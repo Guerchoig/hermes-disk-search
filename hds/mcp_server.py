@@ -1,4 +1,5 @@
 """MCP-сервер disk-search для Hermes: поиск, RAG-ответы, статус, индексация."""
+import os
 import threading
 
 try:
@@ -7,7 +8,7 @@ except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
 from . import db as dbmod, indexer, rag, search
-from .config import dig, db_abs_path, load
+from .config import PROJECT_ROOT, dig, db_abs_path, load
 from .embedder import make_embedder
 
 mcp = _Server("disk-search")
@@ -100,14 +101,33 @@ def start_indexing(full: bool = False) -> str:
         cfg = load()
         conn = _conn(cfg)
         try:
+            sf = os.path.join(PROJECT_ROOT, "index.stop")
+            if os.path.exists(sf):
+                os.unlink(sf)  # leftover от прошлой остановки
             indexer.run_index(conn, _emb(cfg), cfg, full=full, prune=True)
         finally:
             conn.close()
             _idx_state["running"] = False
 
     threading.Thread(target=job, daemon=True).start()
-    return "Фоновая индексация запущена (%s). Прогресс — через index_status." % (
+    threading.Thread(target=job, daemon=True).start()
+    return "Фоновая индексация запущена (%s). Прогресс — через index_status. Остановка — инструментом stop_indexing." % (
         "полная" if full else "инкрементальная")
+
+
+@mcp.tool()
+def stop_indexing() -> str:
+    """Аккуратно остановить идущую индексацию: все уже обработанные файлы
+    сохраняются, текущий файл будет дообработан при следующем запуске."""
+    import os
+
+    from .config import PROJECT_ROOT
+
+    stop_file = os.path.join(PROJECT_ROOT, "index.stop")
+    open(stop_file, "w").close()
+    _idx_state["last_result"] = "stop requested"
+    return ("Сигнал остановки отправлен. Индексатор завершит текущий файл и остановится; "
+            "проверьте завершение через index_status.")
 
 
 @mcp.tool()

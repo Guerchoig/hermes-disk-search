@@ -106,15 +106,31 @@ def process_file(conn, emb, cfg, path, force=False):
     return "indexed(%d чанков)" % len(chunks), kind
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
               limit=None, single_paths=None, prune=True, confirm_delete=False):
-    """Проход по корням; возвращает сводку. Выводит прогресс в stdout."""
+    """Проход по корням; возвращает сводку. Выводит прогресс в stdout.
+    Безопасная остановка: Ctrl+C или файл index.stop в корне проекта."""
+    from .config import PROJECT_ROOT
+
+    stop_file = os.path.join(PROJECT_ROOT, "index.stop")
     t0 = time.time()
     counters = {}
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
     n = 0
     for path in paths:
-        n += 1
-        status, kind = process_file(conn, emb, cfg, path, force=full)
+        if os.path.exists(stop_file):
+            print("[stop] найден index.stop — аккуратная остановка "
+                  "(все обработанные файлы уже сохранены)", flush=True)
+            counters["stopped"] = True
+            break
+        try:
+            n += 1
+            status, kind = process_file(conn, emb, cfg, path, force=full)
+        except KeyboardInterrupt:
+            conn.rollback()  # недописанный файл откатится, останется со статусом 'new'
+            print("\n[stop] Прервано (Ctrl+C). Обработанные файлы сохранены; "
+                  "текущий файл будет дообработан при следующем запуске.", flush=True)
+            counters["stopped"] = True
+            break
         key = status.split("(")[0]
         counters[key] = counters.get(key, 0) + 1
         if not status.startswith("unchanged") and (n % 20 == 1 or status.startswith(("indexed", "error"))):
@@ -122,13 +138,22 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         if limit and n >= limit:
             break
 
-    if prune and seen_roots:
+    if prune and seen_roots and not counters.get("stopped"):
         _prune_deleted(conn, cfg, confirm_delete=confirm_delete)
 
     counters["elapsed_sec"] = round(time.time() - t0, 1)
     counters["files_seen"] = n
     print("[done] %s" % counters)
+    if counters.get("stopped"):
+        _remove_stop_file(stop_file)
     return counters
+
+
+def _remove_stop_file(stop_file):
+    try:
+        os.unlink(stop_file)
+    except OSError:
+        pass
 
 
 def _prune_deleted(conn, cfg, confirm_delete=False):

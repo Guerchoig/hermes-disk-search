@@ -167,6 +167,17 @@ def cmd_check(args):
     return 0 if ok else 1
 
 
+def cmd_stop(args):
+    """Создаёт index.stop — сигнал аккуратной остановки индексации."""
+    from .config import PROJECT_ROOT
+
+    sf = os.path.join(PROJECT_ROOT, "index.stop")
+    open(sf, "w").close()
+    print("Сигнал остановки создан:", sf)
+    print("Индексатор завершит текущий файл и остановится (обработанное сохранится).")
+    return 0
+
+
 def cmd_serve(args):
     from .mcp_server import run
     run()
@@ -217,6 +228,9 @@ def main(argv=None):
 
     pck = sub.add_parser("check", help="диагностика окружения")
     pck.set_defaults(fn=cmd_check)
+
+    pst = sub.add_parser("stop", help="аккуратно остановить идущую индексацию")
+    pst.set_defaults(fn=cmd_stop)
 
     psv = sub.add_parser("serve", help="MCP-сервер для Hermes (stdio)")
     psv.set_defaults(fn=cmd_serve)
