@@ -45,6 +45,14 @@ def iter_files(cfg, roots=None):
                 yield os.path.join(dirpath, fn)
 
 
+def path_excluded(path, cfg):
+    """True, если путь лежит в исключённом каталоге (корзина, системные и т.п.).
+    Проверяет каждый компонент пути без учёта регистра. Кроссплатформенно."""
+    excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
+    parts = os.path.normpath(path).replace("/", os.sep).split(os.sep)
+    return any(p.lower() in excl for p in parts)
+
+
 def _limit_mb(kind, cfg):
     cap = dig(cfg, "index.max_media_mb", 1500) if kind in MEDIA_KINDS \
         else dig(cfg, "index.max_file_mb", 200)
@@ -63,6 +71,10 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
     kind = _kind_of(ext)
     if not kind:
         return "skipped_type", None
+
+    # защита в глубину: корзина/системные каталоги (важно для watcher-событий)
+    if path_excluded(path, cfg):
+        return "skipped_excluded", kind
 
     try:
         st = os.stat(path)

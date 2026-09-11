@@ -9,6 +9,7 @@ import time
 from .config import dig, db_abs_path, PROJECT_ROOT
 from . import db as dbmod, indexer
 from .embedder import make_embedder
+from .indexer import path_excluded
 
 _state = {"processed": 0, "errors": 0, "moved": 0, "last_event": None}
 
@@ -101,6 +102,8 @@ def _worker(q, conn, emb, cfg, stop):
                 path = os.path.abspath(data)
                 if os.path.splitext(path)[1].lower() == ".tmp":
                     continue
+                if path_excluded(path, cfg):
+                    continue  # корзина ($RECYCLE.BIN / .Trash) и системные каталоги
                 if wait_stable(path, debounce, max_wait) and os.path.exists(path):
                     status, _k = indexer.process_file(conn, emb, cfg, path)
                     print("[watch] %s -> %s" % (path, status), flush=True)
@@ -110,10 +113,14 @@ def _worker(q, conn, emb, cfg, stop):
                     _bump("removed_from_index")
             elif kind == "moved":
                 src, dst = os.path.abspath(data[0]), os.path.abspath(data[1])
+                dst_excluded = path_excluded(dst, cfg)
                 if dbmod.get_file_by_path(conn, src):
-                    dbmod.rename_path(conn, src, dst)
-                    _state["moved"] += 1
-                elif os.path.exists(dst):
+                    if dst_excluded:
+                        dbmod.remove_path(conn, src)  # файл ушёл в корзину — из индекса
+                    else:
+                        dbmod.rename_path(conn, src, dst)
+                    _state["processed"] += 1
+                elif not dst_excluded and os.path.exists(dst):
                     status, _k = indexer.process_file(conn, emb, cfg, dst)
                     _bump(status)
         except Exception as e:  # noqa: BLE001
