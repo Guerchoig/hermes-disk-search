@@ -18,7 +18,7 @@ index:
   hf_token: ""              # опционально: токен HuggingFace (https://huggingface.co/settings/tokens) — быстрее загрузки моделей
   max_chunks: 2000          # максимум чанков на файл (гигантские тексты обрезаются; 0 = без лимита)
 
-db_path: "index.db"        # относительный путь = рядом с проектом
+db_path: 'D:\hermes-disk-search-db\index.db'
 
 chunk:
   size: 1200               # символов на чанк

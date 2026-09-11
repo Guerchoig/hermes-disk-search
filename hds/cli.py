@@ -189,6 +189,116 @@ def cmd_whisper_check(args):
     return 0
 
 
+def cmd_db_move(args):
+    """Атомарный перенос индексной БД на новый путь.
+    Этапы: остановка процессов -> консистентная копия (sqlite backup API) ->
+    проверка -> переключение db_path в config.yaml -> переименование старой БД
+    (остаётся как резервная копия) -> перезапуск watcher (если работал)."""
+    import os
+    import re
+    import sqlite3
+    import subprocess
+    import time
+
+    from .config import PROJECT_ROOT, config_path, db_abs_path, load
+
+    cfg = load()
+    old = db_abs_path(cfg)
+    new = os.path.abspath(args.to)
+    if new == old:
+        print("Новый путь совпадает с текущим:", new)
+        return 1
+    if os.path.exists(new) and not args.force:
+        print("[!!] Целевой файл уже существует:", new, "(используйте --force)")
+        return 1
+
+    # 1. Кто работает с БД; остановить watch и index
+    def _hds_processes():
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
+             "Name='pythonw.exe'\") | Where-Object { $_.CommandLine -match "
+             "'-m hds\\.cli (watch|index)' } | ForEach-Object { "
+             "Write-Output ($_.ProcessId.ToString() + '|' + $_.CommandLine) }"],
+            capture_output=True, text=True,
+        )
+        return [l for l in (r.stdout or "").splitlines() if l.strip()]
+
+    procs = _hds_processes()
+    watch_was = any("|" in p and "watch" in p.split("|", 1)[1] for p in procs)
+    if procs:
+        print("Останавливаю процессы hds (", len(procs), "шт.): watch/index")
+        for p in procs:
+            try:
+                subprocess.run(["taskkill", "/F", "/PID", p.split("|", 1)[0]],
+                               capture_output=True)
+            except Exception:  # noqa: BLE001
+                pass
+        time.sleep(2)
+
+    # 2. Консистентная копия через backup API (даже при WAL)
+    os.makedirs(os.path.dirname(new), exist_ok=True)
+    print("Копирую БД %s -> %s ..." % (old, new), flush=True)
+    src = sqlite3.connect(old)
+    dst = sqlite3.connect(new)
+    src.backup(dst)
+    dst.close()
+    src.close()
+
+    def counts(path):
+        c = sqlite3.connect(path)
+        files = c.execute("SELECT COUNT(*) FROM files").fetchone()[0]
+        chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        c.close()
+        return files, chunks
+
+    c_old, c_new = counts(old), counts(new)
+    if c_old != c_new:
+        print("[!!] Проверка не сошлась: было %s, стало %s — переключение отменено"
+              % (c_old, c_new))
+        os.remove(new)
+        return 1
+    print("[ok] Проверка: файлов %d, чанков %d — копия консистентна" % c_new)
+
+    # 3. Атомарное переключение конфига
+    cfg_path = config_path()
+    with open(cfg_path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    new_yaml = new.replace("'", "''")  # одинарные кавычки YAML: бэкслэши Windows не экранируются
+    if re.search(r"(?m)^db_path:", text):
+        text = re.sub(r"(?m)^db_path:.*$", "db_path: '%s'" % new_yaml, text)
+    else:
+        text += "\ndb_path: '%s'\n" % new_yaml
+    tmp_cfg = cfg_path + ".tmp"
+    with open(tmp_cfg, "w", encoding="utf-8") as f:
+        f.write(text)
+    os.replace(tmp_cfg, cfg_path)  # атомарная замена файла
+    print("[ok] config.yaml: db_path -> %s" % new)
+
+    # 4. Старая база остаётся резервной копией
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    for suffix in ("", "-wal", "-shm"):
+        if os.path.exists(old + suffix):
+            try:
+                os.replace(old + suffix, old + suffix + ".moved-" + stamp)
+            except OSError:
+                pass
+    print("[ok] Старая БД оставлена рядом как index.db.moved-%s (можно удалить)" % stamp)
+
+    # 5. Перезапуск watcher (если работал)
+    if watch_was:
+        subprocess.Popen(
+            [os.path.join(PROJECT_ROOT, ".venv", "Scripts", "pythonw.exe"),
+             "-m", "hds.cli", "watch"],
+            cwd=PROJECT_ROOT,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        print("[ok] Watcher перезапущен (работает с новой БД)")
+
+    print("Готово. БД теперь в:", new)
+    return 0
+
+
 def cmd_serve(args):
     from .mcp_server import run
     run()
@@ -248,6 +358,11 @@ def main(argv=None):
 
     pwc = sub.add_parser("whisper-check", help="ручная загрузка/проверка модели Whisper")
     pwc.set_defaults(fn=cmd_whisper_check)
+
+    pdb = sub.add_parser("db-move", help="перенос индексной БД на новый путь")
+    pdb.add_argument("--to", required=True, help="новый путь к index.db")
+    pdb.add_argument("--force", action="store_true", help="перезаписать существующий файл")
+    pdb.set_defaults(fn=cmd_db_move)
 
     psv = sub.add_parser("serve", help="MCP-сервер для Hermes (stdio)")
     psv.set_defaults(fn=cmd_serve)
