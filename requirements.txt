@@ -1,0 +1,14 @@
+pymupdf>=1.24
+python-docx>=1.1
+openpyxl>=3.1
+python-pptx>=0.6.23
+Pillow>=10
+pytesseract>=0.3.10
+requests>=2.31
+PyYAML>=6
+sqlite-vec>=0.1.6
+mcp>=1.2
+watchdog>=4.0
+# Транскрипция аудио/видео (CUDA). Если установка на вашу версию Python не пройдёт,
+# установите вручную: pip install faster-whisper  (поисковая система работает и без неё)
+# faster-whisper

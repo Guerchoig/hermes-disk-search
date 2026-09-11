@@ -1,0 +1,44 @@
+# hermes-disk-search — конфигурация
+# Корни индексации (диски/папки). Добавляйте по одному на строку.
+index:
+  roots:
+    - "D:\\"
+  exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search", "WindowsApps", "$WINDOWS.~BT", "test_data"]
+  max_file_mb: 200          # предел для обычных файлов
+  max_media_mb: 1500        # предел для аудио/видео (транскрипция)
+  ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract + язык rus)
+  ocr_lang: "rus+eng"
+  ocr_tesseract_cmd: ""     # путь к tesseract.exe, если не в PATH (Windows)
+  transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
+  whisper_model: small
+  whisper_device: cuda      # cuda | metal | cpu
+  whisper_compute: float16
+
+db_path: "index.db"        # относительный путь = рядом с проектом
+
+chunk:
+  size: 1200               # символов на чанк
+  overlap: 200             # перекрытие между чанками
+
+embedding:
+  base_url: "http://localhost:1234/v1"   # LM Studio
+  model: "text-embedding-bge-m3"         # BAAI bge-m3 GGUF (lm-kit), 1024 dim, 100+ языков
+  batch_size: 32
+  dim: 1024                # bge-m3 = 1024
+
+chat:
+  base_url: "http://localhost:1234/v1"
+  model: "qwen3.5-9b@q6_k"
+  temperature: 0.2
+  max_context_chars: 14000
+
+search:
+  vec_k: 40                # глубина векторного поиска
+  fts_k: 40                # глубина полнотекстового поиска
+  rrf_k: 60                # константа слияния RRF
+  snippet_chars: 500
+
+watch:
+  debounce_seconds: 8      # ждать стабилизации файла после события записи
+  reconcile_on_start: true # при старте watcher догонять пропущенное (быстрый stat-обход)
+  max_stable_wait: 120

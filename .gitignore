@@ -1,0 +1,17 @@
+# Окружение и кэши
+.venv/
+__pycache__/
+*.py[cod]
+*.log
+watch.lock
+
+# Локальные данные (индекс не входит в репозиторий)
+index.db
+index.db-shm
+index.db-wal
+test_data/
+
+# Среда
+.env
+.idea/
+.vscode/
