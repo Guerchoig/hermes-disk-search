@@ -24,7 +24,7 @@ MS Project .mpp         векторы bge-m3            CLI: python -m hds.cli 
 ## Установка
 
 ```powershell
-cd C:\Users\Sasha\LocalAI\hermes-disk-search
+cd C:\Users\Sasha\hermes-disk-search
 .\setup.ps1
 ```
 
@@ -103,9 +103,9 @@ cd C:\Users\Sasha\LocalAI\hermes-disk-search
 ```yaml
 mcp_servers:
   disk-search:
-    command: C:\Users\Sasha\LocalAI\hermes-disk-search\.venv\Scripts\python.exe
+    command: C:\Users\Sasha\hermes-disk-search\.venv\Scripts\python.exe
     args:
-      - C:\Users\Sasha\LocalAI\hermes-disk-search\mcp_start.py
+      - C:\Users\Sasha\hermes-disk-search\mcp_start.py
     timeout: 300
 ```
 
