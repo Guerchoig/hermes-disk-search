@@ -30,6 +30,7 @@ def cmd_index(args):
         conn, emb, cfg, roots=roots, kinds=_kinds(args.kinds), full=args.full,
         limit=args.limit, confirm_delete=args.confirm_delete,
         prune=not args.no_prune,
+        progress_sec=args.progress_sec, quiet=args.quiet,
     )
     return 0
 
@@ -205,6 +206,9 @@ def main(argv=None):
     pi.add_argument("--limit", type=int, help="обработать не более N файлов")
     pi.add_argument("--no-prune", action="store_true", help="не удалять исчезнувшие файлы")
     pi.add_argument("--confirm-delete", action="store_true")
+    pi.add_argument("--progress-sec", type=int, default=3,
+                    help="частота обновления живого статуса, сек (0 = отключить)")
+    pi.add_argument("--quiet", action="store_true", help="минимум вывода")
     pi.set_defaults(fn=cmd_index)
 
     ps = sub.add_parser("search", help="поиск по индексу")

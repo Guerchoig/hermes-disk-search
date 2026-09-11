@@ -8,6 +8,7 @@ from . import chunker, db as dbmod, extractors
 from .config import dig, db_abs_path
 
 MEDIA_KINDS = {"media"}
+_ACTIVE_REPORTER = None  # устанавливается run_index; читается MCP index_status
 
 
 def content_hash(path, size):
@@ -105,27 +106,60 @@ def process_file(conn, emb, cfg, path, force=False):
     conn.commit()
     return "indexed(%d чанков)" % len(chunks), kind
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
-              limit=None, single_paths=None, prune=True, confirm_delete=False):
+              limit=None, single_paths=None, prune=True, confirm_delete=False,
+              progress_sec=3, quiet=False):
     """Проход по корням; возвращает сводку. Выводит прогресс в stdout.
     Безопасная остановка: Ctrl+C или файл index.stop в корне проекта."""
     from .config import PROJECT_ROOT
+    from .progress import PHASES, ProgressReporter
 
+    global _ACTIVE_REPORTER
     stop_file = os.path.join(PROJECT_ROOT, "index.stop")
     t0 = time.time()
     counters = {}
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
     n = 0
+    rep = None if quiet else ProgressReporter(sec=progress_sec)
+    if rep:
+        _ACTIVE_REPORTER = rep
+        rep.start()
     for path in paths:
         if os.path.exists(stop_file):
+            if rep:
+                rep.note()
             print("[stop] найден index.stop — аккуратная остановка "
                   "(все обработанные файлы уже сохранены)", flush=True)
             counters["stopped"] = True
             break
         try:
             n += 1
-            status, kind = process_file(conn, emb, cfg, path, force=full)
+            if rep:
+                rep.seen()
+            ext = os.path.splitext(path)[1].lower()
+            kind = _kind_of(ext)
+            if rep:
+                rep.set_current(path, PHASES.get(kind, "обработка"))
+            t1 = time.time()
+            status, kind2 = process_file(conn, emb, cfg, path, force=full)
+            dur = time.time() - t1
+            if rep:
+                chunks_n = 0
+                if "(" in status:
+                    try:
+                        chunks_n = int(status.split("(")[1].split()[0])
+                    except (ValueError, IndexError):
+                        chunks_n = 0
+                rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
+                rep.last_done = (path, status.split("(")[0], dur)
+                if kind2 == "media" and not status.startswith("unchanged"):
+                    rep.note()
+                    print("[..] %s — извлечение аудио + Whisper-транскрипция "
+                          "(%.0f МБ), это может занять несколько минут..." %
+                          (path, os.path.getsize(path) / 1048576.0), flush=True)
         except KeyboardInterrupt:
+            if rep:
+                rep.note()
             conn.rollback()  # недописанный файл откатится, останется со статусом 'new'
             print("\n[stop] Прервано (Ctrl+C). Обработанные файлы сохранены; "
                   "текущий файл будет дообработан при следующем запуске.", flush=True)
@@ -133,19 +167,26 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             break
         key = status.split("(")[0]
         counters[key] = counters.get(key, 0) + 1
+        if rep:
+            rep.note()
         if not status.startswith("unchanged") and (n % 20 == 1 or status.startswith(("indexed", "error"))):
-            print("[%d] %s -> %s" % (n, path, status), flush=True)
+            print("[%d] %s -> %s (%.1f с)" % (n, path, status, dur), flush=True)
         if limit and n >= limit:
             break
 
     if prune and seen_roots and not counters.get("stopped"):
+        if rep:
+            rep.note()
         _prune_deleted(conn, cfg, confirm_delete=confirm_delete)
 
-    counters["elapsed_sec"] = round(time.time() - t0, 1)
-    counters["files_seen"] = n
-    print("[done] %s" % counters)
-    if counters.get("stopped"):
-        _remove_stop_file(stop_file)
+    _remove_stop_file(stop_file)
+    if rep:
+        _ACTIVE_REPORTER = None
+        rep.finish(counters)
+    else:
+        counters["elapsed_sec"] = round(time.time() - t0, 1)
+        counters["files_seen"] = n
+        print("[done] %s" % counters)
     return counters
 
 

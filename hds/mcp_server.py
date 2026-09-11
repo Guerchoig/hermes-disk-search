@@ -17,6 +17,11 @@ _idx_lock = threading.Lock()
 _idx_state = {"running": False, "last_result": ""}
 
 
+def _fmt_elapsed(sec):
+    sec = int(sec)
+    return "%02d:%02d:%02d" % (sec // 3600, sec % 3600 // 60, sec % 60)
+
+
 def _conn(cfg):
     return dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
 
@@ -78,6 +83,19 @@ def index_status() -> str:
     try:
         st = dbmod.stats(conn)
         lines = ["Индексация сейчас: %s" % ("идёт" if _idx_state["running"] else "не запущена")]
+        rep = getattr(indexer, "_ACTIVE_REPORTER", None)
+        if rep:
+            import time as _t
+
+            with rep._lock:
+                cur = rep.current
+                lines.append("Прогресс: просмотрено %d, обработано %d, ошибок %d, время %s"
+                             % (rep.seen_count, rep.processed_count, rep.errors,
+                                _fmt_elapsed(_t.time() - rep.t0)))
+                if cur:
+                    import datetime
+                    age = _fmt_elapsed(_t.time() - (rep.current_since or _t.time()))
+                    lines.append("Сейчас: %s (%s, идёт %s)" % (cur[0], cur[1], age))
         lines.append("Файлы по типам: " + ", ".join("%s=%d" % (k or "?", n) for k, n in st["by_kind"]))
         lines.append("По статусам: " + ", ".join("%s=%d" % (k, n) for k, n in st["by_status"]))
         lines.append("Чанков: %d" % st["chunks"])
