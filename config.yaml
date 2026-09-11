@@ -13,6 +13,7 @@ index:
   whisper_model: small
   whisper_device: cuda      # cuda | metal | cpu
   whisper_compute: float16
+  hf_token: ""              # опционально: токен HuggingFace (https://huggingface.co/settings/tokens) — быстрее загрузки моделей
 
 db_path: "index.db"        # относительный путь = рядом с проектом
 

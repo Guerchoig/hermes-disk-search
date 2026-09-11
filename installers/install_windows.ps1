@@ -66,6 +66,13 @@ $vp = "$root\.venv\Scripts\python.exe"
 & $vp -m pip install faster-whisper -q
 Write-Host "[ok] зависимости установлены" -ForegroundColor Green
 
+# --- 5.1. Предзагрузка модели Whisper (чтобы не качалась посреди индексации) ---
+Write-Host "[..] Предзагрузка модели Whisper (small, ~460 МБ) в кэш — разовая операция..."
+$env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
+& $vp -c "from faster_whisper import WhisperModel; WhisperModel('small', device='cpu', compute_type='int8'); print('[ok] модель Whisper скачана в кэш')"
+Write-Host "     Совет: включите Режим разработчика Windows (Параметры -> Конфиденциальность ->" -ForegroundColor DarkGray
+Write-Host "     Для разработчиков), чтобы кэш моделей не дублировал файлы на диске." -ForegroundColor Yellow
+
 # --- 6. Диагностика ---
 & $vp -m hds.cli check
 

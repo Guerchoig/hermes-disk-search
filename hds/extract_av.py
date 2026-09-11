@@ -36,13 +36,23 @@ def _ffprobe(path):
 def _get_whisper(cfg):
     global _whisper_model
     if _whisper_model is None:
+        # Русские сообщения вместо предупреждений huggingface_hub:
+        os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
+        token = dig(cfg, "index.hf_token", "")
+        if token:
+            os.environ.setdefault("HF_TOKEN", token)
+        model_name = dig(cfg, "index.whisper_model", "small")
+        print("[whisper] Подготовка модели '%s' (при первом запуске скачивается с "
+              "HuggingFace, далее используется кэш; это может занять минуту-другу)..."
+              % model_name, flush=True)
         from faster_whisper import WhisperModel
 
         _whisper_model = WhisperModel(
-            dig(cfg, "index.whisper_model", "small"),
+            model_name,
             device=dig(cfg, "index.whisper_device", "cuda"),
             compute_type=dig(cfg, "index.whisper_compute", "float16"),
         )
+        print("[whisper] Модель готова", flush=True)
     return _whisper_model
 
 
