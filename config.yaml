@@ -13,6 +13,8 @@ index:
   whisper_model: small
   whisper_device: cuda      # cuda | metal | cpu
   whisper_compute: float16
+  whisper_load_timeout: 180 # сек; при зависании CUDA-загрузки — автоматический fallback на CPU
+  whisper_batch: 8          # батчевая транскрипция (ровная загрузка GPU, ускорение x3-5); 0 = отключить
   hf_token: ""              # опционально: токен HuggingFace (https://huggingface.co/settings/tokens) — быстрее загрузки моделей
 
 db_path: "index.db"        # относительный путь = рядом с проектом

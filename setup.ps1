@@ -16,6 +16,7 @@ Write-Host "== Установка зависимостей =="
 
 Write-Host "== Опционально: faster-whisper (транскрипция на CUDA) =="
 & $python -m pip install faster-whisper
+& $python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
 
 Write-Host "== Диагностика =="
 & $python -m hds.cli check

@@ -178,6 +178,16 @@ def cmd_stop(args):
     return 0
 
 
+def cmd_whisper_check(args):
+    """Ручная загрузка/проверка модели Whisper (скачивание через curl + CUDA/CPU)."""
+    from .extract_av import _get_whisper
+
+    cfg = load()
+    m = _get_whisper(cfg)
+    print("Модель Whisper готова:", m)
+    return 0
+
+
 def cmd_serve(args):
     from .mcp_server import run
     run()
@@ -231,6 +241,9 @@ def main(argv=None):
 
     pst = sub.add_parser("stop", help="аккуратно остановить идущую индексацию")
     pst.set_defaults(fn=cmd_stop)
+
+    pwc = sub.add_parser("whisper-check", help="ручная загрузка/проверка модели Whisper")
+    pwc.set_defaults(fn=cmd_whisper_check)
 
     psv = sub.add_parser("serve", help="MCP-сервер для Hermes (stdio)")
     psv.set_defaults(fn=cmd_serve)
