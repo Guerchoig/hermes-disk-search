@@ -150,13 +150,14 @@ def run_watch(cfg, roots=None):
     conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
     emb = make_embedder(cfg)
 
-    if dig(cfg, "watch.reconcile_on_start", True):
-        print("[watch] Сверка индекса с дисками (быстрый stat-обход)...")
-        indexer.run_index(conn, emb, cfg, roots=roots, prune=True)
-
+    # Наблюдатель включается ДО reconcile-сверки: события, возникшие во время
+    # долгого обхода, копятся в очереди и обрабатываются параллельно (worker
+    # использует собственную БД-связь, WAL + busy_timeout разрешают параллель).
     q = queue.Queue()
     stop = threading.Event()
-    threading.Thread(target=_worker, args=(q, conn, emb, cfg, stop), daemon=True).start()
+    worker_conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
+    worker_emb = make_embedder(cfg)
+    threading.Thread(target=_worker, args=(q, worker_conn, worker_emb, cfg, stop), daemon=True).start()
 
     obs = Observer(timeout=10)
     handler = _Handler(q)
@@ -166,6 +167,10 @@ def run_watch(cfg, roots=None):
             obs.schedule(handler, root, recursive=True)
             print("[watch] наблюдаю: %s" % root)
     obs.start()
+
+    if dig(cfg, "watch.reconcile_on_start", True):
+        print("[watch] Сверка индекса с дисками (быстрый stat-обход)...")
+        indexer.run_index(conn, emb, cfg, roots=roots, prune=True)
     print("[watch] Готово. События обрабатываются автоматически. Ctrl+C — остановка.", flush=True)
     try:
         while True:
