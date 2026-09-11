@@ -172,8 +172,9 @@ EXTRACTORS = {
 }
 
 
-def extract(path, cfg):
-    """Возвращает (kind, segments). Для неизвестных форматов -> (None, [])."""
+def extract(path, cfg, progress_cb=None):
+    """Возвращает (kind, segments). Для неизвестных форматов -> (None, []).
+    progress_cb вызывается с процентом обработки медиафайлов (0–100)."""
     from .extract_av import kind_for_ext_media as _av_kind
     from .extract_av import extract_dispatch_media
     from .extract_static import kind_for_ext_media as _static_kind
@@ -186,4 +187,6 @@ def extract(path, cfg):
     if kind in EXTRACTORS:
         return kind, EXTRACTORS[kind](path, cfg)
     fn = extract_dispatch_static if kind in ("mpp", "image") else extract_dispatch_media
+    if kind == "media":
+        return fn(path, cfg, kind, progress_cb)
     return fn(path, cfg, kind)

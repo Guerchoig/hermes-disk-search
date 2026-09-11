@@ -144,7 +144,7 @@ def _ffprobe(path):
         return ""
 
 
-def _transcribe(path, cfg, is_video):
+def _transcribe(path, cfg, is_video, progress_cb=None):
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         return None, "ffmpeg не найден в PATH"
@@ -167,18 +167,26 @@ def _transcribe(path, cfg, is_video):
                 from faster_whisper import BatchedInferencePipeline
 
                 pipe = BatchedInferencePipeline(model=model)
-                result, _info = pipe.transcribe(src, language=None, batch_size=batch)
+                result, info = pipe.transcribe(src, language=None, batch_size=batch)
             except Exception as e:  # noqa: BLE001
                 print("[whisper] Батчевый режим недоступен (%s) — обычный" % e,
                       file=sys.stderr, flush=True)
-                result, _info = model.transcribe(src, vad_filter=True, language=None)
+                result, info = model.transcribe(src, vad_filter=True, language=None)
         else:
-            result, _info = model.transcribe(src, vad_filter=True, language=None)
+            result, info = model.transcribe(src, vad_filter=True, language=None)
+        duration = getattr(info, "duration", 0.0) or 0.0
         segs = []
         for s in result:
             t = (s.text or "").strip()
+            if progress_cb and duration > 0:
+                try:
+                    progress_cb(min(100.0, 100.0 * float(s.end) / duration))
+                except Exception:  # noqa: BLE001
+                    pass
             if t:
                 segs.append(seg(t, t_start=s.start, t_end=s.end))
+        if progress_cb:
+            progress_cb(100.0)
         return segs, None
     except Exception as e:  # noqa: BLE001
         return None, repr(e)
@@ -190,7 +198,7 @@ def _transcribe(path, cfg, is_video):
                 pass
 
 
-def extract_media(path, cfg):
+def extract_media(path, cfg, progress_cb=None):
     ext = os.path.splitext(path)[1].lower()
     is_video = ext in VIDEO_EXTS
     segs = [seg("Медиафайл: %s\n%s" % (os.path.basename(path), _ffprobe(path) or "метаданные недоступны"))]
@@ -201,7 +209,7 @@ def extract_media(path, cfg):
     except Exception as e:  # noqa: BLE001
         segs.append(seg("Транскрипция недоступна (faster-whisper не установлен или CUDA не готов): %s" % e))
         return segs
-    tsegs, err = _transcribe(path, cfg, is_video)
+    tsegs, err = _transcribe(path, cfg, is_video, progress_cb=progress_cb)
     if err:
         segs.append(seg("Транскрипция не удалась: %s" % err))
     elif tsegs:
@@ -209,5 +217,5 @@ def extract_media(path, cfg):
     return segs
 
 
-def extract_dispatch_media(path, cfg, kind):
-    return kind, extract_media(path, cfg)
+def extract_dispatch_media(path, cfg, kind, progress_cb=None):
+    return kind, extract_media(path, cfg, progress_cb=progress_cb)

@@ -54,7 +54,7 @@ def _kind_of(ext):
     return extractors.kind_for_ext(ext) or st_kind(ext) or av_kind(ext)  # noqa: E501
 
 
-def process_file(conn, emb, cfg, path, force=False):
+def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
     """Индексирует один файл. Возвращает (статус, kind)."""
     ext = os.path.splitext(path)[1].lower()
     kind = _kind_of(ext)
@@ -84,7 +84,7 @@ def process_file(conn, emb, cfg, path, force=False):
 
     fid = dbmod.upsert_file(conn, path, ext, kind, size, mtime, chash)
     try:
-        kind2, segments = extractors.extract(path, cfg)
+        kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
         chunks = chunker.make_chunks(
             segments,
             dig(cfg, "chunk.size", 1200),
@@ -140,8 +140,25 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             kind = _kind_of(ext)
             if rep:
                 rep.set_current(path, PHASES.get(kind, "обработка"))
+            progress_cb = (lambda p: rep.set_progress(p)) if (rep and kind == "media") else None
+            if progress_cb:
+                # печатать «долго»-сообщение только если файл действительно будет обрабатываться
+                row0 = dbmod.get_file_by_path(conn, path)
+                try:
+                    st0 = os.stat(path)
+                    skip = (not full and row0 and row0["status"] == "indexed"
+                            and row0["size"] == st0.st_size
+                            and abs((row0["mtime"] or 0) - st0.st_mtime) < 2)
+                except OSError:
+                    skip = True
+                if not skip:
+                    rep.note()
+                    print("[..] %s — извлечение аудио + Whisper-транскрипция "
+                          "(%.0f МБ), может занять несколько минут..."
+                          % (path, st0.st_size / 1048576.0), flush=True)
             t1 = time.time()
-            status, kind2 = process_file(conn, emb, cfg, path, force=full)
+            status, kind2 = process_file(conn, emb, cfg, path, force=full,
+                                         progress_cb=progress_cb)
             dur = time.time() - t1
             if rep:
                 chunks_n = 0
@@ -152,11 +169,6 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                         chunks_n = 0
                 rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
                 rep.last_done = (path, status.split("(")[0], dur)
-                if kind2 == "media" and not status.startswith("unchanged"):
-                    rep.note()
-                    print("[..] %s — извлечение аудио + Whisper-транскрипция "
-                          "(%.0f МБ), это может занять несколько минут..." %
-                          (path, os.path.getsize(path) / 1048576.0), flush=True)
         except KeyboardInterrupt:
             if rep:
                 rep.note()

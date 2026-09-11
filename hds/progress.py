@@ -34,6 +34,7 @@ class ProgressReporter:
         self.by_kind = {}
         self.current = None      # (path, phase)
         self.current_since = None
+        self.progress = None     # % обработки текущего файла (медиа)
         self.last_done = None    # (path, status, dur)
 
     # --- управление ---
@@ -73,11 +74,19 @@ class ProgressReporter:
                 self.by_kind[kind] = self.by_kind.get(kind, 0) + 1
             self.current = None
             self.current_since = None
+            self.progress = None
 
     def set_current(self, path, phase):
         with self._lock:
             self.current = (path, phase)
             self.current_since = time.time()
+            self.progress = None
+
+    def set_progress(self, pct):
+        """Прогресс внутри текущего файла, % (для Whisper-транскрипции)."""
+        with self._lock:
+            if self.current:
+                self.progress = max(0.0, min(100.0, float(pct)))
 
     def note(self):
         """Очистить живую строку перед печатью обычной строки лога."""
@@ -97,6 +106,9 @@ class ProgressReporter:
                 path, phase = self.current
                 age = _fmt_dur(time.time() - (self.current_since or time.time()))
                 tail = " | ▶ %s [%s, идёт %s]" % (os.path.basename(path), phase, age)
+                if self.progress is not None:
+                    tail = " | ▶ %s [%s — %.0f%%, идёт %s]" % (
+                        os.path.basename(path), phase, self.progress, age)
             elif self.last_done and not final:
                 path, status, dur = self.last_done
                 tail = " | ✓ %s (%s, %.1f с)" % (os.path.basename(path), status, dur)
