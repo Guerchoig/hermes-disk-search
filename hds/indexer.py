@@ -124,6 +124,9 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     if rep:
         _ACTIVE_REPORTER = rep
         rep.start()
+        mode = "терминал (живая строка)" if rep.is_tty else "не-терминал (полные строки)"
+        print("[прогресс] активен: обновление каждые %d с, режим: %s; отключить: --progress-sec 0"
+              % (progress_sec, mode), flush=True)
     for path in paths:
         if os.path.exists(stop_file):
             if rep:
