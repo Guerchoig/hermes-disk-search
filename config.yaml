@@ -3,7 +3,7 @@
 index:
   roots:
     - "D:\\"
-  exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search", "WindowsApps", "$WINDOWS.~BT", "test_data", ".Trash", ".Trashes", "models"]
+  exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search", "hermes-disk-search-db", "WindowsApps", "$WINDOWS.~BT", "test_data", ".Trash", ".Trashes", "models"]
   max_file_mb: 200          # предел для обычных файлов
   max_media_mb: 1500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract + язык rus)
