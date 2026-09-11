@@ -32,6 +32,9 @@ def iter_files(cfg, roots=None):
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
     for root in roots:
         root = os.path.abspath(root)
+        if os.path.isfile(root):
+            yield root
+            continue
         if not os.path.isdir(root):
             print("[skip] корень не найден: %s" % root)
             continue
@@ -90,9 +93,27 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
             dig(cfg, "chunk.size", 1200),
             dig(cfg, "chunk.overlap", 200),
         ) if segments else []
-        vectors = emb.embed([c["text"] for c in chunks]) if chunks else []
+        max_chunks = int(dig(cfg, "index.max_chunks", 2000))
+        truncated = False
+        if max_chunks > 0 and len(chunks) > max_chunks:
+            chunks = chunks[:max_chunks]
+            truncated = True
+        # Эмбеддинги батчами с прогрессом (важно для больших текстов/CSV)
+        bs = max(1, int(dig(cfg, "embedding.batch_size", 32)))
+        total = len(chunks)
+        if progress_cb and total:
+            progress_cb(0.0)
+        vectors = []
+        for i in range(0, total, bs):
+            vectors.extend(emb.embed([c["text"] for c in chunks[i:i + bs]]))
+            if progress_cb and total:
+                progress_cb(100.0 * min(i + bs, total) / total)
         for c, v in zip(chunks, vectors):
             c["_blob"] = struct.pack("<%df" % len(v), *v)
+        if truncated:
+            print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
+                  "увеличьте лимит в config.yaml при необходимости" % (path, max_chunks),
+                  flush=True)
     except Exception as e:  # noqa: BLE001
         dbmod.finish_file(conn, fid, "error", str(e)[:500])
         conn.commit()
@@ -143,8 +164,8 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             kind = _kind_of(ext)
             if rep:
                 rep.set_current(path, PHASES.get(kind, "обработка"))
-            progress_cb = (lambda p: rep.set_progress(p)) if (rep and kind == "media") else None
-            if progress_cb:
+            progress_cb = (lambda p: rep.set_progress(p)) if rep else None
+            if progress_cb and kind == "media":
                 # печатать «долго»-сообщение только если файл действительно будет обрабатываться
                 row0 = dbmod.get_file_by_path(conn, path)
                 try:

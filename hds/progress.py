@@ -67,7 +67,7 @@ class ProgressReporter:
             key = str(status).split("(")[0]
             if key.startswith("error"):
                 self.errors += 1
-            if key in ("indexed", "moved", "unchanged", "skipped_big"):
+            if key in ("indexed", "moved", "unchanged", "skipped_big", "skipped_type"):
                 self.processed_count += 1
             self.chunks += chunks
             if kind:
