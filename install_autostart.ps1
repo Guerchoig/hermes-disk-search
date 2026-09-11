@@ -1,4 +1,4 @@
-# Автозапуск наблюдателя при входе в Windows (Планировщик задач, без окна)
+﻿# Автозапуск наблюдателя при входе в Windows (Планировщик задач, без окна)
 $root = $PSScriptRoot
 $pythonw = Join-Path $root ".venv\Scripts\pythonw.exe"
 $module = "hds.cli"

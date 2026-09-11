@@ -1,0 +1,19 @@
+#!/bin/bash
+# Исполняемый файл .app-бандла: то же, что Индексация дисков.command
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT=""
+for CAND in "$SELF_DIR/../../../.." "$HOME/hermes-disk-search"; do
+    if [ -f "$CAND/config.yaml" ]; then ROOT="$(cd "$CAND" && pwd)"; break; fi
+done
+if [ -z "$ROOT" ]; then
+    osascript -e 'display dialog "Проект hermes-disk-search не найден. Установите его в ~/hermes-disk-search" buttons {"OK"}'
+    exit 1
+fi
+PY="$ROOT/.venv/bin/python"
+if [ ! -x "$PY" ]; then
+    osascript -e 'display dialog "venv не найден. Сначала запустите install_macos.command" buttons {"OK"}'
+    exit 1
+fi
+cd "$ROOT"
+"$PY" -m hds.cli index 2>&1 | tee /tmp/hds_index.log
+osascript -e "display dialog \"Индексация завершена\" buttons {\"OK\"} with title \"hermes-disk-search\""

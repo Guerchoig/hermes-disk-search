@@ -72,6 +72,23 @@ cd C:\Users\Sasha\hermes-disk-search
 Можно не держать watcher, а индексировать по cron Hermes или Планировщику: ночная команда
 `python -m hds.cli index` (инкрементальная, быстро: только новые/изменённые файлы).
 
+## Иконка, ярлыки, инсталляторы
+
+- **Иконка**: `assets/icon.png` (512px), `assets/icon.ico` (Windows), `assets/icon.icns` (macOS).
+  Генерируется программно: `python tools/make_icon.py` (можно заменить свою — просто подмените файлы).
+- **Ярлык запуска индексации**:
+  - Windows: `shortcuts\windows\create_shortcut.ps1` — создаёт «Индексация дисков.lnk»
+    (на рабочем столе) с иконкой; целевой скрипт — `run_index.ps1` в корне проекта.
+  - macOS: `shortcuts/macos/Индексация дисков.command` (двойной клик из Finder;
+    после клонирования выполните `chmod +x`) и приложение
+    `shortcuts/macos/HermesDiskSearchIndex.app` (иконка внутри, копируется инсталлятором в ~/Applications).
+- **Инсталляторы** (проверяют и доустанавливают недостающее; LM Studio и Hermes
+  не устанавливают — предупреждают и дают ссылки):
+  - Windows: `installers\install_windows.ps1` (Python, ffmpeg, Tesseract по желанию, venv,
+    ярлыки, автозапуск watcher по выбору).
+  - macOS: `installers/install_macos.command` (brew, python3, ffmpeg, tesseract-lang, venv,
+    установка .app).
+
 ## Управление моделями LM Studio (память GPU)
 
 Код проекта **не управляет загрузкой моделей** — он только шлёт HTTP-запросы к `localhost:1234`

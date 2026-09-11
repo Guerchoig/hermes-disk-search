@@ -1,4 +1,4 @@
-# Установка hermes-disk-search: venv + зависимости
+﻿# Установка hermes-disk-search: venv + зависимости
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 Set-Location $root
