@@ -61,6 +61,12 @@ def _tesseract_ready(cfg):
             cmd = dig(cfg, "index.ocr_tesseract_cmd", "") or None
             if cmd:
                 pytesseract.pytesseract.tesseract_cmd = cmd
+            # языковые пакеты, установленные без прав администратора, лежат в
+            # пользовательском tessdata — указываем его, если он существует
+            user_td = os.path.join(os.environ.get("LOCALAPPDATA", ""),
+                                   "Tesseract-OCR", "tessdata")
+            if os.path.isdir(user_td):
+                os.environ.setdefault("TESSDATA_PREFIX", user_td)
             pytesseract.get_tesseract_version()
             ok = True
         except Exception:  # noqa: BLE001

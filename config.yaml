@@ -8,12 +8,14 @@ index:
   # exclude_paths:
   #   - 'D:\Backup\Downloads\opencv'
   #   - 'D:\Backup\Downloads\cmake-4.3.1'
-  exclude_paths: []
+  exclude_paths:
+    - 'D:\Backup\Downloads'
+    - 'D:\Soft'
   max_file_mb: 200          # предел для обычных файлов
   max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract + язык rus)
   ocr_lang: "rus+eng"
-  ocr_tesseract_cmd: ""     # путь к tesseract.exe, если не в PATH (Windows)
+  ocr_tesseract_cmd: 'C:\Program Files\Tesseract-OCR\tesseract.exe'  # путь к tesseract.exe, если не в PATH
   transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
   whisper_model: small
   whisper_device: cuda      # cuda | metal | cpu
