@@ -22,6 +22,10 @@ ul.events li{padding:3px 0;border-bottom:1px solid #223047;font-size:12px}
 textarea{width:100%;min-height:260px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:8px;padding:10px;font:12px Consolas,monospace}
 #msg{min-height:18px;font-size:12px;color:var(--dim)}
 input[type=checkbox]{transform:scale(1.2)}
+ul.tree{list-style:none;margin:4px 0 4px 18px;padding:0}
+ul.tree details{margin:2px 0}
+.t-done{color:var(--ok)}.t-partial{color:var(--warn)}.t-none{color:var(--fg)}
+summary{cursor:pointer;user-select:none}
 </style></head><body><div class="wrap">
 <h1>🔎 hermes-disk-search <span id="badges"></span></h1>
 
@@ -34,18 +38,19 @@ input[type=checkbox]{transform:scale(1.2)}
 <button class="r" onclick="act('/api/index/stop')">⏹ Стоп</button>
 </div>
 <div id="current" class="current mono">—</div>
-<div class="stats">
-<div><b id="st-seen">0</b><span>просмотрено</span></div>
-<div><b id="st-proc">0</b><span>обработано</span></div>
-<div><b id="st-pend">0</b><span>в очереди (оценка)</span></div>
-<div><b id="st-rate">0</b><span>файлов/мин</span></div>
-<div><b id="st-err">0</b><span>ошибок</span></div>
-<div><b id="st-chunks">0</b><span>чанков в ходе</span></div>
-<div><b id="st-time">–</b><span>время</span></div>
-</div>
 <div class="row"><label class="muted">Корни (через «;»), пусто = из настроек:
 <input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
 </label></div>
+
+<details id="trees-details" style="margin:10px 0">
+<summary style="cursor:pointer;color:var(--acc)">🌳 Деревья папок индексации (скрыты — нажмите для показа)</summary>
+<div class="row" style="margin-top:8px">
+<button onclick="loadTrees()">🔄 Обновить деревья</button>
+<span class="muted">🟢 выполнено · 🟡 частично · без цвета — не начата. Клик по папке — свернуть/развернуть.</span>
+</div>
+<div id="trees-box" class="mono" style="margin-top:8px"></div>
+</details>
+
 <h2 class="muted" style="margin-top:14px">Последние обработанные</h2>
 <ul id="events" class="events mono"></ul>
 </div>
@@ -117,13 +122,6 @@ async function refresh(){
           i.current.progress != null ? ' — ' + Math.round(i.current.progress) + '%' : ''}</span>`
       : (i.paused ? '⏸ ПАУЗА' : (i.running ? '…' : '—'));
     document.getElementById('current').innerHTML = cur;
-    document.getElementById('st-seen').textContent = i.seen || 0;
-    document.getElementById('st-proc').textContent = i.processed || 0;
-    document.getElementById('st-pend').textContent = i.pending_est;
-    document.getElementById('st-rate').textContent = i.rate_min || 0;
-    document.getElementById('st-err').textContent = i.errors || 0;
-    document.getElementById('st-chunks').textContent = i.chunks || 0;
-    document.getElementById('st-time').textContent = i.running ? fmtDur(i.elapsed) : '–';
     document.getElementById('events').innerHTML = (i.events || []).map(e =>
       `<li>${new Date(e.ts*1000).toLocaleTimeString()} · ${e.status} · ${e.path} (${e.dur}с${
         e.chunks ? ', ' + e.chunks + ' ч.' : ''})</li>`).join('');
@@ -139,13 +137,37 @@ async function refresh(){
     if (document.activeElement !== ta) ta.value = s.config_yaml;
   } catch(e){ console.warn(e); }
 }
+async function loadTrees(){
+  const box = document.getElementById('trees-box');
+  box.innerHTML = '<span style="color:var(--warn)">⏳ Построение деревьев: обход корней индексации, может занять несколько минут...</span>';
+  try {
+    const j = await (await fetch('/api/tree')).json();
+    box.innerHTML = (j.trees || []).map(t =>
+      `<div style="margin:8px 0"><details open><summary class="t-${t.status}">📁 ${t.name}</summary>
+       <ul class="tree">${treeHtml(t.children || [])}</ul></details></div>`).join('')
+      || '<span class="muted">Корни не заданы или пусты.</span>';
+  } catch(e){ box.innerHTML = '<span style="color:var(--err)">Ошибка построения: ' + e + '</span>'; }
+}
+function treeHtml(nodes){
+  return (nodes || []).map(n => {
+    const kids = (n.children && n.children.length)
+      ? `<ul class="tree">${treeHtml(n.children)}</ul>` : '';
+    return `<li><details><summary class="t-${n.status}">📁 ${n.name}</summary>` +
+      `<span class="muted">файлов на диске: ${n.files} · в индексе: ${n.indexed}</span>` +
+      kids + `</details></li>`;
+  }).join('');
+}
+document.getElementById('trees-details').addEventListener('toggle', function(e){
+  if (e.target.open && !document.getElementById('trees-box').dataset.loaded) loadTrees();
+  document.getElementById('trees-box').dataset.loaded = '1';
+});
 refresh(); setInterval(refresh, 2000);
 </script></div></body></html>
 </div>
 <div class="muted">Пути индексирования — секция index.roots; изменения применяются к новым запускам: после сохранения перезапустите watcher/индексацию кнопками выше.</div>
 </div>
 
-<div class="card"><h2>База индекса</h2>
+<div class="card" style="width:100%"><h2>Расположение базы индексации</h2>
 <div id="db-info" class="mono"></div>
 <div class="row" style="margin-top:10px">
 <input id="db-new" class="mono" placeholder="D:\новая\папка\index.db" style="flex:1;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:6px">

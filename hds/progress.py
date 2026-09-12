@@ -93,6 +93,19 @@ class ProgressReporter:
         with self._lock:
             self.paused = bool(paused)
 
+    def heartbeat_data(self):
+        """Снимок счётчиков для кросс-процессного heartbeat-файла."""
+        with self._lock:
+            d = {"seen": self.seen_count, "processed": self.processed_count,
+                 "errors": self.errors, "chunks": self.chunks,
+                 "paused": self.paused,
+                 "elapsed": round(time.time() - self.t0, 1),
+                 "rate_min": round(self.seen_count / max(0.001, time.time() - self.t0) * 60)}
+            if self.current:
+                d["path"], d["phase"] = self.current
+                d["progress"] = self.progress
+            return d
+
     def set_current(self, path, phase):
         with self._lock:
             self.current = (path, phase)

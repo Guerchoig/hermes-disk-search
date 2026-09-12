@@ -161,6 +161,25 @@ def _index_state():
                     "elapsed": getattr(last, "final_elapsed", 0.0),
                     "events": list(last.events), "by_kind": dict(last.by_kind),
                 })
+    # heartbeat: индексация, запущенная в другом процессе (CLI/watcher), тоже видна
+    hb_path = os.path.join(PROJECT, "index.heartbeat.json")
+    try:
+        if os.path.exists(hb_path):
+            with open(hb_path, "r", encoding="utf-8") as f:
+                hb = json.load(f)
+            if hb.get("ts") and time.time() - hb["ts"] < 30:
+                state.update({"running": True, "paused": bool(hb.get("paused")),
+                              "seen": hb.get("seen", state.get("seen", 0)),
+                              "processed": hb.get("processed", state.get("processed", 0)),
+                              "errors": hb.get("errors", state.get("errors", 0)),
+                              "chunks": hb.get("chunks", 0),
+                              "elapsed": hb.get("elapsed", 0),
+                              "rate_min": hb.get("rate_min", 0),
+                              "current": {"path": hb.get("path", ""),
+                                          "phase": hb.get("phase", ""),
+                                          "progress": hb.get("progress")}})
+    except Exception:  # noqa: BLE001
+        pass
     state["stop_requested"] = os.path.exists(_STOP)
     state["pending_est"] = max(0, state.get("seen", 0) - state.get("processed", 0))
     return state
@@ -183,6 +202,145 @@ def _db_stats():
         except Exception as e:  # noqa: BLE001
             info["error"] = repr(e)
     return info
+
+
+def _build_trees():
+    """Деревья папок от корней индексации со статусом каждой папки:
+    done (зелёный) — все файлы папки в индексе; partial (жёлтый) — частично;
+    none — не начата. Статус родителя = худший из себя и потомков."""
+    import sqlite3
+
+    from .config import db_abs_path
+    from .indexer import _kind_of, path_excluded
+
+    cfg = load()
+    excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
+    disk = {}   # dir -> [count, max_mtime]
+    for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+            dirnames[:] = [d for d in dirnames if d.lower() not in excl]
+            for fn in filenames:
+                if not _kind_of(os.path.splitext(fn)[1].lower()):
+                    continue
+                d = dirpath
+                e = disk.setdefault(d, [0, 0.0])
+                e[0] += 1
+                try:
+                    m = os.stat(os.path.join(dirpath, fn)).st_mtime
+                    if m > e[1]:
+                        e[1] = m
+                except OSError:
+                    pass
+
+    db = {}
+    path_db = db_abs_path(cfg)
+    if os.path.exists(path_db):
+        c = dbmod.connect(path_db, int(dig(cfg, "embedding.dim", 1024)))
+        for path, status, iat in c.execute("SELECT path, status, indexed_at FROM files"):
+            d = os.path.dirname(path)
+            e = db.setdefault(d, [0, 0, 0.0])
+            e[0] += 1
+            if status == "indexed":
+                e[1] += 1
+            if iat and iat > e[2]:
+                e[2] = iat
+        c.close()
+
+    LEVEL = {"none": 0, "partial": 1, "done": 2}
+    NAMES = ("none", "partial", "done")
+    status_of = {}
+    for d in set(disk) | set(db):
+        dn, mtime = disk.get(d, [0, 0.0])
+        tot, idx, iat = db.get(d, [0, 0, 0.0])
+        fresh = dn > 0 and mtime > iat + 2
+        if tot >= max(dn, 1) and idx >= dn and not fresh:
+            st = "done"
+        elif tot > 0 or idx > 0 or fresh:
+            st = "partial"
+        else:
+            st = "none"
+        status_of[d] = {"status": st, "files": dn, "indexed": idx}
+
+    # worst-status распространяется на родителей (вклад глубоких папок)
+    worst = {}
+    for d in sorted(status_of, key=lambda x: (x.count(os.sep), x)):
+        lvl = LEVEL[status_of[d]["status"]]
+        parent = os.path.dirname(d)
+        if parent in worst:
+            lvl = min(lvl, LEVEL[worst[parent]])
+        worst[d] = NAMES[lvl]
+
+    max_depth = 4
+    child_limit = 40
+    trees = []
+    for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
+        r = os.path.normpath(root)
+        prefix = (r.rstrip(os.sep).lower() + os.sep)
+        sub = {d: v for d, v in status_of.items()
+               if d.lower().startswith(prefix)}
+        if not sub:
+            continue
+        node = {"name": r, "path": r, "status": "none",
+                "files": sum(v["files"] for v in sub.values()),
+                "indexed": sum(v["indexed"] for v in sub.values()),
+                "children": []}
+        by_path = {r: node}
+        for d in sorted(sub, key=lambda x: (x.count(os.sep), x.lower())):
+            parts = [p for p in os.path.relpath(d, r).split(os.sep) if p][:max_depth]
+            cur_path, cur = r, node
+            for p in parts:
+                cur_path = os.path.join(cur_path, p)
+                nxt = by_path.get(cur_path)
+                if nxt is None:
+                    sinfo = sub.get(cur_path) or {"files": 0, "indexed": 0}
+                    nxt = {"name": p, "path": cur_path,
+                           "status": worst.get(cur_path, "none"),
+                           "files": sinfo["files"],
+                           "indexed": sinfo["indexed"],
+                           "children": []}
+                    by_path[cur_path] = nxt
+                    cur["children"].append(nxt)
+                cur = nxt
+        # сводный узел для длинных списков детей
+        def trim(n):
+            if len(n["children"]) > child_limit:
+                rest = n["children"][child_limit:]
+                lvl = min(LEVEL[c["status"]] for c in rest)
+                n["children"] = n["children"][:child_limit] + [{
+                    "name": "… ещё %d папок" % len(rest), "path": "",
+                    "status": NAMES[lvl], "files": 0, "indexed": 0, "children": []}]
+            for c in n["children"]:
+                trim(c)
+        trim(node)
+        trees.append(node)
+
+    # статус родителя: все потомки done → done; все none → none;
+    # смесь (есть прогресс и есть не начатое) → partial
+    def aggregate(n):
+        st = n["status"]
+        for c in n["children"]:
+            aggregate(c)
+        ch = n["children"]
+        if ch:
+            lvls = {c["status"] for c in ch}
+            if lvls == {"done"}:
+                st = "done"
+            elif lvls == {"none"}:
+                st = "none"
+            else:
+                st = "partial"
+        n["status"] = st
+        return st
+    for t in trees:
+        aggregate(t)
+    return {"trees": trees,
+            "dirs": len(status_of),
+            "disk_files": sum(v[0] for v in disk.values())}
+
+
+
 
 
 def _start_index(full=False, roots=None):
@@ -286,6 +444,8 @@ class Handler(BaseHTTPRequestHandler):
                 "config_yaml": yaml_text,
                 "roots": [os.path.abspath(r) for r in dig(cfg, "index.roots", [])],
             })
+        elif self.path == "/api/tree":
+            self._json(_build_trees())
         else:
             self._json({"error": "not found"}, 404)
 

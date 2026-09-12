@@ -1,5 +1,6 @@
 """Инкрементальный индексатор: обход дисков, извлечение, чанкинг, эмбеддинги."""
 import hashlib
+import json
 import os
 import struct
 import time
@@ -150,15 +151,36 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     global _ACTIVE_REPORTER
     stop_file = os.path.join(PROJECT_ROOT, "index.stop")
     pause_file = os.path.join(PROJECT_ROOT, "index.pause")
+    hb_file = os.path.join(PROJECT_ROOT, "index.heartbeat.json")
+
+    def _hb(extra=None):
+        """Heartbeat-файл: кросс-процессный статус индексации для UI/MCP."""
+        try:
+            d = {"ts": time.time()}
+            if rep is not None:
+                d.update(rep.heartbeat_data())
+            if extra:
+                d.update(extra)
+            with open(hb_file, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except OSError:
+            pass
+
+    def _hb_remove():
+        try:
+            if os.path.exists(hb_file):
+                os.remove(hb_file)
+        except OSError:
+            pass
     t0 = time.time()
     counters = {}
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
     n = 0
-    rep = None if quiet else ProgressReporter(sec=progress_sec)
-    if rep:
-        _ACTIVE_REPORTER = rep
-        rep.start()
+    rep = ProgressReporter(sec=0 if quiet else progress_sec)  # счётчики всегда (heartbeat), quiet — без печати
+    _ACTIVE_REPORTER = rep
+    rep.start()
+    if not quiet:
         mode = "терминал (живая строка)" if rep.is_tty else "не-терминал (полные строки)"
         print("[прогресс] активен: обновление каждые %d с, режим: %s; отключить: --progress-sec 0"
               % (progress_sec, mode), flush=True)
@@ -176,6 +198,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                     print("[пауза] индексация приостановлена (файл index.pause); "
                           "снимите паузу через UI или удалите файл", flush=True)
                 was_paused = True
+                _hb({"paused": True})
                 time.sleep(1)
             if rep:
                 rep.set_paused(False)
@@ -196,6 +219,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             kind = _kind_of(ext)
             if rep:
                 rep.set_current(path, PHASES.get(kind, "обработка"))
+            _hb({"path": path, "phase": PHASES.get(kind, "обработка")})
             progress_cb = (lambda p: rep.set_progress(p)) if rep else None
             if progress_cb and kind == "media":
                 # печатать «долго»-сообщение только если файл действительно будет обрабатываться
@@ -216,6 +240,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             status, kind2 = process_file(conn, emb, cfg, path, force=full,
                                          progress_cb=progress_cb)
             dur = time.time() - t1
+            _hb()
             if rep:
                 chunks_n = 0
                 if "(" in status:
@@ -248,6 +273,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         _prune_deleted(conn, cfg, confirm_delete=confirm_delete)
 
     _remove_stop_file(stop_file)
+    _hb_remove()
     if rep:
         _ACTIVE_REPORTER = None
         global _LAST_REPORTER
