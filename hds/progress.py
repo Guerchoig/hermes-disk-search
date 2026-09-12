@@ -3,6 +3,7 @@
 - В интерактивном терминале: одна перерисовываемая строка (\\r).
 - В файл/не-tty: полные строки раз в N секунд (чтобы логи читались).
 """
+import collections
 import os
 import sys
 import threading
@@ -35,7 +36,10 @@ class ProgressReporter:
         self.current = None      # (path, phase)
         self.current_since = None
         self.progress = None     # % обработки текущего файла (медиа)
+        self.paused = False
         self.last_done = None    # (path, status, dur)
+        self._last_path = None
+        self.events = collections.deque(maxlen=50)  # последние обработанные файлы
 
     # --- управление ---
     @property
@@ -75,6 +79,19 @@ class ProgressReporter:
             self.current = None
             self.current_since = None
             self.progress = None
+            self.events.appendleft({
+                "path": self._last_path, "status": key, "kind": kind,
+                "dur": round(dur, 2), "chunks": chunks, "ts": time.time(),
+            })
+
+    def set_last_path(self, path):
+        with self._lock:
+            self._last_path = path
+
+    def set_paused(self, paused):
+        """Пауза индексации (файл-сигнал index.pause)."""
+        with self._lock:
+            self.paused = bool(paused)
 
     def set_current(self, path, phase):
         with self._lock:
@@ -102,6 +119,8 @@ class ProgressReporter:
             line = "⏱ %s | просмотрено %s | обработано %d | ошибок %d | %.0f файлов/мин" % (
                 _fmt_dur(time.time() - self.t0), _human(self.seen_count),
                 self.processed_count, self.errors, rate)
+            if self.paused:
+                line = "⏸ ПАУЗА | " + line
             if self.current:
                 path, phase = self.current
                 age = _fmt_dur(time.time() - (self.current_since or time.time()))
@@ -137,6 +156,7 @@ class ProgressReporter:
                 pass
 
     def finish(self, counters=None):
+        self.final_elapsed = round(time.time() - self.t0, 1)
         self.stop()
         self._render(final=True)
         if counters is not None:

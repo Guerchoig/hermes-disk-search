@@ -8,7 +8,8 @@ from . import chunker, db as dbmod, extractors
 from .config import dig, db_abs_path
 
 MEDIA_KINDS = {"media"}
-_ACTIVE_REPORTER = None  # устанавливается run_index; читается MCP index_status
+_ACTIVE_REPORTER = None   # устанавливается run_index; читается MCP index_status
+_LAST_REPORTER = None     # снимок последнего завершённого прогона (для UI)
 
 
 def content_hash(path, size):
@@ -148,6 +149,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
 
     global _ACTIVE_REPORTER
     stop_file = os.path.join(PROJECT_ROOT, "index.stop")
+    pause_file = os.path.join(PROJECT_ROOT, "index.pause")
     t0 = time.time()
     counters = {}
     seen_roots = single_paths is None
@@ -161,6 +163,24 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         print("[прогресс] активен: обновление каждые %d с, режим: %s; отключить: --progress-sec 0"
               % (progress_sec, mode), flush=True)
     for path in paths:
+        if rep:
+            rep.set_last_path(path)
+        # пауза: ждём снятия index.pause (или остановки)
+        if os.path.exists(pause_file):
+            was_paused = False
+            while os.path.exists(pause_file):
+                if os.path.exists(stop_file):
+                    break
+                if not was_paused and rep:
+                    rep.set_paused(True)
+                    print("[пауза] индексация приостановлена (файл index.pause); "
+                          "снимите паузу через UI или удалите файл", flush=True)
+                was_paused = True
+                time.sleep(1)
+            if rep:
+                rep.set_paused(False)
+            if os.path.exists(stop_file):
+                break
         if os.path.exists(stop_file):
             if rep:
                 rep.note()
@@ -230,6 +250,8 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     _remove_stop_file(stop_file)
     if rep:
         _ACTIVE_REPORTER = None
+        global _LAST_REPORTER
+        _LAST_REPORTER = rep
         rep.finish(counters)
     else:
         counters["elapsed_sec"] = round(time.time() - t0, 1)

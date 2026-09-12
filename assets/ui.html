@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru"><head><meta charset="utf-8">
+<title>hermes-disk-search</title>
+<style>
+:root{--bg:#0f1420;--card:#1a2233;--fg:#e7ecf5;--dim:#8fa0b8;--acc:#6c8cff;--ok:#4ade80;--warn:#fbbf24;--err:#f87171}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 'Segoe UI',sans-serif}
+.wrap{max-width:980px;margin:0 auto;padding:16px}
+h1{font-size:19px;margin:6px 0 14px}h2{font-size:15px;margin:0 0 10px;color:var(--acc)}
+.card{background:var(--card);border-radius:10px;padding:14px;margin-bottom:14px}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:12px;margin-left:6px}
+.on{background:#123c2b;color:var(--ok)}.off{background:#3a2233;color:var(--err)}.mid{background:#3a3010;color:var(--warn)}
+button{background:var(--acc);color:#fff;border:0;border-radius:6px;padding:7px 14px;cursor:pointer;margin-right:8px;font-size:13px}
+button:hover{filter:brightness(1.15)}button.w{background:#475569}button.d{background:#b45309}button.r{background:#b03030}button[disabled]{opacity:.4;cursor:default}
+.mono{font-family:Consolas,monospace;font-size:12px}.muted{color:var(--dim)}
+.stats{display:flex;gap:14px;flex-wrap:wrap;margin:8px 0}
+.stats div{background:#111827;border-radius:8px;padding:8px 12px;min-width:110px}
+.stats b{display:block;font-size:17px}.stats span{font-size:11px;color:var(--dim)}
+.current{background:#111827;border-radius:8px;padding:9px 12px;margin:8px 0;word-break:break-all}
+ul.events{list-style:none;margin:6px 0;padding:0;max-height:190px;overflow-y:auto}
+ul.events li{padding:3px 0;border-bottom:1px solid #223047;font-size:12px}
+.row{display:flex;align-items:center;gap:10px;margin:8px 0;flex-wrap:wrap}
+textarea{width:100%;min-height:260px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:8px;padding:10px;font:12px Consolas,monospace}
+#msg{min-height:18px;font-size:12px;color:var(--dim)}
+input[type=checkbox]{transform:scale(1.2)}
+</style></head><body><div class="wrap">
+<h1>🔎 hermes-disk-search <span id="badges"></span></h1>
+
+<div class="card"><h2>Индексация</h2>
+<div class="row">
+<button id="b-start" onclick="act('/api/index/start')">▶ Старт</button>
+<button onclick="act('/api/index/start',{full:true})">▶ Старт (переобработка всего)</button>
+<button id="b-pause" onclick="act('/api/index/pause')">⏸ Пауза</button>
+<button id="b-resume" onclick="act('/api/index/resume')">▶ Продолжить</button>
+<button class="r" onclick="act('/api/index/stop')">⏹ Стоп</button>
+</div>
+<div id="current" class="current mono">—</div>
+<div class="stats">
+<div><b id="st-seen">0</b><span>просмотрено</span></div>
+<div><b id="st-proc">0</b><span>обработано</span></div>
+<div><b id="st-pend">0</b><span>в очереди (оценка)</span></div>
+<div><b id="st-rate">0</b><span>файлов/мин</span></div>
+<div><b id="st-err">0</b><span>ошибок</span></div>
+<div><b id="st-chunks">0</b><span>чанков в ходе</span></div>
+<div><b id="st-time">–</b><span>время</span></div>
+</div>
+<div class="row"><label class="muted">Корни (через «;»), пусто = из настроек:
+<input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+</label></div>
+<h2 class="muted" style="margin-top:14px">Последние обработанные</h2>
+<ul id="events" class="events mono"></ul>
+</div>
+
+<div class="card"><h2>Watcher</h2>
+<div class="row">
+<button id="b-w-start" onclick="act('/api/watch/start')">▶ Запустить</button>
+<button onclick="act('/api/watch/stop')">⏹ Остановить</button>
+<label><input type="checkbox" id="w-autostart" onchange="autostart(this)"> автозапуск при входе в систему</label>
+</div><div id="watch-info" class="muted mono"></div>
+</div>
+
+<div class="card"><h2>Настройки (config.yaml)</h2>
+<textarea id="cfg" spellcheck="false"></textarea>
+<div class="row" style="margin-top:10px">
+<button onclick="saveCfg()">💾 Сохранить настройки</button>
+<span id="cfg-msg"></span>
+<script>
+async function act(url, body){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body || {})});
+  try { const j = await r.json(); if (j.msg) document.getElementById('msg').textContent = j.msg; }
+  catch(e){}
+  refresh();
+}
+async function autostart(cb){
+  await fetch('/api/watch/autostart', {method:'POST', body:JSON.stringify({enabled: cb.checked})});
+  refresh();
+}
+async function saveCfg(){
+  const j = await (await fetch('/api/config/save', {method:'POST',
+    body: JSON.stringify({yaml: document.getElementById('cfg').value})})).json();
+  const m = document.getElementById('cfg-msg');
+  m.textContent = j.msg || (j.ok ? 'Сохранено' : 'Ошибка');
+  m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
+  refresh();
+}
+function fmtDur(s){
+  s = Math.round(s);
+  const h = Math.floor(s/3600), m = Math.floor(s%3600/60), ss = s%60;
+  return (h ? h + 'ч ' : '') + (h||m ? m + 'м ' : '') + ss + 'с';
+}
+async function refresh(){
+  try{
+    const s = await (await fetch('/api/status')).json();
+    const i = s.index;
+    let b = `<span class="badge ${i.running ? (i.paused?'mid':'on') : 'mid'}">индексация: ${
+      i.running ? (i.paused ? 'пауза' : 'идёт') : 'остановлена'}</span>`;
+    b += `<span class="badge ${s.watch.running?'on':'mid'}">watcher: ${s.watch.running?'работает':'остановлен'}</span>`;
+    b += `<span class="badge ${s.watch.autostart?'on':'mid'}">автозапуск: ${s.watch.autostart?'вкл':'выкл'}</span>`;
+    document.getElementById('badges').innerHTML = b;
+    document.getElementById('b-start').disabled = i.running;
+    document.getElementById('b-pause').disabled = !i.running || i.paused;
+    document.getElementById('b-resume').disabled = !i.paused;
+    let cur = i.current
+      ? `▶ ${i.current.path}<br><span style="color:var(--dim)">${i.current.phase}${
+          i.current.progress != null ? ' — ' + Math.round(i.current.progress) + '%' : ''}</span>`
+      : (i.paused ? '⏸ ПАУЗА' : (i.running ? '…' : '—'));
+    document.getElementById('current').innerHTML = cur;
+    document.getElementById('st-seen').textContent = i.seen || 0;
+    document.getElementById('st-proc').textContent = i.processed || 0;
+    document.getElementById('st-pend').textContent = i.pending_est;
+    document.getElementById('st-rate').textContent = i.rate_min || 0;
+    document.getElementById('st-err').textContent = i.errors || 0;
+    document.getElementById('st-chunks').textContent = i.chunks || 0;
+    document.getElementById('st-time').textContent = i.running ? fmtDur(i.elapsed) : '–';
+    document.getElementById('events').innerHTML = (i.events || []).map(e =>
+      `<li>${new Date(e.ts*1000).toLocaleTimeString()} · ${e.status} · ${e.path} (${e.dur}с${
+        e.chunks ? ', ' + e.chunks + ' ч.' : ''})</li>`).join('');
+    document.getElementById('watch-info').textContent = s.watch.running
+      ? `watcher работает (PID ${s.watch.pid})`
+      : 'watcher остановлен — изменения файлов не отслеживаются';
+    document.getElementById('w-autostart').checked = s.watch.autostart;
+    const d = s.db;
+    document.getElementById('db-info').innerHTML =
+      `путь: ${d.path}<br>размер: ${d.size_mb} МБ · файлов: ${d.files ?? '–'} · чанков: ${
+        d.chunks ?? '–'} · ошибок: ${d.errors ?? '–'}`;
+    const ta = document.getElementById('cfg');
+    if (document.activeElement !== ta) ta.value = s.config_yaml;
+  } catch(e){ console.warn(e); }
+}
+refresh(); setInterval(refresh, 2000);
+</script></div></body></html>
+</div>
+<div class="muted">Пути индексирования — секция index.roots; изменения применяются к новым запускам: после сохранения перезапустите watcher/индексацию кнопками выше.</div>
+</div>
+
+<div class="card"><h2>База индекса</h2>
+<div id="db-info" class="mono"></div>
+</div>

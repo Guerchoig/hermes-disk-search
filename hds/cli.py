@@ -299,6 +299,13 @@ def cmd_db_move(args):
     return 0
 
 
+def cmd_ui(args):
+    """Локальный веб-интерфейс (браузер открывается автоматически)."""
+    from . import ui_server
+    ui_server.run(port=args.port, open_browser=not args.no_browser)
+    return 0
+
+
 def cmd_serve(args):
     from .mcp_server import run
     run()
@@ -358,6 +365,11 @@ def main(argv=None):
 
     pwc = sub.add_parser("whisper-check", help="ручная загрузка/проверка модели Whisper")
     pwc.set_defaults(fn=cmd_whisper_check)
+
+    pui = sub.add_parser("ui", help="веб-интерфейс (настройки, управление индексацией)")
+    pui.add_argument("--port", type=int, default=8765)
+    pui.add_argument("--no-browser", action="store_true")
+    pui.set_defaults(fn=cmd_ui)
 
     pdb = sub.add_parser("db-move", help="перенос индексной БД на новый путь")
     pdb.add_argument("--to", required=True, help="новый путь к index.db")
