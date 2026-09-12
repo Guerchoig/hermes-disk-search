@@ -8,27 +8,24 @@ import time
 
 def _hds_processes():
     """[(pid, cmdline)] процессов hds.cli watch/index (не включая UI-сервер)."""
-    import base64
+    import re
 
-    script = ("(Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
-              "Name='pythonw.exe'\") | Where-Object { $_.CommandLine -match "
-              "'-m hds\\.cli (watch|index)' } | ForEach-Object { Write-Output "
-              "($_.ProcessId.ToString() + '|' + $_.CommandLine) }")
-    enc = base64.b64encode(script.encode("utf-16-le")).decode()
-    r = subprocess.run(["powershell", "-NoProfile", "-EncodedCommand", enc],
-                       capture_output=True, text=True)
-    if r.returncode != 0 and not (r.stdout or "").strip():
-        print("[db-move] powershell перечисление процессов: %s" % (r.stderr or "")[:200],
-              flush=True)
+    import psutil
+
     out = []
-    for line in (r.stdout or "").splitlines():
-        if "|" in line.strip():
-            pid, cmd = line.strip().split("|", 1)
-            out.append((pid, cmd))
+    rx = re.compile(r"-m hds\.cli (watch|index)")
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cl = " ".join(p.info["cmdline"] or [])
+            if rx.search(cl):
+                out.append((str(p.info["pid"]), cl))
+        except Exception:  # noqa: BLE001
+            pass
     return out
 
 
-def move_db(new_path, force=False, project=None, venv_pythonw=None):
+def move_db(new_path, force=False, project=None, venv_pythonw=None,
+            kill_processes=True):
     """Атомарный перенос индексной БД.
 
     Возвращает {"ok": bool, "msg": str, "watch_was_running": bool}.
@@ -47,7 +44,7 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None):
         return {"ok": False, "msg": "Целевой файл уже существует: %s (проверьте путь "
                                     "или включите перезапись)" % new}
 
-    procs = _hds_processes()
+    procs = [] if not kill_processes else _hds_processes()
     watch_was = any("watch" in cmd for _pid, cmd in procs)
     if procs:
         print("[db-move] останавливаю процессы hds: %d шт." % len(procs), flush=True)

@@ -137,7 +137,7 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
     for i, c in enumerate(chunks):
         cid = dbmod.add_chunk(conn, fid, i, c["page"], c["t_start"], c["t_end"], c["text"])
         dbmod.add_vector(conn, cid, c["_blob"])
-    dbmod.finish_file(conn, fid, "indexed")
+    dbmod.finish_file(conn, fid, "indexed", chunks=len(chunks))
     conn.commit()
     return "indexed(%d чанков)" % len(chunks), kind
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,

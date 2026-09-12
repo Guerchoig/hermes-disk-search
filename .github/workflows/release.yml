@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Версия релиза (например v0.2.0)'
+        required: true
+        type: string
+      notes_file:
+        description: 'Файл с заметками релиза (опционально)'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install faster-whisper nvidia-cublas-cu12 nvidia-cudnn-cu12 psutil pyyaml
+
+      - name: Компиляция всех модулей
+        run: python -m compileall -q hds tools
+
+      - name: Регрессионные тесты
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests -v
+
+  release:
+    needs: test
+    if: success()
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установка gh-CLI-зависимостей не требуется (gh предустановлен)
+
+      - name: Удаление предыдущих релизов и тегов
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $releases = gh release list --limit 100 --json tagName --jq '.[].tagName' | ConvertFrom-Json
+          foreach ($tag in $releases) {
+            Write-Host "Удаляю предыдущий релиз/тег: $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          }
+
+      - name: Сборка ассетов
+        shell: pwsh
+        run: |
+          python tools/make_icon.py
+          Compress-Archive -Path shortcuts/macos/HermesDiskSearchIndex.app -DestinationPath HermesDiskSearchIndex.app.zip -Force
+          Compress-Archive -Path assets -DestinationPath hds-icons.zip -Force
+
+      - name: Создание релиза
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
+        shell: pwsh
+        run: |
+          $tag = "${{ inputs.version }}"
+          $notes = if (Test-Path "RELEASE_NOTES_$VERSION.md") { "RELEASE_NOTES_$VERSION.md" } else { "" }
+          $args = @('release','create',"$tag",'-t',"$tag — hermes-disk-search")
+          if ($notes -ne '') { $args += @('--notes-file', $notes) } else { $args += @('--generate-notes') }
+          $args += @('assets/icon.png','assets/icon.ico','assets/icon.icns','HermesDiskSearchIndex.app.zip','hds-icons.zip')
+          gh release create "$tag" @args
+
+      - name: Итог
+        run: gh release list

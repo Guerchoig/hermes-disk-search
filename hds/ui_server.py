@@ -266,15 +266,8 @@ def _build_trees():
             st = "partial"
         status_of[d] = {"status": st, "files": dn, "indexed": idx}
 
-    # worst-status распространяется на родителей (вклад глубоких папок)
-    worst = {}
-    for d in sorted(status_of, key=lambda x: (x.count(os.sep), x)):
-        lvl = LEVEL[status_of[d]["status"]]
-        parent = os.path.dirname(d)
-        if parent in worst:
-            lvl = min(lvl, LEVEL[worst[parent]])
-        worst[d] = NAMES[lvl]
-
+    # worst-status (агрегация потомков) выполняется в aggregate(); узлы получают
+    # собственный статус каталога, родители сворачиваются по детям
     max_depth = 4
     child_limit = 40
     trees = []
@@ -285,12 +278,15 @@ def _build_trees():
                if d.lower().startswith(prefix)}
         if not sub:
             continue
-        node = {"name": r, "path": r, "status": "none",
+        node = {"name": r, "path": r,
+                "status": (status_of.get(r) or {"status": "none"})["status"],
                 "files": sum(v["files"] for v in sub.values()),
                 "indexed": sum(v["indexed"] for v in sub.values()),
                 "children": []}
         by_path = {r: node}
         for d in sorted(sub, key=lambda x: (x.count(os.sep), x.lower())):
+            if d == r:
+                continue
             parts = [p for p in os.path.relpath(d, r).split(os.sep) if p][:max_depth]
             cur_path, cur = r, node
             for p in parts:
@@ -299,7 +295,7 @@ def _build_trees():
                 if nxt is None:
                     sinfo = sub.get(cur_path) or {"files": 0, "indexed": 0}
                     nxt = {"name": p, "path": cur_path,
-                           "status": worst.get(cur_path, "none"),
+                           "status": (sub.get(cur_path) or {"status": "none"})["status"],
                            "files": sinfo["files"],
                            "indexed": sinfo["indexed"],
                            "children": []}
@@ -338,9 +334,12 @@ def _build_trees():
         return st
     for t in trees:
         aggregate(t)
-    return {"trees": trees,
+    out = {"trees": trees,
             "dirs": len(status_of),
             "disk_files": sum(v[0] for v in disk.values())}
+    if os.environ.get("HDS_DEBUG_TREES"):
+        out["status_of"] = status_of
+    return out
 
 
 

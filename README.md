@@ -398,3 +398,6 @@ Skill `disk-search` (в `skills\research\disk-search\SKILL.md` Hermes) объя�
 | `hds/cli.py` | CLI |
 | `hds/mcp_server.py`, `mcp_start.py` | MCP-сервер для Hermes |
 | `gen_fixtures.py` | тестовые файлы для smoke-теста |
+| `tests/` | регрессионные тесты (71 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI) |
+| `.github/workflows/release.yml` | GitHub Actions: тесты → сборка → релиз (с удалением предыдущих) |
+| `releasing.md` | правила выпуска релизов |

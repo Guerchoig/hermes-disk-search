@@ -1,0 +1,148 @@
+"""Тесты веб-интерфейса: heartbeat-статус, сохранение настроек, деревья папок."""
+import json
+import os
+import sys
+import tempfile
+import unittest
+
+from helpers import FakeEmbedder, write_config, write_text  # noqa: I100
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from hds import indexer  # noqa: E402
+from hds import db as dbmod  # noqa: E402
+from hds.config import db_abs_path, load  # noqa: E402
+from hds import ui_server  # noqa: E402
+
+
+class HeartbeatStatusTests(unittest.TestCase):
+    """РЕГРЕССИЯ: индексация из другого процесса не была видна в UI."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-ui-")
+        write_config(self.tmp, extra="")
+        self.hb = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "index.heartbeat.json")
+        self.addCleanup(lambda: os.path.exists(self.hb) and os.remove(self.hb))
+        indexer._ACTIVE_REPORTER = None
+
+    def _write_hb(self, path="D:\\x\\v.mp4"):
+        with open(self.hb, "w", encoding="utf-8") as f:
+            json.dump({"ts": __import__("time").time(), "path": path,
+                       "phase": "Whisper", "progress": 55,
+                       "seen": 5, "processed": 3, "errors": 0, "paused": False}, f)
+
+    def test_heartbeat_makes_running_true(self):
+        self._write_hb()
+        st = ui_server._index_state()
+        self.assertTrue(st["running"], "heartbeat из другого процесса должен быть виден")
+        self.assertEqual(st["current"]["path"], "D:\\x\\v.mp4")
+        self.assertEqual(st["current"]["progress"], 55)
+
+    def test_stale_heartbeat_not_running(self):
+        import time
+
+        self._write_hb()
+        with open(self.hb, "w", encoding="utf-8") as f:
+            json.dump({"ts": 1.0, "path": "x"}, f)  # очень старый
+        st = ui_server._index_state()
+        self.assertFalse(st["running"])
+
+    def test_no_heartbeat_not_running(self):
+        if os.path.exists(self.hb):
+            os.remove(self.hb)
+        st = ui_server._index_state()
+        self.assertFalse(st["running"])
+
+
+class SaveConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-uicfg-")
+        self.cfg = write_config(self.tmp)
+
+    def test_invalid_yaml_refused(self):
+        res = ui_server._save_config("index: [unclosed")
+        self.assertFalse(res["ok"])
+        self.assertIn("Ошибка YAML", res["msg"])
+
+    def test_valid_yaml_saved(self):
+        good = load() and open(self.cfg, encoding="utf-8-sig").read()
+        res = ui_server._save_config(good)
+        self.assertTrue(res["ok"])
+
+    def test_changed_db_path_roundtrip(self):
+        import yaml
+
+        res = ui_server._save_config("db_path: 'D:\\test\\index.db'\nindex:\n  roots: []\n")
+        self.assertTrue(res["ok"])
+        cfg = load()
+        self.assertTrue(str(cfg["db_path"]).lower().startswith("d:"))
+        yaml.safe_load(open(self.cfg, encoding="utf-8-sig"))  # конфиг остаётся валидным
+
+
+class TreeBuildTests(unittest.TestCase):
+    """РЕГРЕССИИ: не начатые папки не жёлтые; проиндексированные — зелёные;
+    смесь — жёлтая. Статусы родителя — свёртка по потомкам."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-tree-")
+        self.fixtures = os.path.join(self.tmp, "root")
+        write_text(self.fixtures, "a.txt", "данные корня")
+        write_text(os.path.join(self.fixtures, "sub"), "b.txt", "вложенный")
+        write_config(self.tmp, roots=[self.fixtures])
+        self.addCleanup(lambda: __import__("shutil").rmtree(self.tmp, ignore_errors=True))
+
+    def _find(self, nodes, name):
+        for n in nodes:
+            if os.path.basename(n["path"]).lower() == name.lower():
+                return n
+            r = self._find(n.get("children", []), name)
+            if r:
+                return r
+        return None
+
+    def test_empty_db_all_none(self):
+        res = ui_server._build_trees()
+        self.assertEqual(res["trees"][0]["status"], "none")
+        sub = self._find([res["trees"][0]], "sub")
+        self.assertEqual(sub["status"], "none")
+        self.assertEqual(sub["files"], 1)
+
+    def test_done_when_all_indexed(self):
+        conn = __import__("hds.db", fromlist=["db"]).connect(
+            __import__("hds.config", fromlist=["db_abs_path"]).db_abs_path(load()), 8)
+        emb = FakeEmbedder(8)
+        for root, dirs, files in os.walk(self.fixtures):
+            for fn in files:
+                p = os.path.join(root, fn)
+                indexer.process_file(conn, emb, load(), p)
+        conn.close()
+        res = ui_server._build_trees()
+        self.assertEqual(res["trees"][0]["status"], "done")
+        sub = self._find([res["trees"][0]], "sub")
+        self.assertEqual(sub["status"], "done")
+        self.assertEqual(sub["status"], "done")
+
+    def test_mixed_children_make_parent_partial(self):
+        # a.txt в корне (done), sub не начата (none), sub2 проиндексирована (done)
+        write_text(os.path.join(self.fixtures, "sub2"), "c.txt", "готовый контент")
+        conn = dbmod.connect(db_abs_path(load()), 8)
+        for root, dirs, files in os.walk(os.path.join(self.fixtures, "sub2")):
+            for fn in files:
+                indexer.process_file(conn, FakeEmbedder(8), load(),
+                                     os.path.join(root, fn))
+        conn.close()
+        res = ui_server._build_trees()
+        self.assertEqual(res["trees"][0]["status"], "partial")
+
+    def _find(self, nodes, name):
+        for n in nodes:
+            if os.path.basename(n["path"]).lower() == name.lower():
+                return n
+            r = self._find(n.get("children", []), name)
+            if r:
+                return r
+        return None
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -50,15 +50,6 @@ def connect(db_path, dim):
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
-    # бэкфилл: файлы, проиндексированные до введения indexed_at
-    c_old = conn.execute(
-        "SELECT COUNT(*) FROM files WHERE status='indexed' AND indexed_at IS NULL"
-    ).fetchone()[0]
-    if c_old:
-        conn.execute(
-            "UPDATE files SET indexed_at = COALESCE(mtime, 0) + 10 "
-            "WHERE status='indexed' AND indexed_at IS NULL")
-        print("[db] indexed_at заполнен по mtime для %d старых записей" % c_old)
     row = conn.execute("SELECT value FROM meta WHERE key='vec_dim'").fetchone()
     # проверяем фактическую размерность таблицы пробной вставкой с откатом
     mismatch = True
@@ -83,6 +74,18 @@ def connect(db_path, dim):
               "(запустите 'index --full' для повторной векторизации)" % int(dim))
         row = None
     conn.executescript(SCHEMA.format(dim=int(dim)))
+    # бэкфилл: файлы, проиндексированные до введения indexed_at
+    try:
+        c_old = conn.execute(
+            "SELECT COUNT(*) FROM files WHERE status='indexed' AND indexed_at IS NULL"
+        ).fetchone()[0]
+        if c_old:
+            conn.execute(
+                "UPDATE files SET indexed_at = COALESCE(mtime, 0) + 10 "
+                "WHERE status='indexed' AND indexed_at IS NULL")
+            print("[db] indexed_at заполнен по mtime для %d старых записей" % c_old)
+    except sqlite3.OperationalError:
+        pass
     conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('vec_dim', ?)", (str(int(dim)),))
     conn.commit()
     return conn
@@ -153,13 +156,13 @@ def add_vector(conn, chunk_id, vector_blob):
     )
 
 
-def finish_file(conn, file_id, status, error=None):
+def finish_file(conn, file_id, status, error=None, chunks=None):
     import time
 
     if status == "indexed":
         conn.execute(
-            "UPDATE files SET status=?, error=NULL, indexed_at=? WHERE id=?",
-            (status, time.time(), file_id))
+            "UPDATE files SET status=?, error=NULL, indexed_at=?, chunk_count=? WHERE id=?",
+            (status, time.time(), chunks if chunks is not None else 0, file_id))
     else:
         conn.execute("UPDATE files SET status=?, error=? WHERE id=?",
                      (status, error, file_id))
