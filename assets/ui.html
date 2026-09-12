@@ -41,6 +41,10 @@ summary{cursor:pointer;user-select:none}
 <div class="row"><label class="muted">Корни (через «;»), пусто = из настроек:
 <input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
 </label></div>
+<div class="row"><label class="muted">🔄 Переиндексировать (файл или папка, с переобработкой):
+<input id="reindex-path" class="mono" placeholder="D:\путь\к\файлу_или_папке" style="flex:1;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+<button onclick="reindex()">Переиндексировать</button>
+</label></div>
 
 <details id="trees-details" style="margin:10px 0">
 <summary style="cursor:pointer;color:var(--acc)">🌳 Деревья папок индексации (скрыты — нажмите для показа)</summary>
@@ -53,6 +57,24 @@ summary{cursor:pointer;user-select:none}
 
 <h2 class="muted" style="margin-top:14px">Последние обработанные</h2>
 <ul id="events" class="events mono"></ul>
+</div>
+
+<div class="card"><h2>Параметры обработки</h2>
+<div class="row">
+<label><input type="checkbox" id="opt-transcribe" onchange="setOpt('index.transcribe', this.checked)">
+<span>Транскрипция аудио/видео (Whisper)</span></label>
+</div>
+<div class="row">
+<label>Макс. размер медиафайла, МБ
+<input type="number" min="0" id="opt-max-media" style="width:90px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+</label>
+<button onclick="setOptNum('index.max_media_mb','opt-max-media')">💾 Сохранить</button>
+<label style="margin-left:18px">Макс. чанков на файл
+<input type="number" min="0" id="opt-max-chunks" style="width:90px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+</label>
+<button onclick="setOptNum('index.max_chunks','opt-max-chunks')">💾</button>
+</div>
+<div id="opt-msg" class="muted">Изменения сохраняются в config.yaml (комментарии сохраняются) и применяются к новым запускам — перезапустите watcher/индексацию кнопками выше.</div>
 </div>
 
 <div class="card"><h2>Watcher</h2>
@@ -87,6 +109,27 @@ async function saveCfg(){
   m.textContent = j.msg || (j.ok ? 'Сохранено' : 'Ошибка');
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
+}
+async function reindex(){
+  const p = document.getElementById('reindex-path').value.trim();
+  if (!p) { alert('Укажите файл или папку для переиндексации'); return; }
+  const j = await (await fetch('/api/index/reindex',{method:'POST',
+    body:JSON.stringify({path:p})})).json();
+  if (!j.ok) alert(j.msg || 'не удалось');
+  refresh();
+}
+async function setOpt(key, value){
+  const j = await (await fetch('/api/config/set',{method:'POST',
+    body:JSON.stringify({key, value})})).json();
+  const m = document.getElementById('opt-msg');
+  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
+  m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
+  refresh();
+}
+function setOptNum(key, inputId){
+  const v = parseInt(document.getElementById(inputId).value, 10);
+  if (isNaN(v) || v < 0) { alert('Введите неотрицательное целое число'); refresh(); return; }
+  setOpt(key, v);
 }
 async function moveDb(){
   const path = document.getElementById('db-new').value.trim();
@@ -131,6 +174,13 @@ async function refresh(){
     document.getElementById('b-w-start').disabled = s.watch.running;
     document.getElementById('b-w-stop').disabled = !s.watch.running;
     document.getElementById('w-autostart').checked = s.watch.autostart;
+    const o = s.options || {};
+    const tc = document.getElementById('opt-transcribe');
+    if (document.activeElement !== tc) tc.checked = !!o.transcribe;
+    const mm = document.getElementById('opt-max-media');
+    if (document.activeElement !== mm) mm.value = o.max_media_mb ?? 1500;
+    const mc = document.getElementById('opt-max-chunks');
+    if (document.activeElement !== mc) mc.value = o.max_chunks ?? 2000;
     const d = s.db;
     document.getElementById('db-info').innerHTML =
       `путь: ${d.path}<br>размер: ${d.size_mb} МБ · файлов: ${d.files ?? '–'} · чанков: ${

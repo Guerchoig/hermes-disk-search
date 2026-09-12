@@ -5,7 +5,7 @@ index:
     - "D:\\"
   exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search", "hermes-disk-search-db", "WindowsApps", "$WINDOWS.~BT", ".Trash", ".Trashes", "models"]
   max_file_mb: 200          # предел для обычных файлов
-  max_media_mb: 1500        # предел для аудио/видео (транскрипция)
+  max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract + язык rus)
   ocr_lang: "rus+eng"
   ocr_tesseract_cmd: ""     # путь к tesseract.exe, если не в PATH (Windows)
@@ -16,7 +16,7 @@ index:
   whisper_load_timeout: 180 # сек; при зависании CUDA-загрузки — автоматический fallback на CPU
   whisper_batch: 8          # батчевая транскрипция (ровная загрузка GPU, ускорение x3-5); 0 = отключить
   hf_token: ""              # опционально: токен HuggingFace (https://huggingface.co/settings/tokens) — быстрее загрузки моделей
-  max_chunks: 2000          # максимум чанков на файл (гигантские тексты обрезаются; 0 = без лимита)
+  max_chunks: 3000          # максимум чанков на файл (гигантские тексты обрезаются; 0 = без лимита)
 
 db_path: 'D:\hermes-disk-search-db\index.db'
 

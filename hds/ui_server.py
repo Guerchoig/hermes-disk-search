@@ -1,4 +1,4 @@
-"""Локальный веб-интерфейс hermes-disk-search (http://127.0.0.1:8765).
+﻿"""Локальный веб-интерфейс hermes-disk-search (http://127.0.0.1:8765).
 
 Запуск: python -m hds.cli ui  (браузер открывается автоматически)
 Только localhost; без сторонних зависимостей (stdlib http.server).
@@ -219,127 +219,70 @@ def _build_trees():
     for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
         if not os.path.isdir(root):
             continue
-        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
-            dirnames[:] = [d for d in dirnames if d.lower() not in excl]
-            for fn in filenames:
-                if not _kind_of(os.path.splitext(fn)[1].lower()):
-                    continue
-                d = dirpath
-                e = disk.setdefault(d, [0, 0.0])
-                e[0] += 1
-                try:
-                    m = os.stat(os.path.join(dirpath, fn)).st_mtime
-                    if m > e[1]:
-                        e[1] = m
-                except OSError:
-                    pass
+_CONFIG_FIELDS = {
+    "index.transcribe": ("bool", r"(?m)^(\s*transcribe:)\s+\w+"),
+    "index.max_media_mb": ("int", r"(?m)^(\s*max_media_mb:)\s+\d+"),
+    "index.max_chunks": ("int", r"(?m)^(\s*max_chunks:)\s+\d+"),
+}
 
-    db = {}
-    path_db = db_abs_path(cfg)
-    if os.path.exists(path_db):
-        c = dbmod.connect(path_db, int(dig(cfg, "embedding.dim", 1024)))
-        for path, status, iat in c.execute("SELECT path, status, indexed_at FROM files"):
-            d = os.path.dirname(path)
-            e = db.setdefault(d, [0, 0, 0.0])
-            e[0] += 1
-            if status == "indexed":
-                e[1] += 1
-            if iat and iat > e[2]:
-                e[2] = iat
-        c.close()
 
-    LEVEL = {"none": 0, "partial": 1, "done": 2}
-    NAMES = ("none", "partial", "done")
-    status_of = {}
-    for d in set(disk) | set(db):
-        dn, mtime = disk.get(d, [0, 0.0])
-        tot, idx, iat = db.get(d, [0, 0, 0.0])
-        if dn == 0 and tot == 0:
-            continue
-        if tot == 0:
-            st = "none"      # индексация не начиналась (нет записей в БД)
-        elif dn > 0 and mtime > iat + 2:
-            st = "partial"   # есть файлы, изменённые после индексации
-        elif idx >= dn:
-            st = "done"
-        else:
-            st = "partial"
-        status_of[d] = {"status": st, "files": dn, "indexed": idx}
+def _set_simple_config(key, value):
+    """Точечное изменение параметра config.yaml (сохраняет комментарии).
+    Белый список ключей; файл заменяется атомарно."""
+    import re
 
-    # worst-status (агрегация потомков) выполняется в aggregate(); узлы получают
-    # собственный статус каталога, родители сворачиваются по детям
-    max_depth = 4
-    child_limit = 40
-    trees = []
-    for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
-        r = os.path.normpath(root)
-        prefix = (r.rstrip(os.sep).lower() + os.sep)
-        sub = {d: v for d, v in status_of.items()
-               if d.lower().startswith(prefix)}
-        if not sub:
-            continue
-        node = {"name": r, "path": r,
-                "status": (status_of.get(r) or {"status": "none"})["status"],
-                "files": sum(v["files"] for v in sub.values()),
-                "indexed": sum(v["indexed"] for v in sub.values()),
-                "children": []}
-        by_path = {r: node}
-        for d in sorted(sub, key=lambda x: (x.count(os.sep), x.lower())):
-            if d == r:
-                continue
-            parts = [p for p in os.path.relpath(d, r).split(os.sep) if p][:max_depth]
-            cur_path, cur = r, node
-            for p in parts:
-                cur_path = os.path.join(cur_path, p)
-                nxt = by_path.get(cur_path)
-                if nxt is None:
-                    sinfo = sub.get(cur_path) or {"files": 0, "indexed": 0}
-                    nxt = {"name": p, "path": cur_path,
-                           "status": (sub.get(cur_path) or {"status": "none"})["status"],
-                           "files": sinfo["files"],
-                           "indexed": sinfo["indexed"],
-                           "children": []}
-                    by_path[cur_path] = nxt
-                    cur["children"].append(nxt)
-                cur = nxt
-        # сводный узел для длинных списков детей
-        def trim(n):
-            if len(n["children"]) > child_limit:
-                rest = n["children"][child_limit:]
-                lvl = min(LEVEL[c["status"]] for c in rest)
-                n["children"] = n["children"][:child_limit] + [{
-                    "name": "… ещё %d папок" % len(rest), "path": "",
-                    "status": NAMES[lvl], "files": 0, "indexed": 0, "children": []}]
-            for c in n["children"]:
-                trim(c)
-        trim(node)
-        trees.append(node)
+    spec = _CONFIG_FIELDS.get(key)
+    if spec is None:
+        return {"ok": False, "msg": "Недопустимый параметр: %s" % key}
+    typ, rx = spec
+    if typ == "bool":
+        if not isinstance(value, bool):
+            return {"ok": False, "msg": "Ожидается true/false"}
+        repl = "true" if value else "false"
+    else:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "Ожидается целое число"}
+        if value < 0:
+            return {"ok": False, "msg": "Значение должно быть >= 0"}
+        repl = str(value)
+    from .config import config_path
 
-    # статус родителя: все потомки done → done; все none → none;
-    # смесь (есть прогресс и есть не начатое) → partial
-    def aggregate(n):
-        st = n["status"]
-        for c in n["children"]:
-            aggregate(c)
-        ch = n["children"]
-        if ch:
-            lvls = {c["status"] for c in ch}
-            if lvls == {"done"}:
-                st = "done"
-            elif lvls == {"none"}:
-                st = "none"
-            else:
-                st = "partial"
-        n["status"] = st
-        return st
-    for t in trees:
-        aggregate(t)
-    out = {"trees": trees,
-            "dirs": len(status_of),
-            "disk_files": sum(v[0] for v in disk.values())}
-    if os.environ.get("HDS_DEBUG_TREES"):
-        out["status_of"] = status_of
-    return out
+    cfg_path = config_path()
+    with open(cfg_path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    new_text, n = re.subn(rx, lambda m: m.group(1) + " " + repl, text)
+    if n == 0:
+        return {"ok": False, "msg": "Параметр не найден в config.yaml"}
+    tmp = cfg_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    os.replace(tmp, cfg_path)
+    return {"ok": True,
+            "msg": "Сохранено. Применяется к новым запускам — перезапустите "
+                   "watcher/индексацию кнопками, чтобы параметр подействовал."}
+
+
+def _save_config(yaml_text):
+    import yaml
+
+    try:
+        data = yaml.safe_load(yaml_text)
+        if not isinstance(data, dict):
+            raise ValueError("YAML должен быть словарём")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Ошибка YAML: %s" % e}
+    from .config import config_path
+
+    cfg_path = config_path()
+    tmp = cfg_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(yaml_text if yaml_text.endswith("\n") else yaml_text + "\n")
+    os.replace(tmp, cfg_path)
+    return {"ok": True,
+            "msg": "Сохранено. Изменения применятся к новым запускам — "
+                   "watcher/индексацию перезапустите кнопками."}
 
 
 
@@ -445,6 +388,9 @@ class Handler(BaseHTTPRequestHandler):
                 "db": _db_stats(),
                 "config_yaml": yaml_text,
                 "roots": [os.path.abspath(r) for r in dig(cfg, "index.roots", [])],
+                "options": {"transcribe": bool(dig(cfg, "index.transcribe", True)),
+                            "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
+                            "max_chunks": dig(cfg, "index.max_chunks", 2000)},
             })
         elif self.path == "/api/tree":
             self._json(_build_trees())
@@ -481,6 +427,14 @@ class Handler(BaseHTTPRequestHandler):
                 self._json({"ok": False, "msg": "Укажите путь"})
             else:
                 self._json(_db_move(path, force=bool(body.get("force"))))
+        elif self.path == "/api/index/reindex":
+            path = (body.get("path") or "").strip().strip('"')
+            if not path or not os.path.exists(path):
+                self._json({"ok": False, "msg": "Путь не существует: %s" % path})
+            else:
+                self._json(_start_index(full=True, roots=path))
+        elif self.path == "/api/config/set":
+            self._json(_set_simple_config(body.get("key", ""), body.get("value")))
         else:
             self._json({"error": "not found"}, 404)
 
