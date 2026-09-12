@@ -41,13 +41,45 @@
 3. ✅ Инициализация `self._seen_ts` (deque) и `self.total` в `__init__`
    (раньше `AttributeError` при heartbeat без пре-подсчёта).
 4. ✅ Кодировочно-устойчивый вывод (`ProgressReporter._write`): строка статуса
-   (⏱ и т.п.) перекодируется с replace для cp1251-консоли/pipe — раньше
-   `UnicodeEncodeError` ронял `run_index` в `rep.finish()` (в т.ч. в фоновом
-   потоке теста heartbeat, из-за чего `res == {}`).
-5. ✅ **Все 71 тест зелёные** (`python -m unittest discover -s tests` — OK, ~4 с).
-6. ✅ `python -m hds.cli check`: sqlite-vec, LM Studio (bge-m3 отвечает),
-   ffmpeg, faster-whisper — OK. Опциональные Tesseract/mpxj не установлены
-   (известно, некритично).
+   (⏱ и т.п.) перекодируется с replace, если кодировка потока
+   не поддерживает юникод (cp1251-консоль/pipe) — раньше `UnicodeEncodeError`
+   ронял `run_index` в `rep.finish()` (в т.ч. в фоновом потоке теста heartbeat,
+   из-за чего `res == {}`).
+5. ✅ Все 71 тест зелёные (`python -m unittest discover -s tests`).
+
+### Исправлено в этом чате (инцидент «UI не запускается, watcher умер»):
+1. ✅ **Корневая причина падения watcher'а**: при старте reconcile-сверка
+   (run_index по D:\) дошла до служебного lock-файла Office
+   `~$Регистр НСИ.xlsx`, openpyxl бросил `BadZipFile: File is not a zip file`,
+   исключение никто не перехватил → `process_file` → `run_index` →
+   `run_watch` — процесс watcher'а умер. Отсюда: stale `watch.lock`
+   (PID мёртв), «watcher не запущен», прерванная на середине сверка.
+2. ✅ `hds/indexer.py::_extract_file`:
+   - lock-файлы Office (`~$*`) пропускаются сразу (статус skipped_type);
+   - извлечение обёрнуто в try/except: битый файл → `finish_file(status='error')`
+     и статус `error: ...`, прогон индексации НЕ останавливается.
+3. ✅ `hds/watcher.py::run_watch`: reconcile обёрнут в try/except — падение
+   сверки не убивает наблюдателя (события ФС важнее).
+4. ✅ `hds/ui_server.py::run`: перед bind пробуем подключиться к порту —
+   если кто-то уже слушает, второй экземпляр молча выходит (на Windows
+   SO_REUSEADDR позволял двум серверам молча делить порт 8765 — из-за
+   зависшего старого сервера браузер открывал мёртвую страницу).
+5. ✅ Регрессионные тесты (+3): lock-файл пропускается, битый xlsx →
+   статус error (не падение), run_index доходит до конца с битым файлом.
+   Итого 74 теста — все зелёные.
+6. ✅ Восстановлены процессы: watcher (PID в watch.lock живой, сверка идёт,
+   w_err.log чистый) и UI (api/status отвечает). Найдена причина падения
+   watcher'а ранее — «forrtl: window-CLOSE event» в старом w.log (окно закрыли).
+7. ✅ Автозапуск watcher: задачи HermesDiskSearchWatch в Планировщике НЕ было
+   (не установлена / нет прав администратора). Установлен ярлык
+   `HermesDiskSearchWatch.lnk` в папку автозагрузки (запуск при входе).
+8. ✅ Диагностическая заметка: `.venv\Scripts\pythonw.exe` — шим, порождающий
+   реальный `C:\Python314\pythonw.exe`, поэтому каждый сервис = ДВА процесса
+   с одинаковой командной строкой (не дубликат!); пары процессов с одинаковым
+   CommandLine — норма. Проверять liveness по watch.lock через _pid_alive.
+9. ⚠️ Дисковый шум при старте watcher — норма: reconcile-сверка читает
+   начало/конец всех файлов диска (content_hash); на ~205k файлов —
+   минуты-часы, видно в w.log (ETA в статусной строке).
 
 ### НЕ выполнено (следующий шаг):
 1. **Релиз v0.2.1 по releasing.md**: обновить `__version__` в `hds/__init__.py`,
@@ -92,6 +124,8 @@
 ### hds/indexer.py — РАБОТАЕТ (после отката конвейера)
 - process_file = _extract_file (фаза 1: проверки+извлечение+чанки)
   → _commit_file (фаза 2: эмбеддинги+запись), возвращает (статус, kind)
+- _extract_file: пропуск ~$-lock-файлов Office, try/except вокруг извлечения
+  (битый файл → статус error + finish_file, прогон не падает)
 - run_index: обход, пауза/стоп-файлы, heartbeat (_hb), пре-подсчёт total
   в daemon-потоке (ETA), prune с защитой от массового удаления;
   конвейер pending/_flush_pending удалён
@@ -102,6 +136,10 @@
 - _write(): кодировочно-устойчивая печать (cp1251/pipe не падают)
 - _fmt_eta, rate_window(300), eta_sec, heartbeat_data (total/eta/remaining)
 - _status_line включает ETA
+
+### hds/watcher.py — РАБОТАЕТ
+- reconcile_on_start обёрнут в try/except: сбой сверки не убивает наблюдателя
+- _acquire_lock/_pid_alive: stale watch.lock (мёртвый PID) подчищается при старте
 
 ### hds/ui_server.py — БЫЛ ПОВРЕЖЁН, ВОССТАНОВЛЕН
 - Проверить py_compile + ast.parse перед использованием!

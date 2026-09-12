@@ -5,6 +5,11 @@ __pycache__/
 *.log
 watch.lock
 
+# Runtime-сигналы индексатора (кросс-процессный статус и файлы-команды)
+index.heartbeat.json
+index.stop
+index.pause
+
 # Локальные данные (индекс не входит в репозиторий)
 index.db
 index.db

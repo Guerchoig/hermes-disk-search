@@ -170,7 +170,12 @@ def run_watch(cfg, roots=None):
 
     if dig(cfg, "watch.reconcile_on_start", True):
         print("[watch] Сверка индекса с дисками (быстрый stat-обход)...")
-        indexer.run_index(conn, emb, cfg, roots=roots, prune=True)
+        try:
+            indexer.run_index(conn, emb, cfg, roots=roots, prune=True)
+        except Exception as e:  # noqa: BLE001
+            # сверка не должна убивать наблюдателя: события ФС важнее
+            print("[watch] ошибка сверки (наблюдение продолжается): %s" % e,
+                  file=sys.stderr, flush=True)
     print("[watch] Готово. События обрабатываются автоматически. Ctrl+C — остановка.", flush=True)
     try:
         while True:

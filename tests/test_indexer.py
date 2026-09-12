@@ -105,6 +105,39 @@ class ProcessFileTests(IndexerTestBase):
         conn.close()
         self.assertEqual(status, "skipped_type")
 
+    def test_office_lock_file_skipped(self):
+        """РЕГРЕССИЯ: lock-файлы Office (~$*.xlsx) не должны доходить до openpyxl."""
+        p = write_text(self.fixtures, "~$Регистр НСИ.xlsx", "lock")
+        conn = self._conn()
+        status, _ = indexer.process_file(conn, FakeEmbedder(8), load(), p)
+        conn.close()
+        self.assertEqual(status, "skipped_type", status)
+
+    def test_broken_office_file_is_error_not_crash(self):
+        """РЕГРЕССИЯ: битый xlsx (BadZipFile) даёт статус error, а не роняет
+        весь прогон (watcher умирал на сверке из-за такого файла)."""
+        p = write_text(self.fixtures, "broken.xlsx", "это не zip-архив")
+        conn = self._conn()
+        status, kind = indexer.process_file(conn, FakeEmbedder(8), load(), p)
+        conn.close()
+        self.assertTrue(status.startswith("error"), status)
+        c = dbmod.connect(db_abs_path(load()), 8)
+        row = c.execute("SELECT status FROM files WHERE path=?", (p,)).fetchone()
+        c.close()
+        self.assertEqual(row[0], "error", "битый файл должен помечаться error в БД")
+
+    def test_run_index_survives_broken_file(self):
+        """РЕГРЕССИЯ: run_index доходит до конца, несмотря на битые файлы."""
+        write_text(self.fixtures, "broken.docx", "не docx, просто текст")
+        write_text(self.fixtures, "ok.txt", "нормальный текст про 1С")
+        counters = indexer.run_index(self._conn(), FakeEmbedder(8), load(),
+                                     roots=[self.fixtures], full=True,
+                                     progress_sec=0, prune=False, quiet=True)
+        conn = self._conn()
+        conn.close()
+        err = sum(v for k, v in counters.items() if str(k).startswith("error"))
+        self.assertGreaterEqual(counters.get("indexed", 0) + err, 2)
+
     def test_too_big_skipped(self):
         p = write_text(self.fixtures, "big.txt", "x" * 100)
         cfg = load()

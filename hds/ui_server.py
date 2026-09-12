@@ -560,6 +560,20 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def run(port=8765, open_browser=True):
+    # защита от двойного запуска: на Windows SO_REUSEADDR позволяет двум
+    # серверам молча делить один порт — сначала пробуем «постучаться»
+    import socket as _socket
+    probe = _socket.socket()
+    probe.settimeout(1.0)
+    try:
+        probe.connect(("127.0.0.1", port))
+        print("[ui] порт %d уже занят — интерфейс, вероятно, уже запущен. Выход."
+              % port, flush=True)
+        return
+    except OSError:
+        pass
+    finally:
+        probe.close()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     url = "http://127.0.0.1:%d" % port
     print("[ui] интерфейс: %s (Ctrl+C — остановка)" % url, flush=True)

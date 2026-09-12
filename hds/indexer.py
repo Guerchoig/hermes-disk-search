@@ -80,6 +80,11 @@ def _extract_file(conn, cfg, path, force=False, progress_cb=None):
     if path_excluded(path, cfg):
         return None, None, ("skipped_excluded", kind)
 
+    # служебные lock-файлы Office (~$док.xlsx): вечно меняются, openpyxl на них
+    # падает BadZipFile — пропускаем как нетиповые
+    if os.path.basename(path).startswith("~$"):
+        return None, None, ("skipped_type", kind)
+
     try:
         st = os.stat(path)
     except OSError as e:
@@ -102,18 +107,25 @@ def _extract_file(conn, cfg, path, force=False, progress_cb=None):
             return None, None, ("moved", kind)
 
     fid = dbmod.upsert_file(conn, path, ext, kind, size, mtime, chash)
-    kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
-    chunks = chunker.make_chunks(
-        segments,
-        dig(cfg, "chunk.size", 1200),
-        dig(cfg, "chunk.overlap", 200),
-    ) if segments else []
-    max_chunks = int(dig(cfg, "index.max_chunks", 2000))
-    if max_chunks > 0 and len(chunks) > max_chunks:
-        chunks = chunks[:max_chunks]
-        print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
-              "увеличьте лимит в config.yaml при необходимости" % (path, max_chunks),
-              flush=True)
+    try:
+        kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
+        chunks = chunker.make_chunks(
+            segments,
+            dig(cfg, "chunk.size", 1200),
+            dig(cfg, "chunk.overlap", 200),
+        ) if segments else []
+        max_chunks = int(dig(cfg, "index.max_chunks", 2000))
+        if max_chunks > 0 and len(chunks) > max_chunks:
+            chunks = chunks[:max_chunks]
+            print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
+                  "увеличьте лимит в config.yaml при необходимости" % (path, max_chunks),
+                  flush=True)
+    except Exception as e:  # noqa: BLE001
+        # битый/недописанный файл не должен ронять весь прогон индексации
+        # (BadZipFile у Office-файлов, недокачанные pdf и т.п.)
+        dbmod.finish_file(conn, fid, "error", str(e)[:500])
+        conn.commit()
+        return None, None, ("error: %s" % str(e)[:200], kind)
     return fid, chunks, (kind2 or kind)
 
 
