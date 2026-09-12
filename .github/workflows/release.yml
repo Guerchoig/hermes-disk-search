@@ -49,12 +49,17 @@ jobs:
       - name: Удаление предыдущих релизов и тегов
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ inputs.version }}
         shell: pwsh
         run: |
-          $releases = gh release list --limit 100 --json tagName --jq '.[].tagName' | ConvertFrom-Json
-          foreach ($tag in $releases) {
-            Write-Host "Удаляю предыдущий релиз/тег: $tag"
-            gh release delete "$tag" --yes --cleanup-tag
+          $tags = gh release list --limit 100 --json tagName --jq '.[].tagName'
+          foreach ($tag in $tags) {
+            if ($tag -ne $env:VERSION) {
+              Write-Host "Удаляю предыдущий релиз/тег: $tag"
+              gh release delete "$tag" --yes --cleanup-tag
+            } else {
+              Write-Host "Текущий релиз $tag — не удаляется"
+            }
           }
 
       - name: Сборка ассетов
