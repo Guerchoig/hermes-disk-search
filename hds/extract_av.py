@@ -12,6 +12,10 @@ from .extractors import seg
 AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".wma", ".aac", ".opus"}
 VIDEO_EXTS = {".mp4", ".avi", ".mkv", ".mov", ".wmv", ".flv", ".webm", ".mpg", ".mpeg", ".3gp", ".mts"}
 
+# консольные утилиты (ffprobe/ffmpeg/curl) не должны вспыхивать окнами:
+# watcher при обработке медиафайлов порождал мигающее окно на каждый файл
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
 _whisper_model = None
 
 # Файлы репозитория Systran/faster-whisper-<size>, нужные для локальной работы
@@ -46,7 +50,7 @@ def ensure_whisper_model(cfg):
                 [curl, "-L", "--fail", "--retry", "3",
                  "--connect-timeout", "15", "--max-time", "7200",
                  "--progress-bar", "-o", dest, url],
-                timeout=7200,
+                timeout=7200, creationflags=_NO_WINDOW,
             )
             if r.returncode != 0 or not os.path.exists(dest) or os.path.getsize(dest) == 0:
                 raise RuntimeError(
@@ -138,7 +142,7 @@ def _ffprobe(path):
         return subprocess.run(
             [ff, "-v", "error", "-show_entries", "format=duration:stream=codec_name,width,height",
              "-of", "default=noprint_wrappers=1", path],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=30, creationflags=_NO_WINDOW,
         ).stdout.strip()
     except Exception:  # noqa: BLE001
         return ""
@@ -155,7 +159,7 @@ def _transcribe(path, cfg, is_video, progress_cb=None):
             tmp.close()
             subprocess.run(
                 [ffmpeg, "-y", "-i", path, "-vn", "-ac", "1", "-ar", "16000", tmp.name],
-                capture_output=True, timeout=3600,
+                capture_output=True, timeout=3600, creationflags=_NO_WINDOW,
             )
             src = tmp.name
         else:
