@@ -1,4 +1,4 @@
-﻿"""Локальный веб-интерфейс hermes-disk-search (http://127.0.0.1:8765).
+"""Локальный веб-интерфейс hermes-disk-search (http://127.0.0.1:8765).
 
 Запуск: python -m hds.cli ui  (браузер открывается автоматически)
 Только localhost; без сторонних зависимостей (stdlib http.server).
@@ -185,6 +185,13 @@ def _index_state():
     return state
 
 
+_CONFIG_FIELDS = {
+    "index.transcribe": ("bool", r"(?m)^(\s*transcribe:)\s+\w+"),
+    "index.max_media_mb": ("int", r"(?m)^(\s*max_media_mb:)\s+\d+"),
+    "index.max_chunks": ("int", r"(?m)^(\s*max_chunks:)\s+\d+"),
+}
+
+
 def _db_stats():
     from .config import db_abs_path
 
@@ -205,25 +212,131 @@ def _db_stats():
 
 
 def _build_trees():
-    """Деревья папок от корней индексации со статусом каждой папки:
-    done (зелёный) — все файлы папки в индексе; partial (жёлтый) — частично;
-    none — не начата. Статус родителя = худший из себя и потомков."""
-    import sqlite3
-
+    """Деревья папок от корней индексации: done/partial/none,
+    статус родителя — свёртка по потомкам."""
     from .config import db_abs_path
-    from .indexer import _kind_of, path_excluded
+    from .indexer import _kind_of
 
     cfg = load()
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
-    disk = {}   # dir -> [count, max_mtime]
+    disk = {}
     for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
         if not os.path.isdir(root):
             continue
-_CONFIG_FIELDS = {
-    "index.transcribe": ("bool", r"(?m)^(\s*transcribe:)\s+\w+"),
-    "index.max_media_mb": ("int", r"(?m)^(\s*max_media_mb:)\s+\d+"),
-    "index.max_chunks": ("int", r"(?m)^(\s*max_chunks:)\s+\d+"),
-}
+        for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
+            dirnames[:] = [d for d in dirnames if d.lower() not in excl]
+            for fn in filenames:
+                if not _kind_of(os.path.splitext(fn)[1].lower()):
+                    continue
+                e = disk.setdefault(dirpath, [0, 0.0])
+                e[0] += 1
+                try:
+                    m = os.stat(os.path.join(dirpath, fn)).st_mtime
+                    if m > e[1]:
+                        e[1] = m
+                except OSError:
+                    pass
+
+    db = {}
+    path_db = db_abs_path(cfg)
+    if os.path.exists(path_db):
+        c = dbmod.connect(path_db, int(dig(cfg, "embedding.dim", 1024)))
+        for path, status, iat in c.execute("SELECT path, status, indexed_at FROM files"):
+            d = os.path.dirname(path)
+            e = db.setdefault(d, [0, 0, 0.0])
+            e[0] += 1
+            if status == "indexed":
+                e[1] += 1
+            if iat and iat > e[2]:
+                e[2] = iat
+        c.close()
+
+    LEVEL = {"none": 0, "partial": 1, "done": 2}
+    status_of = {}
+    for d in set(disk) | set(db):
+        dn, mtime = disk.get(d, [0, 0.0])
+        tot, idx, iat = db.get(d, [0, 0, 0.0])
+        if dn == 0 and tot == 0:
+            continue
+        if tot == 0:
+            st = "none"
+        elif dn > 0 and mtime > iat + 2:
+            st = "partial"
+        elif idx >= dn:
+            st = "done"
+        else:
+            st = "partial"
+        status_of[d] = {"status": st, "files": dn, "indexed": idx}
+
+    max_depth = 4
+    child_limit = 40
+    trees = []
+    for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
+        r = os.path.normpath(root)
+        prefix = (r.rstrip(os.sep).lower() + os.sep)
+        sub = {d: v for d, v in status_of.items()
+               if d.lower().startswith(prefix)}
+        if not sub:
+            continue
+        node = {"name": r, "path": r,
+                "status": (status_of.get(r) or {"status": "none"})["status"],
+                "files": sum(v["files"] for v in sub.values()),
+                "indexed": sum(v["indexed"] for v in sub.values()),
+                "children": []}
+        by_path = {r: node}
+        for d in sorted(sub, key=lambda x: (x.count(os.sep), x.lower())):
+            if d == r:
+                continue
+            parts = [p for p in os.path.relpath(d, r).split(os.sep) if p][:max_depth]
+            cur_path, cur = r, node
+            for p in parts:
+                cur_path = os.path.join(cur_path, p)
+                nxt = by_path.get(cur_path)
+                if nxt is None:
+                    sinfo = sub.get(cur_path) or {"status": "none",
+                                                  "files": 0, "indexed": 0}
+                    nxt = {"name": p, "path": cur_path,
+                           "status": sinfo["status"],
+                           "files": sinfo["files"],
+                           "indexed": sinfo["indexed"],
+                           "children": []}
+                    by_path[cur_path] = nxt
+                    cur["children"].append(nxt)
+                cur = nxt
+
+        def trim(n):
+            if len(n["children"]) > child_limit:
+                rest = n["children"][child_limit:]
+                lvl = min(LEVEL[c["status"]] for c in rest)
+                n["children"] = n["children"][:child_limit] + [{
+                    "name": "… ещё %d папок" % len(rest), "path": "",
+                    "status": ("none", "partial", "done")[lvl],
+                    "files": 0, "indexed": 0, "children": []}]
+            for c in n["children"]:
+                trim(c)
+        trim(node)
+        trees.append(node)
+
+    def aggregate(n):
+        st = n["status"]
+        for c in n["children"]:
+            aggregate(c)
+        ch = n["children"]
+        if ch:
+            lvls = {c["status"] for c in ch}
+            if lvls == {"done"}:
+                st = "done"
+            elif lvls == {"none"}:
+                st = "none"
+            else:
+                st = "partial"
+        n["status"] = st
+        return st
+    for t in trees:
+        aggregate(t)
+    return {"trees": trees,
+            "dirs": len(status_of),
+            "disk_files": sum(v[0] for v in disk.values())}
 
 
 def _set_simple_config(key, value):
@@ -331,27 +444,6 @@ def _db_move(new_path, force=False):
         print("[db-move] перезапускаю индексацию с прежними настройками", flush=True)
         _start_index(full=_ui_index_args["full"], roots=_ui_index_args["roots"])
     return res
-
-
-def _save_config(yaml_text):
-    import yaml
-
-    try:
-        data = yaml.safe_load(yaml_text)
-        if not isinstance(data, dict):
-            raise ValueError("YAML должен быть словарём")
-    except Exception as e:  # noqa: BLE001
-        return {"ok": False, "msg": "Ошибка YAML: %s" % e}
-    from .config import config_path
-
-    cfg_path = config_path()
-    tmp = cfg_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(yaml_text if yaml_text.endswith("\n") else yaml_text + "\n")
-    os.replace(tmp, cfg_path)
-    return {"ok": True,
-            "msg": "Сохранено. Изменения применятся к новым запускам — "
-                   "watcher/индексацию перезапустите кнопками."}
 
 
 class Handler(BaseHTTPRequestHandler):
