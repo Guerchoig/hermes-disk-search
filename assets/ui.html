@@ -83,6 +83,18 @@ async function saveCfg(){
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }
+async function moveDb(){
+  const path = document.getElementById('db-new').value.trim();
+  if (!path) { alert('Укажите новый путь к index.db'); return; }
+  if (!confirm('Перенести базу в ' + path + '?\nИндексация приостановится и вернётся автоматически.')) return;
+  const m = document.getElementById('db-info');
+  m.innerHTML = '⏳ Перенос базы... (копирование + проверка, индексация приостановлена)';
+  const r = await fetch('/api/db/move', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({path, force: document.getElementById('db-force').checked})});
+  const j = await r.json();
+  m.innerHTML = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
+}
 function fmtDur(s){
   s = Math.round(s);
   const h = Math.floor(s/3600), m = Math.floor(s%3600/60), ss = s%60;
@@ -135,4 +147,12 @@ refresh(); setInterval(refresh, 2000);
 
 <div class="card"><h2>База индекса</h2>
 <div id="db-info" class="mono"></div>
+<div class="row" style="margin-top:10px">
+<input id="db-new" class="mono" placeholder="D:\новая\папка\index.db" style="flex:1;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:6px">
+<button onclick="moveDb()">↳ Перенести базу</button>
+<label><input type="checkbox" id="db-force"> перезаписать, если файл существует</label>
+</div>
+<div class="muted">Перенос атомарный: индексация приостанавливается, копия проверяется,
+db_path переключается, старая база остаётся резервной копией (.moved-…), watcher и
+индексация возвращаются к прежнему состоянию.</div>
 </div>

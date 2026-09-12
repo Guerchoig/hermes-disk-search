@@ -14,12 +14,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db as dbmod, indexer
 from .config import dig, db_abs_path, load
+from .dbops import move_db
 from .embedder import make_embedder
 
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PAUSE = os.path.join(PROJECT, "index.pause")
 _STOP = os.path.join(PROJECT, "index.stop")
 _cfg_lock = threading.Lock()
+_ui_index_args = {"roots": None, "full": False}  # параметры последнего UI-старта индексации
 
 
 def _pid_alive(pid):
@@ -190,12 +192,13 @@ def _start_index(full=False, roots=None):
         os.remove(_STOP)
     if os.path.exists(_PAUSE):
         os.remove(_PAUSE)
-    cfg = load()
-    conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
-    emb = make_embedder(cfg)
     if isinstance(roots, str):
         roots = [r.strip() for r in roots.split(";") if r.strip()]
     roots_list = roots or None
+    _ui_index_args.update({"roots": roots_list, "full": full})
+    cfg = load()
+    conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
+    emb = make_embedder(cfg)
 
     def job():
         try:
@@ -206,6 +209,25 @@ def _start_index(full=False, roots=None):
 
     threading.Thread(target=job, daemon=True).start()
     return {"ok": True}
+
+
+def _db_move(new_path, force=False):
+    """Перенос БД из UI: остановка индексации -> атомарный перенос ->
+    восстановление состояния (индексация перезапускается, watcher — внутри move_db)."""
+    was_ui_index = getattr(indexer, "_ACTIVE_REPORTER", None) is not None
+    if was_ui_index:
+        print("[db-move] останавливаю индексацию перед переносом...", flush=True)
+        open(_STOP, "w").close()
+        deadline = time.time() + 120
+        while getattr(indexer, "_ACTIVE_REPORTER", None) is not None and time.time() < deadline:
+            time.sleep(1)
+    res = move_db(new_path, force=force, project=PROJECT,
+                  venv_pythonw=os.path.join(PROJECT, ".venv", "Scripts", "pythonw.exe"))
+    if res.get("ok") and was_ui_index:
+        time.sleep(1)
+        print("[db-move] перезапускаю индексацию с прежними настройками", flush=True)
+        _start_index(full=_ui_index_args["full"], roots=_ui_index_args["roots"])
+    return res
 
 
 def _save_config(yaml_text):
@@ -291,6 +313,12 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path == "/api/config/save":
             with _cfg_lock:
                 self._json(_save_config(body.get("yaml", "")))
+        elif self.path == "/api/db/move":
+            path = body.get("path", "").strip()
+            if not path:
+                self._json({"ok": False, "msg": "Укажите путь"})
+            else:
+                self._json(_db_move(path, force=bool(body.get("force"))))
         else:
             self._json({"error": "not found"}, 404)
 
