@@ -19,9 +19,9 @@ jobs:
   test:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -44,7 +44,7 @@ jobs:
     if: success()
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Удаление предыдущих релизов и тегов
         env:
@@ -54,12 +54,8 @@ jobs:
         run: |
           $tags = gh release list --limit 100 --json tagName --jq '.[].tagName'
           foreach ($tag in $tags) {
-            if ($tag -ne $env:VERSION) {
-              Write-Host "Удаляю предыдущий релиз/тег: $tag"
-              gh release delete "$tag" --yes --cleanup-tag
-            } else {
-              Write-Host "Текущий релиз $tag — не удаляется"
-            }
+            Write-Host "Удаляю предыдущий релиз/тег: $tag"
+            gh release delete "$tag" --yes --cleanup-tag
           }
 
       - name: Сборка ассетов
