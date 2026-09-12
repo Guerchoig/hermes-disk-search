@@ -9,6 +9,9 @@ PyYAML>=6
 sqlite-vec>=0.1.6
 mcp>=1.2
 watchdog>=4.0
+mpxj>=14
+jpype1>=1.5
+psutil>=5.9
 # Транскрипция аудио/видео (ставится setup.ps1/инсталлятором; система работает и без неё):
 # pip install faster-whisper
 # Для CUDA-транскрипции (Windows/Linux) нужны ещё:

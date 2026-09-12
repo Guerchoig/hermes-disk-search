@@ -37,7 +37,9 @@ cd C:\Users\Sasha\hermes-disk-search
 2. **Tesseract OCR** (текст на картинках/сканах): `winget install UB-Mannheim.TesseractOCR`
    (+ пакет русского языка), путь к tesseract.exe — в `config.yaml: index.ocr_tesseract_cmd`, если не в PATH.
 3. **faster-whisper** (транскрипция аудио/видео на CUDA) — ставится setup.ps1; ffmpeg должен быть в PATH.
-4. **MS Project (.mpp)** — опционально: `pip install mpxj` (в venv) + Java 11+.
+4. **MS Project (.mpp)** — поддерживается «из коробки»: `mpxj` входит в requirements.txt;
+   нужна Java 11+ (JDK). Если Java не установлена системно, индексатор сам подхватит
+   пользовательскую JDK из `%LOCALAPPDATA%\jdk-21\` (Temurin 21).
 
 Диагностика: `.venv\Scripts\python.exe -m hds.cli check`
 

@@ -18,6 +18,16 @@ def kind_for_ext_media(ext):
 
 def extract_mpp(path, cfg):
     """MS Project через библиотеку mpxj (Java). Если её нет — пометка в индексе."""
+    # пользовательская JDK (установлена без прав администратора): если JAVA_HOME
+    # не задан в окружении процесса — подхватываем сами
+    if not os.environ.get("JAVA_HOME"):
+        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "jdk-21")
+        if os.path.isdir(base):
+            jdk = next((os.path.join(base, d) for d in sorted(os.listdir(base))
+                        if os.path.exists(os.path.join(base, d, "bin", "server", "jvm.dll"))),
+                       None)
+            if jdk:
+                os.environ["JAVA_HOME"] = jdk
     try:
         import jpype
         import mpxj  # noqa: F401
@@ -28,7 +38,9 @@ def extract_mpp(path, cfg):
         )]
     try:
         if not jpype.isJVMStarted():
-            mpxj.startJvm()
+            # mpxj: в старых версиях startJvm(), в 16.x переименовано в startJVM()
+            starter = getattr(mpxj, "startJVM", None) or getattr(mpxj, "startJvm")
+            starter()
         from org.mpxj.reader import UniversalProjectReader
 
         project = UniversalProjectReader().read(path)
