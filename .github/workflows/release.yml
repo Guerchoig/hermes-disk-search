@@ -46,8 +46,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Установка gh-CLI-зависимостей не требуется (gh предустановлен)
-
       - name: Удаление предыдущих релизов и тегов
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
