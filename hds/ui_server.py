@@ -254,13 +254,16 @@ def _build_trees():
     for d in set(disk) | set(db):
         dn, mtime = disk.get(d, [0, 0.0])
         tot, idx, iat = db.get(d, [0, 0, 0.0])
-        fresh = dn > 0 and mtime > iat + 2
-        if tot >= max(dn, 1) and idx >= dn and not fresh:
+        if dn == 0 and tot == 0:
+            continue
+        if tot == 0:
+            st = "none"      # индексация не начиналась (нет записей в БД)
+        elif dn > 0 and mtime > iat + 2:
+            st = "partial"   # есть файлы, изменённые после индексации
+        elif idx >= dn:
             st = "done"
-        elif tot > 0 or idx > 0 or fresh:
-            st = "partial"
         else:
-            st = "none"
+            st = "partial"
         status_of[d] = {"status": st, "files": dn, "indexed": idx}
 
     # worst-status распространяется на родителей (вклад глубоких папок)
