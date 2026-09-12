@@ -33,7 +33,7 @@ class ProgressReporter:
     def __init__(self, sec=3, stream=None):
         self.sec = max(0, int(sec or 0))
         self.stream = stream or sys.stdout
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()  # рентерабельный: heartbeat_data/_status_line вызывают rate_window/eta_sec под замком
         self._stop = threading.Event()
         self._th = None
         self._last_len = 0
@@ -43,6 +43,8 @@ class ProgressReporter:
         self.errors = 0
         self.chunks = 0
         self.by_kind = {}
+        self.total = 0            # заполняется set_total (пре-подсчёт)
+        self._seen_ts = collections.deque()  # метки времени seen() для скользящей скорости
         self.current = None      # (path, phase)
         self.current_since = None
         self.progress = None     # % обработки текущего файла (медиа)
@@ -170,6 +172,16 @@ class ProgressReporter:
             self._last_len = 0
 
     # --- отрисовка ---
+    def _write(self, s):
+        """Запись с защитой от кодировок без юникода (cp1251-консоли, pipe)."""
+        enc = getattr(self.stream, "encoding", None) or "utf-8"
+        try:
+            s.encode(enc)
+        except (UnicodeEncodeError, LookupError):
+            s = s.encode(enc, "replace").decode(enc, "replace")
+        self.stream.write(s)
+        self.stream.flush()
+
     def _status_line(self, final=False):
         with self._lock:
             rate = self.seen_count / max(0.001, time.time() - self.t0) * 60.0
@@ -201,13 +213,11 @@ class ProgressReporter:
         if self.is_tty and not final:
             width = 120
             out = line[:width].ljust(max(self._last_len, len(line[:width])))
-            self.stream.write("\r" + out)
-            self.stream.flush()
+            self._write("\r" + out)
             self._last_len = len(out)
         else:
             self.note()
-            self.stream.write(line + "\n")
-            self.stream.flush()
+            self._write(line + "\n")
 
     def _loop(self):
         while not self._stop.wait(self.sec or 3):
@@ -221,8 +231,7 @@ class ProgressReporter:
         self.stop()
         self._render(final=True)
         if counters is not None:
-            self.stream.write("[done] %s\n" % counters)
-            self.stream.flush()
+            self._write("[done] %s\n" % counters)
 
 
 # Фазы по типам файлов — для показа «чем занят индексатор»

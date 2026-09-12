@@ -148,16 +148,13 @@ def _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb=None):
 
 def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
     """Индексирует один файл. Возвращает (статус, kind)."""
-    res = _extract_file(conn, cfg, path, force=force, progress_cb=progress_cb)
-    fid, chunks = res[0], res[1]
-    early = res[2]
+    fid, chunks, kind = _extract_file(conn, cfg, path, force=force, progress_cb=progress_cb)
     if fid is None:
-        return early
-    kind = early
-    status = _commit_file(conn, fid, chunks, kind, cfg, emb, progress_cb)
-    if status.startswith("error"):
-        return status, kind
-    return "indexed(%d чанков)" % len(chunks), kind
+        return kind  # ранний выход: это кортеж (статус, kind)
+    status = _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb)
+    return status, kind
+
+
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
               limit=None, single_paths=None, prune=True, confirm_delete=False,
               progress_sec=3, quiet=False):
@@ -195,11 +192,6 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
     n = 0
-    # Конвейер: чанки накапливаются с нескольких файлов и векторизуются
-    # одной большой пачкой (эмбеддер сам делит её на батчи) — GPU работает
-    # крупными партиями, HTTP-оверхед на файл исчезает.
-    pending = []  # [(fid, chunks, kind)]
-    bs_threshold = max(32, int(dig(cfg, "embedding.batch_size", 32)) * 4)
     rep = ProgressReporter(sec=0 if quiet else progress_sec)  # счётчики всегда (heartbeat), quiet — без печати
     _ACTIVE_REPORTER = rep
     rep.start()
@@ -217,31 +209,6 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
             pass
     threading.Thread(target=_precount, daemon=True).start()
 
-    def _flush_pending():
-        """Эмбеддинг всех накопленных чанков одной пачкой + запись в БД."""
-        last_status = "indexed(0 чанков)"
-        if not pending:
-            return last_status
-        flat, groups = [], []
-        for fid, chs, kd in pending:
-            groups.append((fid, len(flat), len(flat) + len(chs), chs, kd))
-            flat.extend(c["text"] for c in chs)
-        vectors = emb.embed(flat)
-        for fid, off, end, chs, kd in groups:
-            for c, v in zip(chs, vectors[off:end]):
-                c["_blob"] = struct.pack("<%df" % len(v), *v)
-        for fid, off, end, chs, kd in groups:
-            dbmod.delete_file_data(conn, fid)
-            for i, c in enumerate(chs):
-                cid = dbmod.add_chunk(conn, fid, i, c["page"], c["t_start"],
-                                      c["t_end"], c["text"])
-                dbmod.add_vector(conn, cid, c["_blob"])
-            dbmod.finish_file(conn, fid, "indexed", chunks=len(chs))
-            conn.commit()
-            last_status = "indexed(%d чанков)" % len(chs)
-            rep.processed(last_status, kd, 0.0, chunks=len(chs))
-        pending.clear()
-        return last_status
     for path in paths:
         if rep:
             rep.set_last_path(path)
@@ -295,37 +262,23 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                           "(%.0f МБ), может занять несколько минут..."
                           % (path, st0.st_size / 1048576.0), flush=True)
             t1 = time.time()
-            # Конвейер: извлекаем чанки файла, копим до порога и флашим
-            # эмбеддинги одной большой пачкой (GPU без простоев на HTTP-оверхед)
-            res = _extract_file(conn, cfg, path, force=full, progress_cb=progress_cb)
-            fid, chunks = res[0], res[1]
-            early = res[2]
-            if fid is None:
-                status, kind2 = early[0], early[1]
-                dur = time.time() - t1
-            else:
-                # Фаза 2: эмбеддинги + запись (по одному файлу — надёжно)
-                status = _commit_file(conn, emb, cfg, fid, chunks, res[2],
-                                      progress_cb=progress_cb)
-                kind2 = res[2]
-                committed_now = True
-                dur = time.time() - t1
+            status, kind2 = process_file(conn, emb, cfg, path, force=full,
+                                         progress_cb=progress_cb)
+            dur = time.time() - t1
             _hb()
-            if rep and (fid is None or committed_now):
+            if rep:
                 chunks_n = 0
                 if "(" in status:
                     try:
                         chunks_n = int(status.split("(")[1].split()[0])
                     except (ValueError, IndexError):
                         chunks_n = 0
-                if fid is None or status.startswith(("indexed", "error")):
-                    rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
-                    rep.last_done = (path, status.split("(")[0], dur)
+                rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
+                rep.last_done = (path, status.split("(")[0], dur)
         except KeyboardInterrupt:
             if rep:
                 rep.note()
             conn.rollback()  # недописанный файл откатится, останется со статусом 'new'
-            _flush_pending()  # накопленные чанки сохраняются
             print("\n[stop] Прервано (Ctrl+C). Обработанные файлы сохранены; "
                   "текущий файл будет дообработан при следующем запуске.", flush=True)
             counters["stopped"] = True
@@ -339,7 +292,6 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         if limit and n >= limit:
             break
 
-    _flush_pending()  # остатки конвейера — при любом завершении
     if prune and seen_roots and not counters.get("stopped"):
         if rep:
             rep.note()

@@ -27,28 +27,34 @@
 - ✅ chunk_count записывается в БД (был баг)
 - ✅ indexed_at записывается при завершении + бэкфилл по mtime
 
-### НЕ выполнено (контекстное окно закончилось):
-1. **Тесты виснут** — ~20 из 71 падают/зависают после рефакторинга конвейера.
-2. **Конвейер батч-эмбеддинга** в run_index — недоделан, вызвал каскад багов.
+### Выполнено в этом чате (завершение прерванного рефакторинга):
+1. ✅ **Откат конвейера батч-эмбеддинга** в `hds/indexer.py`:
+   - удалены `pending`, `bs_threshold`, `_flush_pending()` из `run_index`;
+   - тело цикла заменено на `status, kind2 = process_file(conn, emb, cfg, path,
+     force=full, progress_cb=progress_cb)` — обработка по одному файлу, надёжно;
+   - `_extract_file` (фаза 1) + `_commit_file` (фаза 2) сохранены, `process_file`
+     вызывает их с правильным порядком аргументов (раньше был перепутан — баг).
+2. ✅ **Исправлен дедлок в `hds/progress.py`** — причина висящих тестов:
+   `heartbeat_data()` и `_status_line()` держали `self._lock` и вызывали
+   `rate_window()`/`eta_sec()` (тот же замок) → deadlock на каждом `_hb()`.
+   Замок заменён на `threading.RLock()`.
+3. ✅ Инициализация `self._seen_ts` (deque) и `self.total` в `__init__`
+   (раньше `AttributeError` при heartbeat без пре-подсчёта).
+4. ✅ Кодировочно-устойчивый вывод (`ProgressReporter._write`): строка статуса
+   (⏱ и т.п.) перекодируется с replace для cp1251-консоли/pipe — раньше
+   `UnicodeEncodeError` ронял `run_index` в `rep.finish()` (в т.ч. в фоновом
+   потоке теста heartbeat, из-за чего `res == {}`).
+5. ✅ **Все 71 тест зелёные** (`python -m unittest discover -s tests` — OK, ~4 с).
+6. ✅ `python -m hds.cli check`: sqlite-vec, LM Studio (bge-m3 отвечает),
+   ffmpeg, faster-whisper — OK. Опциональные Tesseract/mpxj не установлены
+   (известно, некритично).
 
----
-
-## 2a. ПЛАН НА СЛЕДУЮЩИЙ ЧАТ
-
-1. Откатить конвейер батч-эмбеддинга в `hds/indexer.py`:
-   - В `run_index` УДАЛИТЬ: `pending = []`, `bs_threshold`, `_flush_pending()`,
-     и логику if/elif/else с `_flush_pending()` в теле цикла.
-   - ЗАМЕНИТЬ блок с res/fid/chunks на: `status, kind2 = process_file(conn, emb, cfg, path, force=full, progress_cb=progress_cb)`
-   - ОСТАВИТЬ: `_extract_file`, `_commit_file`, `process_file` (рефакторинг ок)
-   - ОСТАВИТЬ: ETA/скользящую скорость (в progress.py и heartbeat)
-   - Убрать `pending = []` и `bs_threshold` из переменных
-2. Исправить тесты по одному:
-   - `test_stop_file_stops_gracefully` — виснет из-за пре-подсчёта
-   - `test_pause_file_resumes` — аналогично
-   - `test_heartbeat_written_during_and_removed_after` — виснет
-   - `test_moved_reuses_chunks` — fail из-за chunk_count (уже исправлен код)
-3. Прогнать все 71 тест — OK
-4. Релиз v0.2.1 по releasing.md
+### НЕ выполнено (следующий шаг):
+1. **Релиз v0.2.1 по releasing.md**: обновить `__version__` в `hds/__init__.py`,
+   создать `RELEASE_NOTES_v0.2.1.md`, закоммитить/запушить, 
+   `gh workflow run release.yml -f version=v0.2.1`.
+   Перед выпуском — ручная проверка «спроси в Hermes → ответ со ссылками»
+   и `check` (пройден локально, см. выше).
 
 ## 3. ПРОБЛЕМЫ И БАГИ
 
@@ -67,23 +73,34 @@
 12. Make_icon print кириллица падала на runner → utf-8 reconfigure
 
 ### АКТИВНЫЕ ПРОБЛЕМЫ
-1. Конвейер батч-эмбеддинга в run_index — каскад багов (тесты виснут)
-2. ~20 тестов падают/виснут после конвейера + пре-подсчёта
-3. UI-статусы бейджей могут врать (heartbeat удаляется при завершении)
+1. UI-статусы бейджей могут врать (heartbeat удаляется при завершении;
+   возможное решение — показывать last_reporter-снапшот с пометкой «завершён»).
+2. Опционально: аккуратная оптимизация батч-эмбеддинга (можно позже, с полным
+   тестовым покрытием; базовый путь через _commit_file уже батчит внутри файла).
+
+### РЕШЁННЫЕ В ЭТОМ ЧАТЕ
+13. Дедлок в ProgressReporter: не-RLock + вложенные rate_window/eta_sec
+    под замком — висели ~20 тестов (heartbeat, пауза, стоп)
+14. `_seen_ts`/`total` без инициализации в __init__ → AttributeError
+15. UnicodeEncodeError (⏱ в cp1251-консоли/pipe) ронял run_index в rep.finish()
+16. process_file вызывал _commit_file с перепутанным порядком аргументов
 
 ---
 
 ## 4. ТЕКУЩЕЕ СОСТОЯНИЕ ФАЙЛОВ
 
-### hds/indexer.py — ИЗМЕНЁН, ЧАСТИЧНО СЛОМАН
-- process_file разбит на _extract_file (фаза 1) + _commit_file (фаза 2)
-- run_index содержит конвейер с pending/_flush_pending — СЛОМАН, нужно откатить
-- ETA/heartbeat/_hb() — работают
-- path_excluded, content_hash, iter_files, reindex_path, _prune_deleted — работают
+### hds/indexer.py — РАБОТАЕТ (после отката конвейера)
+- process_file = _extract_file (фаза 1: проверки+извлечение+чанки)
+  → _commit_file (фаза 2: эмбеддинги+запись), возвращает (статус, kind)
+- run_index: обход, пауза/стоп-файлы, heartbeat (_hb), пре-подсчёт total
+  в daemon-потоке (ETA), prune с защитой от массового удаления;
+  конвейер pending/_flush_pending удалён
+- path_excluded, content_hash, iter_files, reindex_path, _prune_deleted — ок
 
 ### hds/progress.py — РАБОТАЕТ
-- _fmt_eta, _seen_ts deque, set_total, rate_window(300), eta_sec
-- heartbeat_data включает total/eta_sec/rate_window/remaining
+- RLock (вложенные rate_window/eta_sec безопасны), _seen_ts/total в __init__
+- _write(): кодировочно-устойчивая печать (cp1251/pipe не падают)
+- _fmt_eta, rate_window(300), eta_sec, heartbeat_data (total/eta/remaining)
 - _status_line включает ETA
 
 ### hds/ui_server.py — БЫЛ ПОВРЕЖЁН, ВОССТАНОВЛЕН
@@ -115,22 +132,22 @@
 
 ## 5. ЧТО ПРЕДСТОИТ СДЕЛАТЬ
 
-### КРИТИЧНО (следующий чат)
-1. В hds/indexer.py run_index: откатить конвейер (pending/_flush_pending/
-   bs_threshold) — заменить блок с _extract_file/commit на process_file
-2. Убрать пре-подсчёт из синхронного пути (запустить в daemon-потоке)
-3. Прогнать тесты, исправить оставшиеся
-4. Убедиться что heartbeat и ETA работают
-5. Релиз v0.2.1 по releasing.md
+### КРИТИЧНО (следующий шаг)
+1. Релиз v0.2.1 по releasing.md (тесты зелёные, check пройден):
+   `__version__` в hds/__init__.py → 0.2.1, RELEASE_NOTES_v0.2.1.md,
+   commit+push, `gh workflow run release.yml -f version=v0.2.1`
+2. Ручная проверка сценария «спроси в Hermes → ответ со ссылками»
 
-### ВАЖНО (после тестов)
-6. Обновить README раздел про ETA
-7. Добавить тесты для ETA/скользящей скорости
+### ВАЖНО (после релиза)
+3. UI-бейджи: не показывать «идёт индексация» по устаревшему heartbeat —
+   показывать last_reporter-снапшот с пометкой «завершён»
+4. Обновить README раздел про ETA (если требуется)
 
 ### ЖЕЛАТЕЛЬНО
-8. Оптимизация батч-эмбеддинга (аккуратно, с полным тестовым покрытием)
-9. UI-кнопка для запуска watcher'а с новыми настройками
-10. Поддержка macOS-инсталлятора в тестах
+5. Оптимизация батч-эмбеддинга (аккуратно, с полным тестовым покрытием —
+   прошлая попытка вызвала каскад багов, откатила см. раздел 2)
+6. UI-кнопка для запуска watcher'а с новыми настройками
+7. Поддержка macOS-инсталлятора в тестах
 
 ---
 
@@ -155,64 +172,6 @@ cd C:\Users\Sasha\hermes-disk-search
 - index.stop, index.pause, watch.lock — файлы-сигналы
 - WAL-режим SQLite: параллельная запись безопасна (busy_timeout=5000)
 - config.yaml — одинарные кавычки YAML для Windows-путей (не двойные!)
-- ui_server.py был повреждён множественными правками — ПРОВЕРЬТЕ ЦЕЛОСТНОСТЬ
-## 3. ПРОБЛЕМЫ И БАГИ
-
-### РЕШЁННЫЕ (все в main)
-1. os.kill(pid,0) на Windows УБИВАЕТ — ctypes OpenProcess
-2. mcp 2.x FastMCP→MCPServer — обе версии поддержаны
-3. PS 5.1 + кириллица .ps1 без BOM — все .ps1 с BOM
-4. re.sub с Windows-путём в replacement — lambda-подстановка
-5. Предупреждения HuggingFace подавлены, русские сообщения
-6. Windows-путь в YAML двойных кавычках — одинарные кавычки
-7. indexed_at не записывался → записывается + бэкфилл mtime
-8. chunk_count не записывался → записывается в finish_file
-9. Не начатые папки показывались как partial → fresh-проверка на NULL iat
-10. fts_query игнорировал однобуквенные слова → тест исправлен
-11. Node 20 deprecation в Actions → checkout@v5, setup-python@v6
-12. Make_icon print кириллица падала на runner → utf-8 reconfigure
-
-### АКТИВНЫЕ ПРОБЛЕМЫ
-1. Конвейер батч-эмбеддинга в run_index — каскад багов (тесты виснут)
-2. ~20 тестов падают/виснут после конвейера + пре-подсчёта
-3. UI-статусы бейджей могут врать (heartbeat удаляется при завершении)
-
----
-
-## 4. ТЕКУЩЕЕ СОСТОЯНИЕ ФАЙЛОВ
-
-### hds/indexer.py — ИЗМЕНЁН, ЧАСТИЧНО СЛОМАН
-- process_file разбит на _extract_file (фаза 1) + _commit_file (фаза 2)
-- run_index содержит конвейер с pending/_flush_pending — СЛОМАН, нужно откатить
-- ETA/heartbeat/_hb() — работают
-- path_excluded, content_hash, iter_files, reindex_path, _prune_deleted — работают
-
-### hds/progress.py — РАБОТАЕТ
-- _fmt_eta, _seen_ts deque, set_total, rate_window(300), eta_sec
-- heartbeat_data включает total/eta_sec/rate_window/remaining
-- _status_line включает ETA
-
-### hds/ui_server.py — БЫЛ ПОВРЕЖЁН, ВОССТАНОВЛЕН
-- Проверить py_compile + ast.parse перед использованием!
-- _index_state (репортёр + heartbeat + last_reporter), _db_stats
-- _build_trees (данные + агрегация), _set_simple_config, _save_config
-- _start_index, _db_move, _watch_start/stop/autostart_set
-
-### hds/db.py — РАБОТАЕТ
-- finish_file(status, error, chunks) — записывает indexed_at + chunk_count
-- connect(): sqlite-vec + FTS5 + vec_dim миграция + backfill + busy_timeout
-- upsert_file, add_chunk, add_vector, get_file_by_path/hash
-- rename_path, remove_path, stats
-
-### hds/dbops.py — РАБОТАЕТ
-- move_db(): атомарный перенос БД через psutil, kill_processes параметр
-
-### Остальные файлы — РАБОТАЮТ
-- hds/watcher.py, search.py, rag.py, extractors.py, extract_static.py,
-  extract_av.py, chunker.py, embedder.py, mcp_server.py, cli.py, config.py
-- assets/ui.html, tools/make_icon.py, gen_fixtures.py, test_mcp.py
-
-### config.yaml
-- db_path = D:\hermes-disk-search-db\index.db
-- roots = ["D:\\\"], max_media_mb: 2500, max_chunks: 3000, transcribe: true
-- exclude_dirs включает $RECYCLE.BIN, .Trash, .Trashes, hermes-disk-search-db
+- ui_server.py восстанавливался после повреждения — при сомнении прогоните
+  py_compile + test_ui_server
+- Тесты импортируют helpers из папки tests/ → запускать discover или из tests/
