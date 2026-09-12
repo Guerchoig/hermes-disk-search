@@ -57,12 +57,26 @@ def _pid_alive(pid):
         return False
 
 
+def _lock_pid_is_watcher(pid):
+    """Живой процесс с этим PID — действительно watcher? PID мог быть
+    переиспользован ОС под другую программу (классическая ловушка lock-файлов)."""
+    try:
+        import psutil
+
+        p = psutil.Process(int(pid))
+        if "python" not in (p.name() or "").lower():
+            return False
+        return "hds.cli watch" in " ".join(p.cmdline() or [])
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _acquire_lock(cfg):
     lock = os.path.join(PROJECT_ROOT, "watch.lock")
     if os.path.exists(lock):
         try:
             pid = int(open(lock).read().strip())
-            if _pid_alive(pid):
+            if _pid_alive(pid) and _lock_pid_is_watcher(pid):
                 return None  # уже работает
         except (ValueError, OSError):
             pass

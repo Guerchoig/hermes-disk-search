@@ -132,6 +132,42 @@ class ExcludePathsTests(unittest.TestCase):
         res = ui_server._set_exclude_paths("не список")
         self.assertFalse(res["ok"])
 
+    def test_block_form_does_not_eat_following_keys(self):
+        """РЕГРЕССИЯ: замена блока не должна съедать соседние ключи секции index."""
+        with open(self.cfg, "w", encoding="utf-8") as f:
+            f.write("index:\n  roots: []\n  exclude_dirs: ['X']\n"
+                    "  exclude_paths:\n    - 'D:\\old'\n"
+                    "  max_file_mb: 200\ndb_path: 't.db'\n")
+        res = ui_server._set_exclude_paths([r"D:\new"])
+        self.assertTrue(res["ok"], res.get("msg"))
+        data = self._yaml()
+        self.assertEqual(data["index"]["exclude_paths"], [r"D:\new"])
+        self.assertEqual(data["index"]["max_file_mb"], 200,
+                         "соседний ключ не должен исчезать при замене блока")
+
+
+class HdsPidsTests(unittest.TestCase):
+    """РЕГРЕССИЯ: _hds_pids через PowerShell тихо возвращал пустой список
+    (ломались кавычки WQL) — кнопка «Остановить watcher» не работала."""
+
+    def test_finds_process_by_cmdline(self):
+        import subprocess
+        import sys
+        import time
+
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            time.sleep(1.5)
+            pids = ui_server._hds_pids(r"time\.sleep")
+            self.assertIn(p.pid, pids,
+                          "процесс с 'time.sleep' в cmdline должен находиться")
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_no_match_returns_empty(self):
+        self.assertEqual(ui_server._hds_pids(r"hds\.cli definitely-not-running-xyz"), [])
+
 
 class TreeBuildTests(unittest.TestCase):
     """РЕГРЕССИИ: не начатые папки не жёлтые; проиндексированные — зелёные;

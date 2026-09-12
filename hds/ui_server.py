@@ -42,14 +42,29 @@ def _pid_alive(pid):
 
 
 def _hds_pids(pattern):
-    r = subprocess.run(
-        ["powershell", "-NoProfile", "-Command",
-         "(Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
-         "Name='pythonw.exe'\") | Where-Object { $_.CommandLine -match '%s' } "
-         "| ForEach-Object { Write-Output $_.ProcessId }" % pattern],
-        capture_output=True, text=True,
-    )
-    return [l.strip() for l in (r.stdout or "").splitlines() if l.strip().isdigit()]
+    """PID процессов python/pythonw, чья командная строка матчит pattern.
+    psutil вместо PowerShell Get-CimInstance: вызов через subprocess ломался
+    кавычками WQL ('Invalid query') и тихо возвращал пустой список —
+    из-за этого кнопка «Остановить watcher» не убивала процесс."""
+    import re as _re
+
+    try:
+        import psutil
+    except ImportError:
+        return []
+    rx = _re.compile(pattern)
+    out = []
+    for p in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            info = p.info
+            if (info.get("name") or "").lower() not in (
+                    "python.exe", "pythonw.exe", "python", "python3"):
+                continue
+            if rx.search(" ".join(info.get("cmdline") or [])):
+                out.append(info["pid"])
+        except Exception:  # noqa: BLE001
+            continue
+    return out
 
 
 def _startup_dir():
@@ -62,14 +77,13 @@ def _startup_dir():
 
 
 def _watch_running():
-    lock = os.path.join(PROJECT, "watch.lock")
-    if not os.path.exists(lock):
-        return False, None
-    try:
-        pid = int(open(lock).read().strip())
-        return _pid_alive(pid), pid
-    except (ValueError, OSError):
-        return False, None
+    """Watcher считается запущенным, только если жив реальный процесс с
+    'hds.cli watch' в командной строке. watch.lock не доверяем: он мог
+    остаться от умершего watcher'а, а PID — быть переиспользован ОС."""
+    pids = _hds_pids(r"hds\.cli watch")
+    if pids:
+        return True, pids[0]
+    return False, None
 
 
 def _watch_autostart_on():
@@ -126,13 +140,30 @@ def _watch_start():
 
 
 def _watch_stop():
-    pids = _hds_pids("hds\\.cli watch")
+    """Остановка watcher'а через psutil (TerminateProcess). taskkill из
+    pythonw срабатывал ненадёжно; здесь же — контроль фактического результата."""
+    import psutil
+
+    pids = _hds_pids(r"hds\.cli watch")
+    stopped = []
     for pid in pids:
         try:
-            subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+            p = psutil.Process(pid)
+            for ch in p.children(recursive=True):  # shim -> реальный интерпретатор
+                try:
+                    ch.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+            p.kill()
+            stopped.append(pid)
+        except psutil.NoSuchProcess:
+            stopped.append(pid)  # уже мёртв — считаем остановленным
         except Exception:  # noqa: BLE001
             pass
-    return {"ok": True, "stopped": pids}
+    deadline = time.time() + 5
+    while time.time() < deadline and _hds_pids(r"hds\.cli watch"):
+        time.sleep(0.3)
+    return {"ok": True, "stopped": stopped}
 
 
 def _index_state():
@@ -453,7 +484,9 @@ def _set_exclude_paths(paths):
     cfg_path = config_path()
     with open(cfg_path, "r", encoding="utf-8-sig") as f:
         text = f.read()
-    rx_block = re.compile(r"(?m)^  exclude_paths:\n(?:[ \t]+.*\n?)*")
+    # блок-форма: заголовок + только строки-элементы списка ('- ...'),
+    # чтобы не съесть соседние ключи секции index с тем же отступом
+    rx_block = re.compile(r"(?m)^  exclude_paths:\n(?:[ \t]*-[ \t][^\n]*\n?)*")
     rx_inline = re.compile(r"(?m)^  exclude_paths:[ \t]*\[.*\][ \t]*\r?\n?")
     if rx_block.search(text):
         new_text = rx_block.sub(lambda m: block, text, count=1)
