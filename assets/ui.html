@@ -58,7 +58,7 @@ summary{cursor:pointer;user-select:none}
 <div class="card"><h2>Watcher</h2>
 <div class="row">
 <button id="b-w-start" onclick="act('/api/watch/start')">▶ Запустить</button>
-<button onclick="act('/api/watch/stop')">⏹ Остановить</button>
+<button id="b-w-stop" onclick="act('/api/watch/stop')">⏹ Остановить</button>
 <label><input type="checkbox" id="w-autostart" onchange="autostart(this)"> автозапуск при входе в систему</label>
 </div><div id="watch-info" class="muted mono"></div>
 </div>
@@ -128,6 +128,8 @@ async function refresh(){
     document.getElementById('watch-info').textContent = s.watch.running
       ? `watcher работает (PID ${s.watch.pid})`
       : 'watcher остановлен — изменения файлов не отслеживаются';
+    document.getElementById('b-w-start').disabled = s.watch.running;
+    document.getElementById('b-w-stop').disabled = !s.watch.running;
     document.getElementById('w-autostart').checked = s.watch.autostart;
     const d = s.db;
     document.getElementById('db-info').innerHTML =
