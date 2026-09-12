@@ -19,6 +19,16 @@ def _human(n):
     return "%d %03d" % (n // 1000, n % 1000) if n >= 1000 else str(n)
 
 
+def _fmt_eta(sec):
+    sec = max(0, int(sec))
+    d, h, m = sec // 86400, sec % 86400 // 3600, sec % 3600 // 60
+    if d:
+        return "%dд %dч %dм" % (d, h, m)
+    if h:
+        return "%dч %dм" % (h, m)
+    return "%dм" % max(1, m)
+
+
 class ProgressReporter:
     def __init__(self, sec=3, stream=None):
         self.sec = max(0, int(sec or 0))
@@ -65,6 +75,33 @@ class ProgressReporter:
     def seen(self):
         with self._lock:
             self.seen_count += 1
+            self._seen_ts.append(time.time())
+
+    def set_total(self, total):
+        """Общее число файлов (пре-подсчёт) для расчёта ETA."""
+        with self._lock:
+            self.total = int(total)
+
+    def rate_window(self, window=300):
+        """Скользящая скорость: файлов/мин за последние `window` секунд."""
+        with self._lock:
+            now = time.time()
+            ts = self._seen_ts
+            while ts and ts[0] < now - window:
+                ts.popleft()
+            span = min(window, max(0.001, now - self.t0))
+            return round(len(ts) / span * 60)
+
+    def eta_sec(self):
+        """Оценка оставшегося времени (сек) = осталось / скользящая скорость.
+        None — если total неизвестен, скорость нулевая или всё пройдено."""
+        with self._lock:
+            if not self.total or self.total <= self.seen_count:
+                return None
+            rate = len(self._seen_ts) / max(0.001, time.time() - self.t0)
+            if rate <= 0:
+                return None
+            return max(0, int((self.total - self.seen_count) / rate))
 
     def processed(self, status, kind, dur, chunks=0):
         with self._lock:
@@ -98,13 +135,20 @@ class ProgressReporter:
         with self._lock:
             d = {"seen": self.seen_count, "processed": self.processed_count,
                  "errors": self.errors, "chunks": self.chunks,
-                 "paused": self.paused,
+                 "paused": self.paused, "total": self.total,
                  "elapsed": round(time.time() - self.t0, 1),
-                 "rate_min": round(self.seen_count / max(0.001, time.time() - self.t0) * 60)}
+                 "rate_min": round(self.seen_count / max(0.001, time.time() - self.t0) * 60),
+                 "rate_window": self.rate_window(),
+                 "eta_sec": self.eta_sec()}
+        with self._lock:
             if self.current:
                 d["path"], d["phase"] = self.current
                 d["progress"] = self.progress
-            return d
+        if d["eta_sec"] is not None:
+            d["remaining"] = self.total - self.seen_count
+        else:
+            d.pop("eta_sec")
+        return d
 
     def set_current(self, path, phase):
         with self._lock:
@@ -132,6 +176,10 @@ class ProgressReporter:
             line = "⏱ %s | просмотрено %s | обработано %d | ошибок %d | %.0f файлов/мин" % (
                 _fmt_dur(time.time() - self.t0), _human(self.seen_count),
                 self.processed_count, self.errors, rate)
+            eta = self.eta_sec()
+            if eta is not None:
+                line += " | осталось ≈ %s | ETA ≈ %s" % (
+                    _human(self.total - self.seen_count), _fmt_eta(eta))
             if self.paused:
                 line = "⏸ ПАУЗА | " + line
             if self.current:

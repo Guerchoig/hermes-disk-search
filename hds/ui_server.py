@@ -181,7 +181,32 @@ def _index_state():
     except Exception:  # noqa: BLE001
         pass
     state["stop_requested"] = os.path.exists(_STOP)
-    state["pending_est"] = max(0, state.get("seen", 0) - state.get("processed", 0))
+    hb_path = os.path.join(PROJECT, "index.heartbeat.json")
+    try:
+        if os.path.exists(hb_path):
+            with open(hb_path, "r", encoding="utf-8") as f:
+                hb = json.load(f)
+            if hb.get("ts") and time.time() - hb["ts"] < 30:
+                state.update({"running": True, "paused": bool(hb.get("paused")),
+                              "seen": hb.get("seen", state.get("seen", 0)),
+                              "processed": hb.get("processed", state.get("processed", 0)),
+                              "errors": hb.get("errors", state.get("errors", 0)),
+                              "chunks": hb.get("chunks", 0),
+                              "elapsed": hb.get("elapsed", 0),
+                              "rate_min": hb.get("rate_min", 0),
+                              "total": hb.get("total"),
+                              "rate_window": hb.get("rate_window"),
+                              "eta_sec": hb.get("eta_sec"),
+                              "remaining": hb.get("remaining"),
+                              "current": {"path": hb.get("path", ""),
+                                          "phase": hb.get("phase", ""),
+                                          "progress": hb.get("progress")}})
+    except Exception:  # noqa: BLE001
+        pass
+    if state.get("running") and state.get("eta_sec") is not None:
+        state["pending_est"] = state.get("remaining", 0)
+    else:
+        state["pending_est"] = max(0, state.get("seen", 0) - state.get("processed", 0))
     return state
 
 

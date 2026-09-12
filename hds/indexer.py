@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import struct
+import threading
 import time
 
 from . import chunker, db as dbmod, extractors
@@ -67,29 +68,30 @@ def _kind_of(ext):
     return extractors.kind_for_ext(ext) or st_kind(ext) or av_kind(ext)  # noqa: E501
 
 
-def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
-    """Индексирует один файл. Возвращает (статус, kind)."""
+def _extract_file(conn, cfg, path, force=False, progress_cb=None):
+    """Фаза 1: проверки + извлечение текста + чанки (без эмбеддингов).
+    Возвращает (fid, chunks, kind) или (None, None, статус_текст-кортеж)."""
     ext = os.path.splitext(path)[1].lower()
     kind = _kind_of(ext)
     if not kind:
-        return "skipped_type", None
+        return None, None, ("skipped_type", None)
 
     # защита в глубину: корзина/системные каталоги (важно для watcher-событий)
     if path_excluded(path, cfg):
-        return "skipped_excluded", kind
+        return None, None, ("skipped_excluded", kind)
 
     try:
         st = os.stat(path)
     except OSError as e:
-        return "stat_error: %s" % e, kind
+        return None, None, ("stat_error: %s" % e, kind)
     size, mtime = st.st_size, st.st_mtime
     if size > _limit_mb(kind, cfg):
-        return "skipped_big", kind
+        return None, None, ("skipped_big", kind)
 
     row = dbmod.get_file_by_path(conn, path)
     if not force and row and row["status"] == "indexed" \
             and row["size"] == size and abs((row["mtime"] or 0) - mtime) < 2:
-        return "unchanged", kind
+        return None, None, ("unchanged", kind)
 
     # переименование/переезд: контент уже в индексе под другим путём
     chash = content_hash(path, size)
@@ -97,22 +99,28 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
         same = dbmod.get_file_by_hash(conn, chash)
         if same is not None and same["path"] != path and same["chunk_count"] > 0:
             dbmod.rename_path(conn, same["path"], path)
-            return "moved", kind
+            return None, None, ("moved", kind)
 
     fid = dbmod.upsert_file(conn, path, ext, kind, size, mtime, chash)
+    kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
+    chunks = chunker.make_chunks(
+        segments,
+        dig(cfg, "chunk.size", 1200),
+        dig(cfg, "chunk.overlap", 200),
+    ) if segments else []
+    max_chunks = int(dig(cfg, "index.max_chunks", 2000))
+    if max_chunks > 0 and len(chunks) > max_chunks:
+        chunks = chunks[:max_chunks]
+        print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
+              "увеличьте лимит в config.yaml при необходимости" % (path, max_chunks),
+              flush=True)
+    return fid, chunks, (kind2 or kind)
+
+
+def _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb=None):
+    """Фаза 2: эмбеддинги чанков + запись в БД. Возвращает статус-строку."""
     try:
-        kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
-        chunks = chunker.make_chunks(
-            segments,
-            dig(cfg, "chunk.size", 1200),
-            dig(cfg, "chunk.overlap", 200),
-        ) if segments else []
         max_chunks = int(dig(cfg, "index.max_chunks", 2000))
-        truncated = False
-        if max_chunks > 0 and len(chunks) > max_chunks:
-            chunks = chunks[:max_chunks]
-            truncated = True
-        # Эмбеддинги батчами с прогрессом (важно для больших текстов/CSV)
         bs = max(1, int(dig(cfg, "embedding.batch_size", 32)))
         total = len(chunks)
         if progress_cb and total:
@@ -124,14 +132,10 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
                 progress_cb(100.0 * min(i + bs, total) / total)
         for c, v in zip(chunks, vectors):
             c["_blob"] = struct.pack("<%df" % len(v), *v)
-        if truncated:
-            print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
-                  "увеличьте лимит в config.yaml при необходимости" % (path, max_chunks),
-                  flush=True)
     except Exception as e:  # noqa: BLE001
         dbmod.finish_file(conn, fid, "error", str(e)[:500])
         conn.commit()
-        return "error: %s" % str(e)[:200], kind
+        return "error: %s" % str(e)[:200]
 
     dbmod.delete_file_data(conn, fid)
     for i, c in enumerate(chunks):
@@ -139,6 +143,20 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
         dbmod.add_vector(conn, cid, c["_blob"])
     dbmod.finish_file(conn, fid, "indexed", chunks=len(chunks))
     conn.commit()
+    return "indexed(%d чанков)" % len(chunks)
+
+
+def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
+    """Индексирует один файл. Возвращает (статус, kind)."""
+    res = _extract_file(conn, cfg, path, force=force, progress_cb=progress_cb)
+    fid, chunks = res[0], res[1]
+    early = res[2]
+    if fid is None:
+        return early
+    kind = early
+    status = _commit_file(conn, fid, chunks, kind, cfg, emb, progress_cb)
+    if status.startswith("error"):
+        return status, kind
     return "indexed(%d чанков)" % len(chunks), kind
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
               limit=None, single_paths=None, prune=True, confirm_delete=False,
@@ -177,6 +195,11 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
     n = 0
+    # Конвейер: чанки накапливаются с нескольких файлов и векторизуются
+    # одной большой пачкой (эмбеддер сам делит её на батчи) — GPU работает
+    # крупными партиями, HTTP-оверхед на файл исчезает.
+    pending = []  # [(fid, chunks, kind)]
+    bs_threshold = max(32, int(dig(cfg, "embedding.batch_size", 32)) * 4)
     rep = ProgressReporter(sec=0 if quiet else progress_sec)  # счётчики всегда (heartbeat), quiet — без печати
     _ACTIVE_REPORTER = rep
     rep.start()
@@ -184,6 +207,41 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         mode = "терминал (живая строка)" if rep.is_tty else "не-терминал (полные строки)"
         print("[прогресс] активен: обновление каждые %d с, режим: %s; отключить: --progress-sec 0"
               % (progress_sec, mode), flush=True)
+
+    # Пре-подсчёт для ETA — в фоновом потоке (не блокирует основной обход)
+    def _precount():
+        try:
+            if seen_roots:
+                rep.set_total(sum(1 for _ in iter_files(cfg, roots)))
+        except Exception:  # noqa: BLE001
+            pass
+    threading.Thread(target=_precount, daemon=True).start()
+
+    def _flush_pending():
+        """Эмбеддинг всех накопленных чанков одной пачкой + запись в БД."""
+        last_status = "indexed(0 чанков)"
+        if not pending:
+            return last_status
+        flat, groups = [], []
+        for fid, chs, kd in pending:
+            groups.append((fid, len(flat), len(flat) + len(chs), chs, kd))
+            flat.extend(c["text"] for c in chs)
+        vectors = emb.embed(flat)
+        for fid, off, end, chs, kd in groups:
+            for c, v in zip(chs, vectors[off:end]):
+                c["_blob"] = struct.pack("<%df" % len(v), *v)
+        for fid, off, end, chs, kd in groups:
+            dbmod.delete_file_data(conn, fid)
+            for i, c in enumerate(chs):
+                cid = dbmod.add_chunk(conn, fid, i, c["page"], c["t_start"],
+                                      c["t_end"], c["text"])
+                dbmod.add_vector(conn, cid, c["_blob"])
+            dbmod.finish_file(conn, fid, "indexed", chunks=len(chs))
+            conn.commit()
+            last_status = "indexed(%d чанков)" % len(chs)
+            rep.processed(last_status, kd, 0.0, chunks=len(chs))
+        pending.clear()
+        return last_status
     for path in paths:
         if rep:
             rep.set_last_path(path)
@@ -237,23 +295,37 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                           "(%.0f МБ), может занять несколько минут..."
                           % (path, st0.st_size / 1048576.0), flush=True)
             t1 = time.time()
-            status, kind2 = process_file(conn, emb, cfg, path, force=full,
-                                         progress_cb=progress_cb)
-            dur = time.time() - t1
+            # Конвейер: извлекаем чанки файла, копим до порога и флашим
+            # эмбеддинги одной большой пачкой (GPU без простоев на HTTP-оверхед)
+            res = _extract_file(conn, cfg, path, force=full, progress_cb=progress_cb)
+            fid, chunks = res[0], res[1]
+            early = res[2]
+            if fid is None:
+                status, kind2 = early[0], early[1]
+                dur = time.time() - t1
+            else:
+                # Фаза 2: эмбеддинги + запись (по одному файлу — надёжно)
+                status = _commit_file(conn, emb, cfg, fid, chunks, res[2],
+                                      progress_cb=progress_cb)
+                kind2 = res[2]
+                committed_now = True
+                dur = time.time() - t1
             _hb()
-            if rep:
+            if rep and (fid is None or committed_now):
                 chunks_n = 0
                 if "(" in status:
                     try:
                         chunks_n = int(status.split("(")[1].split()[0])
                     except (ValueError, IndexError):
                         chunks_n = 0
-                rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
-                rep.last_done = (path, status.split("(")[0], dur)
+                if fid is None or status.startswith(("indexed", "error")):
+                    rep.processed(status, kind2 or kind, dur, chunks=chunks_n)
+                    rep.last_done = (path, status.split("(")[0], dur)
         except KeyboardInterrupt:
             if rep:
                 rep.note()
             conn.rollback()  # недописанный файл откатится, останется со статусом 'new'
+            _flush_pending()  # накопленные чанки сохраняются
             print("\n[stop] Прервано (Ctrl+C). Обработанные файлы сохранены; "
                   "текущий файл будет дообработан при следующем запуске.", flush=True)
             counters["stopped"] = True
@@ -267,6 +339,7 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         if limit and n >= limit:
             break
 
+    _flush_pending()  # остатки конвейера — при любом завершении
     if prune and seen_roots and not counters.get("stopped"):
         if rep:
             rep.note()

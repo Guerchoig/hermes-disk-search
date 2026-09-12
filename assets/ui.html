@@ -38,6 +38,7 @@ summary{cursor:pointer;user-select:none}
 <button class="r" onclick="act('/api/index/stop')">⏹ Стоп</button>
 </div>
 <div id="current" class="current mono">—</div>
+<div id="eta" class="mono" style="margin:6px 0;color:var(--acc)"></div>
 <div class="row"><label class="muted">Корни (через «;»), пусто = из настроек:
 <input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
 </label></div>
@@ -143,6 +144,13 @@ async function moveDb(){
   const j = await r.json();
   m.innerHTML = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
 }
+function fmtEta(sec){
+  sec = Math.max(0, Math.round(sec));
+  const d = Math.floor(sec/86400), h = Math.floor(sec%86400/3600), m = Math.floor(sec%3600/60);
+  if (d) return `${d}д ${h}ч ${m}м`;
+  if (h) return `${h}ч ${m}м`;
+  return `${Math.max(1,m)}м`;
+}
 function fmtDur(s){
   s = Math.round(s);
   const h = Math.floor(s/3600), m = Math.floor(s%3600/60), ss = s%60;
@@ -165,6 +173,17 @@ async function refresh(){
           i.current.progress != null ? ' — ' + Math.round(i.current.progress) + '%' : ''}</span>`
       : (i.paused ? '⏸ ПАУЗА' : (i.running ? '…' : '—'));
     document.getElementById('current').innerHTML = cur;
+    let etaLine = '';
+    if (i.running && s.index.total) {
+      const parts = [];
+      if (s.index.rate_window) parts.push(`скорость (5 мин): ${s.index.rate_window} файл/мин`);
+      if (s.index.remaining != null) parts.push(`осталось ≈ ${s.index.remaining} файлов`);
+      if (s.index.eta_sec != null) parts.push(`ETA ≈ ${fmtEta(s.index.eta_sec)}`);
+      etaLine = parts.join(' · ');
+    } else if (i.pending_est) {
+      etaLine = 'запуск завершён — ' + i.pending_est + ' фрагментов учтено';
+    }
+    document.getElementById('eta').innerHTML = etaLine;
     document.getElementById('events').innerHTML = (i.events || []).map(e =>
       `<li>${new Date(e.ts*1000).toLocaleTimeString()} · ${e.status} · ${e.path} (${e.dur}с${
         e.chunks ? ', ' + e.chunks + ' ч.' : ''})</li>`).join('');
