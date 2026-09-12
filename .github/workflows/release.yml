@@ -77,11 +77,13 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.version }}"
-          $notes = if (Test-Path "RELEASE_NOTES_$VERSION.md") { "RELEASE_NOTES_$VERSION.md" } else { "" }
-          $args = @('release','create',"$tag",'-t',"$tag — hermes-disk-search")
-          if ($notes -ne '') { $args += @('--notes-file', $notes) } else { $args += @('--generate-notes') }
-          $args += @('assets/icon.png','assets/icon.ico','assets/icon.icns','HermesDiskSearchIndex.app.zip','hds-icons.zip')
-          gh release create "$tag" @args
+          $noteFile = "RELEASE_NOTES_$tag.md"
+          $assets = @('assets/icon.png','assets/icon.ico','assets/icon.icns','HermesDiskSearchIndex.app.zip','hds-icons.zip')
+          if (Test-Path $noteFile) {
+            gh release create $tag --title "$tag — hermes-disk-search" --notes-file $noteFile @assets
+          } else {
+            gh release create $tag --title "$tag — hermes-disk-search" --generate-notes @assets
+          }
 
       - name: Итог
         run: gh release list
