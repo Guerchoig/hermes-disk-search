@@ -76,6 +76,14 @@ summary{cursor:pointer;user-select:none}
 <button onclick="setOptNum('index.max_chunks','opt-max-chunks')">💾</button>
 </div>
 <div id="opt-msg" class="muted">Изменения сохраняются в config.yaml (комментарии сохраняются) и применяются к новым запускам — перезапустите watcher/индексацию кнопками выше.</div>
+<div style="margin-top:12px">
+<label class="muted">Исключённые из индексации пути (по одному на строку; каталог или файл, без учёта регистра):</label>
+<textarea id="excl-paths" class="mono" spellcheck="false" rows="5" style="width:100%;margin-top:6px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:6px;white-space:pre"></textarea>
+<div class="row" style="margin-top:6px">
+<button onclick="saveExcludes()">💾 Сохранить исключения</button>
+<span id="excl-msg" class="muted">Пример: D:\Backup\Downloads\opencv — папка целиком не индексируется (префикс пути).</span>
+</div>
+</div>
 </div>
 
 <div class="card"><h2>Watcher</h2>
@@ -131,6 +139,16 @@ function setOptNum(key, inputId){
   const v = parseInt(document.getElementById(inputId).value, 10);
   if (isNaN(v) || v < 0) { alert('Введите неотрицательное целое число'); refresh(); return; }
   setOpt(key, v);
+}
+async function saveExcludes(){
+  const ta = document.getElementById('excl-paths');
+  const paths = ta.value.split('\\n').map(s => s.trim()).filter(s => s.length > 0);
+  const j = await (await fetch('/api/config/excludes',{method:'POST',
+    body:JSON.stringify({paths})})).json();
+  const m = document.getElementById('excl-msg');
+  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
+  m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
+  refresh();
 }
 async function moveDb(){
   const path = document.getElementById('db-new').value.trim();
@@ -200,6 +218,9 @@ async function refresh(){
     if (document.activeElement !== mm) mm.value = o.max_media_mb ?? 1500;
     const mc = document.getElementById('opt-max-chunks');
     if (document.activeElement !== mc) mc.value = o.max_chunks ?? 2000;
+    const ep = document.getElementById('excl-paths');
+    if (document.activeElement !== ep) ep.value = (s.exclude_paths || []).join('\\n');
+    const d = s.db;
     const d = s.db;
     document.getElementById('db-info').innerHTML =
       `путь: ${d.path}<br>размер: ${d.size_mb} МБ · файлов: ${d.files ?? '–'} · чанков: ${

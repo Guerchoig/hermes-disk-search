@@ -15,6 +15,9 @@ class Embedder:
         self.batch = max(1, int(batch_size))
         self.timeout = timeout
         self.available = True  # выключается после первой ошибки, чтобы не тормозить поиск
+        # keep-alive: каждое НОВОЕ соединение с LM Studio стоит ~2 с (замер),
+        # переиспользование соединения ускоряет эмбеддинги в разы
+        self._sess = requests.Session()
 
     def embed(self, texts):
         if not texts:
@@ -37,7 +40,7 @@ class Embedder:
         last = None
         for attempt in range(4):
             try:
-                r = requests.post(
+                r = self._sess.post(
                     url,
                     json={"model": self.model, "input": batch},
                     timeout=self.timeout,
@@ -68,5 +71,5 @@ def make_embedder(cfg):
     return Embedder(
         dig(cfg, "embedding.base_url", "http://localhost:1234/v1"),
         dig(cfg, "embedding.model", "bge-m3"),
-        dig(cfg, "embedding.batch_size", 32),
+        dig(cfg, "embedding.batch_size", 64),
     )

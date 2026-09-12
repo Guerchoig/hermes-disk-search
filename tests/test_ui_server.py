@@ -79,6 +79,60 @@ class SaveConfigTests(unittest.TestCase):
         yaml.safe_load(open(self.cfg, encoding="utf-8-sig"))  # конфиг остаётся валидным
 
 
+class ExcludePathsTests(unittest.TestCase):
+    """Фича: редактирование index.exclude_paths (исключаемые пути-префиксы)."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-uiexcl-")
+        self.cfg = write_config(self.tmp)
+
+    def _yaml(self):
+        import yaml
+        with open(self.cfg, encoding="utf-8-sig") as f:
+            return yaml.safe_load(f)
+
+    def test_save_inserts_and_dedupes(self):
+        res = ui_server._set_exclude_paths([r"D:\Backup\Downloads\opencv",
+                                            "  " + r"d:\backup\downloads\OPENCV  ",
+                                            "", r"D:\Backup\Downloads\cmake-4.3.1"])
+        self.assertTrue(res["ok"], res.get("msg"))
+        data = self._yaml()
+        eps = data["index"]["exclude_paths"]
+        self.assertEqual(len(eps), 2, "дубликаты и пустые отбрасываются")
+        self.assertEqual(data["index"]["exclude_dirs"][0], "$RECYCLE.BIN",
+                         "соседние параметры не затронуты")
+
+    def test_second_save_replaces_block(self):
+        ui_server._set_exclude_paths([r"D:\a", r"D:\b"])
+        res = ui_server._set_exclude_paths([r"D:\c"])
+        self.assertTrue(res["ok"], res.get("msg"))
+        with open(self.cfg, encoding="utf-8-sig") as f:
+            text = f.read()
+        self.assertEqual(text.count("exclude_paths:"), 1, "дублей блока быть не должно")
+        self.assertEqual(self._yaml()["index"]["exclude_paths"], [r"D:\c"])
+
+    def test_save_over_empty_inline_list(self):
+        """В config.yaml вида 'exclude_paths: []' замена должна работать."""
+        with open(self.cfg, "w", encoding="utf-8") as f:
+            f.write("index:\n  roots: []\n  exclude_dirs: ['X']\n"
+                    "  exclude_paths: []\ndb_path: 't.db'\n")
+        res = ui_server._set_exclude_paths([r"D:\x\y"])
+        self.assertTrue(res["ok"], res.get("msg"))
+        with open(self.cfg, encoding="utf-8-sig") as f:
+            text = f.read()
+        self.assertEqual(text.count("exclude_paths:"), 1)
+        self.assertEqual(self._yaml()["index"]["exclude_paths"], [r"D:\x\y"])
+
+    def test_save_empty_list(self):
+        res = ui_server._set_exclude_paths([])
+        self.assertTrue(res["ok"], res.get("msg"))
+        self.assertEqual(self._yaml()["index"]["exclude_paths"], [])
+
+    def test_invalid_input_refused(self):
+        res = ui_server._set_exclude_paths("не список")
+        self.assertFalse(res["ok"])
+
+
 class TreeBuildTests(unittest.TestCase):
     """РЕГРЕССИИ: не начатые папки не жёлтые; проиндексированные — зелёные;
     смесь — жёлтая. Статусы родителя — свёртка по потомкам."""

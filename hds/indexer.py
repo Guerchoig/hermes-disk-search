@@ -33,8 +33,12 @@ def content_hash(path, size):
 def iter_files(cfg, roots=None):
     roots = roots or dig(cfg, "index.roots", [])
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
+    prefixes = _excluded_prefixes(cfg)
     for root in roots:
         root = os.path.abspath(root)
+        if _prefix_excluded(root, prefixes):
+            print("[skip] корень исключён настройкой exclude_paths: %s" % root)
+            continue
         if os.path.isfile(root):
             yield root
             continue
@@ -43,17 +47,45 @@ def iter_files(cfg, roots=None):
             continue
         print("[scan] %s" % root)
         for dirpath, dirnames, filenames in os.walk(root, onerror=lambda e: None):
-            dirnames[:] = [d for d in dirnames if d.lower() not in excl]
+            # отсекаем целые поддеревья: по имени каталога (exclude_dirs)
+            # и по полному пути (exclude_paths)
+            dirnames[:] = [d for d in dirnames
+                           if d.lower() not in excl
+                           and not _prefix_excluded(os.path.join(dirpath, d), prefixes)]
             for fn in filenames:
-                yield os.path.join(dirpath, fn)
+                fp = os.path.join(dirpath, fn)
+                if _prefix_excluded(fp, prefixes):  # исключённые одиночные файлы
+                    continue
+                yield fp
+
+
+def _excluded_prefixes(cfg):
+    """Нормализованные префиксы из index.exclude_paths (регистр/слэши ОС)."""
+    out = []
+    for p in dig(cfg, "index.exclude_paths", []) or []:
+        p = os.path.normcase(os.path.normpath(str(p).strip())).lower()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def _prefix_excluded(path, prefixes):
+    """True, если path равен исключённому префиксу или лежит под ним.
+    Сравнение по границе компонента пути: 'D:\\Backup2' не совпадает с 'D:\\Backup'."""
+    if not prefixes:
+        return False
+    np = os.path.normcase(os.path.normpath(str(path))).lower()
+    return any(np == pr or np.startswith(pr + os.sep) for pr in prefixes)
 
 
 def path_excluded(path, cfg):
-    """True, если путь лежит в исключённом каталоге (корзина, системные и т.п.).
-    Проверяет каждый компонент пути без учёта регистра. Кроссплатформенно."""
+    """True, если путь лежит в исключённом каталоге (exclude_dirs, по имени)
+    или под исключённым префиксом пути (exclude_paths). Без учёта регистра."""
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
-    parts = os.path.normpath(path).replace("/", os.sep).split(os.sep)
-    return any(p.lower() in excl for p in parts)
+    p = os.path.normpath(str(path)).replace("/", os.sep)
+    if any(part.lower() in excl for part in p.split(os.sep)):
+        return True
+    return _prefix_excluded(p, _excluded_prefixes(cfg))
 
 
 def _limit_mb(kind, cfg):

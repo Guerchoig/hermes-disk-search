@@ -4,6 +4,11 @@ index:
   roots:
     - "D:\\"
   exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search", "hermes-disk-search-db", "WindowsApps", "$WINDOWS.~BT", ".Trash", ".Trashes", "models"]
+  # Исключаемые пути-префиксы (каталог или файл целиком; редактируется в UI):
+  # exclude_paths:
+  #   - 'D:\Backup\Downloads\opencv'
+  #   - 'D:\Backup\Downloads\cmake-4.3.1'
+  exclude_paths: []
   max_file_mb: 200          # предел для обычных файлов
   max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract + язык rus)
@@ -27,7 +32,7 @@ chunk:
 embedding:
   base_url: "http://localhost:1234/v1"   # LM Studio
   model: "text-embedding-bge-m3"         # BAAI bge-m3 GGUF (lm-kit), 1024 dim, 100+ языков
-  batch_size: 32
+  batch_size: 64
   dim: 1024                # bge-m3 = 1024
 
 chat:

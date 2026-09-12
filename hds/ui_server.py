@@ -426,6 +426,69 @@ def _save_config(yaml_text):
 
 
 
+def _set_exclude_paths(paths):
+    """Сохранение index.exclude_paths в config.yaml с сохранением комментариев.
+    Пути нормализуются в абсолютные; YAML-значения в одинарных кавычках
+    (Windows-пути в двойных кавычках ломают YAML)."""
+    import re
+
+    if not isinstance(paths, list):
+        return {"ok": False, "msg": "Ожидается список путей"}
+    norm, seen = [], set()
+    for p in paths:
+        if not isinstance(p, str):
+            continue
+        p = str(p).strip().strip('"').strip("'")
+        if not p:
+            continue
+        ap = os.path.abspath(p)
+        k = os.path.normcase(ap).lower()
+        if k not in seen:
+            seen.add(k)
+            norm.append(ap)
+    block = "  exclude_paths:\n" + "".join(
+        "    - '%s'\n" % p.replace("'", "''") for p in norm) if norm else "  exclude_paths: []\n"
+    from .config import config_path
+
+    cfg_path = config_path()
+    with open(cfg_path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    rx_block = re.compile(r"(?m)^  exclude_paths:\n(?:[ \t]+.*\n?)*")
+    rx_inline = re.compile(r"(?m)^  exclude_paths:[ \t]*\[.*\][ \t]*\r?\n?")
+    if rx_block.search(text):
+        new_text = rx_block.sub(lambda m: block, text, count=1)
+    elif rx_inline.search(text):
+        new_text = rx_inline.sub(lambda m: block, text, count=1)
+    else:
+        m = re.search(r"(?m)^  exclude_dirs:.*\n", text)
+        if not m:
+            return {"ok": False, "msg": "Не найдена секция index.exclude_dirs в config.yaml"}
+        new_text = text[:m.end()] + block + text[m.end():]
+    try:
+        parsed = _yaml_safe_load(new_text)
+        eps = (parsed.get("index") or {}).get("exclude_paths")
+        if not isinstance(eps, list):
+            raise ValueError("index.exclude_paths не список")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Итоговый config.yaml некорректен: %s" % e}
+    tmp = cfg_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    os.replace(tmp, cfg_path)
+    roots_hit = [r for r in (dig(load(), "index.roots", []) or [])
+                 if indexer._prefix_excluded(
+                     r, [os.path.normcase(os.path.normpath(p)) for p in norm])]
+    warn = " ВНИМАНИЕ: исключение покрывает корень индексации (%s)!" % ", ".join(roots_hit) if roots_hit else ""
+    return {"ok": True, "paths": norm,
+            "msg": "Сохранено путей: %d. Применяется к новым запускам — перезапустите "
+                   "watcher/индексацию кнопками.%s" % (len(norm), warn)}
+
+
+def _yaml_safe_load(text):
+    import yaml
+    return yaml.safe_load(text)
+
+
 def _start_index(full=False, roots=None):
     if getattr(indexer, "_ACTIVE_REPORTER", None) is not None:
         return {"ok": False, "msg": "Индексация уже идёт"}
@@ -505,6 +568,8 @@ class Handler(BaseHTTPRequestHandler):
                 "db": _db_stats(),
                 "config_yaml": yaml_text,
                 "roots": [os.path.abspath(r) for r in dig(cfg, "index.roots", [])],
+                "exclude_paths": [os.path.abspath(p)
+                                  for p in dig(cfg, "index.exclude_paths", [])],
                 "options": {"transcribe": bool(dig(cfg, "index.transcribe", True)),
                             "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
                             "max_chunks": dig(cfg, "index.max_chunks", 2000)},
@@ -552,6 +617,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(_start_index(full=True, roots=path))
         elif self.path == "/api/config/set":
             self._json(_set_simple_config(body.get("key", ""), body.get("value")))
+        elif self.path == "/api/config/excludes":
+            self._json(_set_exclude_paths(body.get("paths") or []))
         else:
             self._json({"error": "not found"}, 404)
 

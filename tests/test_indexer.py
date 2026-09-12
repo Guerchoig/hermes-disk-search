@@ -148,6 +148,46 @@ class ProcessFileTests(IndexerTestBase):
         self.assertEqual(status, "skipped_big")
 
 
+class ExcludePathsTests(IndexerTestBase):
+    """Фича: index.exclude_paths — исключение по префиксу полного пути."""
+
+    def test_prefix_matching_and_boundary(self):
+        cfg = {"index": {"exclude_dirs": [],
+                         "exclude_paths": [r"D:\Backup\Downloads\opencv"]}}
+        self.assertTrue(indexer.path_excluded(r"D:\Backup\Downloads\opencv\src\cv.cpp", cfg))
+        self.assertTrue(indexer.path_excluded(r"D:\BACKUP\DOWNLOADS\OPENCV", cfg),
+                        "без учёта регистра и слэшей")
+        self.assertFalse(indexer.path_excluded(r"D:\Backup\Downloads\opencv2\src.cpp", cfg),
+                         "граница префикса: opencv2 не совпадает с opencv")
+        self.assertFalse(indexer.path_excluded(r"D:\Backup\Downloads\other.cpp", cfg))
+
+    def test_iter_files_skips_excluded_subtree(self):
+        write_text(self.fixtures, "keep.txt", "нужный файл")
+        write_text(self.fixtures, os.path.join("skipme", "sub", "drop.txt"), "лишний")
+        cfg = {"index": {"exclude_dirs": [],
+                         "exclude_paths": [os.path.join(self.fixtures, "skipme")]}}
+        got = list(indexer.iter_files(cfg, roots=[self.fixtures]))
+        self.assertEqual([os.path.basename(p) for p in got], ["keep.txt"])
+
+    def test_iter_files_skips_single_file(self):
+        write_text(self.fixtures, "a.txt", "раз")
+        write_text(self.fixtures, "secret.txt", "не индексировать")
+        cfg = {"index": {"exclude_dirs": [],
+                         "exclude_paths": [os.path.join(self.fixtures, "secret.txt")]}}
+        got = list(indexer.iter_files(cfg, roots=[self.fixtures]))
+        self.assertEqual(len(got), 1)
+        self.assertTrue(got[0].endswith("a.txt"))
+
+    def test_process_file_respects_exclude_paths(self):
+        """Защита в глубину: process_file отказывает файл из исключённого пути."""
+        p = write_text(self.fixtures, "x.txt", "текст")
+        cfg = {"index": {"exclude_paths": [self.fixtures]}}
+        conn = self._conn()
+        status, _k = indexer.process_file(conn, FakeEmbedder(8), cfg, p)
+        conn.close()
+        self.assertEqual(status, "skipped_excluded")
+
+
 class RunIndexTests(IndexerTestBase):
     def test_single_file_root(self):
         """РЕГРЕССИЯ: одиночный файл как корень."""
