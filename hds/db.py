@@ -50,6 +50,15 @@ def connect(db_path, dim):
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
+    # бэкфилл: файлы, проиндексированные до введения indexed_at
+    c_old = conn.execute(
+        "SELECT COUNT(*) FROM files WHERE status='indexed' AND indexed_at IS NULL"
+    ).fetchone()[0]
+    if c_old:
+        conn.execute(
+            "UPDATE files SET indexed_at = COALESCE(mtime, 0) + 10 "
+            "WHERE status='indexed' AND indexed_at IS NULL")
+        print("[db] indexed_at заполнен по mtime для %d старых записей" % c_old)
     row = conn.execute("SELECT value FROM meta WHERE key='vec_dim'").fetchone()
     # проверяем фактическую размерность таблицы пробной вставкой с откатом
     mismatch = True
@@ -145,7 +154,15 @@ def add_vector(conn, chunk_id, vector_blob):
 
 
 def finish_file(conn, file_id, status, error=None):
-    conn.execute("UPDATE files SET status=?, error=? WHERE id=?", (status, error, file_id))
+    import time
+
+    if status == "indexed":
+        conn.execute(
+            "UPDATE files SET status=?, error=NULL, indexed_at=? WHERE id=?",
+            (status, time.time(), file_id))
+    else:
+        conn.execute("UPDATE files SET status=?, error=? WHERE id=?",
+                     (status, error, file_id))
 
 
 def all_files(conn):
