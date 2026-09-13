@@ -71,6 +71,24 @@ class ProgressReporterTests(unittest.TestCase):
         self.rep.set_paused(True)
         self.assertIn("ПАУЗА", self.rep._status_line())
 
+    def test_eta_and_rate_survive_empty_window(self):
+        """РЕГРЕССИЯ: при долгой обработке одного файла скользящее окно пустело,
+        rate_window давал 0, eta_sec исчезал — строка скорость/ETA пропадала из UI."""
+        import time as t
+        from collections import deque
+
+        self.rep.set_total(100)
+        for _ in range(20):
+            self.rep.seen()
+        self.rep.t0 = t.time() - 120  # стартовали 2 минуты назад
+        self.rep._seen_ts = deque([t.time() - 400, t.time() - 350])  # всё старше окна
+        rw = self.rep.rate_window()
+        eta = self.rep.eta_sec()
+        self.assertGreater(rw, 0, "скорость не должна обнуляться при пустом окне")
+        self.assertIsNotNone(eta, "ETA не должен исчезать при пустом окне")
+        self.assertGreater(eta, 0)
+        self.assertLess(eta, 24 * 3600, "ETA не должен улетать в недели")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -85,22 +85,34 @@ class ProgressReporter:
             self.total = int(total)
 
     def rate_window(self, window=300):
-        """Скользящая скорость: файлов/мин за последние `window` секунд."""
+        """Скользящая скорость: файлов/мин за последние `window` секунд.
+        Если окно пусто (давно не завершался ни один файл — идёт долгая
+        обработка одного), возвращаем среднюю скорость за всё время —
+        чтобы «скорость/ETA» не пропадали из UI на время долгих файлов."""
         with self._lock:
             now = time.time()
             ts = self._seen_ts
             while ts and ts[0] < now - window:
                 ts.popleft()
-            span = min(window, max(0.001, now - self.t0))
-            return round(len(ts) / span * 60)
+            if len(ts) >= 2:
+                span = min(window, max(0.001, now - self.t0))
+                return round(len(ts) / span * 60)
+            avg = self.seen_count / max(0.001, now - self.t0) * 60.0
+            return round(avg)
 
     def eta_sec(self):
-        """Оценка оставшегося времени (сек) = осталось / скользящая скорость.
+        """Оценка оставшегося времени (сек) = осталось / скорость.
+        Скорость: за последние 5 минут; при пустом окне — средняя за всё время.
         None — если total неизвестен, скорость нулевая или всё пройдено."""
         with self._lock:
             if not self.total or self.total <= self.seen_count:
                 return None
-            rate = len(self._seen_ts) / max(0.001, time.time() - self.t0)
+            now = time.time()
+            recent = sum(1 for t in self._seen_ts if t >= now - 300)
+            if recent >= 2:
+                rate = recent / min(300.0, max(0.001, now - self.t0))
+            else:
+                rate = self.seen_count / max(0.001, now - self.t0)
             if rate <= 0:
                 return None
             return max(0, int((self.total - self.seen_count) / rate))
