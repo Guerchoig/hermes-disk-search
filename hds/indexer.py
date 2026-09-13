@@ -211,19 +211,21 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     stop_file = os.path.join(PROJECT_ROOT, "index.stop")
     pause_file = os.path.join(PROJECT_ROOT, "index.pause")
     hb_file = os.path.join(PROJECT_ROOT, "index.heartbeat.json")
+    _hb_lock = threading.Lock()  # heartbeat пишут и основной цикл, и фоновый рефреш
 
     def _hb(extra=None):
         """Heartbeat-файл: кросс-процессный статус индексации для UI/MCP."""
-        try:
-            d = {"ts": time.time()}
-            if rep is not None:
-                d.update(rep.heartbeat_data())
-            if extra:
-                d.update(extra)
-            with open(hb_file, "w", encoding="utf-8") as f:
-                json.dump(d, f)
-        except OSError:
-            pass
+        with _hb_lock:
+            try:
+                d = {"ts": time.time()}
+                if rep is not None:
+                    d.update(rep.heartbeat_data())
+                if extra:
+                    d.update(extra)
+                with open(hb_file, "w", encoding="utf-8") as f:
+                    json.dump(d, f)
+            except OSError:
+                pass
 
     def _hb_remove():
         try:
@@ -239,6 +241,17 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     rep = ProgressReporter(sec=0 if quiet else progress_sec)  # счётчики всегда (heartbeat), quiet — без печати
     _ACTIVE_REPORTER = rep
     rep.start()
+    # Периодический рефреш heartbeat: долгая обработка одного файла (OCR
+    # скана на 10 минут, Whisper-транскрипция mp3) не должна выглядеть
+    # в UI как «индексация остановилась» — ts в файле должен оставаться свежим
+    _hb_stop = threading.Event()
+
+    def _hb_loop():
+        while not _hb_stop.wait(5):
+            _hb()
+
+    _hbt = threading.Thread(target=_hb_loop, daemon=True)
+    _hbt.start()
     if not quiet:
         mode = "терминал (живая строка)" if rep.is_tty else "не-терминал (полные строки)"
         print("[прогресс] активен: обновление каждые %d с, режим: %s; отключить: --progress-sec 0"
@@ -342,6 +355,8 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
         _prune_deleted(conn, cfg, confirm_delete=confirm_delete)
 
     _remove_stop_file(stop_file)
+    _hb_stop.set()      # фоновый рефреш heartbeat остановить ДО удаления файла
+    _hbt.join(timeout=3)
     _hb_remove()
     if rep:
         _ACTIVE_REPORTER = None
