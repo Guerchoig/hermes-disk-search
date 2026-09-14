@@ -82,6 +82,20 @@ class ExtractorTests(unittest.TestCase):
         self.assertIsNone(kind)
         self.assertEqual(segs, [])
 
+    def test_image_includes_folder(self):
+        """Фича: в чанк картинки попадает имя папки (поиск фото по папкам)."""
+        import tempfile
+        from PIL import Image
+
+        sub = os.path.join(self.tmp, "Цветы")
+        os.makedirs(sub, exist_ok=True)
+        p = os.path.join(sub, "photo.jpg")
+        Image.new("RGB", (60, 40), "white").save(p)
+        kind, segs = extract(p, self.cfg)
+        self.assertEqual(kind, "image")
+        text = segs[0]["text"]
+        self.assertIn("папка: Цветы", text, "имя папки должно быть в чанке")
+
     def test_mpp_without_mpxj_reports(self):
         """Фича: .mpp без установленного mpxj — пометка, а не падение."""
         p = write_text(self.tmp, "a.mpp", "заглушка")

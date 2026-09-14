@@ -76,6 +76,33 @@ def search(conn, emb, cfg, query, kinds=None, limit=8):
             print("[vec] семантический поиск недоступен (%s); работает ключевой" % e,
                   file=sys.stderr)
 
+    # CLIP: контентный поиск по картинкам («найди изображения цветов») —
+    # текстовый запрос на любом языке сравнивается с самими изображениями.
+    # Результаты — по file_id (rowid = files.id); привязываем к первому чанку
+    # файла (у картинок он один), дальше общий RRF-конвейер.
+    if (not kinds or "image" in kinds) and dig(cfg, "index.clip", True):
+        try:
+            from . import clip_index
+
+            if clip_index.available():
+                qv = clip_index.embed_text(query)
+                if qv:
+                    blob = struct.pack("<%df" % len(qv), *qv)
+                    rows = conn.execute(
+                        "SELECT rowid, distance FROM images_vec WHERE embedding MATCH ? "
+                        "AND k = ? ORDER BY distance",
+                        (blob, vec_k),
+                    ).fetchall()
+                    for rank, (fid, _d) in enumerate(rows):
+                        ch = conn.execute(
+                            "SELECT id FROM chunks WHERE file_id=? LIMIT 1", (fid,)
+                        ).fetchone()
+                        if ch:
+                            scores[ch[0]] = scores.get(ch[0], 0.0) + 1.0 / (rrf_k + rank)
+        except Exception as e:  # noqa: BLE001
+            print("[clip] поиск по содержанию картинок недоступен (%s)" % e,
+                  file=sys.stderr)
+
     if not scores:
         return []
     order = sorted(scores.items(), key=lambda kv: -kv[1])

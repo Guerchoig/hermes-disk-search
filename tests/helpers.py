@@ -25,6 +25,7 @@ index:
   whisper_batch: 0
   hf_token: ""
   max_chunks: {max_chunks}
+  clip: false
 db_path: "{db_path}"
 chunk:
   size: 300

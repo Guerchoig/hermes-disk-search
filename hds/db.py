@@ -4,6 +4,8 @@ import sqlite3
 
 import sqlite_vec
 
+from .clip_index import CLIP_DIM
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS files(
   id INTEGER PRIMARY KEY,
@@ -74,6 +76,11 @@ def connect(db_path, dim):
               "(запустите 'index --full' для повторной векторизации)" % int(dim))
         row = None
     conn.executescript(SCHEMA.format(dim=int(dim)))
+    # CLIP-векторы картинок (поиск по содержанию); фиксированная размерность 512
+    conn.execute(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS images_vec "
+        "USING vec0(embedding float[{}])".format(CLIP_DIM)
+    )
     # бэкфилл: файлы, проиндексированные до введения indexed_at
     try:
         c_old = conn.execute(
@@ -137,6 +144,11 @@ def delete_file_data(conn, file_id):
         conn.execute("DELETE FROM chunks_fts WHERE rowid=?", (cid,))
         conn.execute("DELETE FROM chunks_vec WHERE rowid=?", (cid,))
     conn.execute("DELETE FROM chunks WHERE file_id=?", (file_id,))
+    # CLIP-вектор картинки (rowid = files.id)
+    try:
+        conn.execute("DELETE FROM images_vec WHERE rowid=?", (file_id,))
+    except sqlite3.OperationalError:
+        pass  # таблицы может не быть в старых БД до первого connect() с CLIP-схемой
 
 
 def add_chunk(conn, file_id, ord_, page, t_start, t_end, text):

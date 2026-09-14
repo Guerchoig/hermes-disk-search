@@ -75,7 +75,13 @@ def extract_image(path, cfg):
     from PIL import Image
 
     img = Image.open(path)
+    # папка — важный сигнал для поиска по содержанию: фото из папки
+    # «Цветы» должны находиться по запросу «цветы», даже если на снимке
+    # нет текста для OCR, а EXIF знает только дату и камеру
+    folder = os.path.basename(os.path.normpath(os.path.dirname(path)))
     info = ["Изображение: %dx%d px, формат %s" % (img.width, img.height, img.format or "?")]
+    if folder:
+        info.append("папка: %s" % folder)
     try:
         exif = img.getexif()
         names = {0x0132: "дата", 0x0110: "камера", 0x8298: "автор", 0x9286: "описание"}

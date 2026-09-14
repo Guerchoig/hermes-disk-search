@@ -105,6 +105,49 @@ def cmd_forget(args):
     return 0
 
 
+def cmd_clip_index(args):
+    """Дозаполнить CLIP-векторы для всех проиндексированных картинок."""
+    cfg = load()
+    conn = _conn(cfg)
+    conn.execute("PRAGMA busy_timeout=30000")  # параллельно пишет watcher
+    from . import clip_index
+
+    if not clip_index.available():
+        print("[--] CLIP недоступен: пакет sentence-transformers или веса модели "
+              "не загрузились (см. ошибки выше)")
+        return 1
+    rows = [r for r in conn.execute(
+        "SELECT f.id, f.path FROM files f WHERE f.kind='image' AND f.status='indexed' "
+        "AND f.id NOT IN (SELECT rowid FROM images_vec)")
+        if os.path.exists(r[1])]
+    total = len(rows)
+    print("[clip] картинок без векторов: {}".format(total))
+    import struct
+    import time as _t
+
+    batch = 32
+    done = 0
+    i = 0
+    while i < total:
+        chunk = rows[i:i + batch]
+        vecs = clip_index.embed_images([r[1] for r in chunk])
+        for attempt in range(5):
+            try:
+                for (fid, _p), v in zip(chunk, vecs):
+                    clip_index.add_image_vector(conn, fid, struct.pack("<%df" % len(v), *v))
+                conn.commit()
+                break
+            except Exception as e:  # noqa: BLE001
+                wait = 5 * (attempt + 1)
+                print("\n[clip] БД занята, повтор через {} с: {}".format(wait, e), flush=True)
+                _t.sleep(wait)
+        done += len(chunk)
+        i += batch
+        print("\r[clip] {}/{}".format(done, total), end="", flush=True)
+    print("\n[clip] готово")
+    return 0
+
+
 def cmd_check(args):
     import shutil
 
@@ -257,6 +300,10 @@ def main(argv=None):
     pf = sub.add_parser("forget", help="убрать файл из индекса")
     pf.add_argument("path")
     pf.set_defaults(fn=cmd_forget)
+
+    pci = sub.add_parser("clip-index",
+                         help="дозаполнить CLIP-векторы картинок (поиск по содержанию)")
+    pci.set_defaults(fn=cmd_clip_index)
 
     pck = sub.add_parser("check", help="диагностика окружения")
     pck.set_defaults(fn=cmd_check)

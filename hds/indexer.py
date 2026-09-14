@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import struct
+import sys
 import threading
 import time
 
@@ -323,6 +324,16 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                                          progress_cb=progress_cb)
             dur = time.time() - t1
             _hb()
+            # CLIP-вектор для картинок: контентный поиск «найди изображения …»
+            if kind == "image" and dig(cfg, "index.clip", True):
+                try:
+                    from . import clip_index
+
+                    fid_now = dbmod.get_file_by_path(conn, path)
+                    if fid_now:
+                        clip_index.store_for_file(conn, fid_now["id"], path)
+                except Exception as e:  # noqa: BLE001
+                    print("[clip] ошибка: %s" % e, file=sys.stderr, flush=True)
             if rep:
                 chunks_n = 0
                 if "(" in status:
