@@ -282,7 +282,36 @@ Watcher — постоянно работающий фоновый процес�
 
 ## Интеграция с Hermes
 
-В `config.yaml` Hermes добавлен MCP-сервер:
+Hermes Agent Desktop должен знать про наш MCP-сервер и уметь им пользоваться.
+Всё это делает один скрипт — **`install_hermes.ps1`**:
+
+1. регистрирует MCP-сервер `disk-search` в `<Hermes>\config.yaml` (секция `mcp_servers`);
+2. устанавливает скилл `disk-search` в `<Hermes>\skills\` — правило для агента:
+   «поиск файлов на компе — через MCP disk-search, а не через ripgrep/терминал»;
+3. проверяет итоговый `config.yaml` на валидность.
+
+### Когда Hermes уже установлен
+
+Скрипт вызывается автоматически из `setup.ps1` (последний шаг). Запустить вручную:
+
+```powershell
+powershell -File install_hermes.ps1
+# нестандартное расположение Hermes:
+powershell -File install_hermes.ps1 -HermesDir "C:\путь\к\hermes"
+```
+
+### Если disk-search установлен раньше Hermes
+
+Ничего страшного: `setup.ps1` просто напечатает напоминание. Когда Hermes Desktop
+появится на машине — выполните ту же команду, и подключение произойдёт за один запуск:
+
+```powershell
+powershell -File install_hermes.ps1
+```
+
+### Вручную (без скрипта)
+
+1. В `<Hermes>\config.yaml` в секцию `mcp_servers` добавить:
 
 ```yaml
 mcp_servers:
@@ -293,9 +322,17 @@ mcp_servers:
     timeout: 300
 ```
 
-Skill `disk-search` (в `skills\research\disk-search\SKILL.md` Hermes) объясняет агенту инструменты:
-`search_local_files`, `ask_my_files`, `index_status`, `start_indexing`, `reindex_path`.
-Перезапустите Hermes Desktop после установки.
+2. Скопировать скилл: `hermes-skill\SKILL.md` → `<Hermes>\skills\disk-search\SKILL.md`
+   (скилл объясняет агенту, что «найди на компе…» — это инструменты MCP
+   `search_local_files` / `ask_my_files`, а не ripgrep/терминал).
+
+### Проверка
+
+- Перезапустите Hermes Desktop (или начните новую сессию чата).
+- В логе `logs\agent.log` должна появиться строка
+  `MCP server 'disk-search' (stdio): registered 10 tool(s)`.
+- В чате: «найди на этом компе фильмы» — агент должен вызвать
+  `mcp__disk_search__search_local_files` (видно в UI как вызов инструмента).
 
 ## Настройки (`config.yaml`)
 

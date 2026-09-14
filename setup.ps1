@@ -20,3 +20,8 @@ Write-Host "== Опционально: faster-whisper (транскрипция 
 
 Write-Host "== Диагностика =="
 & $python -m hds.cli check
+
+Write-Host "== Интеграция с Hermes Desktop (MCP-сервер + скилл) =="
+# Не обязателен на этом шаге: если Hermes ещё не установлен, скрипт напечатает,
+# как подключить позже, и завершится успешно.
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_hermes.ps1"
