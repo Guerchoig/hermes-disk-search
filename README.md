@@ -288,7 +288,10 @@ Hermes Agent Desktop должен знать про наш MCP-сервер и �
 1. регистрирует MCP-сервер `disk-search` в `<Hermes>\config.yaml` (секция `mcp_servers`);
 2. устанавливает скилл `disk-search` в `<Hermes>\skills\` — правило для агента:
    «поиск файлов на компе — через MCP disk-search, а не через ripgrep/терминал»;
-3. проверяет итоговый `config.yaml` на валидность.
+3. выставляет `tools.tool_search.enabled: "off"` — без этого Hermes прячет 27
+   инструментов (включая все MCP) за discovery-протоколом `tool_search`, который
+   локальные модели (Qwen3.5-9B) не проходят, и начинает искать через ripgrep;
+4. проверяет итоговый `config.yaml` на валидность.
 
 ### Когда Hermes уже установлен
 
@@ -325,6 +328,15 @@ mcp_servers:
 2. Скопировать скилл: `hermes-skill\SKILL.md` → `<Hermes>\skills\disk-search\SKILL.md`
    (скилл объясняет агенту, что «найди на компе…» — это инструменты MCP
    `search_local_files` / `ask_my_files`, а не ripgrep/терминал).
+
+3. В `<Hermes>\config.yaml` добавить (иначе локальные модели не увидят MCP-инструменты
+   — Hermes прячет их за discovery-протоколом `tool_search`):
+
+```yaml
+tools:
+  tool_search:
+    enabled: "off"
+```
 
 ### Проверка
 

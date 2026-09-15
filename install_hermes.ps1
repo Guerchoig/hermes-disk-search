@@ -1,10 +1,13 @@
 ﻿# Подключение disk-search к Hermes Desktop — можно запускать В ЛЮБОЙ МОМЕНТ:
 #   - до установки Hermes (тогда просто запустите этот скрипт повторно, когда
 #     Hermes Desktop появится на машине);
-#   - после установки (регистрирует MCP-сервер и скилл за один запуск).
+#   - после установки (регистрирует MCP-сервер, скилл и настройку инструментов
+#     за один запуск).
 # Регистрирует:
 #   1) MCP-сервер disk-search в config.yaml (секция mcp_servers)
 #   2) скилл disk-search (правило «поиск файлов — через MCP, а не grep»)
+#   3) tools.tool_search.enabled: "off" — все инструменты всегда в промпте
+#      (локальная 9B-модель не находит MCP-инструменты через discovery-протокол)
 # Идемпотентно: повторный запуск обновляет блоки, не дублируя их.
 param([string]$HermesDir = "")
 $ErrorActionPreference = "Stop"
@@ -21,7 +24,8 @@ if (-not (Test-Path $cfgPath)) {
     Write-Host "      powershell -File `"$root\install_hermes.ps1`""
     Write-Host "    Либо вручную (см. README, раздел «Интеграция с Hermes»):"
     Write-Host "      1) в <Hermes>\config.yaml в секцию mcp_servers добавить блок disk-search;"
-    Write-Host "      2) скопировать hermes-skill\SKILL.md в <Hermes>\skills\disk-search\SKILL.md."
+    Write-Host "      2) скопировать hermes-skill\SKILL.md в <Hermes>\skills\disk-search\SKILL.md;"
+    Write-Host "      3) добавить tools.tool_search.enabled: \`"off\`" (все инструменты в промпте)."
     exit 0
 }
 Write-Host "== Подключение disk-search к Hermes ($HermesDir) =="
@@ -58,6 +62,33 @@ if (Test-Path $py) {
     & $py -c "import yaml,sys; d=yaml.safe_load(open(r'$cfgPath', encoding='utf-8-sig')); ds=(d.get('mcp_servers') or {}).get('disk-search'); sys.exit(0 if ds and ds.get('command') else 1)"
     if ($LASTEXITCODE -ne 0) { throw "config.yaml Hermes повреждён после правки — проверьте вручную" }
     Write-Host "[ok] config.yaml Hermes валиден, disk-search зарегистрирован"
+}
+
+# --- 1b. tools.tool_search.enabled: "off" — все инструменты всегда в промпте ---
+# Локальные модели (Qwen3.5-9B) не осиливают discovery-протокол tool_search/
+# tool_describe/tool_call и не находят MCP-инструменты; облачным не мешает.
+$tsSearch = [regex]::new('(?m)^  tool_search:\r?\n(?:    [^\r\n]*\r?\n?)*')
+$tsInner = @(
+    '  tool_search:'
+    '    enabled: "off"'
+) -join "`r`n"
+if ($tsSearch.IsMatch($text)) {
+    $text = $tsSearch.Replace($text, { param($m) $tsInner + "`r`n" }, 1)
+    Write-Host "[ok] tools.tool_search: блок обновлён (enabled: off)"
+} elseif ($text -match '(?m)^tools:\r?$') {
+    $text = [regex]::new('(?m)^(tools:\r?\n)').Replace($text, { param($m) $m.Value + $tsInner + "`r`n" }, 1)
+    Write-Host "[ok] tools.tool_search: добавлен в существующую секцию tools"
+} else {
+    $text = $text.TrimEnd() + "`r`n`r`n# Все инструменты всегда в промпте (локальная 9B-модель не находит MCP-инструменты через discovery-протокол)`r`ntools:`r`n" + $tsInner + "`r`n"
+    Write-Host "[ok] секция tools.tool_search добавлена в конец config.yaml"
+}
+$tmp2 = "$cfgPath.tmp2"
+[System.IO.File]::WriteAllText($tmp2, $text, $enc)
+Move-Item $tmp2 $cfgPath -Force
+if (Test-Path $py) {
+    & $py -c "import yaml,sys; d=yaml.safe_load(open(r'$cfgPath', encoding='utf-8-sig')); ts=((d.get('tools') or {}).get('tool_search') or {}); sys.exit(0 if ts.get('enabled')=='off' else 1)"
+    if ($LASTEXITCODE -ne 0) { throw "tools.tool_search.enabled != 'off' после правки — проверьте config.yaml вручную" }
+    Write-Host "[ok] tools.tool_search.enabled = off (все инструменты в промпте)"
 }
 
 # --- 2. Скилл disk-search ---

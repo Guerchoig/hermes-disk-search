@@ -162,6 +162,20 @@
    и «database is locked» при конкуренции с watcher'ом — исправлено
    (DELETE+INSERT, busy_timeout 30 с, ретраи).
 
+### Выполнено дополнительно (инсталлятор: tools.tool_search):
+1. ✅ Диагностика: Hermes прячет 27 из 49 инструментов (включая все MCP) за
+   discovery-протоколом tool_search/tool_describe/tool_call (~8k токенов промпта);
+   облачная Qwen3.7-plus проходит его сама, локальная Qwen3.5-9B — нет
+   (ошибки формата в логах, начинает ripgrep/terminal до явного «используй tools»).
+2. ✅ Исправление применено вживую: tools.tool_search.enabled: "off" в config.yaml
+   Hermes — все 49 инструментов всегда в промпте, discovery-барьер убран.
+3. ✅ install_hermes.ps1: шаг 3 — настройка tools.tool_search (три ветки: блок
+   есть → обновить; tools: есть → вставить внутрь; нет → добавить в конец),
+   YAML-валидация, идемпотентно.
+4. ✅ Протестированы 4 сценария (реальный Hermes идемпотентно, свежий Hermes
+   без tools:, tools: без tool_search, tool_search: "on" → "off").
+5. ✅ README: ручной шаг 3 добавлен в раздел «Интеграция с Hermes».
+
 ### НЕ выполнено (следующий шаг):
 1. Заполнить `exclude_paths` (UI → «Параметры обработки» → «Исключённые
    пути») — кандидаты: `D:\Backup\Downloads\opencv`, `D:\Backup\Downloads\cmake-4.3.1`,
