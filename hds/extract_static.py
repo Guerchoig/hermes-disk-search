@@ -1,5 +1,7 @@
 """MS Project (.mpp, через mpxj/Java) и картинки (EXIF + OCR)."""
+import glob
 import os
+import sys
 
 from .config import dig
 from .extractors import seg, _ocr_pil_image, _tesseract_ready
@@ -21,13 +23,25 @@ def extract_mpp(path, cfg):
     # пользовательская JDK (установлена без прав администратора): если JAVA_HOME
     # не задан в окружении процесса — подхватываем сами
     if not os.environ.get("JAVA_HOME"):
-        base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "jdk-21")
-        if os.path.isdir(base):
-            jdk = next((os.path.join(base, d) for d in sorted(os.listdir(base))
-                        if os.path.exists(os.path.join(base, d, "bin", "server", "jvm.dll"))),
-                       None)
-            if jdk:
-                os.environ["JAVA_HOME"] = jdk
+        jdk = None
+        if os.name == "nt":
+            base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "jdk-21")
+            if os.path.isdir(base):
+                jdk = next((os.path.join(base, d) for d in sorted(os.listdir(base))
+                            if os.path.exists(os.path.join(base, d, "bin", "server", "jvm.dll"))),
+                           None)
+        elif sys.platform == "darwin":
+            # macOS: Homebrew openjdk или системная JDK (/usr/libexec/java_home
+            # пишет JAVA_HOME только в шелле, процессу индексатора она не достаётся)
+            cands = ["/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home",
+                     "/opt/homebrew/opt/openjdk",
+                     "/usr/local/opt/openjdk"]
+            cands += sorted(glob.glob("/Library/Java/JavaVirtualMachines/*/Contents/Home"),
+                            reverse=True)
+            jdk = next((c for c in cands
+                        if os.path.exists(os.path.join(c, "bin", "java"))), None)
+        if jdk:
+            os.environ["JAVA_HOME"] = jdk
     try:
         import jpype
         import mpxj  # noqa: F401

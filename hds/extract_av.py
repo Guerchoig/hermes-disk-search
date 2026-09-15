@@ -61,7 +61,12 @@ def ensure_whisper_model(cfg):
 
 
 def _add_nvidia_dll_dirs():
-    """DLL cuBLAS/cuDNN из pip-пакетов nvidia-*-cu12 должны быть видны ctranslate2."""
+    """DLL cuBLAS/cuDNN из pip-пакетов nvidia-*-cu12 должны быть видны ctranslate2.
+    Только Windows: на macOS CUDA нет (Apple Silicon = CPU int8 или experimental
+    Metal), pip-пакетов nvidia-* нет, а os.add_dll_directory существует только
+    на Windows."""
+    if os.name != "nt":
+        return []
     import glob
     import sys
 
@@ -92,6 +97,16 @@ def _get_whisper(cfg):
         path = ensure_whisper_model(cfg)
         device = dig(cfg, "index.whisper_device", "cuda")
         compute = dig(cfg, "index.whisper_compute", "float16")
+        # macOS (M1-M4): CUDA физически отсутствует — не делаем заведомо падающий
+        # запрос, а сразу уходим на CPU (int8). Metal — экспериментальная опция
+        # ctranslate2 >= 4.5: включается явно, index.whisper_device: metal.
+        if device == "cuda" and sys.platform == "darwin":
+            print("[whisper] CUDA на macOS недоступен — использую CPU (int8); "
+                  "Metal можно включить явно: index.whisper_device: metal",
+                  flush=True)
+            device, compute = "cpu", "int8"
+        elif device == "cpu" and compute == "float16":
+            compute = "int8"  # float16 на CPU ctranslate2 не поддерживает
         timeout = int(dig(cfg, "index.whisper_load_timeout", 180))
         print("[whisper] Загрузка модели из %s (%s/%s) ..." % (path, device, compute),
               flush=True)

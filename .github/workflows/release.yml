@@ -39,8 +39,65 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m unittest discover -s tests -v
 
+  # Проверка совместимости с macOS (Apple Silicon M1-M4): зависимости ставятся
+  # без nvidia-* (CUDA на Mac нет), тесты должны проходить без CUDA/Tesseract.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install faster-whisper psutil pyyaml
+
+      - name: Компиляция всех модулей
+        run: python -m compileall -q hds tools
+
+      - name: Регрессионные тесты (macOS)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests -v
+
+  # Архив для macOS собирается на macOS-раннере: git archive сохраняет права
+  # на исполнение (.command, run_index) — это важно для Mac-архива.
+  build-macos:
+    needs: [test, test-macos]
+    if: success()
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Архив релиза для macOS (исходники + иконки + инсталляторы)
+        run: |
+          VERSION="${{ inputs.version }}"
+          git archive --format=zip --prefix="hermes-disk-search/" \
+            -o "hermes-disk-search-${VERSION}-macos.zip" HEAD
+
+      - name: Сборка mac-приложения запуска индексации
+        run: |
+          cd shortcuts/macos
+          zip -ry "$GITHUB_WORKSPACE/HermesDiskSearchIndex.app.zip" HermesDiskSearchIndex.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-archive
+          path: hermes-disk-search-*-macos.zip
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-app
+          path: HermesDiskSearchIndex.app.zip
+          if-no-files-found: error
+
   release:
-    needs: test
+    needs: [test, build-macos]
     if: success()
     runs-on: windows-latest
     steps:
@@ -58,13 +115,25 @@ jobs:
             gh release delete "$tag" --yes --cleanup-tag
           }
 
-      - name: Сборка ассетов
+      - name: Скачивание macOS-ассетов
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-archive
+          path: dist
+
+      - name: Скачивание mac-приложения
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-app
+          path: dist
+
+      - name: Архив релиза для Windows (исходники + иконки + инсталляторы)
+        env:
+          VERSION: ${{ inputs.version }}
         shell: pwsh
         run: |
-          python -m pip install --quiet Pillow
-          python tools/make_icon.py
-          Compress-Archive -Path shortcuts/macos/HermesDiskSearchIndex.app -DestinationPath HermesDiskSearchIndex.app.zip -Force
-          Compress-Archive -Path assets -DestinationPath hds-icons.zip -Force
+          git archive --format=zip --prefix="hermes-disk-search/" `
+            -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
 
       - name: Создание релиза
         env:
@@ -74,7 +143,12 @@ jobs:
         run: |
           $tag = "${{ inputs.version }}"
           $noteFile = "RELEASE_NOTES_$tag.md"
-          $assets = @('assets/icon.png','assets/icon.ico','assets/icon.icns','HermesDiskSearchIndex.app.zip','hds-icons.zip')
+          $macZip = Join-Path 'dist' "hermes-disk-search-$tag-macos.zip"
+          $assets = @(
+            "hermes-disk-search-$tag-windows.zip",
+            $macZip,
+            (Join-Path 'dist' 'HermesDiskSearchIndex.app.zip')
+          )
           if (Test-Path $noteFile) {
             gh release create $tag --title "$tag — hermes-disk-search" --notes-file $noteFile @assets
           } else {

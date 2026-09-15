@@ -1,5 +1,6 @@
 """Извлечение текста: txt/md/код, PDF, DOCX, XLSX, PPTX (OCR пустых страниц PDF)."""
 import os
+import sys
 
 from .config import dig
 
@@ -65,6 +66,13 @@ def _tesseract_ready(cfg):
             # пользовательском tessdata — указываем его, если он существует
             user_td = os.path.join(os.environ.get("LOCALAPPDATA", ""),
                                    "Tesseract-OCR", "tessdata")
+            if sys.platform == "darwin" and not os.path.isdir(user_td):
+                # macOS: tesseract из Homebrew — языки в share/tessdata
+                for td in ("/opt/homebrew/share/tessdata",
+                           "/usr/local/share/tessdata"):
+                    if os.path.isdir(td):
+                        user_td = td
+                        break
             if os.path.isdir(user_td):
                 os.environ.setdefault("TESSDATA_PREFIX", user_td)
             pytesseract.get_tesseract_version()

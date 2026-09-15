@@ -18,7 +18,7 @@ index:
   ocr_tesseract_cmd: 'C:\Program Files\Tesseract-OCR\tesseract.exe'  # путь к tesseract.exe, если не в PATH
   transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
   whisper_model: small
-  whisper_device: cuda      # cuda | metal | cpu
+  whisper_device: cuda      # cuda | metal | cpu; на macOS cuda автоматически = cpu/int8 (CUDA нет), metal — экспериментально
   whisper_compute: float16
   whisper_load_timeout: 180 # сек; при зависании CUDA-загрузки — автоматический fallback на CPU
   whisper_batch: 8          # батчевая транскрипция (ровная загрузка GPU, ускорение x3-5); 0 = отключить

@@ -51,8 +51,8 @@ echo "[ok] зависимости установлены"
 
 # --- 7. Ярлык .app и права ---
 if [ -d "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" ]; then
-    APP_DST="/Applications/HermesDiskSearchIndex.app"
-    rm -rf "$APP" 2>/dev/null || rm -rf "$HOME/Applications/HermesDiskSearchIndex.app"
+    rm -rf "$HOME/Applications/HermesDiskSearchIndex.app" 2>/dev/null
+    rm -rf "/Applications/HermesDiskSearchIndex.app" 2>/dev/null
     cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" "$HOME/Applications/" 2>/dev/null \
         || cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" /Applications/ 2>/dev/null || true
     chmod +x "$ROOT/shortcuts/macos/Индексация дисков.command" 2>/dev/null
@@ -60,7 +60,22 @@ if [ -d "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" ]; then
     echo "[ok] Приложение «HDS Индексация» установлено в ~/Applications"
 fi
 
-# --- 8. Диагностика ---
+# --- 7.1. Предзагрузка модели Whisper (опционально, ~460 МБ) ---
+read -p "Предзагрузить модель Whisper (small, ~460 МБ, для транскрипции)? [y/N] " a
+if [ "$a" = "y" ]; then
+    HF_HUB_OFFLINE=1 "$ROOT/.venv/bin/python" -c \
+        "import sys; sys.path.insert(0, r'$ROOT'); from hds.config import load; from hds.extract_av import _get_whisper; _get_whisper(load()); print('[ok] модель Whisper готова')" \
+        || echo "[--] Не удалось: модель скачается при первой транскрипции"
+fi
+
+# --- 8. Интеграция с Hermes Desktop (MCP-сервер + скилл) ---
+# Не обязательна на этом шаге: если Hermes ещё не установлен, скрипт напечатает,
+# как подключить позже, и завершится успешно.
+if [ -f "$ROOT/installers/install_hermes_macos.sh" ]; then
+    bash "$ROOT/installers/install_hermes_macos.sh" || true
+fi
+
+# --- 9. Диагностика ---
 cd "$ROOT" && "$ROOT/.venv/bin/python" -m hds.cli check
 echo ""
 echo "== Готово. Первичная индексация: запустите «Индексация дисков.command» =="

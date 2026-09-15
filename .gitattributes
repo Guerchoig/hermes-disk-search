@@ -1,0 +1,7 @@
+# Скрипты для macOS должны всегда храниться и выдаваться с LF —
+# bash на CRLF-файлах не работает («$'\r': command not found»).
+*.command text eol=lf
+*.sh text eol=lf
+shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
