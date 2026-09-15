@@ -2,7 +2,7 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search`
 > GitHub: Guerchoig/hermes-disk-search (private), ветка main
-> Версия: v0.2.1 (релиз выпущен через GitHub Actions, run 34711931420 — success)
+> Версия: v0.3.0 (релиз выпущен через GitHub Actions, run 34935328484 — success)
 
 ## 1. ЗАДАЧА
 
