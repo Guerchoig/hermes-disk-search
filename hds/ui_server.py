@@ -457,6 +457,15 @@ def _save_config(yaml_text):
 
 
 
+def _looks_abs(p):
+    """Абсолютен ли путь на любой ОС: os.path.isabs плюс Windows-пути с буквой
+    диска ('D:\\...' / 'D:/...'), которые на POSIX os.path.abspath ошибочно
+    считает относительными и приклеивает к ним cwd."""
+    if os.path.isabs(p):
+        return True
+    return len(p) >= 3 and p[1] == ":" and p[2] in "\\/"
+
+
 def _set_exclude_paths(paths):
     """Сохранение index.exclude_paths в config.yaml с сохранением комментариев.
     Пути нормализуются в абсолютные; YAML-значения в одинарных кавычках
@@ -472,7 +481,7 @@ def _set_exclude_paths(paths):
         p = str(p).strip().strip('"').strip("'")
         if not p:
             continue
-        ap = os.path.abspath(p)
+        ap = p if _looks_abs(p) else os.path.abspath(p)
         k = os.path.normcase(ap).lower()
         if k not in seen:
             seen.add(k)
@@ -510,7 +519,7 @@ def _set_exclude_paths(paths):
     os.replace(tmp, cfg_path)
     roots_hit = [r for r in (dig(load(), "index.roots", []) or [])
                  if indexer._prefix_excluded(
-                     r, [os.path.normcase(os.path.normpath(p)) for p in norm])]
+                     r, [indexer._norm_path(p) for p in norm])]
     warn = " ВНИМАНИЕ: исключение покрывает корень индексации (%s)!" % ", ".join(roots_hit) if roots_hit else ""
     return {"ok": True, "paths": norm,
             "msg": "Сохранено путей: %d. Применяется к новым запускам — перезапустите "

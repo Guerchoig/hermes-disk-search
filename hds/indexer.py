@@ -60,11 +60,18 @@ def iter_files(cfg, roots=None):
                 yield fp
 
 
+def _norm_path(p):
+    """Кроссплатформенная нормализация для сравнения путей/префиксов:
+    нижний регистр и разделители -> '/'. Windows-пути ('D:\\x') корректно
+    сравниваются на любой ОС (на POSIX os.sep == '/', а '\\' — обычный символ)."""
+    return os.path.normcase(os.path.normpath(str(p).strip())).replace("\\", "/").lower()
+
+
 def _excluded_prefixes(cfg):
     """Нормализованные префиксы из index.exclude_paths (регистр/слэши ОС)."""
     out = []
     for p in dig(cfg, "index.exclude_paths", []) or []:
-        p = os.path.normcase(os.path.normpath(str(p).strip())).lower()
+        p = _norm_path(p)
         if p and p not in out:
             out.append(p)
     return out
@@ -75,16 +82,16 @@ def _prefix_excluded(path, prefixes):
     Сравнение по границе компонента пути: 'D:\\Backup2' не совпадает с 'D:\\Backup'."""
     if not prefixes:
         return False
-    np = os.path.normcase(os.path.normpath(str(path))).lower()
-    return any(np == pr or np.startswith(pr + os.sep) for pr in prefixes)
+    np = _norm_path(path)
+    return any(np == pr or np.startswith(pr + "/") for pr in prefixes)
 
 
 def path_excluded(path, cfg):
     """True, если путь лежит в исключённом каталоге (exclude_dirs, по имени)
     или под исключённым префиксом пути (exclude_paths). Без учёта регистра."""
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
-    p = os.path.normpath(str(path)).replace("/", os.sep)
-    if any(part.lower() in excl for part in p.split(os.sep)):
+    p = str(path).replace("\\", "/")
+    if any(part.lower() in excl for part in p.split("/")):
         return True
     return _prefix_excluded(p, _excluded_prefixes(cfg))
 

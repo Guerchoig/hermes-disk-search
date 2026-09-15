@@ -46,23 +46,32 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
+      # Python из Homebrew: сборки python.org (actions/setup-python на macOS)
+      # собраны без поддержки загрузки расширений sqlite3 — sqlite-vec
+      # не загрузится и векторный поиск будет недоступен.
+      - name: Python 3.12 (Homebrew — sqlite3 с загрузкой расширений)
+        run: |
+          PY3="$(brew --prefix python@3.12 2>/dev/null)/bin/python3.12"
+          if [ ! -x "$PY3" ]; then
+            brew install python@3.12
+            PY3="$(brew --prefix python@3.12)/bin/python3.12"
+          fi
+          "$PY3" -c "import sqlite3; c = sqlite3.connect(':memory:'); c.enable_load_extension(False); print('[ok] sqlite3: загрузка расширений доступна')"
+          echo "$(dirname "$PY3")" >> "$GITHUB_PATH"
 
       - name: Установка зависимостей
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install faster-whisper psutil pyyaml
+          python3.12 -m pip install --upgrade pip
+          python3.12 -m pip install -r requirements.txt
+          python3.12 -m pip install faster-whisper psutil pyyaml
 
       - name: Компиляция всех модулей
-        run: python -m compileall -q hds tools
+        run: python3.12 -m compileall -q hds tools
 
       - name: Регрессионные тесты (macOS)
         env:
           PYTHONIOENCODING: utf-8
-        run: python -m unittest discover -s tests -v
+        run: python3.12 -m unittest discover -s tests -v
 
   # Архив для macOS собирается на macOS-раннере: git archive сохраняет права
   # на исполнение (.command, run_index) — это важно для Mac-архива.
