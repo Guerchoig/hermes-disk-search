@@ -106,15 +106,22 @@ class DiagTests(unittest.TestCase):
 
     def test_db_fail_on_missing_drive(self):
         from hds.diag import has_failures, run_checks
+        # Путь, который не существует и не может быть создан на текущей ОС:
+        # Windows — несуществующий диск Q:, POSIX — каталог в корне без прав.
+        if os.name == "nt":
+            db_path, root = "Q:\\missing\\index.db", "Q:\\data"
+        else:
+            db_path, root = "/nonexistent_hds_test_dir/index.db", "/nonexistent_hds_test_dir"
         with open(self.cfg, "w", encoding="utf-8") as f:
             f.write("index:\n"
-                    "  roots: ['Q:\\data']\n"
+                    "  roots: ['%s']\n"
                     "embedding:\n"
                     "  dim: 8\n"
                     "  base_url: 'http://127.0.0.1:1/v1'\n"
-                    "db_path: 'Q:\\missing\\index.db'\n"
+                    "db_path: '%s'\n"
                     "chat:\n"
-                    "  base_url: 'http://127.0.0.1:1/v1'\n")
+                    "  base_url: 'http://127.0.0.1:1/v1'\n"
+                    % (root.replace("'", "''"), db_path.replace("'", "''")))
         checks = run_checks()
         db = next(c for c in checks if c["id"] == "db")
         self.assertEqual(db["status"], "fail")
