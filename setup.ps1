@@ -6,6 +6,16 @@ $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 Set-Location $root
 
+# Снятие пометки «скачано из интернета» (Zone.Identifier): архив релиза,
+# распакованный Проводником, передаёт её всем файлам, и политика RemoteSigned
+# требует цифровую подпись для запуска скриптов. Текущий запуск уже идёт
+# с -ExecutionPolicy Bypass, поэтому снять пометку безопасно — повторные
+# запуски и «Запустить с помощью PowerShell» будут работать без Bypass.
+try {
+    Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
+        Unblock-File -ErrorAction SilentlyContinue
+} catch { }
+
 # --- Поиск рабочего Python 3.x ---
 # Кандидаты: py-лаунчер, затем python из PATH.
 # Заглушка Microsoft Store (WindowsApps) отсеивается фактическим запуском --version.

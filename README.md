@@ -30,9 +30,14 @@ watcher: мгновенная ->  обход дисков (D:\)    ->   SQLite +
 
 ## Установка — Windows
 
+Скачайте архив релиза, распакуйте и запустите **`setup.cmd` двойным кликом** —
+обёртка сама снимает пометку «скачано из интернета» (MotW) со всех файлов и
+запускает установщик с `-ExecutionPolicy Bypass` (подробнее — «Блокировки
+скачивания и подпись» ниже). Либо в PowerShell:
+
 ```powershell
 cd C:\Users\<пользователь>\hermes-disk-search
-.\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 ```
 
 Установщик (`setup.ps1` — единственная точка входа, `installers\install_windows.ps1`
@@ -54,12 +59,38 @@ cd C:\Users\<пользователь>\hermes-disk-search
 
 Диагностика (при желании): `.venv\Scripts\python.exe -m hds.cli check`
 
+### Блокировки «скачано из интернета» и цифровая подпись
+
+- **Windows**: файлы, распакованные из скачанного браузером ZIP, получают пометку
+  MotW (Zone.Identifier), и политика RemoteSigned требует подпись для запуска
+  скриптов. `setup.cmd` снимает пометку (Unblock-File) со всех файлов проекта и
+  запускает установщик с `-ExecutionPolicy Bypass`; setup.ps1 снимает пометку
+  повторно на всякий случай; скачанный Vulkan-рантайм whisper.cpp разблокируется
+  автоматически. SmartScreen при первом запуске скачанных exe может спросить —
+  «Подробнее → Выполнить в любом случае». Полное решение — Authenticode-сертификат
+  (подпись скриптов и exe через signtool убирает и требование подписи, и
+  SmartScreen), но сертификат платный; без него связки setup.cmd + Unblock-File
+  достаточно для запуска.
+- **macOS**: скачанные файлы получают карантинную метку com.apple.quarantine —
+  Gatekeeper блокирует неподписанные приложения («повреждён» / «не удаётся
+  открыть»). `install_macos.command` снимает карантин рекурсивно (`xattr -dr`)
+  с проекта и установленного приложения; mac-приложение в релизе подписано
+  ad-hoc (бесплатно, защищает от «повреждён»). Полное решение — Apple Developer
+  Program ($99/год) + нотаризация.
+
 ## Установка — macOS (Apple Silicon M1-M4)
 
 ```bash
 cd ~/hermes-disk-search
 bash installers/install_macos.command
 ```
+
+Инсталлятор запускается из Терминала и **сам снимает карантин Gatekeeper**
+(`xattr -dr com.apple.quarantine`) с проекта и установленного приложения —
+скачанный архив не будет «повреждённым». Для отдельно скачанного
+`HermesDiskSearchIndex.app.zip`: после распаковки выполните
+`xattr -dr com.apple.quarantine HermesDiskSearchIndex.app` или правый клик →
+«Открыть».
 
 Инсталлятор сам ставит недостающее через Homebrew (python3, ffmpeg, опционально
 Tesseract + `tesseract-lang` для русского OCR), создаёт venv, ставит зависимости,

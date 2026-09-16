@@ -90,9 +90,14 @@ jobs:
           git archive --format=zip --prefix="hermes-disk-search/" \
             -o "hermes-disk-search-${VERSION}-macos.zip" HEAD
 
-      - name: Сборка mac-приложения запуска индексации
+      - name: Сборка mac-приложения запуска индексации (ad-hoc подпись)
         run: |
           cd shortcuts/macos
+          # Ad-hoc подпись: без неё неподписанный bundle после распаковки
+          # из скачанного архива macOS помечает «повреждённым». Ad-hoc бесплатна
+          # и не заменяет нотаризацию, но вместе со снятием карантина
+          # (install_macos.command делает xattr -dr) приложение запускается.
+          codesign --deep --force --sign - HermesDiskSearchIndex.app || true
           zip -ry "$GITHUB_WORKSPACE/HermesDiskSearchIndex.app.zip" HermesDiskSearchIndex.app
 
       - uses: actions/upload-artifact@v4

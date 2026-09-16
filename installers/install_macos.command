@@ -6,6 +6,16 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 echo "== hermes-disk-search: установка (macOS) =="
 
+# --- 0. Снятие карантина Gatekeeper (com.apple.quarantine) ---
+# Файлы, распакованные из скачанного браузером архива, получают карантинную
+# метку; без её снятия macOS блокирует неподписанные бинарники и .command
+# («повреждён» / «не удаётся открыть»). Скрипт запускается из Терминала —
+# это разрешено, поэтому снять карантин можно уже здесь.
+if command -v xattr >/dev/null 2>&1; then
+    echo "[..] Снятие карантина Gatekeeper с файлов проекта..."
+    xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null || true
+fi
+
 have() { command -v "$1" >/dev/null 2>&1; }
 
 # --- 1. Homebrew ---
@@ -73,6 +83,8 @@ if [ -d "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" ]; then
     rm -rf "/Applications/HermesDiskSearchIndex.app" 2>/dev/null
     cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" "$HOME/Applications/" 2>/dev/null \
         || cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" /Applications/ 2>/dev/null || true
+    # снять карантин и с установленного приложения (если .app.zip скачан отдельно)
+    xattr -dr com.apple.quarantine "$HOME/Applications/HermesDiskSearchIndex.app" 2>/dev/null || true
     chmod +x "$ROOT/shortcuts/macos/Индексация дисков.command" 2>/dev/null
     chmod +x "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index" 2>/dev/null
     echo "[ok] Приложение «HDS Индексация» установлено в ~/Applications"

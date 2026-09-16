@@ -115,6 +115,20 @@ def _vulkan_zip_url():
                 return url
     return None
 
+def _unblock_tree(d):
+    """Windows: снять Zone.Identifier («скачано из интернета») у распакованных
+    файлов — аналогично Unblock-File, иначе ОС/политики могут блокировать запуск
+    скачанных бинарников (адаптировано из практики transcribeoffline)."""
+    if os.name != "nt":
+        return
+    for root, _dirs, files in os.walk(d):
+        for f in files:
+            try:
+                os.remove(os.path.join(root, f) + ":Zone.Identifier")
+            except OSError:
+                pass
+
+
 def download_backend(cfg, log=None, allow_unofficial=False):
     """Скачивает и разворачивает бэкенд: бинарник (Vulkan-сборка whisper.cpp)
     и GGML-веса модели. Возвращает (ok, msg).
@@ -157,6 +171,7 @@ def download_backend(cfg, log=None, allow_unofficial=False):
     with zipfile.ZipFile(zpath) as z:
         z.extractall(d)
     os.remove(zpath)
+    _unblock_tree(d)  # снять MotW, если архив скачан браузером и получил метку
     if not find_exe(cfg):
         return False, "В архиве не найден whisper-cli.exe/main.exe (распаковано в %s)" % d
     return _download_ggml_model(cfg, log)
