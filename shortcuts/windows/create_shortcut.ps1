@@ -1,6 +1,8 @@
 ﻿# Создание ярлыка «Hermes Disk Search» (веб-интерфейс) на рабочем столе и в папке проекта
 $root = $PSScriptRoot | Split-Path | Split-Path   # shortcuts\windows -> корень проекта
 $ws = New-Object -ComObject WScript.Shell
+# Реальный путь к рабочему столу (учитывает перенаправление в OneDrive)
+$desktop = [Environment]::GetFolderPath('Desktop')
 
 function New-Lnk($path) {
     $lnk = $ws.CreateShortcut($path)
@@ -13,8 +15,8 @@ function New-Lnk($path) {
 }
 
 New-Lnk (Join-Path $root 'shortcuts\windows\Hermes Disk Search.lnk')
-New-Lnk (Join-Path $env:USERPROFILE 'Desktop\Hermes Disk Search.lnk')
+New-Lnk (Join-Path $desktop 'Hermes Disk Search.lnk')
 # старый ярлык индексации больше не нужен — UI умеет запускать индексацию
-$old = Join-Path $env:USERPROFILE 'Desktop\Индексация дисков.lnk'
+$old = Join-Path $desktop 'Индексация дисков.lnk'
 if (Test-Path $old) { Remove-Item $old -Force }
-Write-Host 'Ярлык «Hermes Disk Search» создан на рабочем столе (открывает веб-интерфейс)'
+Write-Host "Ярлык «Hermes Disk Search» создан на рабочем столе ($desktop), открывает веб-интерфейс"

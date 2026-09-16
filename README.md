@@ -1,7 +1,7 @@
 # hermes-disk-search
 
 Система хранения и поиска информации на вашем компьютере по запросам на естественном языке.
-Работает поверх **Hermes Agent Desktop** + **LM Studio** (или Ollama) на CUDA-видеокарте или Mac M1-M5.
+Работает поверх **Hermes Agent Desktop** + **LM Studio** (или Ollama) на CUDA-видеокарте или Mac M1-M6.
 
 Пример вопроса в чате Hermes: *«Найди на моём компе, в каких проектах использовался 1С:Документооборот»* —
 ответ придёт со ссылками на локальные файлы (тексты, PDF, MS Office, MS Project, видео, картинки).
@@ -14,41 +14,45 @@ watcher: мгновенная ->  обход дисков (D:\)    ->   SQLite +
 реакция на события      PDF/DOCX/XLSX/PPTX        + FTS5 (ключевые слова)   поиск_local_files / ask_my_files
 файловой системы        MS Project .mpp           векторы bge-m3            CLI: python -m hds.cli search|ask
                         картинки: OCR (Tesseract)
-                        аудио/видео: faster-whisper (CUDA)
+                        аудио/видео: faster-whisper (CUDA/Metal/CPU)
 ```
 
 **Диспетчер** индексации запускается при старте системы и постояно отслеживает действия пользователя с файлами и работу индексатора; при создании/удалении/изменении/перемещении файлов диспетчер дает индексатору команду на изменения в индексной базе. Если диспетчер был некоторое время не активен, то при старте он отслеживает все изменения произошедшие за это время в файловой системе.
 
-**Индексатор**, используя ИИ-модель эмбеддинов, по команде диспетчера создает или обновляет индексную базу
+**Индексатор**, используя ИИ-модель эмбеддингов, по команде диспетчера создает или обновляет индексную базу
 
 **Индексная база (хранилище)** хранит гибридный индекс и сведения о файлах, она расположена в месте, указанном в настройках, и может быть перемещена из пользовательского интерфейса
 
 **MCP-сервер по команде Hermas Agent** осуществляет гибридный поиск:
-семантический (векторы) + ключевой (FTS5/BM25), слияние RRF. Если ИИ-модель эмбеддингов недоступна, то поиск производится только по ключевым словам, система продолжает работать.
+семантический (векторы) + ключевой (FTS5/BM25), затем слияние результатов ()RRF). Если ИИ-модель эмбеддингов недоступна, то поиск производится только по ключевым словам, система продолжает работать.
 
-**Из web-интерфейса** можно изменять настройки запускать и останавливать диспетчер и индексатор, (пере)индексировать отдельные пути или файлы, изменять местоположение индексной базы.
+**Из web-интерфейса** можно изменять настройки, запускать и останавливать диспетчер и индексатор, (пере)индексировать отдельные пути или файлы, изменять местоположение индексной базы.
 
 ## Установка — Windows
 
 ```powershell
-cd C:\Users\Sasha\hermes-disk-search
+cd C:\Users\<пользователь>\hermes-disk-search
 .\setup.ps1
 ```
 
-Что нужно дополнительно:
+Установщик (`setup.ps1` — единственная точка входа, `installers\install_windows.ps1`
+оставлен как обёртка для совместимости) делает всё сам:
 
-1. **Embedding-модель `bge-m3`** — установлена (GGUF-версия `lm-kit/bge-m3-gguf`, Q8_0, 1024 dim).
-   Если понадобится переустановить: `lms get` часто не находит модель — скачайте файл вручную:
-   `curl.exe -L -o "%USERPROFILE%\.lmstudio\models\lm-kit\bge-m3-gguf\bge-m3-Q8_0.gguf" https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf`,
-   затем загрузите модель в LM Studio (или `lms load text-embedding-bge-m3 -y`).
-2. **Tesseract OCR** (текст на картинках/сканах): `winget install UB-Mannheim.TesseractOCR`
-   (+ пакет русского языка), путь к tesseract.exe — в `config.yaml: index.ocr_tesseract_cmd`, если не в PATH.
-3. **faster-whisper** (транскрипция аудио/видео на CUDA) — ставится setup.ps1; ffmpeg должен быть в PATH.
-4. **MS Project (.mpp)** — поддерживается «из коробки»: `mpxj` входит в requirements.txt;
-   нужна Java 11+ (JDK). Если Java не установлена системно, индексатор сам подхватит
-   пользовательскую JDK из `%LOCALAPPDATA%\jdk-21\` (Temurin 21).
+1. Находит рабочий Python 3.x и понятно ругается, если его нет (заглушка Store и т.п.).
+2. Ставит недостающее через winget: **ffmpeg** — автоматически; **Tesseract OCR** — по вашему разрешению; создаёт окружение - venv и устанавливает компоненты из файла зависимостей (+ faster-whisper).
+3. **Скачивает embedding-модель `bge-m3`** (GGUF `lm-kit/bge-m3-gguf`, Q8_0, 1024 dim, ~1,2 ГБ) в `%USERPROFILE%\.lmstudio\models\lm-kit\bge-m3-gguf\`, если её там нет, и пытается загрузить в LM Studio через `lms load`. Позже модель можно скачать/загрузить кнопками в веб-интерфейсе (группа «Модель эмбеддингов»).
+4. Замечает `config.yaml` с путями с другого компьютера (отсутствующие диски) и предлагает заменить их на профиль этого компьютера.
+5. По запросу предзагружает модель Whisper (~460 МБ), создаёт ярлык «Hermes Disk Search» на рабочем столе и (по запросу) автозапуск watcher'а, подключает MCP-сервер к Hermes Desktop.
 
-Диагностика: `.venv\Scripts\python.exe -m hds.cli check`
+Что нужно от пользователя:
+
+1. **Python 3.10+** с python.org (галочка «Add python.exe to PATH») — установить если не установлен.
+2. **LM Studio** (установить с https://lmstudio.ai): в интерфейсе LM Studio запустить сервер (Developer → Start Server) и скачать/загрузить **чат-модель** (например `qwen3.5-9b`). Всё остальное — из веб-интерфейса.
+3. **MS Project (.mpp)** — поддерживается «из коробки»: `mpxj` входит в requirements.txt; нужна установка Java 11+ (JDK). Если Java не установлена системно, индексатор сам подхватит пользовательскую JDK из `%LOCALAPPDATA%\jdk-21\` (Temurin 21).
+
+После установки командная строка не нужна: ярлык «Hermes Disk Search» открывает веб-интерфейс, где делается всё — корни индексации, старт/стоп индексации и watcher'а, перенос базы, скачивание/загрузка модели эмбеддингов, правка config.yaml. Веб-интерфейс запускается даже с отсутствующим или испорченным config.yaml (покажет ошибку и предложит поправить).
+
+Диагностика (при желании): `.venv\Scripts\python.exe -m hds.cli check`
 
 ## Установка — macOS (Apple Silicon M1-M4)
 
@@ -59,14 +63,18 @@ bash installers/install_macos.command
 
 Инсталлятор сам ставит недостающее через Homebrew (python3, ffmpeg, опционально
 Tesseract + `tesseract-lang` для русского OCR), создаёт venv, ставит зависимости,
+**скачивает embedding-модель `bge-m3`** в `~/.lmstudio/models/lm-kit/bge-m3-gguf/`,
 копирует приложение «HDS Индексация» в ~/Applications, подключает MCP-сервер
 к Hermes Desktop и запускает диагностику `python -m hds.cli check`.
 
 Отличия от Windows:
 
-- **CUDA недоступна** — транскрипция Whisper работает на CPU (`int8`). Код сам
-  переключает устройство на macOS (без ошибок «CUDA not available»); экспериментально
-  можно включить Metal: `config.yaml: index.whisper_device: metal` (ctranslate2 ≥ 4.5).
+- **CUDA недоступна** — инсталлятор на Apple Silicon сам подключает **Metal** через
+  mlx-whisper (устанавливает его и скачивает MLX-веса модели), и транскрипция идёт на GPU.
+  Если mlx-whisper недоступен — CPU (`int8`). Авто-детекция включена по умолчанию
+  (`index.whisper_device: auto`); явно включить Metal: `index.whisper_device: metal`.
+  Важно: через faster-whisper/ctranslate2 Metal недоступен в принципе (ctranslate2
+  поддерживает только cpu/cuda/auto), поэтому Metal — это отдельный бэкенд mlx-whisper.
 - **Пакеты nvidia-* не нужны** и на Mac не ставятся.
 - **Tesseract**: `brew install tesseract tesseract-lang`; языки лежат в
   `/opt/homebrew/share/tessdata` — код подхватывает их автоматически.
@@ -92,11 +100,11 @@ db_path: 'index.db'   # или путь на внешнем диске, напр
 На странице релизов GitHub выложены два полных архива (иконки `assets/` уже внутри —
 отдельно скачивать ничего не нужно) и mac-приложение:
 
-| Файл                                            | Для чего                                                                                      |
-| ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
-| `hermes-disk-search-<версия>-windows.zip` | Исходники + иконки + инсталляторы для Windows (`installers\install_windows.ps1`) |
-| `hermes-disk-search-<версия>-macos.zip`          | То же для macOS (`installers/install_macos.command`), права на исполнение сохранены           |
-| `HermesDiskSearchIndex.app.zip`                  | Готовое mac-приложение запуска индексации (в ~/Applications)                                  |
+| Файл                                          | Для чего                                                                                                        |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `hermes-disk-search-<версия>-windows.zip` | Исходники + иконки + инсталляторы для Windows (`installers\install_windows.ps1`)       |
+| `hermes-disk-search-<версия>-macos.zip`   | То же для macOS (`installers/install_macos.command`), права на исполнение сохранены |
+| `HermesDiskSearchIndex.app.zip`                 | Готовое mac-приложение запуска индексации (в ~/Applications)                        |
 
 Порядок установки из архива: распаковать → запустить инсталлятор своей ОС → следовать подсказкам.
 
@@ -176,13 +184,29 @@ cd ~/hermes-disk-search
   ускорение в 3–5 раз; при сбое автоматически откатывается к последовательному.
 - При зависании CUDA-загрузки (>180 с, `index.whisper_load_timeout`) — автоматический
   fallback на CPU (`int8`) с русским сообщением.
+- **Выбор устройства — авто-детекция** (`index.whisper_device: auto` по умолчанию).
+  Цепочка на Windows/Linux: **CUDA** (faster-whisper) → **Vulkan** (whisper.cpp — путь
+  GPU-ускорения для AMD/Intel) → **CPU** (`int8`). На macOS: Metal через mlx-whisper
+  (инсталлятор ставит его на Apple Silicon), иначе CPU.
+  Можно задать явно: `cuda`, `vulkan`, `cpu`, `metal` (только macOS).
+- **AMD/Intel без CUDA (Vulkan через whisper.cpp)**: ctranslate2 работает только с CUDA,
+  поэтому для AMD-карт используется отдельный бэкенд — whisper.cpp с Vulkan (GGML Vulkan
+  зреет с 2024 г. и на AMD по скорости сопоставим с CUDA на NVIDIA). Инсталлятор ставит его
+  автоматически, если CUDA не найдена и есть GPU (AMD/Radeon/NVIDIA/Intel); вручную:
+  `.venv\Scripts\python.exe -m hds.cli vulkan-setup` (скачивает бинарник и GGML-веса
+  `ggml-<имя>.bin` в `models\whisper-cpp\`; папку можно переопределить —
+  `index.whisper_cpp_dir`). Подойдёт и любая своя сборка whisper.cpp — просто положите
+  `whisper-cli.exe` в эту папку. Если готовая Vulkan-сборка недоступна, бэкенд можно
+  собрать: `cmake -B build -DGGML_VULKAN=ON` (README whisper.cpp). До установки бэкенда
+  (и при его сбое) транскрипция работает на CPU; UI-диагностика напомнит об установке.
 - Для CUDA нужны `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (ставятся инсталлятором;
   код проекта сам добавляет их DLL в пути поиска). Пакеты ставятся только на Windows —
   на macOS они не нужны.
 - **macOS (M1-M4)**: CUDA физически отсутствует — код сам переключает транскрипцию
-  на CPU (`int8`), без ошибок «CUDA not available» и без ложных fallback-таймаутов.
-  Экспериментальное ускорение на Apple Silicon: `index.whisper_device: metal`
-  (требует ctranslate2 ≥ 4.5; при сбое сработает обычный fallback на CPU).
+  на Metal (mlx-whisper) или CPU (`int8`), без ошибок «CUDA not available» и без ложных
+  fallback-таймаутов. Metal-ускорение: `index.whisper_device: metal` (или `auto`);
+  веса — `mlx-community/whisper-<имя>-mlx` (`index.whisper_mlx_repo`), скачиваются в
+  HF-кэш инсталлятором или при первой транскрипции; при сбое — обычный fallback на CPU.
 - Проверка вручную: `python -m hds.cli whisper-check`.
 
 ## Предупреждения HuggingFace при индексации (и что с ними делать)
@@ -343,6 +367,7 @@ Watcher — постоянно работающий фоновый процес�
 - **Резервная копия**: остановить watcher → скопировать `index.db*`; либо командой
   `db-move` на временный путь (она делает консистентную копию);
 - **Перенос на другой диск/путь** — атомарная команда:
+
   ```powershell
   python -m hds.cli db-move --to "D:\hermes-disk-search-db\index.db"
   ```
@@ -352,7 +377,7 @@ Watcher — постоянно работающий фоновый процес�
   3. проверяет равенство счётчиков (файлы/чанки) — при расхождении откат;
   4. **атомарно** переключает `db_path` в `config.yaml` (замена файла через `os.replace`);
   5. переименовывает старую БД в `index.db.moved-<дата>` — остаётся резервной копией,
-     можно удалить;
+  можно удалить;
   6. перезапускает watcher с новой БД (если он работал).
 - **Смена модели эмбеддингов** (`embedding.dim`) — векторная таблица пересоздаётся
   автоматически, затем `index --full`.
@@ -453,10 +478,13 @@ tools:
 | `ocr_tesseract_cmd`    | `""`                      | Путь к`tesseract.exe`, если не в PATH                                                                                                                                                                                                                                                                                                                                                                                  |
 | `transcribe`           | `true`                    | Транскрипция аудио/видео; нужен faster-whisper                                                                                                                                                                                                                                                                                                                                                            |
 | `whisper_model`        | `small`                   | Модель Whisper (`tiny`/`base`/`small`/`medium`/`large-v3`); качается в `models\whisper-<имя>`                                                                                                                                                                                                                                                                                                          |
-| `whisper_device`       | `cuda`                    | `cuda` (Windows/Linux), `cpu`; на macOS `cuda` автоматически заменяется на `cpu`/`int8`, `metal` — экспериментально (Apple Silicon) |
+| `whisper_device`       | `auto`                    | Авто-детекция: CUDA → Vulkan (whisper.cpp, для AMD/Intel) → CPU (`int8`); на macOS — Metal (mlx-whisper) или CPU. Явно: `cuda`, `vulkan`, `cpu`, `metal` (macOS)                                                                                                                              |
+| `whisper_mlx_repo`     | `mlx-community/whisper-<имя>-mlx` | Репозиторий MLX-весов для Metal-бэкенда (macOS)                                                                                                                                                                                                                                                               |
+| `whisper_cpp_dir`      | `models\whisper-cpp`    | Папка бэкенда whisper.cpp (бинарник + GGML-веса `ggml-<имя>.bin`); ставится `vulkan-setup`                                                                                                                                                         |
 | `whisper_compute`      | `float16`                 | Точность вычислений:`float16` на GPU, на CPU рекомендуется `int8`                                                                                                                                                                                                                                                                                                                             |
 | `whisper_load_timeout` | `180`                     | Сек; при зависании CUDA-загрузки — авто-fallback на CPU (`int8`)                                                                                                                                                                                                                                                                                                                                     |
 | `whisper_batch`        | `8`                       | Батчевая транскрипция: ровная загрузка GPU, ускорение ×3–5;`0` — последовательный режим                                                                                                                                                                                                                                                                         |
+| `whisper_language`     | `""`                      | Язык аудио: `""` — авто-детекция; `"ru"` — фиксировать русский (надёжнее на tiny/base — авто-детект коротких фраз иногда ошибается)                                                                                                                                                                                                                            |
 | `whisper_dir`          | `models\whisper-<имя>` | Папка локальной копии модели (можно вынести на другой диск)                                                                                                                                                                                                                                                                                                                         |
 | `hf_token`             | `""`                      | Токен HuggingFace (опционально, только для скачивания моделей)                                                                                                                                                                                                                                                                                                                             |
 | `max_chunks`           | `2000`                    | Лимит чанков на файл — защита от гигантских CSV/логов (обрезка с`[warn]`); `0` — без лимита                                                                                                                                                                                                                                                                           |

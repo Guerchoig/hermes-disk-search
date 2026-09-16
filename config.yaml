@@ -18,10 +18,18 @@ index:
   ocr_tesseract_cmd: 'C:\Program Files\Tesseract-OCR\tesseract.exe'  # путь к tesseract.exe, если не в PATH
   transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
   whisper_model: small
-  whisper_device: cuda      # cuda | metal | cpu; на macOS cuda автоматически = cpu/int8 (CUDA нет), metal — экспериментально
+  whisper_device: auto      # auto | cuda | vulkan | cpu | metal:
+                            #   auto = CUDA → Vulkan (whisper.cpp, AMD/Intel) → CPU (int8);
+                            #   vulkan = whisper.cpp; бэкенд ставится setup.ps1 или
+                            #     'python -m hds.cli vulkan-setup' (GPU-ускорение для AMD/Intel);
+                            #   metal = только macOS Apple Silicon через mlx-whisper
+  # whisper_mlx_repo: 'mlx-community/whisper-small-mlx'  # MLX-веса для Metal (macOS, опционально)
+  # whisper_cpp_dir: 'models\whisper-cpp'  # папка бинарника whisper.cpp + GGML-весов (Windows)
   whisper_compute: float16
   whisper_load_timeout: 180 # сек; при зависании CUDA-загрузки — автоматический fallback на CPU
   whisper_batch: 8          # батчевая транскрипция (ровная загрузка GPU, ускорение x3-5); 0 = отключить
+  whisper_language: ""      # "" = авто-детекция языка; "ru" — фиксировать русский
+                            # (надёжнее на tiny/base: авто-детект коротких фраз иногда ошибается)
   hf_token: ""              # опционально: токен HuggingFace (https://huggingface.co/settings/tokens) — быстрее загрузки моделей
   max_chunks: 3000          # максимум чанков на файл (гигантские тексты обрезаются; 0 = без лимита)
 

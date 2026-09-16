@@ -24,6 +24,123 @@ _cfg_lock = threading.Lock()
 _ui_index_args = {"roots": None, "full": False}  # параметры последнего UI-старта индексации
 
 
+# --- Устойчивость к отсутствующим/битым настройкам --------------------------
+def _safe_cfg():
+    """Возвращает (cfg, error): гарантирует наличие config.yaml (создаёт
+    дефолтный при отсутствии); при нечитаемом YAML отдаёт пустой словарь
+    и текст ошибки. UI обязан открываться при любых настройках."""
+    from .config import ensure_config, load
+
+    try:
+        ensure_config()
+        return load(), ""
+    except Exception as e:  # noqa: BLE001
+        return {}, "config.yaml не читается: %s" % e
+
+
+def _venv_python():
+    """Интерпретатор venv для фоновых процессов (watcher), кросс-платформенно."""
+    if os.name == "nt":
+        return os.path.join(PROJECT, ".venv", "Scripts", "pythonw.exe")
+    return os.path.join(PROJECT, ".venv", "bin", "python")
+
+
+# --- Модель эмбеддингов: статус / скачивание / загрузка ---------------------
+_MODEL_NAME = "text-embedding-bge-m3"
+_MODEL_URL = "https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf"
+_EMB_DL = {"running": False, "progress": 0.0, "msg": "", "error": ""}
+
+
+def _gguf_path():
+    home = os.path.expanduser("~")
+    return os.path.join(home, ".lmstudio", "models", "lm-kit",
+                        "bge-m3-gguf", "bge-m3-Q8_0.gguf")
+
+
+def _lm_models():
+    """(server_ok, ids) — опрос LM Studio на localhost:1234."""
+    import requests as rq
+
+    try:
+        r = rq.get("http://localhost:1234/v1/models", timeout=2)
+        return True, [m.get("id") for m in r.json().get("data", [])]
+    except Exception:  # noqa: BLE001
+        return False, []
+
+
+def _model_status():
+    server_ok, models = _lm_models()
+    return {
+        "gguf_path": _gguf_path(),
+        "gguf_ready": os.path.exists(_gguf_path()),
+        "downloading": _EMB_DL["running"],
+        "progress": _EMB_DL["progress"],
+        "msg": _EMB_DL["error"] or _EMB_DL["msg"],
+        "server_ok": server_ok,
+        "model_loaded": bool(server_ok and _MODEL_NAME in models),
+    }
+
+
+def _model_download():
+    """Фоновое скачивание GGUF bge-m3 (~1,2 ГБ) в папку моделей LM Studio."""
+    if _EMB_DL["running"]:
+        return {"ok": False, "msg": "Скачивание уже идёт"}
+    if os.path.exists(_gguf_path()):
+        return {"ok": True, "msg": "Файл модели уже на месте"}
+    _EMB_DL.update({"running": True, "progress": 0.0,
+                    "msg": "начинаю скачивание", "error": ""})
+
+    def job():
+        try:
+            os.makedirs(os.path.dirname(_gguf_path()), exist_ok=True)
+            tmp = _gguf_path() + ".part"
+            import requests as rq
+
+            with rq.get(_MODEL_URL, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                total = int(r.headers.get("Content-Length", 0))
+                done = 0
+                with open(tmp, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            _EMB_DL["progress"] = round(done / total * 100, 1)
+                        _EMB_DL["msg"] = "скачано %d МБ из %s" % (
+                            done // 1048576,
+                            ("%d МБ" % (total // 1048576)) if total else "?")
+            os.replace(tmp, _gguf_path())
+            _EMB_DL.update({"running": False, "progress": 100.0,
+                            "msg": "модель скачана — загрузите её кнопкой «Загрузить» "
+                                   "или в LM Studio (Developer → Load)"})
+        except Exception as e:  # noqa: BLE001
+            _EMB_DL.update({"running": False, "msg": "",
+                            "error": "ошибка скачивания: %s" % e})
+
+    threading.Thread(target=job, daemon=True).start()
+    return {"ok": True, "msg": "Скачивание начато (~1,2 ГБ, один раз)"}
+
+
+def _model_load():
+    """Загрузка модели в запущенный LM Studio через lms CLI (best effort)."""
+    import shutil
+
+    exe = shutil.which("lms")
+    if not exe:
+        return {"ok": False, "msg": "CLI 'lms' не найден — откройте LM Studio и "
+                                    "загрузите модель вручную: Developer → "
+                                    "Select a model to load → text-embedding-bge-m3"}
+    try:
+        r = subprocess.run([exe, "load", _MODEL_NAME, "-y"],
+                           capture_output=True, timeout=600)
+        if r.returncode == 0:
+            return {"ok": True, "msg": "Модель загружена в LM Studio"}
+        out = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")[:300]
+        return {"ok": False, "msg": "lms load завершился с ошибкой: %s" % out}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Не удалось выполнить lms load: %s" % e}
+
+
 def _pid_alive(pid):
     if os.name == "nt":
         import ctypes
@@ -131,11 +248,11 @@ def _watch_start():
     running, _pid = _watch_running()
     if running:
         return {"ok": False, "msg": "watcher уже запущен"}
-    exe = os.path.join(PROJECT, ".venv", "Scripts", "pythonw.exe")
+    exe = _venv_python()
     if not os.path.exists(exe):
-        return {"ok": False, "msg": "pythonw.exe не найден"}
-    subprocess.Popen([exe, "-m", "hds.cli", "watch"], cwd=PROJECT,
-                     creationflags=subprocess.CREATE_NO_WINDOW)
+        return {"ok": False, "msg": "Интерпретатор venv не найден: %s" % exe}
+    kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    subprocess.Popen([exe, "-m", "hds.cli", "watch"], cwd=PROJECT, **kwargs)
     return {"ok": True}
 
 
@@ -251,7 +368,8 @@ _CONFIG_FIELDS = {
 def _db_stats():
     from .config import db_abs_path
 
-    path = db_abs_path(load())
+    cfg, _err = _safe_cfg()
+    path = db_abs_path(cfg)
     info = {"path": path, "size_mb": 0.0}
     if os.path.exists(path):
         info["size_mb"] = round(os.path.getsize(path) / 1048576.0, 1)
@@ -273,7 +391,7 @@ def _build_trees():
     from .config import db_abs_path
     from .indexer import _kind_of
 
-    cfg = load()
+    cfg, _err = _safe_cfg()
     excl = {str(e).lower() for e in dig(cfg, "index.exclude_dirs", [])}
     disk = {}
     for root in [os.path.abspath(r) for r in dig(cfg, "index.roots", [])]:
@@ -542,8 +660,14 @@ def _start_index(full=False, roots=None):
         roots = [r.strip() for r in roots.split(";") if r.strip()]
     roots_list = roots or None
     _ui_index_args.update({"roots": roots_list, "full": full})
-    cfg = load()
-    conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
+    cfg, cfg_err = _safe_cfg()
+    if cfg_err:
+        return {"ok": False, "msg": "Настройки не читаются: " + cfg_err}
+    try:
+        conn = dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Не удалось открыть БД: %s — проверьте db_path "
+                                    "в настройках (файл config.yaml ниже)" % e}
     emb = make_embedder(cfg)
 
     def job():
@@ -568,7 +692,7 @@ def _db_move(new_path, force=False):
         while getattr(indexer, "_ACTIVE_REPORTER", None) is not None and time.time() < deadline:
             time.sleep(1)
     res = move_db(new_path, force=force, project=PROJECT,
-                  venv_pythonw=os.path.join(PROJECT, ".venv", "Scripts", "pythonw.exe"))
+                  venv_pythonw=_venv_python())
     if res.get("ok") and was_ui_index:
         time.sleep(1)
         print("[db-move] перезапускаю индексацию с прежними настройками", flush=True)
@@ -590,79 +714,116 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(self.rfile.read(n) or b"{}")
 
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            html = open(os.path.join(PROJECT, "assets", "ui.html"), "rb").read()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
-        elif self.path == "/api/status":
-            cfg = load()
-            with open(os.path.join(PROJECT, "config.yaml"),
-                      "r", encoding="utf-8-sig") as f:
-                yaml_text = f.read()
-            w_running, w_pid = _watch_running()
-            self._json({
-                "index": _index_state(),
-                "watch": {"running": w_running, "pid": w_pid,
-                          "autostart": _watch_autostart_on()},
-                "db": _db_stats(),
-                "config_yaml": yaml_text,
-                "roots": [os.path.abspath(r) for r in dig(cfg, "index.roots", [])],
-                "exclude_paths": [os.path.abspath(p)
-                                  for p in dig(cfg, "index.exclude_paths", [])],
-                "options": {"transcribe": bool(dig(cfg, "index.transcribe", True)),
-                            "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
-                            "max_chunks": dig(cfg, "index.max_chunks", 2000)},
-            })
-        elif self.path == "/api/tree":
-            self._json(_build_trees())
-        else:
-            self._json({"error": "not found"}, 404)
+        try:
+            if self.path in ("/", "/index.html"):
+                html = open(os.path.join(PROJECT, "assets", "ui.html"), "rb").read()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(html)))
+                self.end_headers()
+                self.wfile.write(html)
+            elif self.path == "/api/status":
+                cfg, cfg_err = _safe_cfg()
+                yaml_text = ""
+                try:
+                    from .config import config_path
+                    with open(config_path(), "r", encoding="utf-8-sig") as f:
+                        yaml_text = f.read()
+                except Exception:  # noqa: BLE001
+                    pass
+                w_running, w_pid = _watch_running()
+                self._json({
+                    "config_error": cfg_err,
+                    "index": _index_state(),
+                    "watch": {"running": w_running, "pid": w_pid,
+                              "autostart": _watch_autostart_on()},
+                    "db": _db_stats(),
+                    "config_yaml": yaml_text,
+                    "roots": [os.path.abspath(r) for r in (dig(cfg, "index.roots", []) or [])
+                              if isinstance(r, str)],
+                    "exclude_paths": [os.path.abspath(p)
+                                      for p in (dig(cfg, "index.exclude_paths", []) or [])
+                                      if isinstance(p, str)],
+                    "options": {"transcribe": bool(dig(cfg, "index.transcribe", True)),
+                                "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
+                                "max_chunks": dig(cfg, "index.max_chunks", 2000)},
+                })
+            elif self.path == "/api/tree":
+                self._json(_build_trees())
+            elif self.path == "/api/model/status":
+                self._json(_model_status())
+            elif self.path == "/api/diagnostics":
+                from .diag import run_checks
+                cfg, cfg_err = _safe_cfg()
+                if cfg_err:
+                    checks = [{"id": "config", "status": "fail",
+                               "title": "Настройки не читаются", "msg": cfg_err,
+                               "fix": "Исправьте config.yaml в карточке «Настройки» и нажмите «Сохранить настройки»."}]
+                else:
+                    checks = run_checks(cfg)
+                self._json({"checks": checks,
+                            "ok": all(c["status"] != "fail" for c in checks)})
+            else:
+                self._json({"error": "not found"}, 404)
+        except Exception as e:  # noqa: BLE001
+            # UI не должен «падать» ни при каких настройках — отдаём ошибку JSON-ом
+            try:
+                self._json({"error": str(e)}, 500)
+            except Exception:  # noqa: BLE001
+                pass
 
     def do_POST(self):
-        body = self._body()
-        if self.path == "/api/index/start":
-            self._json(_start_index(full=bool(body.get("full")),
-                                    roots=body.get("roots") or None))
-        elif self.path == "/api/index/stop":
-            open(_STOP, "w").close()
-            self._json({"ok": True})
-        elif self.path == "/api/index/pause":
-            open(_PAUSE, "w").close()
-            self._json({"ok": True})
-        elif self.path == "/api/index/resume":
-            if os.path.exists(_PAUSE):
-                os.remove(_PAUSE)
-            self._json({"ok": True})
-        elif self.path == "/api/watch/start":
-            self._json(_watch_start())
-        elif self.path == "/api/watch/stop":
-            self._json(_watch_stop())
-        elif self.path == "/api/watch/autostart":
-            self._json({"ok": _watch_autostart_set(bool(body.get("enabled")))})
-        elif self.path == "/api/config/save":
-            with _cfg_lock:
-                self._json(_save_config(body.get("yaml", "")))
-        elif self.path == "/api/db/move":
-            path = body.get("path", "").strip()
-            if not path:
-                self._json({"ok": False, "msg": "Укажите путь"})
+        try:
+            body = self._body()
+            if self.path == "/api/index/start":
+                self._json(_start_index(full=bool(body.get("full")),
+                                        roots=body.get("roots") or None))
+            elif self.path == "/api/index/stop":
+                open(_STOP, "w").close()
+                self._json({"ok": True})
+            elif self.path == "/api/index/pause":
+                open(_PAUSE, "w").close()
+                self._json({"ok": True})
+            elif self.path == "/api/index/resume":
+                if os.path.exists(_PAUSE):
+                    os.remove(_PAUSE)
+                self._json({"ok": True})
+            elif self.path == "/api/watch/start":
+                self._json(_watch_start())
+            elif self.path == "/api/watch/stop":
+                self._json(_watch_stop())
+            elif self.path == "/api/watch/autostart":
+                self._json({"ok": _watch_autostart_set(bool(body.get("enabled")))})
+            elif self.path == "/api/config/save":
+                with _cfg_lock:
+                    self._json(_save_config(body.get("yaml", "")))
+            elif self.path == "/api/db/move":
+                path = body.get("path", "").strip()
+                if not path:
+                    self._json({"ok": False, "msg": "Укажите путь"})
+                else:
+                    self._json(_db_move(path, force=bool(body.get("force"))))
+            elif self.path == "/api/index/reindex":
+                path = (body.get("path") or "").strip().strip('"')
+                if not path or not os.path.exists(path):
+                    self._json({"ok": False, "msg": "Путь не существует: %s" % path})
+                else:
+                    self._json(_start_index(full=True, roots=path))
+            elif self.path == "/api/config/set":
+                self._json(_set_simple_config(body.get("key", ""), body.get("value")))
+            elif self.path == "/api/config/excludes":
+                self._json(_set_exclude_paths(body.get("paths") or []))
+            elif self.path == "/api/model/download":
+                self._json(_model_download())
+            elif self.path == "/api/model/load":
+                self._json(_model_load())
             else:
-                self._json(_db_move(path, force=bool(body.get("force"))))
-        elif self.path == "/api/index/reindex":
-            path = (body.get("path") or "").strip().strip('"')
-            if not path or not os.path.exists(path):
-                self._json({"ok": False, "msg": "Путь не существует: %s" % path})
-            else:
-                self._json(_start_index(full=True, roots=path))
-        elif self.path == "/api/config/set":
-            self._json(_set_simple_config(body.get("key", ""), body.get("value")))
-        elif self.path == "/api/config/excludes":
-            self._json(_set_exclude_paths(body.get("paths") or []))
-        else:
-            self._json({"error": "not found"}, 404)
+                self._json({"error": "not found"}, 404)
+        except Exception as e:  # noqa: BLE001
+            try:
+                self._json({"error": str(e)}, 500)
+            except Exception:  # noqa: BLE001
+                pass
 
     def log_message(self, *a):  # тишина в консоли
         pass

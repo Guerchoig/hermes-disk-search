@@ -149,64 +149,22 @@ def cmd_clip_index(args):
 
 
 def cmd_check(args):
-    import shutil
+    from .config import ensure_config
+    from .diag import has_failures, run_checks
 
-    import requests as rq
-
-    cfg = load()
-    ok = True
+    ensure_config()  # config.yaml может отсутствовать — создадим дефолтный
     print("== hermes-disk-search: проверка окружения ==")
-    try:
-        conn = _conn(cfg)
-        print("[ok] sqlite-vec загружен, БД: %s" % db_abs_path(cfg))
-        conn.close()
-    except Exception as e:  # noqa: BLE001
-        ok = False
-        print("[!!] sqlite-vec/БД: %s" % e)
-
-    chat_url = dig(cfg, "chat.base_url", "").rstrip("/") + "/models"
-    try:
-        r = rq.get(chat_url, timeout=10)
-        models = [m.get("id") for m in r.json().get("data", [])]
-        print("[ok] чат-эндпоинт %s; модели: %s" % (chat_url, models[:10]))
-        chat_model = dig(cfg, "chat.model")
-        if chat_model and models and chat_model not in models:
-            print("[!!] чат-модель '%s' не в списке загруженных" % chat_model)
-    except Exception as e:  # noqa: BLE001
-        ok = False
-        print("[!!] чат-эндпоинт %s недоступен: %s" % (chat_url, e))
-
-    emb = _emb(cfg)
-    try:
-        emb.ping()
-        print("[ok] эмбеддинги: модель '%s' отвечает" % emb.model)
-    except Exception as e:  # noqa: BLE001
-        print("[!!] эмбеддинги: %s" % e)
-        print("     -> скачайте '%s' в LM Studio (тип Embedding) и загрузите" % emb.model)
-
-    from .extractors import _tesseract_ready
-    if _tesseract_ready(cfg):
-        print("[ok] Tesseract OCR найден")
-    else:
-        print("[--] Tesseract OCR не найден (картинки без OCR): winget install UB-Mannheim.TesseractOCR")
-
-    if shutil.which("ffmpeg"):
-        print("[ok] ffmpeg найден")
-    else:
-        print("[--] ffmpeg не найден (видео без транскрипции)")
-
-    try:
-        import faster_whisper  # noqa: F401
-        print("[ok] faster-whisper установлен")
-    except Exception:  # noqa: BLE001
-        print("[--] faster-whisper не установлен: pip install faster-whisper")
-
-    try:
-        import mpxj  # noqa: F401
-        print("[ok] mpxj (MS Project) установлен")
-    except Exception:  # noqa: BLE001
-        print("[--] mpxj не установлен (.mpp не парсятся): pip install mpxj + Java 11+")
-
+    checks = run_checks()
+    for c in checks:
+        if c["status"] == "ok":
+            print("[ok] %s" % c["title"])
+            continue
+        print("[%s] %s" % ("!!" if c["status"] == "fail" else "--", c["title"]))
+        if c["msg"]:
+            print("     %s" % c["msg"])
+        if c["fix"]:
+            print("     -> %s" % c["fix"])
+    ok = not has_failures(checks)
     print("Итог: %s" % ("основные компоненты готовы" if ok else "есть критические проблемы"))
     return 0 if ok else 1
 
@@ -232,13 +190,31 @@ def cmd_whisper_check(args):
     return 0
 
 
+def cmd_vulkan_setup(args):
+    """Установка whisper.cpp (Vulkan-сборка + GGML-веса) — GPU-ускорение
+    транскрипции на AMD/Intel видеокартах, где CUDA недоступна."""
+    from .config import ensure_config
+    from .whisper_cpp import download_backend
+
+    ensure_config()
+    ok, msg = download_backend(load(), allow_unofficial=getattr(args, "unofficial", False))
+    print(("[ok] " if ok else "[!!] ") + msg)
+    if ok:
+        from .extract_av import _pick_device
+        dev, comp = _pick_device(load())
+        print("[ok] Авто-детекция выбрала: %s/%s" % (dev, comp))
+    return 0 if ok else 1
+
+
 def cmd_db_move(args):
     """Атомарный перенос индексной БД на новый путь (см. hds/dbops.py)."""
     from .config import PROJECT_ROOT
     from .dbops import move_db
 
+    py = (os.path.join(PROJECT_ROOT, ".venv", "Scripts", "pythonw.exe") if os.name == "nt"
+          else os.path.join(PROJECT_ROOT, ".venv", "bin", "python"))
     res = move_db(os.path.abspath(args.to), force=args.force, project=PROJECT_ROOT,
-                  venv_pythonw=os.path.join(PROJECT_ROOT, ".venv", "Scripts", "pythonw.exe"))
+                  venv_pythonw=py)
     print(res["msg"])
     return 0 if res["ok"] else 1
 
@@ -246,6 +222,8 @@ def cmd_db_move(args):
 def cmd_ui(args):
     """Локальный веб-интерфейс (браузер открывается автоматически)."""
     from . import ui_server
+    from .config import ensure_config
+    ensure_config()  # UI обязан запускаться даже без config.yaml
     ui_server.run(port=args.port, open_browser=not args.no_browser)
     return 0
 
@@ -313,6 +291,12 @@ def main(argv=None):
 
     pwc = sub.add_parser("whisper-check", help="ручная загрузка/проверка модели Whisper")
     pwc.set_defaults(fn=cmd_whisper_check)
+
+    pvk = sub.add_parser("vulkan-setup",
+                         help="установка whisper.cpp (Vulkan) — GPU-ускорение для AMD/Intel")
+    pvk.add_argument("--unofficial", action="store_true",
+                     help="разрешить стороннюю Vulkan-сборку (если официальной нет)")
+    pvk.set_defaults(fn=cmd_vulkan_setup)
 
     pui = sub.add_parser("ui", help="веб-интерфейс (настройки, управление индексацией)")
     pui.add_argument("--port", type=int, default=8765)

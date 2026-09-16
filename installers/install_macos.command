@@ -49,6 +49,24 @@ fi
 "$ROOT/.venv/bin/python" -m pip install faster-whisper -q
 echo "[ok] зависимости установлены"
 
+# --- 6.1. Модель эмбеддингов bge-m3 (автоскачивание, ~1,2 ГБ, если не установлена) ---
+bash "$ROOT/installers/ensure_embedding_model.sh"
+
+# --- 6.2. Metal для транскрипции (mlx-whisper, только Apple Silicon) ---
+if [ "$(uname -m)" = "arm64" ]; then
+    echo "[..] Apple Silicon: подключаю Metal-ускорение транскрипции (mlx-whisper)..."
+    if "$ROOT/.venv/bin/python" -m pip install mlx-whisper -q; then
+        echo "[ok] mlx-whisper установлен — транскрипция через Metal"
+        echo "[..] Предзагрузка Whisper-модели для Metal (mlx-community/whisper-small-mlx)..."
+        "$ROOT/.venv/bin/python" -c "from huggingface_hub import snapshot_download; snapshot_download('mlx-community/whisper-small-mlx'); print('[ok] модель для Metal готова')" \
+            || echo "[--] Не удалось сейчас — скачается при первой транскрипции"
+    else
+        echo "[--] mlx-whisper не установился — транскрипция на CPU (faster-whisper int8)"
+    fi
+else
+    echo "[--] Процессор $(uname -m) не Apple Silicon — транскрипция на CPU (faster-whisper int8)"
+fi
+
 # --- 7. Ярлык .app и права ---
 if [ -d "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" ]; then
     rm -rf "$HOME/Applications/HermesDiskSearchIndex.app" 2>/dev/null

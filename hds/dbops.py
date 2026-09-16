@@ -48,9 +48,11 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None,
     watch_was = any("watch" in cmd for _pid, cmd in procs)
     if procs:
         print("[db-move] останавливаю процессы hds: %d шт." % len(procs), flush=True)
+        import psutil
+
         for pid, _cmd in procs:
             try:
-                subprocess.run(["taskkill", "/F", "/PID", pid], capture_output=True)
+                psutil.Process(int(pid)).kill()  # кросс-платформенно (taskkill — только Windows)
             except Exception:  # noqa: BLE001
                 pass
         time.sleep(2)
@@ -101,8 +103,8 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None,
                 pass
 
     if watch_was and venv_pythonw and os.path.exists(venv_pythonw):
-        subprocess.Popen([venv_pythonw, "-m", "hds.cli", "watch"], cwd=project,
-                         creationflags=subprocess.CREATE_NO_WINDOW)
+        kwargs = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        subprocess.Popen([venv_pythonw, "-m", "hds.cli", "watch"], cwd=project, **kwargs)
         print("[db-move] watcher перезапущен", flush=True)
 
     return {"ok": True, "msg": "БД перенесена в %s (файлов %d, чанков %d); "

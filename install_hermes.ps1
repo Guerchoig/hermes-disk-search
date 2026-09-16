@@ -33,9 +33,9 @@ Write-Host "== Подключение disk-search к Hermes ($HermesDir) =="
 # --- 1. MCP-сервер disk-search в config.yaml (правка текстом, комментарии сохраняются) ---
 $mcpBlock = @(
     '  disk-search:'
-    '    command: C:\Users\Sasha\hermes-disk-search\.venv\Scripts\python.exe'
+    "    command: $root\.venv\Scripts\python.exe"
     '    args:'
-    '      - C:\Users\Sasha\hermes-disk-search\mcp_start.py'
+    "      - $root\mcp_start.py"
     '    timeout: 300'
 ) -join "`r`n"
 $enc = New-Object System.Text.UTF8Encoding($false)

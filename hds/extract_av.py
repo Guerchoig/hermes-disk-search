@@ -85,6 +85,145 @@ def _add_nvidia_dll_dirs():
     return dirs
 
 
+def _mlx_available():
+    """Установлен ли mlx-whisper (Metal-ускорение транскрипции на Apple Silicon)?"""
+    if sys.platform != "darwin":
+        return False
+    try:
+        import mlx_whisper  # noqa: F401
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pick_device(cfg, platform=None, cpp_available=None, cuda_count=None):
+    """Авто-детекция устройства транскрипции.
+
+    faster-whisper/ctranslate2 поддерживают ТОЛЬКО cpu/cuda/auto: ни Vulkan,
+    ни Metal/MPS у ctranslate2 нет (OpenNMT/CTranslate2#1562, faster-whisper#515).
+    Цепочка авто-детекции:
+      Windows/Linux: CUDA (faster-whisper) → Vulkan (whisper.cpp — путь для
+                     AMD/Intel; бэкенд ставится `python -m hds.cli vulkan-setup`)
+                     → CPU (int8);
+      macOS: Metal через mlx-whisper (если установлен), иначе CPU (int8).
+    Возвращает (device, compute); device ∈ {"cuda", "cpu", "vulkan", "metal-mlx"}.
+    Параметры platform/cpp_available/cuda_count — для тестов (иначе определяются сами).
+    """
+    plat = platform or sys.platform
+    device = str(dig(cfg, "index.whisper_device", "auto") or "auto").strip().lower()
+    if cpp_available is None:
+        from . import whisper_cpp as _wcpp
+        cpp_available = lambda: _wcpp.available(cfg)  # noqa: E731
+    elif not callable(cpp_available):
+        _cpp_flag = bool(cpp_available)
+        cpp_available = lambda: _cpp_flag  # noqa: E731
+
+    def _cuda_n():
+        if cuda_count is not None:
+            return cuda_count
+        try:
+            import ctranslate2
+            return ctranslate2.get_cuda_device_count()
+        except Exception:  # noqa: BLE001
+            return None
+
+    # metal — только macOS с установленным mlx-whisper
+    if device == "metal" or (device == "auto" and plat == "darwin"):
+        if plat == "darwin" and _mlx_available():
+            return "metal-mlx", "float16"
+        if device == "metal":
+            print("[whisper] metal недоступен (нужны macOS и 'pip install mlx-whisper') — авто-детекция",
+                  flush=True)
+        if device == "metal" and plat != "darwin":
+            device = "auto"
+        elif device == "auto" and plat == "darwin":
+            pass  # ниже уйдёт на CPU
+
+    # vulkan (whisper.cpp) — GPU-ускорение для AMD/Intel на Windows/Linux
+    if device in ("vulkan", "amd") and plat != "darwin":
+        if cpp_available():
+            return "vulkan", "ggml"
+        print("[whisper] whisper.cpp (Vulkan) не установлен — авто-детекция. "
+              "Установите бэкенд: python -m hds.cli vulkan-setup", flush=True)
+        device = "auto"
+
+    if device == "cuda":
+        if plat == "darwin":
+            print("[whisper] CUDA на macOS недоступен — использую CPU (int8)", flush=True)
+            return "cpu", "int8"
+        if _cuda_n() == 0:
+            print("[whisper] CUDA-устройства не найдены — использую CPU (int8)", flush=True)
+            return "cpu", "int8"
+        return "cuda", dig(cfg, "index.whisper_compute", "float16")
+
+    if device == "auto" and plat != "darwin":
+        n = _cuda_n()
+        if n is None:  # ctranslate2 не смог определить — пробовать CUDA бессмысленно
+            return "cpu", "int8"
+        if n > 0:
+            return "cuda", dig(cfg, "index.whisper_compute", "float16")
+        if cpp_available():
+            return "vulkan", "ggml"
+        return "cpu", "int8"
+
+    # cpu (в т.ч. auto на macOS без mlx-whisper)
+    compute = dig(cfg, "index.whisper_compute", "float16")
+    return "cpu", ("int8" if compute == "float16" else compute)
+
+
+class _MlxSeg:
+    def __init__(self, d):
+        self.text = d.get("text", "")
+        self.start = float(d.get("start", 0.0))
+        self.end = float(d.get("end", 0.0))
+
+
+class _MlxInfo:
+    def __init__(self, res):
+        ends = [float(s.get("end", 0.0)) for s in res.get("segments", [])]
+        self.duration = max(ends) if ends else 0.0
+
+
+class _MlxWhisper:
+    """Адаптер mlx-whisper (Apple Metal) под интерфейс faster_whisper.WhisperModel,
+    который ожидает _transcribe(). Веса — в формате MLX (mlx-community на HF)."""
+
+    is_mlx = True
+    batchable = False  # BatchedInferencePipeline работает только с faster-whisper
+
+    def __init__(self, repo):
+        self.repo = repo
+
+    def transcribe(self, path, vad_filter=True, language=None):
+        import mlx_whisper
+        res = mlx_whisper.transcribe(path, path_or_hf_repo=self.repo, language=language)
+        return iter(_MlxSeg(s) for s in res.get("segments", [])), _MlxInfo(res)
+
+
+def _get_mlx_model(cfg):
+    """Metal-бэкенд: скачивает MLX-веса в HF-кэш (онлайн или из кэша).
+    Возвращает _MlxWhisper или None — тогда вызывающий код уходит на CPU."""
+    name = dig(cfg, "index.whisper_model", "small")
+    repo = dig(cfg, "index.whisper_mlx_repo", "mlx-community/whisper-%s-mlx" % name)
+    try:
+        from huggingface_hub import snapshot_download
+    except Exception as e:  # noqa: BLE001
+        print("[whisper] Metal-бэкенд недоступен (%s) — использую CPU (int8)" % e, flush=True)
+        return None
+    print("[whisper] Metal (mlx-whisper): модель %s..." % repo, flush=True)
+    local = None
+    try:
+        local = snapshot_download(repo)
+    except Exception:  # noqa: BLE001
+        try:
+            local = snapshot_download(repo, local_files_only=True)
+        except Exception as e:  # noqa: BLE001
+            print("[whisper] Metal-модель недоступна (%s) — использую CPU (int8)" % e, flush=True)
+            return None
+    print("[whisper] Metal: модель готова (%s)" % local, flush=True)
+    return _MlxWhisper(local)
+
+
 def _get_whisper(cfg):
     global _whisper_model
     if _whisper_model is None:
@@ -94,18 +233,24 @@ def _get_whisper(cfg):
         token = dig(cfg, "index.hf_token", "")
         if token:
             os.environ.setdefault("HF_TOKEN", token)
+        device, compute = _pick_device(cfg)
+        if device == "metal-mlx":
+            # mlx-whisper скачивает веса сам (HF-кэш) — офлайн-режим ему мешает
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            _whisper_model = _get_mlx_model(cfg)
+            if _whisper_model is not None:
+                print("[whisper] Модель готова (Metal / mlx-whisper)", flush=True)
+                return _whisper_model
+            device, compute = "cpu", "int8"  # mlx не скачался/не установлен
+        if device == "vulkan":
+            from . import whisper_cpp
+            _whisper_model = whisper_cpp.make_adapter(cfg)
+            if _whisper_model is not None:
+                print("[whisper] Модель готова (Vulkan / whisper.cpp)", flush=True)
+                return _whisper_model
+            device, compute = "cpu", "int8"  # бэкенд не установлен/битый
         path = ensure_whisper_model(cfg)
-        device = dig(cfg, "index.whisper_device", "cuda")
-        compute = dig(cfg, "index.whisper_compute", "float16")
-        # macOS (M1-M4): CUDA физически отсутствует — не делаем заведомо падающий
-        # запрос, а сразу уходим на CPU (int8). Metal — экспериментальная опция
-        # ctranslate2 >= 4.5: включается явно, index.whisper_device: metal.
-        if device == "cuda" and sys.platform == "darwin":
-            print("[whisper] CUDA на macOS недоступен — использую CPU (int8); "
-                  "Metal можно включить явно: index.whisper_device: metal",
-                  flush=True)
-            device, compute = "cpu", "int8"
-        elif device == "cpu" and compute == "float16":
+        if device == "cpu" and compute == "float16":
             compute = "int8"  # float16 на CPU ctranslate2 не поддерживает
         timeout = int(dig(cfg, "index.whisper_load_timeout", 180))
         print("[whisper] Загрузка модели из %s (%s/%s) ..." % (path, device, compute),
@@ -181,18 +326,19 @@ def _transcribe(path, cfg, is_video, progress_cb=None):
             src = path
         model = _get_whisper(cfg)
         batch = int(dig(cfg, "index.whisper_batch", 8))
-        if batch > 1:
+        lang = dig(cfg, "index.whisper_language", "") or None
+        if batch > 1 and getattr(model, "batchable", True):
             try:
                 from faster_whisper import BatchedInferencePipeline
 
                 pipe = BatchedInferencePipeline(model=model)
-                result, info = pipe.transcribe(src, language=None, batch_size=batch)
+                result, info = pipe.transcribe(src, language=lang, batch_size=batch)
             except Exception as e:  # noqa: BLE001
                 print("[whisper] Батчевый режим недоступен (%s) — обычный" % e,
                       file=sys.stderr, flush=True)
-                result, info = model.transcribe(src, vad_filter=True, language=None)
+                result, info = model.transcribe(src, vad_filter=True, language=lang)
         else:
-            result, info = model.transcribe(src, vad_filter=True, language=None)
+            result, info = model.transcribe(src, vad_filter=True, language=lang)
         duration = getattr(info, "duration", 0.0) or 0.0
         segs = []
         for s in result:
