@@ -101,10 +101,38 @@ def run_checks(cfg=None):
         else:
             raise RuntimeError("HTTP %s" % r.status_code)
     except Exception:  # noqa: BLE001
-        add("emb", "fail", "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
-            fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
-                "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
-                "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
+        # сервер может знать модель под другим идентификатором (bge-m3) —
+        # ищем её в списке моделей и пробуем зонд с фактическим именем
+        actual = None
+        try:
+            r2 = rq.get(emb_url + "/models", timeout=3)
+            for m in (m.get("id") or "" for m in r2.json().get("data", [])):
+                if "bge-m3" in m.lower():
+                    actual = m
+                    break
+        except Exception:  # noqa: BLE001
+            pass
+        handled = False
+        if actual and actual != emb_model:
+            try:
+                r3 = rq.post(emb_url + "/embeddings",
+                             json={"model": actual, "input": ["ping"]}, timeout=3)
+                if r3.status_code == 200:
+                    add("emb", "warn",
+                        "Эмбеддинги работают, но сервер отдаёт модель под именем '%s', "
+                        "а в config.yaml указано '%s'" % (actual, emb_model),
+                        fix="В группе «Модель эмбеддингов» нажмите «Применить имя "
+                            "модели» — embedding.model в настройках обновится "
+                            "автоматически.")
+                    handled = True
+            except Exception:  # noqa: BLE001
+                pass
+        if not handled:
+            add("emb", "fail",
+                "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
+                fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
+                    "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
+                    "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
 
     # 5. Tesseract OCR
     from .extractors import _tesseract_ready

@@ -364,5 +364,48 @@ class UiVersionTests(unittest.TestCase):
         self.assertTrue(__version__)
 
 
+class EmbModelTests(unittest.TestCase):
+    """Сопоставление модели эмбеддингов (LM Studio может отдавать другой id)."""
+
+    def test_match_exact(self):
+        from hds.ui_server import _match_emb_model
+        self.assertEqual(
+            _match_emb_model(["qwen", "text-embedding-bge-m3"], "text-embedding-bge-m3"),
+            ("text-embedding-bge-m3", None))
+
+    def test_match_substring(self):
+        from hds.ui_server import _match_emb_model
+        exact, actual = _match_emb_model(["qwen", "lm-kit/bge-m3-gguf"],
+                                         "text-embedding-bge-m3")
+        self.assertIsNone(exact)
+        self.assertEqual(actual, "lm-kit/bge-m3-gguf")
+
+    def test_match_none(self):
+        from hds.ui_server import _match_emb_model
+        self.assertEqual(_match_emb_model(["qwen"], "text-embedding-bge-m3"),
+                         (None, None))
+
+
+class EmbModelSaveTests(unittest.TestCase):
+    """«Применить имя модели»: замена embedding.model в config.yaml."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-embm-")
+        self.cfg = write_config(self.tmp)
+        self.addCleanup(lambda: os.path.exists(self.cfg) and os.remove(self.cfg))
+
+    def test_adopt_replaces_model_keeps_neighbors(self):
+        res = ui_server._set_embedding_model("text-embedding-bge-m3")
+        self.assertTrue(res["ok"])
+        self.assertEqual(load()["embedding"]["model"], "text-embedding-bge-m3")
+        txt = open(self.cfg, encoding="utf-8-sig").read()
+        self.assertIn("base_url", txt)   # соседние ключи на месте
+        self.assertIn("batch_size", txt)
+
+    def test_adopt_invalid_input(self):
+        self.assertFalse(ui_server._set_embedding_model("   ")["ok"])
+        self.assertFalse(ui_server._set_embedding_model(None)["ok"])
+
+
 if __name__ == "__main__":
     unittest.main()

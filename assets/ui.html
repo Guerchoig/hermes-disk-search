@@ -33,7 +33,7 @@ summary{cursor:pointer;user-select:none}
 <div class="card" id="diag-card" style="border-left:4px solid var(--acc)">
 <div class="row" style="margin-bottom:0">
 <b id="diag-summary">⏳ Проверка компонентов…</b>
-<button class="w" style="margin-left:auto" onclick="loadDiag()">🔄 Проверить</button>
+<button class="w" style="margin-left:auto" onclick="loadDiag(true)">🔄 Проверить</button>
 </div>
 <div id="diag-list" style="margin-top:8px"></div>
 </div>
@@ -111,6 +111,7 @@ summary{cursor:pointer;user-select:none}
 <div class="row" style="margin-top:8px">
 <button id="b-emb-dl" onclick="embDl()">⬇ Скачать модель (~1,2 ГБ)</button>
 <button id="b-emb-load" onclick="act('/api/model/load')">⏏ Загрузить в LM Studio</button>
+<button id="b-emb-adopt" onclick="embAdopt()" style="display:none">⤵ Применить имя модели</button>
 </div>
 <div class="muted">Модель bge-m3 нужна для поиска «по смыслу»; без неё поиск работает только
 по ключевым словам. Скачивание — один раз, файл кладётся в папку моделей LM Studio,
@@ -144,6 +145,19 @@ async function embDl(){
 async function autostart(cb){
   await fetch('/api/watch/autostart', {method:'POST', body:JSON.stringify({enabled: cb.checked})});
   refresh();
+}
+async function embAdopt(){
+  try {
+    const m = await (await fetch('/api/model/status')).json();
+    if (!m.actual_id) return;
+    const j = await (await fetch('/api/model/adopt', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({model: m.actual_id})})).json();
+    const info = document.getElementById('emb-info');
+    info.textContent = j.msg || (j.ok ? 'Имя модели обновлено' : 'Ошибка');
+    info.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
+  } catch(e){}
+  refresh(); loadDiag(true);
 }
 async function saveRoots(){
   const paths = document.getElementById('roots-input').value.split(';')
@@ -318,6 +332,7 @@ async function refresh(){
       const info = document.getElementById('emb-info');
       let st;
       if (m.downloading) st = `⏳ скачивание: ${m.msg} (${m.progress || 0}%)`;
+      else if (m.model_loaded && m.mismatch) st = `🟡 модель отвечает под именем «${m.actual_id}», в настройках указано «${m.config_model}»`;
       else if (m.model_loaded) st = '🟢 модель загружена в LM Studio — поиск по смыслу активен';
       else if (m.server_ok) st = '🟡 LM Studio запущен, модель не загружена';
       else if (m.gguf_ready) st = '🟡 файл модели на месте, но LM Studio не запущен (Developer → Start Server)';
@@ -325,6 +340,7 @@ async function refresh(){
       info.textContent = st + (m.msg && !m.downloading ? ' · ' + m.msg : '');
       document.getElementById('b-emb-dl').disabled = m.downloading || m.gguf_ready;
       document.getElementById('b-emb-load').disabled = !m.gguf_ready || m.model_loaded || m.downloading;
+      document.getElementById('b-emb-adopt').style.display = m.mismatch ? '' : 'none';
     } catch(e){}
     loadDiag();
   } catch(e){ console.warn(e); }

@@ -69,8 +69,26 @@ def _lm_models():
         return False, []
 
 
+def _match_emb_model(models, config_model):
+    """Сопоставление модели эмбеддингов со списком моделей сервера.
+    Возвращает (exact_id, community_id): точное совпадение с config-именем
+    или id, содержащий базовое имя модели (bge-m3)."""
+    cm = (config_model or "").strip().lower()
+    for m in models:
+        if m and m.strip().lower() == cm:
+            return m, None
+    for m in models:
+        if m and "bge-m3" in m.lower():
+            return None, m
+    return None, None
+
+
 def _model_status():
     server_ok, models = _lm_models()
+    cfg, _err = _safe_cfg()
+    from .config import dig
+    cfg_model = dig(cfg, "embedding.model", _MODEL_NAME) or _MODEL_NAME
+    exact, actual = _match_emb_model(models, cfg_model)
     return {
         "gguf_path": _gguf_path(),
         "gguf_ready": os.path.exists(_gguf_path()),
@@ -78,7 +96,10 @@ def _model_status():
         "progress": _EMB_DL["progress"],
         "msg": _EMB_DL["error"] or _EMB_DL["msg"],
         "server_ok": server_ok,
-        "model_loaded": bool(server_ok and _MODEL_NAME in models),
+        "config_model": cfg_model,
+        "actual_id": exact or actual or "",
+        "model_loaded": bool(server_ok and (exact or actual)),
+        "mismatch": bool(exact is None and actual),
     }
 
 
@@ -645,6 +666,40 @@ def _set_exclude_paths(paths):
                    "watcher/индексацию кнопками.%s" % (len(norm), warn)}
 
 
+def _set_embedding_model(model):
+    """Замена embedding.model в config.yaml с сохранением комментариев.
+    Нужно, когда LM Studio отдаёт модель под другим идентификатором
+    (например, после переустановки/обновления LM Studio)."""
+    import re
+
+    if not isinstance(model, str) or not model.strip():
+        return {"ok": False, "msg": "Укажите имя модели"}
+    model = model.strip()
+    from .config import config_path, replace_file
+
+    try:
+        cfg_path = config_path()
+        with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+        rx = re.compile(r"(?m)^(embedding:\s*\n(?:[^\n]*\n)*?  model:)[^\n]*$")
+        new_text, n = rx.subn(lambda m: m.group(1) + " '%s'" % model.replace("'", "''"),
+                              text, count=1)
+        if n == 0:
+            return {"ok": False, "msg": "Не найден embedding.model в config.yaml"}
+        parsed = _yaml_safe_load(new_text)
+        if (parsed.get("embedding") or {}).get("model") != model:
+            raise ValueError("embedding.model не применился")
+        tmp = cfg_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        replace_file(tmp, cfg_path)
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Ошибка сохранения: %s" % e}
+    return {"ok": True, "model": model,
+            "msg": "embedding.model обновлён на '%s'. Перезапустите watcher/"
+                   "индексацию кнопками." % model}
+
+
 def _set_roots(paths):
     """Сохранение index.roots в config.yaml (комментарии сохраняются).
     Пути нормализуются в абсолютные; YAML-значения в одинарных кавычках
@@ -888,6 +943,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(_model_download())
             elif self.path == "/api/model/load":
                 self._json(_model_load())
+            elif self.path == "/api/model/adopt":
+                self._json(_set_embedding_model(body.get("model", "")))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001
