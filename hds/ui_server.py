@@ -818,7 +818,7 @@ class Handler(BaseHTTPRequestHandler):
                 if cfg_err:
                     checks = [{"id": "config", "status": "fail",
                                "title": "Настройки не читаются", "msg": cfg_err,
-                               "fix": "Исправьте config.yaml в карточке «Настройки» и нажмите «Сохранить настройки»."}]
+                               "fix": "Исправьте config.yaml в группе «Настройки» и нажмите «Сохранить настройки»."}]
                 else:
                     checks = run_checks(cfg)
                 self._json({"checks": checks,

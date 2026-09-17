@@ -39,8 +39,8 @@ def run_checks(cfg=None):
     except OSError as e:
         add("db", "fail", "База данных недоступна: %s" % e,
             "db_path: %s" % db_path,
-            "Диск/путь из config.yaml не существует. Исправьте db_path в карточке "
-            "«Настройки» или перенесите базу (карточка «Расположение базы индексации»).")
+            "Диск/путь из config.yaml не существует. Исправьте db_path в группе "
+            "«Настройки» или перенесите базу (группа «Расположение базы индексации»).")
     except Exception as e:  # noqa: BLE001
         # БД, занятая параллельной записью watcher'а, — это рабочее состояние,
         # а не проблема окружения; настоящие проблемы пути ловятся OSError выше.
@@ -54,12 +54,12 @@ def run_checks(cfg=None):
     roots = [str(r) for r in (dig(cfg, "index.roots", []) or [])]
     if not roots:
         add("roots", "warn", "Корни индексации не заданы",
-            fix="Добавьте диски/папки в config.yaml (index.roots) в карточке «Настройки».")
+            fix="Добавьте диски/папки в config.yaml (index.roots) в группе «Настройки».")
     else:
         missing = [r for r in roots if not os.path.isdir(r)]
         if missing:
             add("roots", "warn", "Корни индексации не существуют: %s" % ", ".join(missing),
-                fix="Поправьте index.roots в карточке «Настройки» — укажите существующий диск/папку.")
+                fix="Поправьте index.roots в группе «Настройки» — укажите существующий диск/папку.")
         else:
             add("roots", "ok", "Корни индексации: %s" % ", ".join(roots))
 
@@ -77,7 +77,7 @@ def run_checks(cfg=None):
             if near:
                 add("chat", "warn",
                     "Чат-модель '%s' не совпадает с загруженной '%s'" % (chat_model, near),
-                    fix="Уточните имя chat.model в карточке «Настройки».")
+                    fix="Уточните имя chat.model в группе «Настройки».")
             else:
                 add("chat", "warn", "Чат-модель '%s' не загружена" % chat_model,
                     "доступно: %s" % ", ".join(m for m in models if m)[:160],
@@ -103,7 +103,7 @@ def run_checks(cfg=None):
     except Exception:  # noqa: BLE001
         add("emb", "fail", "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
             fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
-                "кнопка «Скачать модель» в карточке «Модель эмбеддингов» выше, затем "
+                "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
                 "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
 
     # 5. Tesseract OCR
