@@ -352,5 +352,17 @@ class ReplaceFileTests(unittest.TestCase):
             cfgmod.os = real_os
 
 
+class UiVersionTests(unittest.TestCase):
+    """/api/status отдаёт версию приложения — run_ui.ps1 сверяет её для
+    авто-перезапуска устаревшего UI-сервера."""
+
+    def test_version_exposed(self):
+        from hds import __version__
+        from hds import ui_server
+
+        self.assertEqual(ui_server.HDS_VERSION, __version__)
+        self.assertTrue(__version__)
+
+
 if __name__ == "__main__":
     unittest.main()

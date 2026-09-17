@@ -13,6 +13,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db as dbmod, indexer
+from . import __version__ as HDS_VERSION
 from .config import dig, db_abs_path, load, replace_file
 from .dbops import move_db
 from .embedder import make_embedder
@@ -800,6 +801,7 @@ class Handler(BaseHTTPRequestHandler):
                 w_running, w_pid = _watch_running()
                 self._json({
                     "config_error": cfg_err,
+                    "app_version": HDS_VERSION,
                     "index": _index_state(),
                     "watch": {"running": w_running, "pid": w_pid,
                               "autostart": _watch_autostart_on()},

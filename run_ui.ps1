@@ -1,4 +1,4 @@
-# Запуск локального веб-интерфейса hermes-disk-search (браузер открывается сам)
+﻿# Запуск локального веб-интерфейса hermes-disk-search (браузер открывается сам)
 # Идемпотентно: если UI-сервер уже работает — просто открывается страница.
 # Логи сервера (stdout/stderr): %LOCALAPPDATA%\hermes-disk-search\ui.log и ui.err.log
 $root = $PSScriptRoot
@@ -16,12 +16,28 @@ New-Item -ItemType Directory -Path $logDir -Force | Out-Null
 $outLog = Join-Path $logDir "ui.log"
 $errLog = Join-Path $logDir "ui.err.log"
 
-# Сервер уже работает?
+# Сервер уже работает? Если да — какой версии?
+# Старый сервер (код предыдущей установки) не знает новых эндпоинтов UI,
+# поэтому при несовпадении версии он останавливается и запускается заново.
 $serverRunning = $false
+$serverVersion = $null
 try {
-    Invoke-RestMethod -Uri "http://127.0.0.1:$uiPort/api/status" -TimeoutSec 3 | Out-Null
+    $st = Invoke-RestMethod -Uri "http://127.0.0.1:$uiPort/api/status" -TimeoutSec 3
     $serverRunning = $true
+    $serverVersion = $st.app_version
 } catch { }
+
+$curVersion = (Select-String -Path (Join-Path $root "hds\__init__.py") `
+    -Pattern '__version__\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+
+if ($serverRunning -and $serverVersion -ne $curVersion) {
+    Write-Host "[..] На порту $uiPort — UI-сервер предыдущей установки (v$serverVersion); перезапускаю на v$curVersion..."
+    Get-CimInstance Win32_Process -Filter "Name = 'pythonw.exe'" |
+        Where-Object { $_.CommandLine -match '-m hds\.cli ui' } |
+        ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Start-Sleep 1
+    $serverRunning = $false
+}
 
 if (-not $serverRunning) {
     try {

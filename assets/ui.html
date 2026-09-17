@@ -266,6 +266,7 @@ async function refresh(){
       i.running ? (i.paused ? 'пауза' : 'идёт') : 'остановлена'}</span>`;
     b += `<span class="badge ${s.watch.running?'on':'mid'}">watcher: ${s.watch.running?'работает':'остановлен'}</span>`;
     b += `<span class="badge ${s.watch.autostart?'on':'mid'}">автозапуск: ${s.watch.autostart?'вкл':'выкл'}</span>`;
+    b += `<span class="badge">сервер: v${s.app_version || '?'}</span>`;
     document.getElementById('badges').innerHTML = b;
     document.getElementById('b-start').disabled = i.running;
     document.getElementById('b-pause').disabled = !i.running || i.paused;
