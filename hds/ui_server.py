@@ -13,7 +13,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db as dbmod, indexer
-from .config import dig, db_abs_path, load
+from .config import dig, db_abs_path, load, replace_file
 from .dbops import move_db
 from .embedder import make_embedder
 
@@ -545,7 +545,7 @@ def _set_simple_config(key, value):
     tmp = cfg_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(new_text)
-    os.replace(tmp, cfg_path)
+    replace_file(tmp, cfg_path)
     return {"ok": True,
             "msg": "Сохранено. Применяется к новым запускам — перезапустите "
                    "watcher/индексацию кнопками, чтобы параметр подействовал."}
@@ -566,7 +566,7 @@ def _save_config(yaml_text):
     tmp = cfg_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(yaml_text if yaml_text.endswith("\n") else yaml_text + "\n")
-    os.replace(tmp, cfg_path)
+    replace_file(tmp, cfg_path)
     return {"ok": True,
             "msg": "Сохранено. Изменения применятся к новым запускам — "
                    "watcher/индексацию перезапустите кнопками."}
@@ -634,7 +634,7 @@ def _set_exclude_paths(paths):
     tmp = cfg_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(new_text)
-    os.replace(tmp, cfg_path)
+    replace_file(tmp, cfg_path)
     roots_hit = [r for r in (dig(load(), "index.roots", []) or [])
                  if indexer._prefix_excluded(
                      r, [indexer._norm_path(p) for p in norm])]
@@ -669,33 +669,35 @@ def _set_roots(paths):
              if norm else "  roots: []\n")
     from .config import config_path
 
-    cfg_path = config_path()
-    with open(cfg_path, "r", encoding="utf-8-sig") as f:
-        text = f.read()
-    # блок-форма: заголовок + только строки-элементы списка ('- ...'),
-    # чтобы не съесть соседние ключи секции index с тем же отступом
-    rx_block = re.compile(r"(?m)^  roots:\n(?:[ \t]*-[ \t][^\n]*\n?)*")
-    rx_inline = re.compile(r"(?m)^  roots:[ \t]*\[.*\][ \t]*\r?\n?")
-    if rx_block.search(text):
-        new_text = rx_block.sub(lambda m: block, text, count=1)
-    elif rx_inline.search(text):
-        new_text = rx_inline.sub(lambda m: block, text, count=1)
-    else:
-        m = re.search(r"(?m)^index:\r?\n", text)
-        if not m:
-            return {"ok": False, "msg": "Не найдена секция index в config.yaml"}
-        new_text = text[:m.end()] + block + text[m.end():]
     try:
+        cfg_path = config_path()
+        with open(cfg_path, "r", encoding="utf-8-sig") as f:
+            text = f.read()
+        # блок-форма: заголовок + только строки-элементы списка ('- ...'),
+        # чтобы не съесть соседние ключи секции index с тем же отступом
+        rx_block = re.compile(r"(?m)^  roots:\n(?:[ \t]*-[ \t][^\n]*\n?)*")
+        rx_inline = re.compile(r"(?m)^  roots:[ \t]*\[.*\][ \t]*\r?\n?")
+        if rx_block.search(text):
+            new_text = rx_block.sub(lambda m: block, text, count=1)
+        elif rx_inline.search(text):
+            new_text = rx_inline.sub(lambda m: block, text, count=1)
+        else:
+            m = re.search(r"(?m)^index:\r?\n", text)
+            if not m:
+                return {"ok": False,
+                        "msg": "Не найдена секция index в config.yaml — "
+                               "исправьте YAML в редакторе настроек и сохраните"}
+            new_text = text[:m.end()] + block + text[m.end():]
         parsed = _yaml_safe_load(new_text)
         rr = (parsed.get("index") or {}).get("roots")
         if not isinstance(rr, list):
             raise ValueError("index.roots не список")
+        tmp = cfg_path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        replace_file(tmp, cfg_path)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "msg": "Итоговый config.yaml некорректен: %s" % e}
-    tmp = cfg_path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(new_text)
-    os.replace(tmp, cfg_path)
+        return {"ok": False, "msg": "Ошибка сохранения: %s" % e}
     warn = (" ВНИМАНИЕ: список корней пуст — индексация не найдёт файлов."
             if not norm else "")
     return {"ok": True, "roots": norm,
@@ -780,6 +782,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(html)))
+                # без кэширования: после обновления файлов проекта браузер
+                # обязан забрать свежий HTML (иначе старый JS дёргает
+                # несуществующие эндпоинты)
+                self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.wfile.write(html)
             elif self.path == "/api/status":

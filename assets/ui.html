@@ -148,10 +148,16 @@ async function autostart(cb){
 async function saveRoots(){
   const paths = document.getElementById('roots-input').value.split(';')
     .map(s => s.trim()).filter(Boolean);
-  const j = await (await fetch('/api/roots/save', {method:'POST',
-    headers:{'Content-Type':'application/json'}, body: JSON.stringify({paths})})).json();
+  let j;
+  try {
+    const r = await fetch('/api/roots/save', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({paths})});
+    j = await r.json();
+  } catch(e) {
+    j = {ok:false, msg:'Сервер недоступен или страница устарела — обновите страницу (Ctrl+F5)'};
+  }
   const m = document.getElementById('roots-msg');
-  m.textContent = j.msg || (j.ok ? 'Сохранено' : 'Ошибка');
+  m.textContent = j.msg || j.error || (j.ok ? 'Сохранено' : 'Ошибка сохранения');
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }

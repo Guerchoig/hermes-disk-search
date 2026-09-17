@@ -68,6 +68,26 @@ def ensure_config():
     return True
 
 
+def replace_file(src, dst, attempts=20, delay=0.05):
+    """Атомарная замена файла с ретраями.
+
+    os.replace на Windows падает (PermissionError), если целевой файл в момент
+    замены открыт другим потоком/процессом хотя бы на чтение (CRT не передаёт
+    FILE_SHARE_DELETE). UI-сервер читает config.yaml каждые 2 секунды из
+    соседних потоков, поэтому конкурентные записи в него требуют ретраев.
+    """
+    import time
+
+    for i in range(attempts):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if i == attempts - 1:
+                raise
+            time.sleep(delay)
+
+
 def load(path=None):
     p = path or config_path()
     with open(p, "r", encoding="utf-8-sig") as f:

@@ -33,7 +33,7 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None,
     проверка счётчиков -> атомарное переключение db_path в config.yaml ->
     переименование старой БД (.moved-<дата>) -> перезапуск watcher.
     """
-    from .config import config_path, db_abs_path, load
+    from .config import config_path, db_abs_path, load, replace_file
 
     cfg = load()
     old = db_abs_path(cfg)
@@ -92,7 +92,7 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None,
     tmp = cfg_path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(text)
-    os.replace(tmp, cfg_path)
+    replace_file(tmp, cfg_path)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     for suffix in ("", "-wal", "-shm"):

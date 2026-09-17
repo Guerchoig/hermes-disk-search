@@ -296,5 +296,61 @@ class RootSaveTests(unittest.TestCase):
         self.assertFalse(res["ok"])
 
 
+class ReplaceFileTests(unittest.TestCase):
+    """os.replace на Windows падает при конкурентном чтении config.yaml —
+    replace_file должен ретраить."""
+
+    def test_retries_then_succeeds(self):
+        import types
+
+        from hds import config as cfgmod
+
+        d = tempfile.mkdtemp(prefix="hds-repl-")
+        src, dst = os.path.join(d, "src"), os.path.join(d, "dst")
+        with open(src, "w") as f:
+            f.write("new")
+        with open(dst, "w") as f:
+            f.write("old")
+        calls = {"n": 0}
+
+        def flaky(a, b):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise PermissionError(32, "locked", b)
+            return os.replace(a, b)
+
+        # подменяем os только внутри модуля config (не глобально!)
+        real_os = cfgmod.os
+        cfgmod.os = types.SimpleNamespace(replace=flaky)
+        try:
+            cfgmod.replace_file(src, dst)
+        finally:
+            cfgmod.os = real_os
+        self.assertEqual(calls["n"], 3)
+        with open(dst) as f:
+            self.assertEqual(f.read(), "new")
+
+    def test_raises_after_attempts_exhausted(self):
+        import types
+
+        from hds import config as cfgmod
+
+        d = tempfile.mkdtemp(prefix="hds-repl2-")
+        src, dst = os.path.join(d, "src"), os.path.join(d, "dst")
+        open(src, "w").close()
+        open(dst, "w").close()
+
+        def always_locked(a, b):
+            raise PermissionError(32, "locked", b)
+
+        real_os = cfgmod.os
+        cfgmod.os = types.SimpleNamespace(replace=always_locked)
+        try:
+            with self.assertRaises(PermissionError):
+                cfgmod.replace_file(src, dst, attempts=3, delay=0.01)
+        finally:
+            cfgmod.os = real_os
+
+
 if __name__ == "__main__":
     unittest.main()
