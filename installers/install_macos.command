@@ -83,8 +83,12 @@ if [ -d "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" ]; then
     rm -rf "/Applications/HermesDiskSearchIndex.app" 2>/dev/null
     cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" "$HOME/Applications/" 2>/dev/null \
         || cp -R "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app" /Applications/ 2>/dev/null || true
-    # снять карантин и с установленного приложения (если .app.zip скачан отдельно)
+    # снять карантин и подписать копию приложения ad-hoc на целевой машине:
+    # bundle в mac-архиве собирается из git-коммита и не подписан, а кодовые
+    # подписи нельзя закоммитить — поэтому инсталлятор подписывает копию сам
+    # (codesign входит в macOS, ad-hoc бесплатна)
     xattr -dr com.apple.quarantine "$HOME/Applications/HermesDiskSearchIndex.app" 2>/dev/null || true
+    codesign --force --deep --sign - "$HOME/Applications/HermesDiskSearchIndex.app" 2>/dev/null || true
     chmod +x "$ROOT/shortcuts/macos/Индексация дисков.command" 2>/dev/null
     chmod +x "$ROOT/shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index" 2>/dev/null
     echo "[ok] Приложение «HDS Индексация» установлено в ~/Applications"
