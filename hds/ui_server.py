@@ -644,6 +644,66 @@ def _set_exclude_paths(paths):
                    "watcher/индексацию кнопками.%s" % (len(norm), warn)}
 
 
+def _set_roots(paths):
+    """Сохранение index.roots в config.yaml (комментарии сохраняются).
+    Пути нормализуются в абсолютные; YAML-значения в одинарных кавычках
+    (Windows-пути в двойных кавычках ломают YAML)."""
+    import re
+
+    if not isinstance(paths, list):
+        return {"ok": False, "msg": "Ожидается список путей"}
+    norm, seen = [], set()
+    for p in paths:
+        if not isinstance(p, str):
+            continue
+        p = str(p).strip().strip('"').strip("'")
+        if not p:
+            continue
+        p = os.path.expanduser(p)
+        ap = p if _looks_abs(p) else os.path.abspath(p)
+        k = os.path.normcase(ap).lower()
+        if k not in seen:
+            seen.add(k)
+            norm.append(ap)
+    block = ("  roots:\n" + "".join("    - '%s'\n" % p.replace("'", "''") for p in norm)
+             if norm else "  roots: []\n")
+    from .config import config_path
+
+    cfg_path = config_path()
+    with open(cfg_path, "r", encoding="utf-8-sig") as f:
+        text = f.read()
+    # блок-форма: заголовок + только строки-элементы списка ('- ...'),
+    # чтобы не съесть соседние ключи секции index с тем же отступом
+    rx_block = re.compile(r"(?m)^  roots:\n(?:[ \t]*-[ \t][^\n]*\n?)*")
+    rx_inline = re.compile(r"(?m)^  roots:[ \t]*\[.*\][ \t]*\r?\n?")
+    if rx_block.search(text):
+        new_text = rx_block.sub(lambda m: block, text, count=1)
+    elif rx_inline.search(text):
+        new_text = rx_inline.sub(lambda m: block, text, count=1)
+    else:
+        m = re.search(r"(?m)^index:\r?\n", text)
+        if not m:
+            return {"ok": False, "msg": "Не найдена секция index в config.yaml"}
+        new_text = text[:m.end()] + block + text[m.end():]
+    try:
+        parsed = _yaml_safe_load(new_text)
+        rr = (parsed.get("index") or {}).get("roots")
+        if not isinstance(rr, list):
+            raise ValueError("index.roots не список")
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": "Итоговый config.yaml некорректен: %s" % e}
+    tmp = cfg_path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(new_text)
+    os.replace(tmp, cfg_path)
+    warn = (" ВНИМАНИЕ: список корней пуст — индексация не найдёт файлов."
+            if not norm else "")
+    return {"ok": True, "roots": norm,
+            "msg": "Корни сохранены (%d). Применяются к новым запускам — "
+                   "запустите/перезапустите watcher и индексацию кнопками выше.%s"
+                   % (len(norm), warn)}
+
+
 def _yaml_safe_load(text):
     import yaml
     return yaml.safe_load(text)
@@ -813,6 +873,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(_set_simple_config(body.get("key", ""), body.get("value")))
             elif self.path == "/api/config/excludes":
                 self._json(_set_exclude_paths(body.get("paths") or []))
+            elif self.path == "/api/roots/save":
+                with _cfg_lock:
+                    self._json(_set_roots(body.get("paths") or []))
             elif self.path == "/api/model/download":
                 self._json(_model_download())
             elif self.path == "/api/model/load":

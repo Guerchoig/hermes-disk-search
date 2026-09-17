@@ -197,12 +197,15 @@ def cmd_vulkan_setup(args):
     from .whisper_cpp import download_backend
 
     ensure_config()
-    ok, msg = download_backend(load(), allow_unofficial=getattr(args, "unofficial", False))
+    ok, msg = download_backend(load())
     print(("[ok] " if ok else "[!!] ") + msg)
     if ok:
         from .extract_av import _pick_device
-        dev, comp = _pick_device(load())
-        print("[ok] Авто-детекция выбрала: %s/%s" % (dev, comp))
+        dev, _comp = _pick_device(load())
+        name = {"cuda": "CUDA",
+                "vulkan": "Vulkan (whisper.cpp)",
+                "metal-mlx": "Metal (mlx-whisper)"}.get(dev, "CPU")
+        print("[ok] Декодирование аудио/видео будет использовать: %s" % name)
     return 0 if ok else 1
 
 
@@ -294,8 +297,6 @@ def main(argv=None):
 
     pvk = sub.add_parser("vulkan-setup",
                          help="установка whisper.cpp (Vulkan) — GPU-ускорение для AMD/Intel")
-    pvk.add_argument("--unofficial", action="store_true",
-                     help="разрешить стороннюю Vulkan-сборку (если официальной нет)")
     pvk.set_defaults(fn=cmd_vulkan_setup)
 
     pui = sub.add_parser("ui", help="веб-интерфейс (настройки, управление индексацией)")

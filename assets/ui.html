@@ -48,9 +48,12 @@ summary{cursor:pointer;user-select:none}
 </div>
 <div id="current" class="current mono">—</div>
 <div id="eta" class="mono" style="margin:6px 0;color:var(--acc)"></div>
-<div class="row"><label class="muted">Корни (через «;»), пусто = из настроек:
+<div class="row"><label class="muted">Корни индексации (через «;»), сохраняются в настройки:
 <input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
-</label></div>
+</label>
+<button onclick="saveRoots()">💾 Сохранить корни</button>
+<span id="roots-msg" class="muted"></span>
+</div>
 <div class="row"><label class="muted">🔄 Переиндексировать (файл или папка, с переобработкой):
 <input id="reindex-path" class="mono" placeholder="D:\путь\к\файлу_или_папке" style="flex:1;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
 <button onclick="reindex()">Переиндексировать</button>
@@ -140,6 +143,16 @@ async function embDl(){
 }
 async function autostart(cb){
   await fetch('/api/watch/autostart', {method:'POST', body:JSON.stringify({enabled: cb.checked})});
+  refresh();
+}
+async function saveRoots(){
+  const paths = document.getElementById('roots-input').value.split(';')
+    .map(s => s.trim()).filter(Boolean);
+  const j = await (await fetch('/api/roots/save', {method:'POST',
+    headers:{'Content-Type':'application/json'}, body: JSON.stringify({paths})})).json();
+  const m = document.getElementById('roots-msg');
+  m.textContent = j.msg || (j.ok ? 'Сохранено' : 'Ошибка');
+  m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }
 async function saveCfg(){
@@ -283,6 +296,8 @@ async function refresh(){
     if (document.activeElement !== mm) mm.value = o.max_media_mb ?? 1500;
     const mc = document.getElementById('opt-max-chunks');
     if (document.activeElement !== mc) mc.value = o.max_chunks ?? 2000;
+    const ri = document.getElementById('roots-input');
+    if (document.activeElement !== ri) ri.value = (s.roots || []).join('; ');
     const ep = document.getElementById('excl-paths');
     if (document.activeElement !== ep) ep.value = (s.exclude_paths || []).join('\n');
     const d = s.db;

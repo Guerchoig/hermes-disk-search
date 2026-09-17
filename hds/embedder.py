@@ -60,8 +60,21 @@ class Embedder:
                 last = repr(e)
             time.sleep(2 * (attempt + 1))
         self.available = False
+        low = (last or "").lower()
+        if "no models loaded" in low or "400" in low:
+            hint = ("Модель скачана, но не загружена в LM Studio: веб-интерфейс → "
+                    "карточка «Модель эмбеддингов» → «Загрузить в LM Studio», "
+                    "или в LM Studio: Developer → Select a model to load → %s."
+                    % self.model)
+        elif "connection" in low or "max retries" in low or "failed to establish" in low:
+            hint = ("Похоже, LM Studio не запущен: запустите LM Studio и включите "
+                    "сервер (Developer → Start Server).")
+        else:
+            hint = ("Проверьте состояние модели в веб-интерфейсе: карточка "
+                    "«Модель эмбеддингов».")
         raise EmbeddingError(
-            "Эмбеддинги недоступны (модель '%s' на %s): %s" % (self.model, self.base_url, last)
+            "Эмбеддинги недоступны (модель '%s' на %s): %s. %s"
+            % (self.model, self.base_url, last, hint)
         )
 
 

@@ -37,10 +37,15 @@ if command -v lms >/dev/null 2>&1; then
     fi
 fi
 
-# Итоговая проверка сервера
-if curl -s -m 3 http://localhost:1234/v1/models >/dev/null 2>&1; then
-    echo "[ok] LM Studio отвечает на localhost:1234"
+# Итоговая проверка: сервер отвечает И модель реально загружена
+if curl -s -m 3 http://localhost:1234/v1/models 2>/dev/null | grep -q text-embedding-bge-m3; then
+    echo "[ok] Эмбеддинги готовы: модель загружена в LM Studio"
+elif curl -s -m 3 http://localhost:1234/v1/models >/dev/null 2>&1; then
+    echo "[--] Файл модели на месте, но сервер её не загрузил."
+    echo "     В LM Studio: Developer -> Select a model to load -> text-embedding-bge-m3,"
+    echo "     или позже нажмите «Загрузить в LM Studio» в веб-интерфейсе."
 else
-    echo "[--] LM Studio не запущен: установите (https://lmstudio.ai), запустите"
-    echo "     сервер (Developer -> Start Server) и загрузите модель"
+    echo "[--] LM Studio не запущен. Установите (https://lmstudio.ai), запустите сервер"
+    echo "     (Developer -> Start Server) и загрузите модель (Developer -> Load)."
+    echo "     Файл модели уже скачан — в списке моделей LM Studio она появится."
 fi

@@ -26,8 +26,8 @@ _GH_RELEASES = [
     "https://api.github.com/repos/ggml-org/whisper.cpp/releases?per_page=20",
     "https://api.github.com/repos/lemonade-sdk/whisper.cpp-amd/releases?per_page=10",
 ]
-# Сторонняя готовая Vulkan-сборка (только по явному --unofficial: не официальный
-# источник, версия сборки не контролируется нами).
+# Сборка сообщества — используется автоматически, если официальная Vulkan-
+# сборка whisper.cpp для Windows ещё не опубликована.
 _UNOFFICIAL_VULKAN_URL = ("https://github.com/jerryshell/whisper.cpp-windows-vulkan-bin/"
                           "releases/download/v1.0.0/whisper.cpp-windows-vulkan.zip")
 _EXE_NAMES = ("whisper-cli.exe", "main.exe", "whisper.exe")
@@ -106,14 +106,19 @@ def _gh_assets(url):
         return []
 
 
-def _vulkan_zip_url():
-    """URL свежего Windows x64 Vulkan-бинарника whisper.cpp или None."""
-    for api in _GH_RELEASES:
-        for name, url in _gh_assets(api):
-            n = name.lower()
-            if "vulkan" in n and n.endswith(".zip") and ("x64" in n or "win64" in n):
-                return url
-    return None
+def _vulkan_zip_url(assets=None):
+    """URL Windows x64 Vulkan-сборки whisper.cpp: официальный релиз, если
+    опубликован, иначе — доступная сборка сообщества (fallback автоматический).
+    assets — готовый список (name, url) для тестов; иначе запрашивается GitHub."""
+    if assets is None:
+        assets = []
+        for api in _GH_RELEASES:
+            assets.extend(_gh_assets(api))
+    for name, url in assets:
+        n = name.lower()
+        if "vulkan" in n and n.endswith(".zip") and ("x64" in n or "win64" in n):
+            return url
+    return _UNOFFICIAL_VULKAN_URL
 
 def _unblock_tree(d):
     """Windows: снять Zone.Identifier («скачано из интернета») у распакованных
@@ -129,11 +134,11 @@ def _unblock_tree(d):
                 pass
 
 
-def download_backend(cfg, log=None, allow_unofficial=False):
-    """Скачивает и разворачивает бэкенд: бинарник (Vulkan-сборка whisper.cpp)
-    и GGML-веса модели. Возвращает (ok, msg).
-    allow_unofficial=True — разрешить стороннюю сборку (единственная готовая
-    Vulkan-сборка для Windows на сегодня; источник не официальный)."""
+def download_backend(cfg, log=None):
+    """Скачивает и разворачивает бэкенд транскрипции: Vulkan-сборка whisper.cpp
+    + GGML-веса модели. Источник — официальный релиз whisper.cpp; если тот ещё
+    не публикует Vulkan-сборку, автоматически используется доступная сборка
+    сообщества. Возвращает (ok, msg)."""
     log = log or (lambda s: print(s, flush=True))
     if os.name != "nt":
         return False, "Бэкенд whisper.cpp (Vulkan) поддерживается только на Windows"
@@ -143,30 +148,28 @@ def download_backend(cfg, log=None, allow_unofficial=False):
         return True, "whisper.cpp уже установлен: %s" % find_exe(cfg)
 
     zip_url = _vulkan_zip_url()
-    if not zip_url and allow_unofficial:
-        zip_url = _UNOFFICIAL_VULKAN_URL
-        log("[vulkan] Официальная сборка не найдена — использую стороннюю "
-            "(jerryshell/whisper.cpp-windows-vulkan-bin v1.0.0) по явному разрешению")
-    if not zip_url:
-        return False, (
-            "Готовая Vulkan-сборка whisper.cpp для Windows сейчас не опубликована "
-            "в официальных источниках (ggml-org, lemonade-sdk/whisper.cpp-amd). "
-            "Варианты: 1) повторите с --unofficial (сторонняя сборка, на свой риск); "
-            "2) положите любую сборку whisper.cpp (whisper-cli.exe) в %s — "
-            "бэкенд подхватится автоматически; 3) соберите сами: cmake -B build "
-            "-DGGML_VULKAN=ON (см. README whisper.cpp); 4) транскрипция продолжит "
-            "работать на CPU." % d)
+    if not zip_url:  # страховка: fallback-URL константен, ветка недостижима
+        return False, ("Не удалось определить источник Vulkan-сборки whisper.cpp. "
+                       "Варианты: положите сборку (whisper-cli.exe) в %s, соберите "
+                       "сами (cmake -B build -DGGML_VULKAN=ON) или транскрипция "
+                       "продолжит работать на CPU." % d)
 
     curl = shutil.which("curl")
     if not curl:
         return False, "curl не найден — скачайте %s вручную и распакуйте в %s" % (zip_url, d)
     zpath = os.path.join(d, "whisper-cpp.zip")
-    log("[vulkan] Скачивание %s ..." % zip_url)
-    r = subprocess.run([curl, "-L", "--fail", "--retry", "3", "--connect-timeout", "15",
-                        "--max-time", "3600", "--progress-bar", "-o", zpath, zip_url],
-                       timeout=3600, creationflags=_no_window())
-    if r.returncode != 0 or not os.path.exists(zpath):
-        return False, "Не удалось скачать %s" % zip_url
+    ok_dl = False
+    for attempt in (1, 2):  # transient-сбои сети — обычное дело для CI/домашних сетей
+        log("[vulkan] Скачивание рантайма whisper.cpp (Vulkan)%s..." %
+            (" (повтор)" if attempt > 1 else ""))
+        r = subprocess.run([curl, "-L", "--fail", "--retry", "3", "--connect-timeout", "15",
+                            "--max-time", "3600", "--progress-bar", "-o", zpath, zip_url],
+                           timeout=3600, creationflags=_no_window())
+        if r.returncode == 0 and os.path.exists(zpath):
+            ok_dl = True
+            break
+    if not ok_dl:
+        return False, "Не удалось скачать Vulkan-рантайм (%s). Проверьте сеть и повторите" % zip_url
     import zipfile
     with zipfile.ZipFile(zpath) as z:
         z.extractall(d)

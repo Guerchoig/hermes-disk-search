@@ -39,11 +39,19 @@ if ($lms) {
     }
 }
 
-# Итоговая проверка сервера
+# Итоговая проверка: сервер отвечает И модель реально загружена
 try {
-    $null = Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 3
-    Write-Host "[ok] LM Studio отвечает на localhost:1234" -ForegroundColor Green
+    $ids = (Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 3).data |
+        ForEach-Object { $_.id }
+    if ($ids -contains "text-embedding-bge-m3") {
+        Write-Host "[ok] Эмбеддинги готовы: модель загружена в LM Studio" -ForegroundColor Green
+    } else {
+        Write-Host "[--] Файл модели на месте, но сервер её не загрузил." -ForegroundColor Yellow
+        Write-Host "     В LM Studio: Developer -> Select a model to load -> text-embedding-bge-m3," -ForegroundColor Yellow
+        Write-Host "     или позже нажмите «Загрузить в LM Studio» в веб-интерфейсе." -ForegroundColor Yellow
+    }
 } catch {
-    Write-Host "[--] LM Studio не запущен: установите (https://lmstudio.ai), запустите" -ForegroundColor Yellow
-    Write-Host "     сервер (Developer -> Start Server) и загрузите модель" -ForegroundColor Yellow
+    Write-Host "[--] LM Studio не запущен. Установите (https://lmstudio.ai), запустите сервер" -ForegroundColor Yellow
+    Write-Host "     (Developer -> Start Server) и загрузите модель (Developer -> Load)." -ForegroundColor Yellow
+    Write-Host "     Файл модели уже скачан — в списке моделей LM Studio она появится." -ForegroundColor Yellow
 }

@@ -203,6 +203,22 @@ class PickDeviceVulkanTests(unittest.TestCase):
         self.assertEqual(self._pick("vulkan", False, 0), ("cpu", "int8"))
 
 
+class VulkanUrlTests(unittest.TestCase):
+    """Источник Vulkan-сборки: официальный релиз → сборка сообщества (авто)."""
+
+    def test_official_preferred(self):
+        from hds.whisper_cpp import _vulkan_zip_url
+        assets = [("whisper-vulkan-bin-x64.zip", "https://x/v.zip"),
+                  ("whisper-bin-x64.zip", "https://x/cpu.zip")]
+        self.assertEqual(_vulkan_zip_url(assets), "https://x/v.zip")
+
+    def test_community_fallback_when_no_official(self):
+        from hds.whisper_cpp import _UNOFFICIAL_VULKAN_URL, _vulkan_zip_url
+        assets = [("whisper-bin-x64.zip", "https://x/cpu.zip"),
+                  ("whisper-cublas-12.4.0-bin-x64.zip", "https://x/cu.zip")]
+        self.assertEqual(_vulkan_zip_url(assets), _UNOFFICIAL_VULKAN_URL)
+
+
 class WhisperCppTests(unittest.TestCase):
     """Бэкенд whisper.cpp (Vulkan для AMD/Intel): парсинг JSON, поиск бинарника."""
 
@@ -237,6 +253,47 @@ class WhisperCppTests(unittest.TestCase):
         self.assertEqual(whisper_cpp.find_exe(cfg),
                          os.path.join(nested, "whisper-cli.exe"))
         self.assertFalse(whisper_cpp.available(cfg))  # весов нет — не готов
+
+
+class RootSaveTests(unittest.TestCase):
+    """Сохранение index.roots из UI: блок/inline-формы YAML, вставка, очистка."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-roots-")
+        self.cfg = write_config(self.tmp)  # inline-форма: 'roots: []'
+        self.addCleanup(lambda: os.path.exists(self.cfg) and os.remove(self.cfg))
+
+    def test_save_block_form_preserves_neighbors(self):
+        with open(self.cfg, "w", encoding="utf-8") as f:
+            f.write("# тестовый конфиг\nindex:\n"
+                    "  roots:\n    - 'D:\\old'\n"
+                    "  exclude_dirs: [\"node_modules\"]\n")
+        res = ui_server._set_roots(["D:\\new", "C:\\tmp"])
+        self.assertTrue(res["ok"])
+        cfg = load()
+        self.assertEqual(cfg["index"]["roots"], ["D:\\new", "C:\\tmp"])
+        self.assertIn("exclude_dirs", cfg["index"])  # соседний ключ не тронут
+        self.assertIn("# тестовый конфиг", open(self.cfg, encoding="utf-8-sig").read())
+
+    def test_save_inline_form(self):
+        res = ui_server._set_roots(["D:\\x"])
+        self.assertTrue(res["ok"])
+        self.assertEqual(load()["index"]["roots"], ["D:\\x"])
+
+    def test_save_empty_clears_and_warns(self):
+        self.assertTrue(ui_server._set_roots(["D:\\x"])["ok"])
+        res = ui_server._set_roots([])
+        self.assertTrue(res["ok"])
+        self.assertEqual(load()["index"]["roots"], [])
+        self.assertIn("ВНИМАНИЕ", res["msg"])
+
+    def test_relative_becomes_absolute(self):
+        self.assertTrue(ui_server._set_roots(["docs"])["ok"])
+        self.assertTrue(os.path.isabs(load()["index"]["roots"][0]))
+
+    def test_not_a_list_refused(self):
+        res = ui_server._set_roots("D:\\x")
+        self.assertFalse(res["ok"])
 
 
 if __name__ == "__main__":
