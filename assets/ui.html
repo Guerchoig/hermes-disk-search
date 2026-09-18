@@ -38,6 +38,14 @@ summary{cursor:pointer;user-select:none}
 <div id="diag-list" style="margin-top:8px"></div>
 </div>
 
+<div class="card"><h2>Watcher</h2>
+<div class="row">
+<button id="b-w-start" onclick="act('/api/watch/start')">▶ Запустить</button>
+<button id="b-w-stop" onclick="act('/api/watch/stop')">⏹ Остановить</button>
+<label><input type="checkbox" id="w-autostart" onchange="autostart(this)"> автозапуск при входе в систему</label>
+</div><div id="watch-info" class="muted mono"></div>
+</div>
+
 <div class="card"><h2>Индексация</h2>
 <div class="row">
 <button id="b-start" onclick="act('/api/index/start')">▶ Старт</button>
@@ -96,14 +104,6 @@ summary{cursor:pointer;user-select:none}
 <span id="excl-msg" class="muted">Пример: D:\Backup\Downloads\opencv — папка целиком не индексируется (префикс пути).</span>
 </div>
 </div>
-</div>
-
-<div class="card"><h2>Watcher</h2>
-<div class="row">
-<button id="b-w-start" onclick="act('/api/watch/start')">▶ Запустить</button>
-<button id="b-w-stop" onclick="act('/api/watch/stop')">⏹ Остановить</button>
-<label><input type="checkbox" id="w-autostart" onchange="autostart(this)"> автозапуск при входе в систему</label>
-</div><div id="watch-info" class="muted mono"></div>
 </div>
 
 <div class="card"><h2>Модель эмбеддингов (поиск по смыслу)</h2>

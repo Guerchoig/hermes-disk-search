@@ -23,6 +23,7 @@ _PAUSE = os.path.join(PROJECT, "index.pause")
 _STOP = os.path.join(PROJECT, "index.stop")
 _cfg_lock = threading.Lock()
 _ui_index_args = {"roots": None, "full": False}  # параметры последнего UI-старта индексации
+_LAST_HB_EVENTS = []  # события последнего прогона в другом процессе (heartbeat удалён после finish)
 
 
 # --- Устойчивость к отсутствующим/битым настройкам --------------------------
@@ -143,8 +144,31 @@ def _model_download():
     return {"ok": True, "msg": "Скачивание начато (~1,2 ГБ, один раз)"}
 
 
+def _loaded_instances(exe):
+    """Идентификаторы загруженных инстансов модели эмбеддингов (lms ps).
+    LM Studio держит модель в нескольких копиях, если 'lms load' вызывали
+    повторно (кнопка UI, инсталлятор, рестарты) — каждая копия ест VRAM."""
+    try:
+        r = subprocess.run([exe, "ps"], capture_output=True, timeout=30)
+        out = (r.stdout or b"").decode("utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        return []
+    ids = []
+    for ln in out.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("IDENTIFIER") or set(ln) <= set("- "):
+            continue  # заголовок таблицы и разделитель
+        if _MODEL_NAME.lower() in ln.lower():
+            ids.append(ln.split()[0])  # первый токен = идентификатор инстанса
+    return ids
+
+
 def _model_load():
-    """Загрузка модели в запущенный LM Studio через lms CLI (best effort)."""
+    """Загрузка модели в запущенный LM Studio через lms CLI (best effort).
+    'lms load' при каждом вызове создаёт НОВЫЙ инстанс модели (дубликаты:
+    клики по кнопке, повторные установки, рестарты UI), поэтому перед
+    загрузкой сверяемся с 'lms ps': одна копия — не трогаем, несколько —
+    выгружаем все и поднимаем одну свежую."""
     import shutil
 
     exe = shutil.which("lms")
@@ -153,10 +177,23 @@ def _model_load():
                                     "загрузите модель вручную: Developer → "
                                     "Select a model to load → text-embedding-bge-m3"}
     try:
+        loaded = _loaded_instances(exe)
+        if len(loaded) == 1:
+            return {"ok": True, "msg": "Модель уже загружена в LM Studio (%s)"
+                                       % loaded[0]}
+        for ident in loaded:  # дубликаты: выгрузить, чтобы не жгли VRAM
+            try:
+                subprocess.run([exe, "unload", ident], capture_output=True,
+                               timeout=60)
+            except Exception:  # noqa: BLE001
+                pass
         r = subprocess.run([exe, "load", _MODEL_NAME, "-y"],
                            capture_output=True, timeout=600)
         if r.returncode == 0:
-            return {"ok": True, "msg": "Модель загружена в LM Studio"}
+            msg = "Модель загружена в LM Studio"
+            if loaded:
+                msg += " (дубликаты выгружены: было %d копий)" % len(loaded)
+            return {"ok": True, "msg": msg}
         out = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")[:300]
         return {"ok": False, "msg": "lms load завершился с ошибкой: %s" % out}
     except Exception as e:  # noqa: BLE001
@@ -345,34 +382,23 @@ def _index_state():
                               "chunks": hb.get("chunks", 0),
                               "elapsed": hb.get("elapsed", 0),
                               "rate_min": hb.get("rate_min", 0),
-                              "current": {"path": hb.get("path", ""),
-                                          "phase": hb.get("phase", ""),
-                                          "progress": hb.get("progress")}})
-    except Exception:  # noqa: BLE001
-        pass
-    state["stop_requested"] = os.path.exists(_STOP)
-    hb_path = os.path.join(PROJECT, "index.heartbeat.json")
-    try:
-        if os.path.exists(hb_path):
-            with open(hb_path, "r", encoding="utf-8") as f:
-                hb = json.load(f)
-            if hb.get("ts") and time.time() - hb["ts"] < 30:
-                state.update({"running": True, "paused": bool(hb.get("paused")),
-                              "seen": hb.get("seen", state.get("seen", 0)),
-                              "processed": hb.get("processed", state.get("processed", 0)),
-                              "errors": hb.get("errors", state.get("errors", 0)),
-                              "chunks": hb.get("chunks", 0),
-                              "elapsed": hb.get("elapsed", 0),
-                              "rate_min": hb.get("rate_min", 0),
                               "total": hb.get("total"),
                               "rate_window": hb.get("rate_window"),
                               "eta_sec": hb.get("eta_sec"),
                               "remaining": hb.get("remaining"),
                               "current": {"path": hb.get("path", ""),
                                           "phase": hb.get("phase", ""),
-                                          "progress": hb.get("progress")}})
+                                          "progress": hb.get("progress")},
+                              "events": hb.get("events", state.get("events", []))})
+                if "events" in hb:
+                    # кеш: после завершения прогона heartbeat-файл удаляется,
+                    # но «Последние обработанные» должны остаться в UI
+                    _LAST_HB_EVENTS[:] = hb["events"]
     except Exception:  # noqa: BLE001
         pass
+    state["stop_requested"] = os.path.exists(_STOP)
+    if "events" not in state:
+        state["events"] = list(_LAST_HB_EVENTS)
     if state.get("running") and state.get("eta_sec") is not None:
         state["pending_est"] = state.get("remaining", 0)
     else:

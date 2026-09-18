@@ -155,7 +155,10 @@ class PickDeviceTests(unittest.TestCase):
 
     def test_vulkan_not_supported_falls_back(self):
         from hds.extract_av import _pick_device
-        dev, comp = _pick_device({"index": {"whisper_device": "vulkan"}}, platform="win32")
+        # cpp_available=False явно: иначе тест зависит от окружения (если
+        # whisper.cpp установлен на машине, детекция честно вернёт vulkan)
+        dev, comp = _pick_device({"index": {"whisper_device": "vulkan"}},
+                                 platform="win32", cpp_available=False)
         self.assertIn(dev, ("cuda", "cpu"))
         self.assertEqual(comp, "float16" if dev == "cuda" else "int8")
 

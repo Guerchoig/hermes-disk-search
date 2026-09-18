@@ -153,7 +153,8 @@ class ProgressReporter:
                  "elapsed": round(time.time() - self.t0, 1),
                  "rate_min": round(self.seen_count / max(0.001, time.time() - self.t0) * 60),
                  "rate_window": self.rate_window(),
-                 "eta_sec": self.eta_sec()}
+                 "eta_sec": self.eta_sec(),
+                 "events": list(self.events)[:25]}  # последние обработанные — для UI
         with self._lock:
             if self.current:
                 d["path"], d["phase"] = self.current

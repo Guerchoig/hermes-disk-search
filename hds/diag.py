@@ -95,12 +95,12 @@ def run_checks(cfg=None):
     emb_url = _norm_url(dig(cfg, "embedding.base_url", "http://localhost:1234/v1"))
     try:
         r = rq.post(emb_url + "/embeddings",
-                    json={"model": emb_model, "input": ["ping"]}, timeout=3)
+                    json={"model": emb_model, "input": ["ping"]}, timeout=10)
         if r.status_code == 200:
             add("emb", "ok", "Эмбеддинги: модель '%s' отвечает" % emb_model)
         else:
             raise RuntimeError("HTTP %s" % r.status_code)
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
         # сервер может знать модель под другим идентификатором (bge-m3) —
         # ищем её в списке моделей и пробуем зонд с фактическим именем
         actual = None
@@ -116,7 +116,7 @@ def run_checks(cfg=None):
         if actual and actual != emb_model:
             try:
                 r3 = rq.post(emb_url + "/embeddings",
-                             json={"model": actual, "input": ["ping"]}, timeout=3)
+                             json={"model": actual, "input": ["ping"]}, timeout=10)
                 if r3.status_code == 200:
                     add("emb", "warn",
                         "Эмбеддинги работают, но сервер отдаёт модель под именем '%s', "
@@ -128,11 +128,26 @@ def run_checks(cfg=None):
             except Exception:  # noqa: BLE001
                 pass
         if not handled:
-            add("emb", "fail",
-                "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
-                fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
-                    "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
-                    "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
+            # Таймаут пинга ≠ «модель не загружена»: под нагрузкой (очередь
+            # эмбеддингов при индексации, GPU 100%) зонд просто не успевает
+            # дождаться ответа. /v1/models — каталог моделей, а не список
+            # загруженных; если модель в каталоге есть, честнее сообщить
+            # «сервер занят», чем вводить в заблуждение красным «fail».
+            busy = isinstance(e, rq.exceptions.Timeout)
+            if busy and actual:
+                add("emb", "warn",
+                    "LM Studio не ответил на пинг эмбеддингов за 10 с — судя по всему, "
+                    "сервер занят очередью запросов (обычно во время индексации). "
+                    "Модель '%s' в каталоге есть." % emb_model,
+                    fix="Если индексация сейчас не идёт — загрузите модель: кнопка "
+                        "«Загрузить в LM Studio» в группе «Модель эмбеддингов» выше "
+                        "(дубликаты, если появятся, кнопка убирает сама).")
+            else:
+                add("emb", "fail",
+                    "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
+                    fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
+                        "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
+                        "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
 
     # 5. Tesseract OCR
     from .extractors import _tesseract_ready

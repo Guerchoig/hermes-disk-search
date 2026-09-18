@@ -24,12 +24,17 @@ class HeartbeatStatusTests(unittest.TestCase):
             os.path.abspath(__file__))), "index.heartbeat.json")
         self.addCleanup(lambda: os.path.exists(self.hb) and os.remove(self.hb))
         indexer._ACTIVE_REPORTER = None
+        indexer._LAST_REPORTER = None
+        ui_server._LAST_HB_EVENTS.clear()
 
     def _write_hb(self, path="D:\\x\\v.mp4"):
         with open(self.hb, "w", encoding="utf-8") as f:
             json.dump({"ts": __import__("time").time(), "path": path,
                        "phase": "Whisper", "progress": 55,
-                       "seen": 5, "processed": 3, "errors": 0, "paused": False}, f)
+                       "seen": 5, "processed": 3, "errors": 0, "paused": False,
+                       "events": [{"path": r"D:\x\a.txt", "status": "indexed",
+                                   "kind": "text", "dur": 0.4, "chunks": 2,
+                                   "ts": 1000.0}]}, f)
 
     def test_heartbeat_makes_running_true(self):
         self._write_hb()
@@ -37,6 +42,23 @@ class HeartbeatStatusTests(unittest.TestCase):
         self.assertTrue(st["running"], "heartbeat из другого процесса должен быть виден")
         self.assertEqual(st["current"]["path"], "D:\\x\\v.mp4")
         self.assertEqual(st["current"]["progress"], 55)
+
+    def test_heartbeat_carries_events(self):
+        """РЕГРЕССИЯ: «Последние обработанные» не обновлялись, когда индексация
+        идёт в другом процессе (watcher/CLI): heartbeat не содержал events."""
+        self._write_hb()
+        st = ui_server._index_state()
+        self.assertEqual(len(st["events"]), 1)
+        self.assertEqual(st["events"][0]["path"], r"D:\x\a.txt")
+
+    def test_events_survive_after_run_finish(self):
+        """Прогон в другом процессе завершился: heartbeat удалён,
+        но последние события должны остаться в UI."""
+        self._write_hb()
+        ui_server._index_state()  # кеширует events из heartbeat
+        os.remove(self.hb)
+        st = ui_server._index_state()
+        self.assertEqual(len(st["events"]), 1)
 
     def test_stale_heartbeat_not_running(self):
         import time

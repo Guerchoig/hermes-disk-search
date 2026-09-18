@@ -27,15 +27,36 @@ if (Test-Path $gguf) {
 }
 
 # Попытка загрузить модель в LM Studio через lms CLI (best effort)
+# 'lms load' при каждом вызове создаёт НОВЫЙ инстанс модели (дубликаты едят
+# VRAM), поэтому сначала проверяем 'lms ps': уже загружена — не трогаем.
 $lms = Get-Command lms -ErrorAction SilentlyContinue
 if ($lms) {
-    Write-Host "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3)..."
-    & lms load text-embedding-bge-m3 -y 2>$null | Out-Null
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "[ok] Модель загружена в LM Studio" -ForegroundColor Green
+    $loaded = @()
+    try {
+        $psOut = & lms ps 2>$null | Out-String
+        foreach ($ln in ($psOut -split "`n")) {
+            $t = $ln.Trim()
+            if ($t -and -not $t.StartsWith("IDENTIFIER") -and ($t.Trim('-').Length -gt 0) -and
+                $t.ToLower().Contains("text-embedding-bge-m3")) {
+                $loaded += ($t -split '\s+')[0]
+            }
+        }
+    } catch { }
+    if ($loaded.Count -eq 1) {
+        Write-Host "[ok] Модель уже загружена в LM Studio ($($loaded[0]))" -ForegroundColor Green
     } else {
-        Write-Host "[--] Автозагрузка не удалась — загрузите модель в LM Studio:" -ForegroundColor Yellow
-        Write-Host "     Developer -> Select a model to load -> text-embedding-bge-m3" -ForegroundColor Yellow
+        if ($loaded.Count -gt 1) {
+            Write-Host "[..] Найдено $($loaded.Count) копий модели — выгружаю дубликаты..."
+            foreach ($id in $loaded) { & lms unload $id 2>$null | Out-Null }
+        }
+        Write-Host "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3)..."
+        & lms load text-embedding-bge-m3 -y 2>$null | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[ok] Модель загружена в LM Studio" -ForegroundColor Green
+        } else {
+            Write-Host "[--] Автозагрузка не удалась — загрузите модель в LM Studio:" -ForegroundColor Yellow
+            Write-Host "     Developer -> Select a model to load -> text-embedding-bge-m3" -ForegroundColor Yellow
+        }
     }
 }
 
