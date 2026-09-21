@@ -213,6 +213,11 @@ Write-Host "== Интеграция с Hermes Desktop (MCP-сервер + ски
 # как подключить позже, и завершится успешно.
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_hermes.ps1"
 
+Write-Host "== Интеграция с Cline Desktop (MCP-сервер + скилл) =="
+# Не обязательна на этом шаге: если Cline ещё не установлен, скрипт напечатает,
+# как подключить позже, и завершится успешно.
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_cline.ps1"
+
 Write-Host "== Ярлык на рабочем столе (веб-интерфейс) =="
 & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\shortcuts\windows\create_shortcut.ps1"
 

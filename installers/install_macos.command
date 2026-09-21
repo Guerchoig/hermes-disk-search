@@ -109,6 +109,11 @@ if [ -f "$ROOT/installers/install_hermes_macos.sh" ]; then
     bash "$ROOT/installers/install_hermes_macos.sh" || true
 fi
 
+# --- 8.1. Интеграция с Cline Desktop (MCP-сервер + скилл) ---
+if [ -f "$ROOT/installers/install_cline_macos.sh" ]; then
+    bash "$ROOT/installers/install_cline_macos.sh" || true
+fi
+
 # --- 9. Диагностика ---
 cd "$ROOT" && "$ROOT/.venv/bin/python" -m hds.cli check
 echo ""

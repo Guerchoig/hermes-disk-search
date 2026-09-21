@@ -47,7 +47,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 2. Ставит недостающее через winget: **ffmpeg** — автоматически; **Tesseract OCR** — по вашему разрешению; создаёт окружение - venv и устанавливает компоненты из файла зависимостей (+ faster-whisper).
 3. **Скачивает embedding-модель `bge-m3`** (GGUF `lm-kit/bge-m3-gguf`, Q8_0, 1024 dim, ~1,2 ГБ) в `%USERPROFILE%\.lmstudio\models\lm-kit\bge-m3-gguf\`, если её там нет, и пытается загрузить в LM Studio через `lms load`. Позже модель можно скачать/загрузить кнопками в веб-интерфейсе (группа «Модель эмбеддингов»).
 4. Замечает `config.yaml` с путями с другого компьютера (отсутствующие диски) и предлагает заменить их на профиль этого компьютера.
-5. По запросу предзагружает модель Whisper (~460 МБ), создаёт ярлык «Hermes Disk Search» на рабочем столе и (по запросу) автозапуск watcher'а, подключает MCP-сервер к Hermes Desktop.
+5. По запросу предзагружает модель Whisper (~460 МБ), создаёт ярлык «Hermes Disk Search» на рабочем столе и (по запросу) автозапуск watcher'а, подключает MCP-сервер к Hermes Desktop и (если установлен) к Cline Desktop.
 
 Что нужно от пользователя:
 
@@ -95,7 +95,7 @@ bash installers/install_macos.command
 Tesseract + `tesseract-lang` для русского OCR), создаёт venv, ставит зависимости,
 **скачивает embedding-модель `bge-m3`** в `~/.lmstudio/models/lm-kit/bge-m3-gguf/`,
 копирует приложение «HDS Индексация» в ~/Applications, подключает MCP-сервер
-к Hermes Desktop и запускает диагностику `python -m hds.cli check`.
+к Hermes Desktop и Cline Desktop (если установлен) и запускает диагностику `python -m hds.cli check`.
 
 Отличия от Windows:
 
@@ -342,12 +342,12 @@ python -m hds.cli ui          # сервер + браузер откроется
   путь — атомарный, с возвратом состояния watcher'а и индексации.
 
 Сервер слушает только `127.0.0.1` (доступ извне невозможен), порт настраивается
-`python -m hds.cli ui --port N`. Статусы отражают **истинное состояние любых процессов**:
-индексация определяется через heartbeat-файл (`index.heartbeat.json` обновляется
-индексатором каждые ~30 с, кросс-процессно), watcher — через `watch.lock` и живость PID.
-
-Сервер слушает только `127.0.0.1` (доступ извне невозможен), порт настраивается
-`python -m hds.cli ui --port N`.
+`python -m hds.cli ui --port N`. POST-эндпоинты API принимают только запросы
+собственной страницы (`Origin: http://127.0.0.1:<порт>`, `Content-Type: application/json`)
+— cross-origin запросы из браузера отклоняются. Статусы отражают **истинное состояние
+любых процессов**: индексация определяется через heartbeat-файл (`index.heartbeat.json`
+обновляется индексатором каждые ~30 с, кросс-процессно), watcher — через `watch.lock`
+и живость PID.
 
 ## Watch: наблюдатель файловой системы
 
@@ -488,6 +488,80 @@ tools:
 - В чате: «найди на этом компе фильмы» — агент должен вызвать
   `mcp__disk_search__search_local_files` (видно в UI как вызов инструмента).
 
+## Интеграция с Cline Desktop (Windows / macOS)
+
+Cline (https://cline.bot/desktop) тоже умеет пользоваться disk-search через MCP.
+Всё это делает один скрипт — **`install_cline.ps1`** (Windows) или
+**`installers/install_cline_macos.sh`** (macOS); он вызывается автоматически из
+`setup.ps1` / `installers/install_macos.command` и:
+
+1. регистрирует MCP-сервер `disk-search` в настройках Cline:
+   `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json` (Windows) /
+   `~/.cline/data/settings/cline_mcp_settings.json` (macOS) — единый файл
+   MCP-настроек Cline Desktop и Cline CLI; дополнительно обновляется
+   `%USERPROFILE%\.cline\mcp.json` / `~/.cline/mcp.json` (вариант конфига
+   Cline CLI);
+2. устанавливает скилл `disk-search`:
+   `hermes-skill\disk-search.md` → `%USERPROFILE%\.cline\skills\disk-search\SKILL.md`
+   (macOS: `hermes-skill/disk-search.md` → `~/.cline/skills/disk-search/SKILL.md`;
+   Cline читает скиллы как папки с `SKILL.md` внутри — ровно такую структуру
+   создаёт и «Skills → New skill...» в самом Cline). Скилл объясняет агенту,
+   что «найди на компе…» — это инструменты MCP-сервера `disk-search`
+   (`search_local_files` / `ask_my_files`), а не встроенный поиск/терминал;
+3. правит только секцию `mcpServers` JSON — остальные серверы и настройки
+   Cline сохраняются; повторный запуск обновляет запись, не дублируя её.
+
+### Когда Cline уже установлен
+
+Скрипты вызываются автоматически; запустить вручную:
+
+```powershell
+# Windows
+powershell -File install_cline.ps1
+```
+
+```bash
+# macOS
+bash installers/install_cline_macos.sh
+```
+
+### Если Cline будет установлен позже
+
+Ничего страшного: при установке disk-search скрипт просто напечатает напоминание.
+Когда Cline Desktop появится на машине — выполните ту же команду, и подключение
+произойдёт за один запуск (см. команды выше).
+
+### Вручную (без скрипта)
+
+1. Открыть файл настроек MCP Cline — Windows:
+   `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`, macOS:
+   `~/.cline/data/settings/cline_mcp_settings.json` (если файла нет — создать;
+   тот же файл открывается из Cline: MCP Servers → Configure) и добавить сервер
+   `disk-search` в секцию `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "disk-search": {
+      "command": "C:\\\\Users\\\\<user>\\\\hermes-disk-search\\\\.venv\\\\Scripts\\\\python.exe",
+      "args": ["C:\\\\Users\\\\<user>\\\\hermes-disk-search\\\\mcp_start.py"],
+      "env": {},
+      "disabled": false
+    }
+  }
+}
+```
+
+   macOS-вариант — абсолютные пути:
+   `"command": "/Users/<user>/hermes-disk-search/.venv/bin/python"`,
+   `"args": ["/Users/<user>/hermes-disk-search/mcp_start.py"]`.
+2. Скопировать скилл: `hermes-skill/disk-search.md` →
+   `~/.cline/skills/disk-search/SKILL.md`
+   (Windows: `%USERPROFILE%\.cline\skills\disk-search\SKILL.md`).
+3. Перезапустить Cline Desktop (или начать новую сессию): сервер `disk-search`
+   должен появиться в MCP Servers, а запрос «найди на этом компе фильмы» —
+   вызвать его инструмент `search_local_files`.
+
 ## Настройки (`config.yaml`)
 
 Все настройки в одном файле `config.yaml` (UTF-8). Изменения вступают в силу при
@@ -601,7 +675,8 @@ tools:
 | `hds/search.py`                                               | гибридный поиск RRF + сниппеты                                                                                                                                  |
 | `hds/rag.py`                                                  | ответ с цитатами через чат-модель                                                                                                                         |
 | `hds/cli.py`                                                  | CLI                                                                                                                                                                                   |
-| `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер для Hermes                                                                                                                                                        |
+| `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер (Hermes, Cline и другие MCP-клиенты)                                                                                                                                                        |
+| `install_cline.ps1`, `installers/install_cline_macos.sh` | подключение disk-search к Cline Desktop/CLI (MCP-сервер + скилл) |
 | `gen_fixtures.py`                                             | тестовые файлы для smoke-теста                                                                                                                                   |
 | `tests/`                                                      | регрессионные тесты (71 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI) |
 | `.github/workflows/release.yml`                               | GitHub Actions: тесты → сборка → релиз (с удалением предыдущих)                                                                                 |
