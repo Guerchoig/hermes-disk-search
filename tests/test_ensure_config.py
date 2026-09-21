@@ -367,6 +367,28 @@ class UiVersionTests(unittest.TestCase):
         self.assertTrue(__version__)
 
 
+
+class RunUiLauncherTests(unittest.TestCase):
+    """РЕГРЕССИЯ: при запуске по ярлыку страница UI открывалась дважды —
+    браузер открывали и сервер (webbrowser.open в ui_server.run), и лаунчер
+    (Start-Process в run_ui.ps1). Теперь сервер стартует с --no-browser,
+    страницу открывает только лаунчер."""
+
+    def _text(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        with open(os.path.join(root, "run_ui.ps1"), encoding="utf-8-sig") as f:
+            return f.read()
+
+    def test_server_starts_without_browser(self):
+        self.assertIn("--no-browser", self._text(),
+                      "сервер должен стартовать с --no-browser из run_ui.ps1")
+
+    def test_single_page_opener(self):
+        self.assertEqual(self._text().count('Start-Process "http://'), 1,
+                         "страницу UI должен открывать только лаунчер "
+                         "(ровно одна вставка URL)")
+
+
 class EmbModelTests(unittest.TestCase):
     """Сопоставление модели эмбеддингов (LM Studio может отдавать другой id)."""
 

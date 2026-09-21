@@ -8,8 +8,6 @@ import time
 
 def _hds_processes():
     """[(pid, cmdline)] процессов hds.cli watch/index (не включая UI-сервер)."""
-    import re
-
     import psutil
 
     out = []
@@ -56,8 +54,6 @@ def move_db(new_path, force=False, project=None, venv_pythonw=None,
             except Exception:  # noqa: BLE001
                 pass
         time.sleep(2)
-
-    import sqlite3
 
     os.makedirs(os.path.dirname(new) or ".", exist_ok=True)
     print("[db-move] копирую %s -> %s ..." % (old, new), flush=True)

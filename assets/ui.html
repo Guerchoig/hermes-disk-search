@@ -354,6 +354,7 @@ async function loadTrees(){
       `<div style="margin:8px 0"><details open><summary class="t-${t.status}">📁 ${t.name}</summary>
        <ul class="tree">${treeHtml(t.children || [])}</ul></details></div>`).join('')
       || '<span class="muted">Корни не заданы или пусты.</span>';
+    box.dataset.loaded = '1';  // только при успешной загрузке: при ошибке раскрытие повторит попытку
   } catch(e){ box.innerHTML = '<span style="color:var(--err)">Ошибка построения: ' + e + '</span>'; }
 }
 function treeHtml(nodes){
@@ -366,16 +367,16 @@ function treeHtml(nodes){
   }).join('');
 }
 document.getElementById('trees-details').addEventListener('toggle', function(e){
+  // при раскрытии дозагружаем, если ещё не загружено; флаг ставит loadTrees
   if (e.target.open && !document.getElementById('trees-box').dataset.loaded) loadTrees();
-  document.getElementById('trees-box').dataset.loaded = '1';
 });
 refresh(); setInterval(refresh, 2000);
-</script></div></body></html>
-</div>
-<div class="muted">Пути индексирования — секция index.roots; изменения применяются к новым запускам: после сохранения перезапустите watcher/индексацию кнопками выше.</div>
+</script>
 </div>
 
-<div class="card" style="width:100%"><h2>Расположение базы индексации</h2>
+<div class="muted">Пути индексирования — секция index.roots; изменения применяются к новым запускам: после сохранения перезапустите watcher/индексацию кнопками выше.</div>
+
+<div class="card"><h2>Расположение базы индексации</h2>
 <div id="db-info" class="mono"></div>
 <div class="row" style="margin-top:10px">
 <input id="db-new" class="mono" placeholder="D:\новая\папка\index.db" style="flex:1;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:6px">
@@ -386,3 +387,7 @@ refresh(); setInterval(refresh, 2000);
 db_path переключается, старая база остаётся резервной копией (.moved-…), watcher и
 индексация возвращаются к прежнему состоянию.</div>
 </div>
+
+</div>
+</div>
+</body></html>

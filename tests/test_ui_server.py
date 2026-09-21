@@ -232,7 +232,6 @@ class TreeBuildTests(unittest.TestCase):
         self.assertEqual(res["trees"][0]["status"], "done")
         sub = self._find([res["trees"][0]], "sub")
         self.assertEqual(sub["status"], "done")
-        self.assertEqual(sub["status"], "done")
 
     def test_mixed_children_make_parent_partial(self):
         # a.txt в корне (done), sub не начата (none), sub2 проиндексирована (done)
@@ -246,14 +245,46 @@ class TreeBuildTests(unittest.TestCase):
         res = ui_server._build_trees()
         self.assertEqual(res["trees"][0]["status"], "partial")
 
-    def _find(self, nodes, name):
-        for n in nodes:
-            if os.path.basename(n["path"]).lower() == name.lower():
-                return n
-            r = self._find(n.get("children", []), name)
-            if r:
-                return r
-        return None
+
+class CsrfGuardTests(unittest.TestCase):
+    """РЕГРЕССИЯ: локальный API принимал cross-origin POST с любым
+    Content-Type — побочные эффекты (правка config.yaml, стоп watcher)
+    выполнялись по запросу любой открытой в браузере страницы."""
+
+    def setUp(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), ui_server.Handler)
+        self.port = srv.server_port
+        th = threading.Thread(target=srv.serve_forever, daemon=True)
+        th.start()
+        self.addCleanup(srv.shutdown)
+        self.addCleanup(srv.server_close)
+
+    def _post(self, ctype, origin=None):
+        import requests as rq
+
+        headers = {"Content-Type": ctype}
+        if origin:
+            headers["Origin"] = origin
+        r = rq.post("http://127.0.0.1:%d/api/no-such-endpoint" % self.port,
+                    data="{}", headers=headers, timeout=5)
+        return r.status_code, r.json()
+
+    def test_cross_origin_rejected(self):
+        code, _body = self._post("text/plain", origin="http://evil.example")
+        self.assertEqual(code, 403)
+
+    def test_text_plain_without_origin_rejected(self):
+        code, _body = self._post("text/plain")
+        self.assertEqual(code, 415)
+
+    def test_json_passes_guard(self):
+        """Свой Origin/JSON проходит гард и доходит до роутинга (404 пути)."""
+        code, body = self._post("application/json")
+        self.assertEqual(code, 404)
+        self.assertEqual(body.get("error"), "not found")
 
 
 if __name__ == "__main__":

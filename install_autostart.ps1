@@ -30,4 +30,4 @@ if (-not $ok) {
     Write-Host "[ok] Ярлык создан в автозагрузке: $startup\HermesDiskSearchWatch.lnk"
     Write-Host "Запуск при входе в систему; удалить — уберите ярлык из папки автозагрузки."
 }
-Write-Host "Процесс в диспетчере задач: pythonw.exe (аргументы: -m hds.cli watch)"
+Write-Host "Процессы в диспетчере задач: pythonw.exe x2 (venv-лаунчер + реальный интерпретатор, аргументы: -m hds.cli watch)"

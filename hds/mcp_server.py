@@ -134,7 +134,6 @@ def start_indexing(full: bool = False) -> str:
             _idx_state["running"] = False
 
     threading.Thread(target=job, daemon=True).start()
-    threading.Thread(target=job, daemon=True).start()
     return "Фоновая индексация запущена (%s). Прогресс — через index_status. Остановка — инструментом stop_indexing." % (
         "полная" if full else "инкрементальная")
 

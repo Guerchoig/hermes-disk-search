@@ -263,7 +263,26 @@ def _watch_running():
 
 
 def _watch_autostart_on():
-    return os.path.exists(os.path.join(_startup_dir(), "HermesDiskSearchWatch.lnk"))
+    # install_autostart.ps1 регистрирует автозапуск двумя способами: задача
+    # Task Scheduler (если есть права) или ярлык в Startup (фолбэк). Раньше
+    # UI видел только ярлык: при работающей задаче бейдж ложно показывал
+    # «автозапуск: выкл», а выключение галочкой задачу не убирало.
+    if os.path.exists(os.path.join(_startup_dir(), "HermesDiskSearchWatch.lnk")):
+        return True
+    if sys.platform == "darwin":
+        return os.path.exists(os.path.join(_startup_dir(), "local.hds.watch.plist"))
+    if os.name != "nt":
+        return False
+    try:
+        r = subprocess.run(
+            ["schtasks", "/Query", "/TN", "HermesDiskSearchWatch",
+             "/FO", "CSV", "/NH"],
+            capture_output=True, timeout=15)
+        return r.returncode == 0
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _watch_autostart_set(enabled):
     startup = _startup_dir()
     if sys.platform == "darwin":
@@ -295,7 +314,11 @@ def _watch_autostart_set(enabled):
                % (pythonw.replace("'", "''"), PROJECT.replace("'", "''"), PROJECT))
     else:
         cmd = ("$p = '%s'; $f = $p + '\\HermesDiskSearchWatch.lnk'; "
-               "if (Test-Path $f) { Remove-Item $f }" % _startup_dir().replace("'", "''"))
+               "if (Test-Path $f) { Remove-Item $f }; "
+               # выключение убирает и ярлык, и задачу планировщика (если была)
+               "schtasks /End /TN HermesDiskSearchWatch 2>$null; "
+               "schtasks /Delete /TN HermesDiskSearchWatch /F 2>$null; exit 0"
+               % _startup_dir().replace("'", "''"))
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "$p = '%s'; %s" % (_startup_dir().replace("'", "''"), cmd)],
@@ -847,11 +870,14 @@ def _db_move(new_path, force=False):
 class Handler(BaseHTTPRequestHandler):
     def _json(self, obj, code=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            pass  # клиент уже закрыл соединение (закрытие вкладки) — не ошибка
 
     def _body(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -921,8 +947,27 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _csrf_ok(self):
+        """CSRF-защита локального API: браузер доставит cross-origin POST
+        (даже с text/plain) любой открытой странице — побочный эффект
+        выполнится, хотя ответ прочитать нельзя. Разрешаем только запросы
+        собственной страницы (Origin пуст или http://127.0.0.1:<порт>)
+        с Content-Type: application/json. Возвращает None, если всё хорошо,
+        иначе — (код, тело)."""
+        origin = self.headers.get("Origin")
+        if origin and origin != "http://127.0.0.1:%d" % self.server.server_port:
+            return 403, {"error": "cross-origin запрос отклонён"}
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype != "application/json":
+            return 415, {"error": "Content-Type должен быть application/json"}
+        return None
+
     def do_POST(self):
         try:
+            guard = self._csrf_ok()
+            if guard:
+                self._json(guard[1], guard[0])
+                return
             body = self._body()
             if self.path == "/api/index/start":
                 self._json(_start_index(full=bool(body.get("full")),

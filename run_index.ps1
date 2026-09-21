@@ -3,7 +3,7 @@ $root = $PSScriptRoot
 Set-Location $root
 $py = Join-Path $root ".venv\Scripts\python.exe"
 if (-not (Test-Path $py)) {
-    Write-Host "== venv не найден. Сначала запустите install_windows.ps1 ==" -ForegroundColor Yellow
+    Write-Host "== venv не найден. Сначала запустите setup.ps1 ==" -ForegroundColor Yellow
     Read-Host "Enter для выхода"
     exit 1
 }

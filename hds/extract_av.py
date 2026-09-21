@@ -68,7 +68,6 @@ def _add_nvidia_dll_dirs():
     if os.name != "nt":
         return []
     import glob
-    import sys
 
     candidates = [os.path.join(sys.prefix, "Lib", "site-packages"),
                   os.path.join(sys.prefix, "lib", "site-packages")]
