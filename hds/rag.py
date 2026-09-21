@@ -8,8 +8,9 @@ SYSTEM_PROMPT = (
     "Ты помогаешь искать информацию в локальных файлах пользователя. "
     "Отвечай на русском языке. Опирайся ТОЛЬКО на приведённые фрагменты документов; "
     "если их недостаточно — так и скажи. При упоминании фактов указывай источник в "
-    "формате [N], где N — номер фрагмента. В конце перечисли все использованные "
-    "источники отдельным списком: путь к файлу, страница/таймкод."
+    "формате [N], где N — номер фрагмента. Отвечай компактно: суть в нескольких "
+    "предложениях и короткий список источников (путь, страница/таймкод) в конце — "
+    "ответ генерирует локальная модель, длинные ответы не помещаются в таймаут клиента."
 )
 
 
@@ -34,7 +35,7 @@ def build_context(results, max_chars):
     return "\n\n".join(blocks), len(blocks)
 
 
-def ask(conn, emb, cfg, question, limit=12):
+def ask(conn, emb, cfg, question, limit=8):
     from .search import search as _search
 
     results = _search(conn, emb, cfg, question, limit=limit)
@@ -47,6 +48,9 @@ def ask(conn, emb, cfg, question, limit=12):
     payload = {
         "model": dig(cfg, "chat.model", "local-model"),
         "temperature": float(dig(cfg, "chat.temperature", 0.2)),
+        # лимит генерации: без него локальная модель может писать минуты и
+        # выходить за таймаут MCP-клиента (Cline режет вызов по "timeout")
+        "max_tokens": int(dig(cfg, "chat.max_tokens", 600)),
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": "Вопрос пользователя: %s\n\n"

@@ -51,8 +51,12 @@ def main():
     # формат Cline Desktop (как у серверов из Marketplace): вложенный transport.
     # autoApprove со всеми инструментами обязателен: с пустым списком Cline
     # запрашивает подтверждение на каждый вызов, и модель избегает сервера.
+    # timeout: ask_my_files делает RAG-ответ локальной LLM (поиск + генерация,
+    # при холодной модели LM Studio — ещё и загрузка весов), 60 с по умолчанию
+    # не хватает; Cline поддерживает per-server "timeout" в секундах.
     entry = {"disabled": False,
              "autoApprove": tools,
+             "timeout": 300,
              "transport": {"type": "stdio", "command": args.python,
                            "args": [args.mcp_start], "env": {}}}
     for t in args.targets:
