@@ -46,11 +46,13 @@ def main():
     ap.add_argument("--mcp-start", required=True, help="путь к mcp_start.py")
     ap.add_argument("--targets", nargs="+", required=True, help="JSON-файлы настроек MCP Cline")
     args = ap.parse_args()
-    entry = {"command": args.python, "args": [args.mcp_start],
-             "env": {}, "disabled": False, "autoApprove": [],
-             # дублируем в новом вложенном формате Cline Desktop
-             # (серверы из Marketplace пишутся так); плоский формат
-             # command+args понимают все клиенты Cline
+    tools = ["search_local_files", "ask_my_files", "index_status",
+             "start_indexing", "stop_indexing", "reindex_path"]
+    # формат Cline Desktop (как у серверов из Marketplace): вложенный transport.
+    # autoApprove со всеми инструментами обязателен: с пустым списком Cline
+    # запрашивает подтверждение на каждый вызов, и модель избегает сервера.
+    entry = {"disabled": False,
+             "autoApprove": tools,
              "transport": {"type": "stdio", "command": args.python,
                            "args": [args.mcp_start], "env": {}}}
     for t in args.targets:
@@ -58,7 +60,7 @@ def main():
     for t in args.targets:  # контроль: запись на месте и файл валиден
         with open(t, encoding="utf-8-sig") as f:
             d = json.load(f)
-        assert d["mcpServers"]["disk-search"]["command"] == args.python
+        assert d["mcpServers"]["disk-search"]["transport"]["command"] == args.python
     print("[ok] MCP disk-search зарегистрирован в настройках Cline")
 
 

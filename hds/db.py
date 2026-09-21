@@ -47,7 +47,7 @@ def connect(db_path, dim):
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
-    conn.execute("PRAGMA busy_timeout=5000")  # параллельные записи (watcher + reconcile)
+    conn.execute("PRAGMA busy_timeout=30000")  # параллельные записи (watcher + reconcile + MCP)
     vec_ok = True
     try:
         conn.enable_load_extension(True)
@@ -63,9 +63,14 @@ def connect(db_path, dim):
               "Рекомендуется Python из Homebrew: brew install python")
     conn.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT)")
     row = conn.execute("SELECT value FROM meta WHERE key='vec_dim'").fetchone()
-    # проверяем фактическую размерность таблицы пробной вставкой с откатом
-    mismatch = True
-    if vec_ok:
+    # проверяем фактическую размерность таблицы пробной вставкой с откатом —
+    # ТОЛЬКО если meta не подтверждает нужную размерность: проба и запись meta —
+    # это WRITE-операции, и при постоянной записи watcher'а каждый такой
+    # connect() проигрывал гонку за write-lock (MCP-вызовы падали
+    # "database is locked" и клиенты считали сервер сломанным)
+    stored_dim = str(row[0]) if row else None
+    mismatch = stored_dim != str(int(dim))
+    if mismatch and vec_ok:
         probe = b"\x00" * (int(dim) * 4)
         conn.execute("SAVEPOINT probe_sp")
         try:
@@ -108,8 +113,11 @@ def connect(db_path, dim):
             print("[db] indexed_at заполнен по mtime для %d старых записей" % c_old)
     except sqlite3.OperationalError:
         pass
-    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('vec_dim', ?)", (str(int(dim)),))
-    conn.commit()
+    if stored_dim != str(int(dim)):  # пишем meta только при реальном изменении —
+        # безусловная запись превращала каждое подключение в write-транзакцию
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('vec_dim', ?)",
+                     (str(int(dim)),))
+        conn.commit()
     return conn
 
 
