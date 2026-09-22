@@ -59,6 +59,13 @@ def _default_config_yaml():
         "  fts_weight: 1.0          # вес FTS-ветки в RRF-слиянии\n"
         "  vec_weight: 1.0          # вес векторной ветки\n"
         "  snippet_chars: 500\n"
+        "\n"
+        "rerank:\n"
+        "  enabled: false           # реранкер для ask_my_files (bge-reranker-v2-m3 в llama-server)\n"
+        "  url: \"http://localhost:8012/v1\"\n"
+        "  model: \"bge-reranker-v2-m3\"\n"
+        "  timeout: 30\n"
+        "  max_latency: 15          # сек; превышение — реранкер авто-отключается\n"
     )
 
 

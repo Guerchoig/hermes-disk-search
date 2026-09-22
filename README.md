@@ -641,6 +641,24 @@ bash installers/install_cline_macos.sh
 | `rrf_k`         | `60`                  | Константа слияния RRF (больше — ровнее вклад обоих методов) |
 | `snippet_chars` | `500`                 | Длина сниппета в результатах                                                     |
 
+### `rerank` — реранкер для ask_my_files (по умолчанию выключен)
+
+Cross-encoder `bge-reranker-v2-m3` (MIT) переставляет топ-20 кандидатов поиска и
+оставляет топ-8 для генерации ответа — самый стабильный источник прироста точности
+RAG. LM Studio эндпоинт `/rerank` не реализует, поэтому модель запускается отдельным
+процессом llama-server:
+
+```powershell
+# модель ~600 МБ (GGUF Q8_0), например baai/bge-reranker-v2-m3 из репозитория ggml-org
+llama-server --reranking --pooling rank --port 8012 --ctx-size 2048 ^
+  --model "%USERPROFILE%\.lmstudio\models\baai\bge-reranker-v2-m3\bge-reranker-v2-m3-Q8_0.gguf"
+```
+
+Затем включите `rerank.enabled: true` (галочка в веб-интерфейсе). На CPU реранк
+20 фрагментов занимает секунды; при латентности выше `rerank.max_latency` реранкер
+авто-отключается до перезапуска, поиск продолжает работать без него. Статус —
+`python -m hds.cli check`.
+
 ### `watch` — наблюдатель файловой системы
 
 | Параметр       | По умолчанию | Описание                                                                                                             |

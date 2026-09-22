@@ -38,10 +38,19 @@ def build_context(results, max_chars):
 def ask(conn, emb, cfg, question, limit=8):
     from .search import search as _search
 
-    results = _search(conn, emb, cfg, question, limit=limit)
+    # реранкер (rerank.enabled, по умолчанию выключен): ищем кандидатов с запасом
+    # (top-20), cross-encoder переставляет их и отбирает top-N для генерации
+    pool = 20 if dig(cfg, "rerank.enabled", False) else limit
+    results = _search(conn, emb, cfg, question, limit=pool)
     if not results:
         return {"answer": "В индексе ничего не найдено. Проиндексируйте диски: "
                           "python -m hds.cli index", "sources": []}
+    if dig(cfg, "rerank.enabled", False):
+        from .rerank import rerank_results
+
+        reranked = rerank_results(cfg, question, results, top_n=limit)
+        if reranked is not None:
+            results = reranked
     max_chars = int(dig(cfg, "chat.max_context_chars", 14000))
     context, n_used = build_context(results, max_chars)
     url = dig(cfg, "chat.base_url", "http://localhost:1234/v1").rstrip("/") + "/chat/completions"

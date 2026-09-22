@@ -271,6 +271,26 @@ def run_checks(cfg=None):
             fix="Установите: pip install pymorphy3 pymorphy3-dicts-ru, затем "
                 "python -m hds.cli reindex-fts")
 
+    # 7d. реранкер (только если включён в конфиге)
+    if dig(cfg, "rerank.enabled", False):
+        import requests as _rq
+
+        base = (dig(cfg, "rerank.url", "http://localhost:8012/v1") or "").rstrip("/")
+        try:
+            ok = _rq.get(base + "/health", timeout=3).status_code == 200
+        except Exception:  # noqa: BLE001
+            ok = False
+        if ok:
+            add("rerank", "ok", "Реранкер (llama-server) отвечает")
+        else:
+            add("rerank", "warn",
+                "rerank.enabled включён, но реранкер не отвечает — "
+                "ask_my_files работает без реранкинга",
+                fix="Запустите llama-server с реранк-моделью: llama-server "
+                    "--reranking --pooling rank --port 8012 "
+                    "--model <путь к bge-reranker-v2-m3-Q8_0.gguf> "
+                    "(GGUF ~600 МБ; LM Studio /rerank не реализует).")
+
     # 8. mpxj (MS Project)
     try:
         import mpxj  # noqa: F401

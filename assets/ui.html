@@ -82,6 +82,10 @@ summary{cursor:pointer;user-select:none}
 
 <div class="card"><h2>Параметры обработки</h2>
 <div class="row">
+<label><input type="checkbox" id="opt-rerank" onchange="setOpt('rerank.enabled', this.checked)">
+<span>Реранкер для ask_my_files (bge-reranker-v2-m3, llama-server :8012)</span></label>
+</div>
+<div class="row">
 <label><input type="checkbox" id="opt-transcribe" onchange="setOpt('index.transcribe', this.checked)">
 <span>Транскрипция аудио/видео (Whisper)</span></label>
 </div>
@@ -335,6 +339,8 @@ async function refresh(){
     const o = s.options || {};
     const tc = document.getElementById('opt-transcribe');
     if (document.activeElement !== tc) tc.checked = !!o.transcribe;
+    const rr = document.getElementById('opt-rerank');
+    if (document.activeElement !== rr) rr.checked = !!o.rerank;
     const mm = document.getElementById('opt-max-media');
     if (document.activeElement !== mm) mm.value = o.max_media_mb ?? 1500;
     const mc = document.getElementById('opt-max-chunks');

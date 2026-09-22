@@ -59,6 +59,13 @@ search:
   vec_weight: 1.0          # вес векторной ветки в слиянии
   snippet_chars: 500
 
+rerank:
+  enabled: false           # реранкер для ask_my_files (нужен llama-server с --reranking)
+  url: "http://localhost:8012/v1"
+  model: "bge-reranker-v2-m3"
+  timeout: 30              # сек, таймаут HTTP
+  max_latency: 15          # сек; при превышении реранкер авто-отключается (слабый CPU)
+
 watch:
   debounce_seconds: 8      # ждать стабилизации файла после события записи
   reconcile_on_start: true # при старте watcher догонять пропущенное (быстрый stat-обход)

@@ -471,6 +471,7 @@ _CONFIG_FIELDS = {
     "index.max_chunks": ("int", r"(?m)^(\s*max_chunks:)\s+\d+"),
     "search.fts_weight": ("float", r"(?m)^(\s*fts_weight:)\s+[\d.]+"),
     "search.vec_weight": ("float", r"(?m)^(\s*vec_weight:)\s+[\d.]+"),
+    "rerank.enabled": ("bool", r"(?m)^(\s*enabled:)\s+\w+"),
 }
 
 
@@ -969,6 +970,7 @@ class Handler(BaseHTTPRequestHandler):
                                 "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
                                 "fts_weight": dig(cfg, "search.fts_weight", 1.0),
                                 "vec_weight": dig(cfg, "search.vec_weight", 1.0),
+                                "rerank": bool(dig(cfg, "rerank.enabled", False)),
                                 "max_chunks": dig(cfg, "index.max_chunks", 2000)},
                 })
             elif self.path == "/api/tree":
