@@ -8,7 +8,7 @@ from unittest import mock
 from helpers import FakeEmbedder, write_config, write_text  # noqa: I100
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from hds import db as dbmod, rag  # noqa: E402
+from hds import db as dbmod, lemmatizer, rag  # noqa: E402
 from hds.config import db_abs_path, load  # noqa: E402
 from hds.search import fts_query, make_snippet, search  # noqa: E402
 
@@ -35,9 +35,15 @@ class Base(unittest.TestCase):
 
 class SearchTests(Base):
     def test_fts_query_escaping(self):
+        """Токены экранируются; при установленном pymorphy3 — лемматизируются."""
         self.assertEqual(fts_query("тест"), '"тест"')
-        self.assertEqual(fts_query("тест два слова"), '"тест" OR "два" OR "слова"')
         self.assertIsNone(fts_query(",,,"))
+
+    @unittest.skipUnless(lemmatizer.available(), "pymorphy3 не установлен")
+    def test_fts_query_lemmatized_multi(self):
+        """РЕГРЕССИЯ: запрос лемматизируется («слова» -> «слово») — иначе
+        лемматизированный FTS-индекс не находил бы словоформы запроса."""
+        self.assertEqual(fts_query("тест два слова"), '"тест" OR "два" OR "слово"')
 
     def test_snippet_around_token(self):
         snip = make_snippet("длинный текст. Здесь 1С:Документооборот упоминается. Ещё текст.", "документооборот")

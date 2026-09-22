@@ -4,12 +4,17 @@ import struct
 import sys
 
 from .config import dig
+from .lemmatizer import lemmatize_token
 
 TOKEN_RE = re.compile(r"[\w]{2,}", re.UNICODE)
 
 
 def fts_query(q):
-    tokens = TOKEN_RE.findall(q)[:12]
+    """OR-запрос по леммам: разные словоформы находят друг друга.
+
+    Токены запроса лемматизируются тем же способом, что и текст в chunks_fts
+    (hds.lemmatizer.normalize при индексации)."""
+    tokens = [lemmatize_token(t) for t in TOKEN_RE.findall(q)[:12]]
     if not tokens:
         return None
     return " OR ".join('"%s"' % t.replace('"', '""') for t in tokens)

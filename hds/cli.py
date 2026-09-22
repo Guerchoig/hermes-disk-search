@@ -3,6 +3,7 @@ import argparse
 import json
 import os
 import sys
+import time
 
 from . import db as dbmod, indexer, rag, search
 from .config import dig, db_abs_path, load
@@ -94,6 +95,48 @@ def cmd_reindex(args):
     conn, emb = _conn(cfg), _emb(cfg)
     for status, _k in indexer.reindex_path(conn, emb, cfg, args.path, force=not args.no_force):
         print(status)
+    return 0
+
+
+def cmd_reindex_fts(args):
+    """Перестроить chunks_fts из chunks.text (лемматизация; без эмбеддингов/OCR/AV).
+
+    Нужна после обновления на версию с русской морфологией FTS: старые записи
+    FTS содержат исходные словоформы, лемматизированный запрос их не находит."""
+    from . import lemmatizer
+    from .progress import ProgressReporter
+
+    cfg = load()
+    conn = _conn(cfg)
+    conn.execute("PRAGMA busy_timeout=30000")  # параллельно пишет watcher
+    total = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+    if not total:
+        print("В индексе нет чанков — перестраивать нечего.")
+        return 0
+    print("Перестройка FTS: %d чанков%s" % (
+        total, " (лемматизация pymorphy3)" if lemmatizer.available()
+        else " (pymorphy3 не установлен — БЕЗ морфологии)"))
+    conn.execute("DELETE FROM chunks_fts")
+    conn.commit()
+    rep = ProgressReporter(args.progress_sec)
+    rep.start()
+    n, batch, t0 = 0, [], time.time()
+    for cid, text in conn.execute("SELECT id, text FROM chunks ORDER BY id"):
+        batch.append((cid, lemmatizer.normalize(text)))
+        if len(batch) >= 500:
+            conn.executemany("INSERT INTO chunks_fts(rowid, text) VALUES(?,?)", batch)
+            conn.commit()
+            n += len(batch)
+            batch.clear()
+            rep.seen()
+    if batch:
+        conn.executemany("INSERT INTO chunks_fts(rowid, text) VALUES(?,?)", batch)
+        conn.commit()
+        n += len(batch)
+    rep.finish({"chunks": n, "elapsed_sec": round(time.time() - t0, 1)})
+    # отметка «FTS перестроен под лемматизацию» — для предупреждения в check/UI
+    conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('fts_normalized','1')")
+    conn.commit()
     return 0
 
 
@@ -285,6 +328,12 @@ def main(argv=None):
     pci = sub.add_parser("clip-index",
                          help="дозаполнить CLIP-векторы картинок (поиск по содержанию)")
     pci.set_defaults(fn=cmd_clip_index)
+
+    prf = sub.add_parser("reindex-fts",
+                         help="перестроить FTS-полнотекст (лемматизация, без переэмбеддинга)")
+    prf.add_argument("--progress-sec", type=int, default=3,
+                     help="частота обновления живого статуса, сек (0 = отключить)")
+    prf.set_defaults(fn=cmd_reindex_fts)
 
     pck = sub.add_parser("check", help="диагностика окружения")
     pck.set_defaults(fn=cmd_check)

@@ -13,6 +13,10 @@ watchdog>=4.0
 mpxj>=14
 jpype1>=1.5
 psutil>=5.9
+# Русская морфология для FTS (лемматизация; при отсутствии — деградация без падения,
+# предупреждение в `python -m hds.cli check`; после установки запустите reindex-fts):
+pymorphy3>=2.0
+pymorphy3-dicts-ru>=2.4
 # Транскрипция аудио/видео (ставится setup.ps1/инсталлятором; система работает и без неё):
 # pip install faster-whisper
 # Для CUDA-транскрипции (Windows/Linux) нужны ещё:

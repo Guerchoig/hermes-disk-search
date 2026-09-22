@@ -246,6 +246,31 @@ def run_checks(cfg=None):
                     fix="Запустите setup.ps1 повторно (поставит whisper.cpp Vulkan "
                         "автоматически) или выполните: .venv\\Scripts\\python.exe -m hds.cli vulkan-setup")
 
+    # 7c. pymorphy3 — русская морфология ключевого поиска (FTS)
+    from . import lemmatizer
+    if lemmatizer.available():
+        add("lemmatizer", "ok", "pymorphy3 установлен — русская морфология в ключевом поиске")
+        try:
+            c = dbmod.connect(db_path, int(dig(cfg, "embedding.dim", 1024)))
+            n_chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            row = c.execute("SELECT value FROM meta WHERE key='fts_normalized'").fetchone()
+            c.close()
+            if n_chunks and (not row or row[0] != "1"):
+                # часть чанков проиндексирована до включения лемматизации
+                add("fts-norm", "warn",
+                    "FTS-полнотекст не перестроен под лемматизацию — разные словоформы "
+                    "не находятся на данных, проиндексированных раньше",
+                    fix="Запустите: python -m hds.cli reindex-fts (только CPU, "
+                        "30-90 мин на ~550 тыс. чанков, без переэмбеддинга)")
+        except Exception:  # noqa: BLE001
+            pass
+    else:
+        add("lemmatizer", "warn",
+            "pymorphy3 не установлен — ключевой поиск без русской морфологии "
+            "(«настройки» не находит «настройка»)",
+            fix="Установите: pip install pymorphy3 pymorphy3-dicts-ru, затем "
+                "python -m hds.cli reindex-fts")
+
     # 8. mpxj (MS Project)
     try:
         import mpxj  # noqa: F401

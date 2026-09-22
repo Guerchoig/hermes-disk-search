@@ -180,7 +180,11 @@ def add_chunk(conn, file_id, ord_, page, t_start, t_end, text):
         (file_id, ord_, page, t_start, t_end, text),
     )
     cid = cur.lastrowid
-    conn.execute("INSERT INTO chunks_fts(rowid, text) VALUES(?,?)", (cid, text))
+    # в FTS пишется лемматизированный текст (отображаемый — в chunks.text);
+    # запрос лемматизируется тем же способом (hds.search.fts_query)
+    from .lemmatizer import normalize
+
+    conn.execute("INSERT INTO chunks_fts(rowid, text) VALUES(?,?)", (cid, normalize(text)))
     return cid
 
 
