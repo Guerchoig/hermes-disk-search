@@ -5,6 +5,7 @@
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -14,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import db as dbmod, indexer
 from . import __version__ as HDS_VERSION
-from .config import dig, db_abs_path, load, replace_file
+from .config import EMB_CONTEXT, dig, db_abs_path, load, replace_file
 from .dbops import move_db
 from .embedder import make_embedder
 
@@ -50,6 +51,10 @@ def _venv_python():
 # --- Модель эмбеддингов: статус / скачивание / загрузка ---------------------
 _MODEL_NAME = "text-embedding-bge-m3"
 _MODEL_URL = "https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf"
+# Контекст, с которым модель обязана быть загружена (единый источник и замеры —
+# hds/config.py: EMB_CONTEXT): LM Studio молча усекает вход длиннее контекста,
+# поэтому задаём его явно при загрузке.
+_EMB_CONTEXT = EMB_CONTEXT
 _EMB_DL = {"running": False, "progress": 0.0, "msg": "", "error": ""}
 
 
@@ -145,10 +150,29 @@ def _model_download():
 
 
 def _loaded_instances(exe):
-    """Идентификаторы загруженных инстансов модели эмбеддингов (lms ps).
+    """Загруженные инстансы модели эмбеддингов: [{'id', 'context'}].
+
+    Основной путь — 'lms ps --json' (отдаёт фактический contextLength);
+    при недоступности JSON — разбор таблицы 'lms ps' (context=None).
     LM Studio держит модель в нескольких копиях, если 'lms load' вызывали
     повторно (кнопка UI, инсталлятор, рестарты) — каждая копия ест VRAM."""
     try:
+        r = subprocess.run([exe, "ps", "--json"], capture_output=True, timeout=30)
+        data = json.loads((r.stdout or b"").decode("utf-8", errors="replace") or "[]")
+        out = []
+        for m in data:
+            ident = str(m.get("identifier") or m.get("modelKey") or "")
+            if _MODEL_NAME.lower() in ident.lower():
+                ctx = m.get("contextLength")
+                try:
+                    ctx = int(ctx) if ctx else None
+                except (TypeError, ValueError):
+                    ctx = None
+                out.append({"id": ident, "context": ctx})
+        return out
+    except Exception:  # noqa: BLE001
+        pass
+    try:  # откат: старые сборки lms без --json
         r = subprocess.run([exe, "ps"], capture_output=True, timeout=30)
         out = (r.stdout or b"").decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
@@ -160,17 +184,19 @@ def _loaded_instances(exe):
             continue  # заголовок таблицы и разделитель
         if _MODEL_NAME.lower() in ln.lower():
             ids.append(ln.split()[0])  # первый токен = идентификатор инстанса
-    return ids
+    return [{"id": i, "context": None} for i in ids]
 
 
 def _model_load():
     """Загрузка модели в запущенный LM Studio через lms CLI (best effort).
+
     'lms load' при каждом вызове создаёт НОВЫЙ инстанс модели (дубликаты:
     клики по кнопке, повторные установки, рестарты UI), поэтому перед
-    загрузкой сверяемся с 'lms ps': одна копия — не трогаем, несколько —
-    выгружаем все и поднимаем одну свежую."""
-    import shutil
-
+    загрузкой сверяемся с 'lms ps': одна копия с нужным контекстом — не
+    трогаем, дубликаты или заниженный контекст — выгружаем и поднимаем одну
+    свежую. Контекст задаётся явно (--context-length): LM Studio молча
+    усекает вход длиннее загруженного контекста, и хвост длинных чанков
+    не попадал бы в векторы без единой ошибки в ответе."""
     exe = shutil.which("lms")
     if not exe:
         return {"ok": False, "msg": "CLI 'lms' не найден — откройте LM Studio и "
@@ -178,21 +204,31 @@ def _model_load():
                                     "Select a model to load → text-embedding-bge-m3"}
     try:
         loaded = _loaded_instances(exe)
-        if len(loaded) == 1:
-            return {"ok": True, "msg": "Модель уже загружена в LM Studio (%s)"
-                                       % loaded[0]}
-        for ident in loaded:  # дубликаты: выгрузить, чтобы не жгли VRAM
+        ctx = loaded[0]["context"] if len(loaded) == 1 else None
+        if len(loaded) == 1 and (ctx is None or ctx >= _EMB_CONTEXT):
+            msg = "Модель уже загружена в LM Studio (%s" % loaded[0]["id"]
+            if ctx:
+                msg += ", контекст %d" % ctx
+            return {"ok": True, "msg": msg + ")"}
+        small = [i for i in loaded if i["context"] and i["context"] < _EMB_CONTEXT]
+        for inst in loaded:  # дубликаты или заниженный контекст: выгрузить
             try:
-                subprocess.run([exe, "unload", ident], capture_output=True,
+                subprocess.run([exe, "unload", inst["id"]], capture_output=True,
                                timeout=60)
             except Exception:  # noqa: BLE001
                 pass
-        r = subprocess.run([exe, "load", _MODEL_NAME, "-y"],
-                           capture_output=True, timeout=600)
+        r = subprocess.run(
+            [exe, "load", _MODEL_NAME, "--context-length", str(_EMB_CONTEXT), "-y"],
+            capture_output=True, timeout=600)
         if r.returncode == 0:
-            msg = "Модель загружена в LM Studio"
+            msg = "Модель загружена в LM Studio (контекст %d)" % _EMB_CONTEXT
             if loaded:
-                msg += " (дубликаты выгружены: было %d копий)" % len(loaded)
+                msg += " (выгружено копий: %d)" % len(loaded)
+            if small:
+                msg += ("; раньше контекст был занижен (%s) — длинные чанки молча "
+                        "усекались, запустите переиндексацию («Старт (переобработка "
+                        "всего)») для восстановления" %
+                        ", ".join(str(i["context"]) for i in small))
             return {"ok": True, "msg": msg}
         out = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")[:300]
         return {"ok": False, "msg": "lms load завершился с ошибкой: %s" % out}

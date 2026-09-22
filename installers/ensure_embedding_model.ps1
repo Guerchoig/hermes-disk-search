@@ -26,6 +26,22 @@ if (Test-Path $gguf) {
     }
 }
 
+# Фактический контекст загруженной embedding-модели (lms ps --json).
+# При контексте меньше 8192 LM Studio МОЛЧА обрезает вход длиннее контекста —
+# длинные чанки попадают в индекс неполно. Проверено замером: при ctx=8192
+# текст 15 644 токена дал вектор, равный вектору первых ~8192 токенов.
+function Get-EmbContext {
+    try {
+        $json = & lms ps --json 2>$null | Out-String
+        foreach ($m in ($json | ConvertFrom-Json)) {
+            if ("$($m.identifier)$($m.modelKey)".ToLower().Contains("bge-m3")) {
+                return [int]$m.contextLength
+            }
+        }
+    } catch { }
+    return $null
+}
+
 # Попытка загрузить модель в LM Studio через lms CLI (best effort)
 # 'lms load' при каждом вызове создаёт НОВЫЙ инстанс модели (дубликаты едят
 # VRAM), поэтому сначала проверяем 'lms ps': уже загружена — не трогаем.
@@ -43,20 +59,41 @@ if ($lms) {
         }
     } catch { }
     if ($loaded.Count -eq 1) {
-        Write-Host "[ok] Модель уже загружена в LM Studio ($($loaded[0]))" -ForegroundColor Green
+        $ctx = Get-EmbContext
+        if ($null -ne $ctx -and $ctx -lt 8192) {
+            Write-Host "[!!] Модель загружена с контекстом $ctx (нужно 8192): LM Studio МОЛЧА" -ForegroundColor Yellow
+            Write-Host "     обрезает вход длиннее контекста — длинные фрагменты индексируются неполно." -ForegroundColor Yellow
+            Write-Host "[..] Перезагружаю модель с контекстом 8192..."
+            foreach ($id in $loaded) { & lms unload $id 2>$null | Out-Null }
+            & lms load text-embedding-bge-m3 --context-length 8192 -y 2>$null | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "[ok] Модель перезагружена с контекстом 8192" -ForegroundColor Green
+                Write-Host "     Совет: запустите переиндексацию — часть чанков могла быть проиндексирована неполно." -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "[ok] Модель уже загружена в LM Studio ($($loaded[0]))" -ForegroundColor Green
+        }
     } else {
         if ($loaded.Count -gt 1) {
             Write-Host "[..] Найдено $($loaded.Count) копий модели — выгружаю дубликаты..."
             foreach ($id in $loaded) { & lms unload $id 2>$null | Out-Null }
         }
-        Write-Host "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3)..."
-        & lms load text-embedding-bge-m3 -y 2>$null | Out-Null
+        # --context-length обязателен: при меньшем контексте LM Studio молча
+        # обрезает вход длиннее контекста (проверено: вектор совпадает с
+        # вектором только первых токенов, без ошибки в ответе)
+        Write-Host "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3 --context-length 8192)..."
+        & lms load text-embedding-bge-m3 --context-length 8192 -y 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) {
-            Write-Host "[ok] Модель загружена в LM Studio" -ForegroundColor Green
+            Write-Host "[ok] Модель загружена в LM Studio (контекст 8192)" -ForegroundColor Green
         } else {
             Write-Host "[--] Автозагрузка не удалась — загрузите модель в LM Studio:" -ForegroundColor Yellow
             Write-Host "     Developer -> Select a model to load -> text-embedding-bge-m3" -ForegroundColor Yellow
         }
+    }
+    $ctxFinal = Get-EmbContext
+    if ($null -ne $ctxFinal -and $ctxFinal -lt 8192) {
+        Write-Host "[!!] Фактический контекст модели: $ctxFinal (должно быть 8192)." -ForegroundColor Yellow
+        Write-Host "     Вручную: lms unload text-embedding-bge-m3; lms load text-embedding-bge-m3 --context-length 8192 -y" -ForegroundColor Yellow
     }
 }
 

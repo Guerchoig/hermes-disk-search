@@ -5,6 +5,13 @@ import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Целевой контекст embedding-модели (bge-m3) в LM Studio. При меньшем загруженном
+# контексте LM Studio МОЛЧА усекает вход (проверено: текст 15 644 токена при
+# ctx=8192 дал вектор, равный вектору первых ~8192 токенов, без ошибки в ответе;
+# llama.cpp на то же отвечает явным 400). Чанки проекта: медиана 484 токена,
+# p90 829, максимум 2114 — при ctx=512 ~45 % чанков теряли бы хвост.
+EMB_CONTEXT = 8192
+
 
 def config_path():
     return os.environ.get("HDS_CONFIG") or os.path.join(PROJECT_ROOT, "config.yaml")

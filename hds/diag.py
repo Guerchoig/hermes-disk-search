@@ -6,8 +6,10 @@
           "fail" — критично (индексация и поиск не работают).
 Зонды сети короткие (таймаут 3 с, без ретраев), чтобы UI не подвисал.
 """
+import json
 import os
 import shutil
+import subprocess
 import sys
 
 IS_MAC = sys.platform == "darwin"
@@ -15,6 +17,29 @@ IS_MAC = sys.platform == "darwin"
 
 def _norm_url(u):
     return (u or "").rstrip("/")
+
+
+def _loaded_embedding_context(lms_exe):
+    """Фактический контекст загруженной embedding-модели (None, если неизвестен).
+
+    LM Studio отдаёт его в 'lms ps --json' (поле contextLength). Значение важно:
+    при контексте меньше целевого (config.EMB_CONTEXT) LM Studio МОЛЧА усекает
+    вход длиннее контекста — длинные чанки попадают в индекс неполно.
+    """
+    try:
+        p = subprocess.run([lms_exe, "ps", "--json"], capture_output=True,
+                           timeout=20)
+        for m in json.loads((p.stdout or b"").decode("utf-8", "replace") or "[]"):
+            ident = str(m.get("identifier") or m.get("modelKey") or "")
+            if "bge-m3" in ident.lower():
+                ctx = m.get("contextLength")
+                try:
+                    return int(ctx) if ctx else None
+                except (TypeError, ValueError):
+                    return None
+    except Exception:  # noqa: BLE001
+        return None
+    return None
 
 
 def run_checks(cfg=None):
@@ -148,6 +173,22 @@ def run_checks(cfg=None):
                     fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
                         "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
                         "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
+
+    # 4b. Контекст embedding-модели: LM Studio МОЛЧА усекает вход длиннее
+    # загруженного контекста — хвост длинных чанков не попадает в векторы
+    # (llama.cpp на то же отвечает явной ошибкой 400, LM Studio — нет).
+    from .config import EMB_CONTEXT
+    _lms = shutil.which("lms")
+    if _lms:
+        ctx = _loaded_embedding_context(_lms)
+        if ctx and ctx < EMB_CONTEXT:
+            add("embctx", "warn",
+                "Модель эмбеддингов загружена с контекстом %d (нужно %d) — "
+                "длинные фрагменты индексируются неполно" % (ctx, EMB_CONTEXT),
+                fix="LM Studio молча обрезает вход длиннее контекста. Нажмите "
+                    "«Загрузить в LM Studio» в группе «Модель эмбеддингов» — кнопка "
+                    "перезагрузит модель с контекстом %d, затем запустите "
+                    "переиндексацию («Старт (переобработка всего)»)." % EMB_CONTEXT)
 
     # 5. Tesseract OCR
     from .extractors import _tesseract_ready

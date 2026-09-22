@@ -27,13 +27,22 @@ else
 fi
 
 # Попытка загрузить модель в LM Studio через lms CLI (best effort)
+# --context-length обязателен: при меньшем контексте LM Studio МОЛЧА обрезает
+# вход длиннее контекста (вектор совпадает с вектором только первых токенов,
+# без ошибки в ответе) — длинные фрагменты индексируются неполно.
 if command -v lms >/dev/null 2>&1; then
-    echo "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3)..."
-    if lms load text-embedding-bge-m3 -y >/dev/null 2>&1; then
-        echo "[ok] Модель загружена в LM Studio"
+    echo "[..] Загрузка модели в LM Studio (lms load text-embedding-bge-m3 --context-length 8192)..."
+    if lms load text-embedding-bge-m3 --context-length 8192 -y >/dev/null 2>&1; then
+        echo "[ok] Модель загружена в LM Studio (контекст 8192)"
     else
         echo "[--] Автозагрузка не удалась — загрузите модель в LM Studio:"
         echo "     Developer -> Select a model to load -> text-embedding-bge-m3"
+    fi
+    CTX=$(lms ps --json 2>/dev/null | grep -o '"contextLength":[0-9]*' | head -1 | cut -d: -f2)
+    if [ -n "$CTX" ] && [ "$CTX" -lt 8192 ]; then
+        echo "[!!] Фактический контекст модели: $CTX (должно быть 8192) — длинные"
+        echo "     фрагменты будут обрезаны. Повторите вручную:"
+        echo "     lms unload text-embedding-bge-m3; lms load text-embedding-bge-m3 --context-length 8192 -y"
     fi
 fi
 
