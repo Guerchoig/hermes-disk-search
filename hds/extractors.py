@@ -1,5 +1,10 @@
-"""Извлечение текста: txt/md/код, PDF, DOCX, XLSX, PPTX (OCR пустых страниц PDF)."""
+"""Извлечение текста: txt/md/код, PDF, DOCX, XLSX, PPTX (OCR пустых страниц PDF).
+
+md и DOCX возвращают сегменты с полем head — «путь заголовков» секции
+(например «# Раздел / ## Подраздел»); структурный чанкер (hds/chunker.py)
+добавляет его в начало каждого чанка секции."""
 import os
+import re
 import sys
 
 from .config import dig
@@ -34,8 +39,11 @@ def kind_for_ext(ext):
     return None
 
 
-def seg(text, page=None, t_start=None, t_end=None):
-    return {"text": text, "page": page, "t_start": t_start, "t_end": t_end}
+def seg(text, page=None, t_start=None, t_end=None, head=None):
+    d = {"text": text, "page": page, "t_start": t_start, "t_end": t_end}
+    if head:
+        d["head"] = head  # путь заголовков секции — для структурного чанкера
+    return d
 
 
 def read_text_file(path):
@@ -91,6 +99,45 @@ def _ocr_pil_image(img, cfg):
     )
 
 
+_MD_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*#*\s*$")
+_DOCX_HEADING_RE = re.compile(r"^(?:heading|заголовок)\s+(\d+)", re.IGNORECASE)
+
+
+def _head_path(head_parts):
+    """Список [(level, title)] -> строка «# Раздел / ## Подраздел»."""
+    return " / ".join("%s %s" % ("#" * lvl, title) for lvl, title in head_parts)
+
+
+def _push_heading(head_parts, level, title):
+    """Заголовок уровня level: убрать более глубокие/равные, добавить новый."""
+    while head_parts and head_parts[-1][0] >= level:
+        head_parts.pop()
+    head_parts.append((level, title))
+
+
+def extract_markdown(path, cfg):
+    """Markdown: сегмент на секцию (между заголовками), head — путь заголовков."""
+    text = read_text_file(path)
+    segs, cur = [], []
+    head_parts = []
+
+    def flush():
+        body = "\n".join(cur).strip()
+        if body:
+            segs.append(seg(body, head=_head_path(head_parts) if head_parts else None))
+        del cur[:]
+
+    for line in text.splitlines():
+        m = _MD_HEADING_RE.match(line)
+        if m:
+            flush()
+            _push_heading(head_parts, len(m.group(1)), m.group(2).strip())
+            continue
+        cur.append(line)
+    flush()
+    return segs if segs else [seg(text)]
+
+
 def extract_pdf(path, cfg):
     import fitz
 
@@ -117,16 +164,49 @@ def extract_pdf(path, cfg):
 
 
 def extract_docx(path, cfg):
+    """DOCX: сегмент на секцию заголовков (head — путь заголовков) + таблицы."""
     from docx import Document
 
     d = Document(path)
-    parts = [p.text for p in d.paragraphs if p.text and p.text.strip()]
-    for t in d.tables:
-        for row in t.rows:
+    segs, cur = [], []
+    head_parts = []
+
+    def flush():
+        body = "\n".join(cur).strip()
+        if body:
+            segs.append(seg(body, head=_head_path(head_parts) if head_parts else None))
+        del cur[:]
+
+    for p in d.paragraphs:
+        t = (p.text or "").strip()
+        if not t:
+            continue
+        style = (p.style.name or "") if p.style is not None else ""
+        m = _DOCX_HEADING_RE.match(style.strip())
+        if m:
+            flush()
+            try:
+                level = min(6, max(1, int(m.group(1))))
+            except ValueError:
+                level = 1
+            _push_heading(head_parts, level, t)
+            continue
+        if style.strip().lower() == "title":
+            flush()
+            _push_heading(head_parts, 1, t)
+            continue
+        cur.append(p.text)
+    flush()
+    for tbl in d.tables:
+        rows = []
+        for row in tbl.rows:
             cells = [c.text.strip() for c in row.cells if c.text and c.text.strip()]
             if cells:
-                parts.append(" | ".join(cells))
-    return [seg("\n".join(parts))]
+                rows.append(" | ".join(cells))
+        if rows:
+            segs.append(seg("\n".join(rows),
+                            head=_head_path(head_parts) if head_parts else None))
+    return segs if segs else [seg("")]
 
 
 def extract_xlsx(path, cfg):
@@ -198,6 +278,8 @@ def extract(path, cfg, progress_cb=None):
     kind = kind_for_ext(ext) or _static_kind(ext) or _av_kind(ext)
     if kind is None:
         return None, []
+    if kind == "text" and ext in (".md", ".markdown"):
+        return kind, extract_markdown(path, cfg)
     if kind in EXTRACTORS:
         return kind, EXTRACTORS[kind](path, cfg)
     fn = extract_dispatch_static if kind in ("mpp", "image") else extract_dispatch_media

@@ -27,6 +27,9 @@ def cmd_index(args):
     cfg = load()
     conn, emb = _conn(cfg), _emb(cfg)
     roots = args.roots.split(";") if args.roots else None
+    if args.rechunk:
+        indexer.run_rechunk(conn, emb, cfg, progress_sec=args.progress_sec)
+        return 0
     indexer.run_index(
         conn, emb, cfg, roots=roots, kinds=_kinds(args.kinds), full=args.full,
         limit=args.limit, confirm_delete=args.confirm_delete,
@@ -288,6 +291,9 @@ def main(argv=None):
     pi.add_argument("--roots", help="корни через ';' (по умолчанию из конфига)")
     pi.add_argument("--kinds", help="фильтр типов: text,pdf,docx,xlsx,pptx,mpp,image,media")
     pi.add_argument("--full", action="store_true", help="принудительно переобработать всё")
+    pi.add_argument("--rechunk", action="store_true",
+                    help="перечанковать проиндексированные текстовые файлы структурным "
+                         "чанкером без OCR/транскрипции (переэмбеддинг затронутых файлов)")
     pi.add_argument("--limit", type=int, help="обработать не более N файлов")
     pi.add_argument("--no-prune", action="store_true", help="не удалять исчезнувшие файлы")
     pi.add_argument("--confirm-delete", action="store_true")

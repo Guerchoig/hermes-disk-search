@@ -36,8 +36,8 @@ index:
 db_path: 'D:\hermes-disk-search-db\index.db'
 
 chunk:
-  size: 1200               # символов на чанк
-  overlap: 200             # перекрытие между чанками
+  size: 800                # символов на чанк (≈400 токенов; структурный чанкер, Фаза 2)
+  overlap: 120             # перекрытие соседних чанков (целые предложения)
 
 embedding:
   base_url: "http://localhost:1234/v1"   # LM Studio

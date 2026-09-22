@@ -8,11 +8,31 @@ import threading
 import time
 
 from . import chunker, db as dbmod, extractors
-from .config import dig, db_abs_path
+from .config import EMB_CONTEXT, dig, db_abs_path
 
 MEDIA_KINDS = {"media"}
 _ACTIVE_REPORTER = None   # устанавливается run_index; читается MCP index_status
 _LAST_REPORTER = None     # снимок последнего завершённого прогона (для UI)
+
+# консервативная оценка «символов на токен» для bge-m3 (замер Фазы A1: медиана
+# 2.83 симв/токен; берём с запасом в меньшую сторону)
+_CHARS_PER_TOKEN = 2.4
+
+
+def clip_for_embedding(text):
+    """Не отдавать модели текст заведомо длиннее контекста: LM Studio молча
+    усекает вход без ошибки (PLAN_INDEX_QUALITY.md §4/A2), поэтому режем сами —
+    по последнему \\n внутри лимита, с логом."""
+    limit = int((EMB_CONTEXT - 256) * _CHARS_PER_TOKEN)
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    nl = cut.rfind("\n")
+    if nl > limit // 2:
+        cut = cut[:nl]
+    print("[warn] чанк %d симв. длиннее бюджета эмбеддинга (~%d ток., %d симв.), "
+          "обрезан до %d" % (len(text), EMB_CONTEXT, limit, len(cut)), flush=True)
+    return cut
 
 
 def content_hash(path, size):
@@ -179,7 +199,8 @@ def _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb=None):
             progress_cb(0.0)
         vectors = []
         for i in range(0, total, bs):
-            vectors.extend(emb.embed([c["text"] for c in chunks[i:i + bs]]))
+            vectors.extend(emb.embed([clip_for_embedding(c["text"])
+                                      for c in chunks[i:i + bs]]))
             if progress_cb and total:
                 progress_cb(100.0 * min(i + bs, total) / total)
         for c, v in zip(chunks, vectors):
@@ -428,3 +449,68 @@ def reindex_path(conn, emb, cfg, path, force=True):
         for fn in filenames:
             res.append(process_file(conn, emb, cfg, os.path.join(dirpath, fn), force=force))
     return res
+
+
+RECHUNK_KINDS = ("text", "docx", "xlsx", "pptx", "pdf", "mpp")
+
+
+def run_rechunk(conn, emb, cfg, progress_sec=3):
+    """Перечанковка без OCR/транскрипции (Фаза 2 плана PLAN_INDEX_QUALITY.md).
+
+    Повторное извлечение текста (OCR и Whisper отключены — image/media
+    пропускаются, их чанки без них не восстановить), новый структурный чанкер,
+    пере-эмбеддинг затронутых файлов. По большой БД занимает часы — планировать
+    на ночь; сначала проверить на маленькой папке."""
+    from .progress import PHASES, ProgressReporter
+
+    rows = conn.execute(
+        "SELECT id, path, kind FROM files WHERE kind IN (%s) AND status='indexed' "
+        "ORDER BY id" % ",".join("'%s'" % k for k in RECHUNK_KINDS)).fetchall()
+    if not rows:
+        print("Нет проиндексированных текстовых файлов для перечанковки.")
+        return {"files": 0}
+    # OCR/транскрипция отключаются только для этого прогона (копия конфига)
+    cfg2 = dict(cfg)
+    idx = dict(cfg.get("index") or {})
+    idx["ocr"] = False
+    idx["transcribe"] = False
+    cfg2["index"] = idx
+    rep = ProgressReporter(progress_sec)
+    rep.set_total(len(rows))
+    rep.start()
+    print("[rechunk] файлов: %d; OCR и транскрипция отключены; "
+          "переэмбеддинг затронутых файлов" % len(rows), flush=True)
+    counters, t0 = {}, time.time()
+    try:
+        for i, r in enumerate(rows, 1):
+            path = r["path"]
+            if not os.path.exists(path):
+                counters["missing"] = counters.get("missing", 0) + 1
+                continue
+            rep.seen()
+            rep.set_current(path, PHASES.get(r["kind"], "перечанковка"))
+            t1 = time.time()
+            try:
+                status, kind2 = process_file(conn, emb, cfg2, path, force=True)
+            except Exception as e:  # noqa: BLE001
+                status = "error: %s" % str(e)[:120]
+            dur = time.time() - t1
+            key = status.split("(")[0]
+            counters[key] = counters.get(key, 0) + 1
+            chunks_n = 0
+            if "(" in status:
+                try:
+                    chunks_n = int(status.split("(")[1].split()[0])
+                except (ValueError, IndexError):
+                    chunks_n = 0
+            rep.processed(status, r["kind"], dur, chunks=chunks_n)
+            if i % 20 == 1 or status.startswith(("indexed", "error")):
+                rep.note()
+                print("[%d/%d] %s -> %s (%.1f с)" % (i, len(rows), path, status, dur),
+                      flush=True)
+    except KeyboardInterrupt:
+        counters["stopped"] = True
+        print("\n[stop] Прервано: обработанные файлы сохранены.", flush=True)
+    rep.finish(counters)
+    counters["elapsed_sec"] = round(time.time() - t0, 1)
+    return counters
