@@ -95,6 +95,17 @@ summary{cursor:pointer;user-select:none}
 </label>
 <button onclick="setOptNum('index.max_chunks','opt-max-chunks')">💾</button>
 </div>
+<div class="row" style="margin-top:6px">
+<label>Вес FTS-ветки
+<input type="number" step="0.1" min="0" id="opt-fts-w" style="width:70px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+</label>
+<button onclick="setOptFloat('search.fts_weight','opt-fts-w')">💾</button>
+<label style="margin-left:14px">Вес векторной ветки
+<input type="number" step="0.1" min="0" id="opt-vec-w" style="width:70px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
+</label>
+<button onclick="setOptFloat('search.vec_weight','opt-vec-w')">💾</button>
+<span class="muted">веса слияния RRF: 1/1 — ветки равны; 2 — ветка вдвое важнее</span>
+</div>
 <div id="opt-msg" class="muted">Изменения сохраняются в config.yaml (комментарии сохраняются) и применяются к новым запускам — перезапустите watcher/индексацию кнопками выше.</div>
 <div style="margin-top:12px">
 <label class="muted">Исключённые из индексации пути (по одному на строку; каталог или файл, без учёта регистра):</label>
@@ -207,6 +218,11 @@ async function setOpt(key, value){
 function setOptNum(key, inputId){
   const v = parseInt(document.getElementById(inputId).value, 10);
   if (isNaN(v) || v < 0) { alert('Введите неотрицательное целое число'); refresh(); return; }
+  setOpt(key, v);
+}
+function setOptFloat(key, inputId){
+  const v = parseFloat(document.getElementById(inputId).value);
+  if (isNaN(v) || v < 0) { alert('Введите неотрицательное число'); refresh(); return; }
   setOpt(key, v);
 }
 async function saveExcludes(){
@@ -323,6 +339,10 @@ async function refresh(){
     if (document.activeElement !== mm) mm.value = o.max_media_mb ?? 1500;
     const mc = document.getElementById('opt-max-chunks');
     if (document.activeElement !== mc) mc.value = o.max_chunks ?? 2000;
+    const fw = document.getElementById('opt-fts-w');
+    if (document.activeElement !== fw) fw.value = o.fts_weight ?? 1.0;
+    const vw = document.getElementById('opt-vec-w');
+    if (document.activeElement !== vw) vw.value = o.vec_weight ?? 1.0;
     const ri = document.getElementById('roots-input');
     if (document.activeElement !== ri) ri.value = (s.roots || []).join('; ');
     const ep = document.getElementById('excl-paths');

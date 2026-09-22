@@ -469,6 +469,8 @@ _CONFIG_FIELDS = {
     "index.transcribe": ("bool", r"(?m)^(\s*transcribe:)\s+\w+"),
     "index.max_media_mb": ("int", r"(?m)^(\s*max_media_mb:)\s+\d+"),
     "index.max_chunks": ("int", r"(?m)^(\s*max_chunks:)\s+\d+"),
+    "search.fts_weight": ("float", r"(?m)^(\s*fts_weight:)\s+[\d.]+"),
+    "search.vec_weight": ("float", r"(?m)^(\s*vec_weight:)\s+[\d.]+"),
 }
 
 
@@ -633,6 +635,14 @@ def _set_simple_config(key, value):
         if not isinstance(value, bool):
             return {"ok": False, "msg": "Ожидается true/false"}
         repl = "true" if value else "false"
+    elif typ == "float":
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            return {"ok": False, "msg": "Ожидается число"}
+        if value < 0:
+            return {"ok": False, "msg": "Значение должно быть >= 0"}
+        repl = "%g" % value
     else:
         try:
             value = int(value)
@@ -957,6 +967,8 @@ class Handler(BaseHTTPRequestHandler):
                                       if isinstance(p, str)],
                     "options": {"transcribe": bool(dig(cfg, "index.transcribe", True)),
                                 "max_media_mb": dig(cfg, "index.max_media_mb", 1500),
+                                "fts_weight": dig(cfg, "search.fts_weight", 1.0),
+                                "vec_weight": dig(cfg, "search.vec_weight", 1.0),
                                 "max_chunks": dig(cfg, "index.max_chunks", 2000)},
                 })
             elif self.path == "/api/tree":

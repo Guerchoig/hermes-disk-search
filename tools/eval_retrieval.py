@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from hds import db as dbmod  # noqa: E402
 from hds.config import db_abs_path, dig, load  # noqa: E402
-from hds.search import fts_query  # noqa: E402
+from hds.search import fts_search_ids  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 EVAL_DIR = os.path.join(ROOT, "eval")
@@ -103,18 +103,10 @@ def generate(cfg, n):
 
 
 def _fts_rank(conn, question, limit):
-    """FTS-ветка (BM25): список chunk_id + время, мс."""
-    fq = fts_query(question)
-    if not fq:
-        return [], 0.0
+    """FTS-ветка (BM25, AND->OR с префиксом — как в поиске): chunk_id + время, мс."""
     t0 = time.perf_counter()
-    try:
-        rows = conn.execute(
-            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
-            "ORDER BY bm25(chunks_fts) LIMIT ?", (fq, limit)).fetchall()
-    except Exception:  # noqa: BLE001
-        return [], 0.0
-    return [r[0] for r in rows], (time.perf_counter() - t0) * 1000.0
+    ids = fts_search_ids(conn, question, limit)
+    return ids, (time.perf_counter() - t0) * 1000.0
 
 
 def _vec_rank(conn, emb, question, limit):

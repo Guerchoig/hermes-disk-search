@@ -20,7 +20,41 @@ def fts_query(q):
     return " OR ".join('"%s"' % t.replace('"', '""') for t in tokens)
 
 
+def fts_search_ids(conn, q, k):
+    """Топ-k chunk_id по FTS: сначала AND, при пустом результате — OR.
+
+    Последний токен ищется с префиксом («настройк*» — найдёт «настройки»).
+    Возвращает [] при пустом запросе или ошибке."""
+    tokens = [lemmatize_token(t) for t in TOKEN_RE.findall(q)[:12]]
+    if not tokens:
+        return []
+    quoted = ['"%s"' % t.replace('"', '""') for t in tokens]
+    quoted[-1] += "*"  # префиксный матчинг последнего токена
+
+    def run(expr):
+        try:
+            rows = conn.execute(
+                "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
+                "ORDER BY bm25(chunks_fts) LIMIT ?", (expr, k)).fetchall()
+            return [r[0] for r in rows]
+        except Exception as e:  # noqa: BLE001
+            print("[fts] ошибка поиска: %s" % e, file=sys.stderr)
+            return []
+
+    ids = run(" AND ".join(quoted))
+    if not ids and len(quoted) > 1:
+        ids = run(" OR ".join(quoted))  # AND слишком строг — ослабляем до OR
+    return ids
+
+
+_SENT_END_RE = re.compile(r"[.!?…]\s|\n")
+
+
 def make_snippet(text, q, max_len=500):
+    """Сниппет вокруг первого вхождения токена запроса.
+
+    Границы окна двигаются к ближайшим концам предложений, чтобы не резать
+    фразу посередине (если предложение целиком не влезает — режем как раньше)."""
     tokens = [t.lower() for t in TOKEN_RE.findall(q)][:20]
     lower = text.lower()
     pos = -1
@@ -28,10 +62,33 @@ def make_snippet(text, q, max_len=500):
         p = lower.find(t)
         if p != -1 and (pos == -1 or p < pos):
             pos = p
+    if pos == -1 and tokens:
+        # лемма запроса может встретиться как подстрока словоформы текста
+        for t in (lemmatize_token(x) for x in tokens):
+            p = lower.find(t)
+            if p != -1 and (pos == -1 or p < pos):
+                pos = p
     if pos == -1:
         pos = 0
     start = max(0, pos - max_len // 3)
     end = min(len(text), start + max_len)
+    if start > 0:
+        # последний конец предложения ДО pos; окно поиска расширяем влево,
+        # чтобы захватить конец предыдущего предложения рядом с границей окна
+        last = None
+        for m in _SENT_END_RE.finditer(text, max(0, start - 150), pos + 1):
+            last = m
+        if last:
+            start = min(last.end(), pos)
+    if end < len(text):
+        # ближайший конец предложения ПОСЛЕ pos; окно расширяем вправо,
+        # чтобы не обрезать предложение, чуть не влезшее в лимит
+        last = None
+        for m in _SENT_END_RE.finditer(text, min(pos, start),
+                                       min(len(text), end + 150)):
+            last = m
+        if last:
+            end = max(last.end(), min(pos + 1, len(text)))
     snip = text[start:end].replace("\n", " ").strip()
     return ("…" if start > 0 else "") + snip + ("…" if end < len(text) else "")
 
@@ -50,21 +107,14 @@ def search(conn, emb, cfg, query, kinds=None, limit=8):
     vec_k = int(dig(cfg, "search.vec_k", 40))
     fts_k = int(dig(cfg, "search.fts_k", 40))
     rrf_k = int(dig(cfg, "search.rrf_k", 60))
+    fts_w = float(dig(cfg, "search.fts_weight", 1.0))
+    vec_w = float(dig(cfg, "search.vec_weight", 1.0))
     snippet_chars = int(dig(cfg, "search.snippet_chars", 500))
     scores = {}
 
-    fq = fts_query(query)
-    if fq:
-        try:
-            rows = conn.execute(
-                "SELECT rowid, bm25(chunks_fts) AS s FROM chunks_fts "
-                "WHERE chunks_fts MATCH ? ORDER BY s LIMIT ?",
-                (fq, fts_k),
-            ).fetchall()
-            for rank, (cid, _s) in enumerate(rows):
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank)
-        except Exception as e:  # noqa: BLE001
-            print("[fts] ошибка поиска: %s" % e, file=sys.stderr)
+    # FTS-ветка: AND с префиксным хвостом, при пустом результате OR (fts_search_ids)
+    for rank, cid in enumerate(fts_search_ids(conn, query, fts_k)):
+        scores[cid] = scores.get(cid, 0.0) + fts_w / (rrf_k + rank)
 
     if emb is not None and emb.available:
         try:
@@ -76,7 +126,7 @@ def search(conn, emb, cfg, query, kinds=None, limit=8):
                 (blob, vec_k),
             ).fetchall()
             for rank, (cid, _d) in enumerate(rows):
-                scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank)
+                scores[cid] = scores.get(cid, 0.0) + vec_w / (rrf_k + rank)
         except Exception as e:  # noqa: BLE001
             print("[vec] семантический поиск недоступен (%s); работает ключевой" % e,
                   file=sys.stderr)

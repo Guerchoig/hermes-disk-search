@@ -1,5 +1,6 @@
 """Тесты поиска: FTS-запросы, сниппеты, гибрид, деградация без эмбеддингов, RAG-фолбэк."""
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -66,6 +67,60 @@ class SearchTests(Base):
         res = search(self.conn, FakeEmbedder(8), load(), "1С:Документооборот", limit=5)
         self.assertTrue(res)
         self.assertTrue(all("score" in r for r in res))
+
+    def _index_one(self, name, text):
+        p = write_text(self.tmp, name, text)
+        fid = dbmod.upsert_file(self.conn, p, ".txt", "text", 10, 1.0, "h-" + name)
+        dbmod.add_chunk(self.conn, fid, 0, None, None, None, text)
+        dbmod.add_vector(self.conn, fid, struct.pack("<8f", *FakeEmbedder(8).embed_query(text)))
+        return p
+
+    def test_and_first_then_or_fallback(self):
+        """РЕГРЕССИЯ: раньше был только OR — в выдаче лишние файлы; теперь сначала
+        AND (все слова), OR — только если AND ничего не нашёл."""
+        self._index_one("a.txt", "настройки приложения сохраняются автоматически")
+        self._index_one("b.txt", "настройки хранятся отдельно")
+        res = search(self.conn, None, load(), "настройки сохраняются", limit=5)
+        self.assertEqual(len(res), 1)
+        self.assertTrue(res[0]["path"].endswith("a.txt"))
+        # OR-фолбэк: второго слова нет нигде — выдача всё равно непустая
+        res2 = search(self.conn, None, load(), "настройки кванторомиус", limit=5)
+        self.assertTrue(res2)
+
+    def test_prefix_matching_last_token(self):
+        """РЕГРЕССИЯ: последний токен запроса ищется с префиксом («настройк*»)."""
+        self._index_one("c.txt", "пользовательские настройки находятся в профиле")
+        res = search(self.conn, None, load(), "пользовательские настройк", limit=5)
+        self.assertTrue(res)
+        self.assertTrue(res[0]["path"].endswith("c.txt"))
+
+    def test_weights_change_hybrid_ranking(self):
+        """Фаза 3: search.fts_weight / search.vec_weight. Векторная ветка с
+        большим весом поднимает файл, совпадающий только семантически."""
+        ta = "документооборот используется для согласования договоров"
+        while len(ta) % 5 != 3:  # FakeEmbedder: вектор зависит от len % 5
+            ta += " х"
+        tb = "склад логистика маршруты доставки"
+        while len(tb) % 5 != 0:
+            tb += " х"
+        self._index_one("a.txt", ta)   # совпадение по FTS
+        self._index_one("b.txt", tb)   # вектор ближе всего к запросу «документооборот»
+        write_config(self.tmp, extra="\nsearch:\n  fts_weight: 1.0\n  vec_weight: 1.0\n")
+        res_eq = search(self.conn, FakeEmbedder(8), load(), "документооборот", limit=5)
+        self.assertTrue(res_eq[0]["path"].endswith("a.txt"))
+        write_config(self.tmp, extra="\nsearch:\n  fts_weight: 1.0\n  vec_weight: 100.0\n")
+        res_vec = search(self.conn, FakeEmbedder(8), load(), "документооборот", limit=5)
+        self.assertTrue(res_vec[0]["path"].endswith("b.txt"))
+
+    def test_snippet_sentence_boundaries(self):
+        """РЕГРЕССИЯ: сниппет не должен начинаться с середины предложения."""
+        text = ("Первое предложение вообще не про то, что мы ищем, и оно длинное. "
+                "Второе предложение упоминает документооборот и раскрывает тему. "
+                "Третье предложение тоже длинное и нужно для обрезки хвоста.")
+        snip = make_snippet(text, "документооборот", max_len=80)
+        self.assertTrue(snip.replace("…", "").startswith("Второе"),
+                        "сниппет должен начинаться с начала предложения: %r" % snip)
+        self.assertTrue(snip.replace("…", "").endswith("."))
 
 
 class RagTests(Base):

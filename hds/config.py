@@ -56,6 +56,8 @@ def _default_config_yaml():
         "  vec_k: 40\n"
         "  fts_k: 40\n"
         "  rrf_k: 60\n"
+        "  fts_weight: 1.0          # вес FTS-ветки в RRF-слиянии\n"
+        "  vec_weight: 1.0          # вес векторной ветки\n"
         "  snippet_chars: 500\n"
     )
 
