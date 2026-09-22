@@ -286,6 +286,13 @@ class CsrfGuardTests(unittest.TestCase):
         self.assertEqual(code, 404)
         self.assertEqual(body.get("error"), "not found")
 
+    def test_localhost_origin_allowed(self):
+        """Origin http://localhost:<порт> равнозначен 127.0.0.1 (garд пропускает)."""
+        code, body = self._post("application/json",
+                                origin="http://localhost:%d" % self.port)
+        self.assertEqual(code, 404)
+        self.assertEqual(body.get("error"), "not found")
+
 
 if __name__ == "__main__":
     unittest.main()

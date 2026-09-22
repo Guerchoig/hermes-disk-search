@@ -143,7 +143,9 @@ async function embDl(){
   loadDiag(true);
 }
 async function autostart(cb){
-  await fetch('/api/watch/autostart', {method:'POST', body:JSON.stringify({enabled: cb.checked})});
+  await fetch('/api/watch/autostart', {method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({enabled: cb.checked})});
   refresh();
 }
 async function embAdopt(){
@@ -177,9 +179,10 @@ async function saveRoots(){
 }
 async function saveCfg(){
   const j = await (await fetch('/api/config/save', {method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({yaml: document.getElementById('cfg').value})})).json();
   const m = document.getElementById('cfg-msg');
-  m.textContent = j.msg || (j.ok ? 'Сохранено' : 'Ошибка');
+  m.textContent = j.msg || j.error || (j.ok ? 'Сохранено' : 'Ошибка');
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }
@@ -187,15 +190,17 @@ async function reindex(){
   const p = document.getElementById('reindex-path').value.trim();
   if (!p) { alert('Укажите файл или папку для переиндексации'); return; }
   const j = await (await fetch('/api/index/reindex',{method:'POST',
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({path:p})})).json();
   if (!j.ok) alert(j.msg || 'не удалось');
   refresh();
 }
 async function setOpt(key, value){
   const j = await (await fetch('/api/config/set',{method:'POST',
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({key, value})})).json();
   const m = document.getElementById('opt-msg');
-  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
+  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || j.error || 'готово');
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }
@@ -208,9 +213,10 @@ async function saveExcludes(){
   const ta = document.getElementById('excl-paths');
   const paths = ta.value.split('\n').map(s => s.trim()).filter(s => s.length > 0);
   const j = await (await fetch('/api/config/excludes',{method:'POST',
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify({paths})})).json();
   const m = document.getElementById('excl-msg');
-  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || 'готово');
+  m.textContent = (j.ok ? '✅ ' : '❌ ') + (j.msg || j.error || 'готово');
   m.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
   refresh();
 }

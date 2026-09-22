@@ -951,11 +951,14 @@ class Handler(BaseHTTPRequestHandler):
         """CSRF-защита локального API: браузер доставит cross-origin POST
         (даже с text/plain) любой открытой странице — побочный эффект
         выполнится, хотя ответ прочитать нельзя. Разрешаем только запросы
-        собственной страницы (Origin пуст или http://127.0.0.1:<порт>)
-        с Content-Type: application/json. Возвращает None, если всё хорошо,
+        собственной страницы (Origin пуст или http://127.0.0.1:<порт> —
+        вариант http://localhost:<порт> равнозначен) с
+        Content-Type: application/json. Возвращает None, если всё хорошо,
         иначе — (код, тело)."""
         origin = self.headers.get("Origin")
-        if origin and origin != "http://127.0.0.1:%d" % self.server.server_port:
+        if origin and origin not in (
+                "http://127.0.0.1:%d" % self.server.server_port,
+                "http://localhost:%d" % self.server.server_port):
             return 403, {"error": "cross-origin запрос отклонён"}
         ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         if ctype != "application/json":
