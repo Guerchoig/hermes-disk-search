@@ -58,8 +58,14 @@ def _chat_generate(cfg, chunk_text, timeout=120):
     payload = {
         "model": dig(cfg, "chat.model", "local-model"),
         "temperature": 0.4,
-        "max_tokens": 120,
-        "messages": [{"role": "user", "content": Q_PROMPT % chunk_text}],
+        # «думающим» моделям (qwen3.5) нужен запас: размышления съедают лимит,
+        # при малых max_tokens ответ обрезается до пустого/недописанного
+        "max_tokens": 400,
+        "messages": [
+            {"role": "system",
+             "content": "Отвечай сразу, без рассуждений и пояснений. /no_think"},
+            {"role": "user", "content": Q_PROMPT % chunk_text},
+        ],
     }
     r = requests.post(url, json=payload, timeout=timeout)
     r.raise_for_status()
@@ -72,8 +78,19 @@ def _chat_generate(cfg, chunk_text, timeout=120):
     # выбросить блок размышлений <think>…</think>, если модель его писала
     q = re.sub(r"<think>.*?</think>", "", q, flags=re.S).strip()
     q = q.strip("\"'`«» \n\r\t")
-    q = q.splitlines()[0].strip() if q else ""
-    return q or None
+    lines = [l.strip(" \"'`«» \t") for l in q.splitlines() if l.strip()]
+    if not lines:
+        return None
+    # вопрос обычно в КОНЦЕ (после размышлений) и заканчивается «?»;
+    # первая строка reasoning у «думающих» моделей — мусор («Thinking Process:»)
+    q = lines[-1]
+    if not q.endswith("?"):
+        candidates = [l for l in lines if l.endswith("?")]
+        if candidates:
+            q = candidates[-1]
+    if len(q) < 8 or q.rstrip(": ").lower() in ("thinking process", "thinking"):
+        return None  # мусор вместо вопроса — чанк пропускается
+    return q
 
 
 def generate(cfg, n):
