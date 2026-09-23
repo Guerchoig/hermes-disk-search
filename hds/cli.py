@@ -105,13 +105,20 @@ def cmd_reindex_fts(args):
     """Перестроить chunks_fts из chunks.text (лемматизация; без эмбеддингов/OCR/AV).
 
     Нужна после обновления на версию с русской морфологией FTS: старые записи
-    FTS содержат исходные словоформы, лемматизированный запрос их не находит."""
+    FTS содержат исходные словоформы, лемматизированный запрос их не находит.
+    Watcher может параллельно писать в БД — каждая запись ждёт write-lock
+    до busy_timeout (10 мин) и при неудаче повторяется; надёжнее остановить
+    watcher в веб-интерфейсе на время прогона."""
+    import sqlite3
+
     from . import lemmatizer
     from .progress import ProgressReporter
 
     cfg = load()
     conn = _conn(cfg)
-    conn.execute("PRAGMA busy_timeout=30000")  # параллельно пишет watcher
+    # 10 минут: DELETE 553 тыс. строк и батчи вставок терпеливо ждут write-lock,
+    # который периодически держит watcher (30 с не хватало — «database is locked»)
+    conn.execute("PRAGMA busy_timeout=600000")
     total = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
     if not total:
         print("В индексе нет чанков — перестраивать нечего.")
@@ -119,8 +126,17 @@ def cmd_reindex_fts(args):
     print("Перестройка FTS: %d чанков%s" % (
         total, " (лемматизация pymorphy3)" if lemmatizer.available()
         else " (pymorphy3 не установлен — БЕЗ морфологии)"))
-    conn.execute("DELETE FROM chunks_fts")
-    conn.commit()
+    for attempt in (1, 2, 3):
+        try:
+            conn.execute("DELETE FROM chunks_fts")
+            conn.commit()
+            break
+        except sqlite3.OperationalError as e:
+            if attempt == 3 or "locked" not in str(e).lower():
+                raise
+            print("[warn] база занята другим процессом (watcher пишет) — "
+                  "повтор через 30 с (%d/3)" % attempt, flush=True)
+            time.sleep(15)
     rep = ProgressReporter(args.progress_sec)
     rep.start()
     n, batch, t0 = 0, [], time.time()
