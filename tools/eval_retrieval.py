@@ -49,6 +49,8 @@ def _conn(cfg):
 
 def _chat_generate(cfg, chunk_text, timeout=120):
     """Один вопрос по фрагменту через локальную чат-модель (None при сбое)."""
+    import re
+
     import requests
 
     url = dig(cfg, "chat.base_url", "http://localhost:1234/v1").rstrip("/") \
@@ -61,7 +63,14 @@ def _chat_generate(cfg, chunk_text, timeout=120):
     }
     r = requests.post(url, json=payload, timeout=timeout)
     r.raise_for_status()
-    q = r.json()["choices"][0]["message"]["content"].strip()
+    msg = r.json()["choices"][0]["message"]
+    q = (msg.get("content") or "").strip()
+    if not q:
+        # «думающие» модели (qwen3.5 и т.п.) кладут ответ в reasoning_content,
+        # оставляя content пустым — берём текст оттуда
+        q = (msg.get("reasoning_content") or "").strip()
+    # выбросить блок размышлений <think>…</think>, если модель его писала
+    q = re.sub(r"<think>.*?</think>", "", q, flags=re.S).strip()
     q = q.strip("\"'`«» \n\r\t")
     q = q.splitlines()[0].strip() if q else ""
     return q or None
@@ -90,6 +99,10 @@ def generate(cfg, n):
                 q = _chat_generate(cfg, text)
             except Exception as e:  # noqa: BLE001
                 print("  [skip] чанк %d: %s" % (cid, str(e)[:100]))
+                skipped += 1
+                continue
+            if not q:
+                print("  [skip] чанк %d: модель вернула пустой ответ" % cid)
                 skipped += 1
                 continue
             f.write(json.dumps({"qid": i, "chunk_id": cid, "kind": kind,
@@ -157,6 +170,14 @@ def measure(cfg):
         print("Нет %s — сначала запустите --generate" % GOLDEN)
         return 1
     items = [json.loads(l) for l in open(GOLDEN, encoding="utf-8") if l.strip()]
+    # пропустить строки без вопроса (модель вернула пустой ответ при генерации)
+    bad = [x for x in items if not x.get("question")]
+    if bad:
+        print("Пропущено вопросов без текста: %d" % len(bad))
+        items = [x for x in items if x.get("question")]
+    if not items:
+        print("В %s нет ни одного вопроса — перегенерируйте: --generate" % GOLDEN)
+        return 1
     conn = _conn(cfg)
     emb = make_embedder(cfg)
     fts_k = max(10, int(dig(cfg, "search.fts_k", 40)))
