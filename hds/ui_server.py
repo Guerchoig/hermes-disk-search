@@ -22,6 +22,11 @@ from .embedder import make_embedder
 PROJECT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _PAUSE = os.path.join(PROJECT, "index.pause")
 _STOP = os.path.join(PROJECT, "index.stop")
+# подпроцессы без консольного окна: UI-сервер может работать «бесконечно»
+# (pythonw/автозапуск), и без этого флага каждый опрос `lms ps` при открытом
+# web-интерфейсе мигает консольным окном (Windows)
+_NO_WINDOW = ({"creationflags": subprocess.CREATE_NO_WINDOW}
+              if os.name == "nt" else {})
 _cfg_lock = threading.Lock()
 _ui_index_args = {"roots": None, "full": False}  # параметры последнего UI-старта индексации
 _LAST_HB_EVENTS = []  # события последнего прогона в другом процессе (heartbeat удалён после finish)
@@ -157,7 +162,8 @@ def _loaded_instances(exe):
     LM Studio держит модель в нескольких копиях, если 'lms load' вызывали
     повторно (кнопка UI, инсталлятор, рестарты) — каждая копия ест VRAM."""
     try:
-        r = subprocess.run([exe, "ps", "--json"], capture_output=True, timeout=30)
+        r = subprocess.run([exe, "ps", "--json"], capture_output=True, timeout=30,
+                           **_NO_WINDOW)
         data = json.loads((r.stdout or b"").decode("utf-8", errors="replace") or "[]")
         out = []
         for m in data:
@@ -173,7 +179,7 @@ def _loaded_instances(exe):
     except Exception:  # noqa: BLE001
         pass
     try:  # откат: старые сборки lms без --json
-        r = subprocess.run([exe, "ps"], capture_output=True, timeout=30)
+        r = subprocess.run([exe, "ps"], capture_output=True, timeout=30, **_NO_WINDOW)
         out = (r.stdout or b"").decode("utf-8", errors="replace")
     except Exception:  # noqa: BLE001
         return []
@@ -214,12 +220,12 @@ def _model_load():
         for inst in loaded:  # дубликаты или заниженный контекст: выгрузить
             try:
                 subprocess.run([exe, "unload", inst["id"]], capture_output=True,
-                               timeout=60)
+                               timeout=60, **_NO_WINDOW)
             except Exception:  # noqa: BLE001
                 pass
         r = subprocess.run(
             [exe, "load", _MODEL_NAME, "--context-length", str(_EMB_CONTEXT), "-y"],
-            capture_output=True, timeout=600)
+            capture_output=True, timeout=600, **_NO_WINDOW)
         if r.returncode == 0:
             msg = "Модель загружена в LM Studio (контекст %d)" % _EMB_CONTEXT
             if loaded:
@@ -313,7 +319,7 @@ def _watch_autostart_on():
         r = subprocess.run(
             ["schtasks", "/Query", "/TN", "HermesDiskSearchWatch",
              "/FO", "CSV", "/NH"],
-            capture_output=True, timeout=15)
+            capture_output=True, timeout=15, **_NO_WINDOW)
         return r.returncode == 0
     except Exception:  # noqa: BLE001
         return False
@@ -358,7 +364,7 @@ def _watch_autostart_set(enabled):
     r = subprocess.run(
         ["powershell", "-NoProfile", "-Command",
          "$p = '%s'; %s" % (_startup_dir().replace("'", "''"), cmd)],
-        capture_output=True)
+        capture_output=True, **_NO_WINDOW)
     return r.returncode == 0
 
 
