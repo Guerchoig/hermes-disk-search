@@ -181,14 +181,30 @@ def run_checks(cfg=None):
         add("lemmatizer", "ok", "pymorphy3 установлен — русская морфология в ключевом поиске")
         try:
             c = dbmod.connect(db_path, int(dig(cfg, "embedding.dim", 1024)))
-            n_chunks = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            row = c.execute("SELECT value FROM meta WHERE key='fts_normalized'").fetchone()
+            total = c.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+            stale = 0
+            if total:
+                # Содержательная проверка вместо флага meta 'fts_normalized':
+                # обычная индексация всегда пишет лемматизированный FTS
+                # (db.add_chunk -> lemmatizer.normalize), но флаг ставила только
+                # команда reindex-fts — на свежей установке (индексация с нуля)
+                # предупреждение срабатывало ложно. Сэмплируем чанки с начала
+                # таблицы (там и лежат самые старые данные) и сверяем FTS-текст
+                # с нормализацией: совпадает — лемматизация есть.
+                stride = max(1, total // 100)
+                rows = c.execute(
+                    "SELECT c.text, f.text FROM chunks c "
+                    "JOIN chunks_fts f ON f.rowid = c.id "
+                    "WHERE c.id % ? = 0 LIMIT 100", (stride,)).fetchall()
+                for ch, ft in rows:
+                    if ft != lemmatizer.normalize(ch):
+                        stale += 1
             c.close()
-            if n_chunks and (not row or row[0] != "1"):
-                # часть чанков проиндексирована до включения лемматизации
+            if stale:
                 add("fts-norm", "warn",
-                    "FTS-полнотекст не перестроен под лемматизацию — разные словоформы "
-                    "не находятся на данных, проиндексированных раньше",
+                    "Часть FTS-чанков (%d из %d сэмпла) проиндексирована без "
+                    "лемматизации — разные словоформы не находятся на данных, "
+                    "проиндексированных раньше" % (stale, min(100, total)),
                     fix="Запустите: python -m hds.cli reindex-fts (только CPU, "
                         "30-90 мин на ~550 тыс. чанков, без переэмбеддинга)")
         except Exception:  # noqa: BLE001
