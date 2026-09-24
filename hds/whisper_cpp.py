@@ -256,9 +256,8 @@ class WhisperCppModel:
             if r.returncode != 0 or not os.path.exists(jpath):
                 err = (r.stderr or r.stdout or "")[-400:]
                 raise RuntimeError("whisper.cpp завершился с ошибкой: %s" % err)
-            with open(jpath, "r", encoding="utf-8") as f:
-                if not os.path.getsize(jpath):
-                    raise RuntimeError("whisper.cpp вернул пустой JSON")
+            if not os.path.getsize(jpath):
+                raise RuntimeError("whisper.cpp вернул пустой JSON")
             segs, info = _load_transcription(jpath)
             return iter(segs), info
         finally:

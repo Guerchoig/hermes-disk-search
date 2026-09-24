@@ -117,7 +117,7 @@ def start_indexing(full: bool = False) -> str:
     """Запустить индексацию дисков из конфига в фоне (не блокирует чат).
     full=True — принудительная переобработка всех файлов."""
     with _idx_lock:
-        if _idx_state["running"]:
+        if _idx_state["running"] or indexer.index_running():
             return "Индексация уже идёт. Проверьте инструментом index_status."
         _idx_state["running"] = True
 
@@ -142,10 +142,6 @@ def start_indexing(full: bool = False) -> str:
 def stop_indexing() -> str:
     """Аккуратно остановить идущую индексацию: все уже обработанные файлы
     сохраняются, текущий файл будет дообработан при следующем запуске."""
-    import os
-
-    from .config import PROJECT_ROOT
-
     stop_file = os.path.join(PROJECT_ROOT, "index.stop")
     open(stop_file, "w").close()
     _idx_state["last_result"] = "stop requested"
@@ -156,8 +152,6 @@ def stop_indexing() -> str:
 @mcp.tool()
 def reindex_path(path: str) -> str:
     """Переиндексировать один файл или папку (например, после массового изменения)."""
-    import os
-
     cfg = load()
     conn = _conn(cfg)
     try:

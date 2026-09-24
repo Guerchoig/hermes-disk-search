@@ -132,6 +132,12 @@ def _worker(q, conn, emb, cfg, stop):
                     if dst_excluded:
                         dbmod.remove_path(conn, src)  # файл ушёл в корзину — из индекса
                     else:
+                        # перезапись: запись для dst уже есть в индексе (со старым
+                        # содержимым) — rename упал бы на UNIQUE(path). Старую
+                        # запись убираем; актуальное содержимое доиндексируется
+                        # ближайшим событием modified для dst
+                        if dbmod.get_file_by_path(conn, dst):
+                            dbmod.remove_path(conn, dst)
                         dbmod.rename_path(conn, src, dst)
                     _state["processed"] += 1
                 elif not dst_excluded and os.path.exists(dst):

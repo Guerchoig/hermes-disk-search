@@ -81,7 +81,7 @@ def build_context(results, max_chars):
     blocks, used = [], 0
     for i, r in enumerate(results, 1):
         loc = r["path"]
-        if r["page"]:
+        if r["page"] is not None:  # страница 0 — валидная (не «нет страницы»)
             loc += ", стр. %d" % r["page"]
         if r["t_start"] is not None:
             loc += ", время %s–%s" % (_fmt_time(r["t_start"]), _fmt_time(r["t_end"] or r["t_start"]))
@@ -119,9 +119,13 @@ def ask(conn, emb, cfg, question, limit=8):
     ]
     payload = _chat_payload(cfg, messages)
     url = _chat_url(cfg)
+    # Таймаут согласован с MCP-клиентом (Cline режет вызов по 300 с): один
+    # запрос должен укладываться с запасом; раньше 600 с + nudge-повтор
+    # давали до 1200 с «молчаливого» зависания ask_my_files.
+    timeout = float(dig(cfg, "chat.timeout", 240))
 
     def _post(p):
-        r = requests.post(url, json=p, timeout=600)
+        r = requests.post(url, json=p, timeout=timeout)
         r.raise_for_status()
         return r.json()["choices"][0]["message"] or {}
 

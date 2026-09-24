@@ -72,6 +72,24 @@ class ProcessFileTests(IndexerTestBase):
         conn.close()
         self.assertTrue(status.startswith("indexed"), status)
 
+    def test_duplicate_content_both_indexed(self):
+        """РЕГРЕССИЯ: две копии одного контента обе остаются в индексе —
+        раньше hash-move «перетягивал» запись к последней обработанной копии,
+        и каждый следующий прогон переключал её обратно."""
+        text = "одинаковый контент двух копий документа " * 10
+        p1 = write_text(self.fixtures, "d1.txt", text)
+        p2 = write_text(self.fixtures, "d2.txt", text)
+        conn = self._conn()
+        indexer.process_file(conn, FakeEmbedder(8), load(), p1)
+        status2, _ = indexer.process_file(conn, FakeEmbedder(8), load(), p2)
+        conn.close()
+        self.assertTrue(status2.startswith("indexed"), status2)
+        c = dbmod.connect(db_abs_path(load()), 8)
+        paths = [r[0] for r in c.execute(
+            "SELECT path FROM files WHERE path IN (?,?)", (p1, p2))]
+        c.close()
+        self.assertEqual(len(paths), 2, "обе копии должны быть в индексе")
+
     def test_moved_reuses_chunks(self):
         """Фича: переименование не переиндексирует, а переезжает."""
         p = write_text(self.fixtures, "c.txt", "текст для переезда " * 10)

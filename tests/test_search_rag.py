@@ -112,6 +112,19 @@ class SearchTests(Base):
         res_vec = search(self.conn, FakeEmbedder(8), load(), "документооборот", limit=5)
         self.assertTrue(res_vec[0]["path"].endswith("b.txt"))
 
+    def test_kinds_filter_pushdown(self):
+        """РЕГРЕССИЯ: kinds-фильтр пробрасывается в FTS-ветку (pushdown), а не
+        применяется после слияния — выдача по типу не пустеет при существующих
+        совпадениях, а чужие типы в неё не попадают."""
+        self._index_two()  # оба файла kind='text'
+        res = search(self.conn, None, load(), "документооборот",
+                     kinds=["text"], limit=5)
+        self.assertTrue(res, "совпадение в kind='text' должно находиться")
+        self.assertTrue(all(r["kind"] == "text" for r in res))
+        res2 = search(self.conn, None, load(), "документооборот",
+                      kinds=["pdf"], limit=5)
+        self.assertEqual(res2, [], "чужой kind не должен попадать в выдачу")
+
     def test_snippet_sentence_boundaries(self):
         """РЕГРЕССИЯ: сниппет не должен начинаться с середины предложения."""
         text = ("Первое предложение вообще не про то, что мы ищем, и оно длинное. "

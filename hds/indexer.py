@@ -8,7 +8,7 @@ import threading
 import time
 
 from . import chunker, db as dbmod, extractors
-from .config import EMB_CONTEXT, dig, db_abs_path
+from .config import EMB_CONTEXT, PROJECT_ROOT, dig, db_abs_path
 
 MEDIA_KINDS = {"media"}
 _ACTIVE_REPORTER = None   # устанавливается run_index; читается MCP index_status
@@ -117,9 +117,23 @@ def path_excluded(path, cfg):
 
 
 def _limit_mb(kind, cfg):
-    cap = dig(cfg, "index.max_media_mb", 1500) if kind in MEDIA_KINDS \
+    cap = dig(cfg, "index.max_media_mb", 2500) if kind in MEDIA_KINDS \
         else dig(cfg, "index.max_file_mb", 200)
     return int(cap) * 1024 * 1024
+
+
+def index_running(max_age=30):
+    """True, если ДРУГОЙ процесс сейчас индексирует (heartbeat-файл свежий).
+
+    Кросс-процессный аналог внутрипроцессных проверок (_idx_state в MCP,
+    _ACTIVE_REPORTER в UI): heartbeat пишет только run_index и удаляет после
+    прогона, поэтому свежая метка = идущая индексация, а зависший после
+    сбоя файл отсекается проверкой возраста."""
+    hb = os.path.join(PROJECT_ROOT, "index.heartbeat.json")
+    try:
+        return (time.time() - os.path.getmtime(hb)) < max_age
+    except OSError:
+        return False
 
 
 def _kind_of(ext):
@@ -158,11 +172,15 @@ def _extract_file(conn, cfg, path, force=False, progress_cb=None):
             and row["size"] == size and abs((row["mtime"] or 0) - mtime) < 2:
         return None, None, ("unchanged", kind)
 
-    # переименование/переезд: контент уже в индексе под другим путём
+    # переименование/переезд: контент уже в индексе под другим путём.
+    # Переезд засчитываем ТОЛЬКО если старый путь исчез с диска: иначе это
+    # дубликат контента, и две копии вечно «отнимали» одну запись индекса
+    # друг у друга (каждый прогон переключал её на другой путь).
     chash = content_hash(path, size)
     if not force and (row is None or row["status"] != "indexed"):
         same = dbmod.get_file_by_hash(conn, chash)
-        if same is not None and same["path"] != path and same["chunk_count"] > 0:
+        if same is not None and same["path"] != path and same["chunk_count"] > 0 \
+                and not os.path.exists(same["path"]):
             dbmod.rename_path(conn, same["path"], path)
             return None, None, ("moved", kind)
 
@@ -171,10 +189,10 @@ def _extract_file(conn, cfg, path, force=False, progress_cb=None):
         kind2, segments = extractors.extract(path, cfg, progress_cb=progress_cb)
         chunks = chunker.make_chunks(
             segments,
-            dig(cfg, "chunk.size", 1200),
-            dig(cfg, "chunk.overlap", 200),
+            dig(cfg, "chunk.size", 800),
+            dig(cfg, "chunk.overlap", 120),
         ) if segments else []
-        max_chunks = int(dig(cfg, "index.max_chunks", 2000))
+        max_chunks = int(dig(cfg, "index.max_chunks", 3000))
         if max_chunks > 0 and len(chunks) > max_chunks:
             chunks = chunks[:max_chunks]
             print("[warn] %s: текст обрезан до %d чанков (index.max_chunks); "
@@ -192,7 +210,7 @@ def _extract_file(conn, cfg, path, force=False, progress_cb=None):
 def _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb=None):
     """Фаза 2: эмбеддинги чанков + запись в БД. Возвращает статус-строку."""
     try:
-        max_chunks = int(dig(cfg, "index.max_chunks", 2000))
+        max_chunks = int(dig(cfg, "index.max_chunks", 3000))
         bs = max(1, int(dig(cfg, "embedding.batch_size", 32)))
         total = len(chunks)
         if progress_cb and total:
@@ -225,7 +243,27 @@ def process_file(conn, emb, cfg, path, force=False, progress_cb=None):
     if fid is None:
         return kind  # ранний выход: это кортеж (статус, kind)
     status = _commit_file(conn, emb, cfg, fid, chunks, kind, progress_cb)
+    _clip_store(conn, cfg, fid, path, kind, status)
     return status, kind
+
+
+def _clip_store(conn, cfg, fid, path, kind, status):
+    """CLIP-вектор картинки (контентный поиск «найди изображения …»).
+
+    Вызывается из process_file, поэтому вектор создаётся для ЛЮБОЙ точки
+    входа индексации (watcher, MCP reindex_path), а не только для полного
+    прогона run_index — раньше новые фото не находились по содержанию,
+    пока пользователь не запускал `python -m hds.cli clip-index` вручную.
+    Ошибки глотаются: индексация текста не должна зависеть от CLIP."""
+    if kind != "image" or not status.startswith("indexed") \
+            or not dig(cfg, "index.clip", True):
+        return
+    try:
+        from . import clip_index
+
+        clip_index.store_for_file(conn, fid, path)
+    except Exception as e:  # noqa: BLE001
+        print("[clip] ошибка: %s" % e, file=sys.stderr, flush=True)
 
 
 def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
@@ -266,6 +304,13 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
     counters = {}
     seen_roots = single_paths is None
     paths = single_paths if single_paths is not None else iter_files(cfg, roots)
+    # кросс-процессная защита: watcher-сверка и MCP/UI-старт не должны
+    # складываться с индексацией CLI/другого UI-процесса (раньше «уже идёт»
+    # проверялось только внутри своего процесса)
+    if index_running():
+        print("[index] в другом процессе уже идёт индексация "
+              "(свежий index.heartbeat.json) — выход.", flush=True)
+        return {"skipped_other_process": True}
     n = 0
     rep = ProgressReporter(sec=0 if quiet else progress_sec)  # счётчики всегда (heartbeat), quiet — без печати
     _ACTIVE_REPORTER = rep
@@ -352,16 +397,8 @@ def run_index(conn, emb, cfg, roots=None, kinds=None, full=False,
                                          progress_cb=progress_cb)
             dur = time.time() - t1
             _hb()
-            # CLIP-вектор для картинок: контентный поиск «найди изображения …»
-            if kind == "image" and dig(cfg, "index.clip", True):
-                try:
-                    from . import clip_index
-
-                    fid_now = dbmod.get_file_by_path(conn, path)
-                    if fid_now:
-                        clip_index.store_for_file(conn, fid_now["id"], path)
-                except Exception as e:  # noqa: BLE001
-                    print("[clip] ошибка: %s" % e, file=sys.stderr, flush=True)
+            # CLIP-вектор создаётся внутри process_file (_clip_store) —
+            # единая точка для всех точек входа индексации
             if rep:
                 chunks_n = 0
                 if "(" in status:

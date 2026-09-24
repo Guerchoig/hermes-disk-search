@@ -88,7 +88,8 @@ class SaveConfigTests(unittest.TestCase):
         self.assertIn("Ошибка YAML", res["msg"])
 
     def test_valid_yaml_saved(self):
-        good = load() and open(self.cfg, encoding="utf-8-sig").read()
+        with open(self.cfg, encoding="utf-8-sig") as f:
+            good = load() and f.read()
         res = ui_server._save_config(good)
         self.assertTrue(res["ok"])
 

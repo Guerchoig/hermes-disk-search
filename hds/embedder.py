@@ -61,7 +61,8 @@ class Embedder:
                     break  # модель не установлена/не загружена — ретраи бессмысленны
             except Exception as e:  # noqa: BLE001
                 last = repr(e)
-            time.sleep(2 * (attempt + 1))
+            if attempt < 3:  # после последней попытки спать нечего
+                time.sleep(2 * (attempt + 1))
         self.available = False
         low = (last or "").lower()
         if "exceed_context" in low or "context size" in low:

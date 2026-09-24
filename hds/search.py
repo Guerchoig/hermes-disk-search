@@ -9,33 +9,54 @@ from .lemmatizer import lemmatize_token
 TOKEN_RE = re.compile(r"[\w]{2,}", re.UNICODE)
 
 
+def _fts_tokens(q):
+    """Токены запроса, лемматизированные тем же способом, что и chunks_fts."""
+    return [lemmatize_token(t) for t in TOKEN_RE.findall(q)[:12]]
+
+
+def _quoted(tokens):
+    """Экранированные FTS-фразы («" ... «" -> '""'»)."""
+    return ['"%s"' % t.replace('"', '""') for t in tokens]
+
+
 def fts_query(q):
     """OR-запрос по леммам: разные словоформы находят друг друга.
 
     Токены запроса лемматизируются тем же способом, что и текст в chunks_fts
     (hds.lemmatizer.normalize при индексации)."""
-    tokens = [lemmatize_token(t) for t in TOKEN_RE.findall(q)[:12]]
+    tokens = _fts_tokens(q)
     if not tokens:
         return None
-    return " OR ".join('"%s"' % t.replace('"', '""') for t in tokens)
+    return " OR ".join(_quoted(tokens))
 
 
-def fts_search_ids(conn, q, k):
+def fts_search_ids(conn, q, k, kinds=None):
     """Топ-k chunk_id по FTS: сначала AND, при пустом результате — OR.
 
     Последний токен ищется с префиксом («настройк*» — найдёт «настройки»).
+    kinds — фильтр по files.kind, пробрасывается прямо в SQL (pushdown):
+    иначе top-k кандидатов мог целиком состоять из «чужих» типов и
+    отфильтрованная выдача пустела при существующих совпадениях.
     Возвращает [] при пустом запросе или ошибке."""
-    tokens = [lemmatize_token(t) for t in TOKEN_RE.findall(q)[:12]]
+    tokens = _fts_tokens(q)
     if not tokens:
         return []
-    quoted = ['"%s"' % t.replace('"', '""') for t in tokens]
+    quoted = _quoted(tokens)
     quoted[-1] += "*"  # префиксный матчинг последнего токена
+
+    join, kind_sql, params_tail = "", "", []
+    if kinds:
+        join = ("JOIN chunks c ON c.id = cf.rowid "
+                "JOIN files f ON f.id = c.file_id ")
+        kind_sql = " AND f.kind IN (%s)" % ",".join("?" * len(kinds))
+        params_tail = list(kinds)
 
     def run(expr):
         try:
             rows = conn.execute(
-                "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ? "
-                "ORDER BY bm25(chunks_fts) LIMIT ?", (expr, k)).fetchall()
+                "SELECT cf.rowid FROM chunks_fts cf %sWHERE chunks_fts MATCH ?%s "
+                "ORDER BY bm25(chunks_fts) LIMIT ?" % (join, kind_sql),
+                [expr] + params_tail + [k]).fetchall()
             return [r[0] for r in rows]
         except Exception as e:  # noqa: BLE001
             print("[fts] ошибка поиска: %s" % e, file=sys.stderr)
@@ -120,11 +141,17 @@ def search(conn, emb, cfg, query, kinds=None, limit=8):
         try:
             qv = emb.embed_query(query)
             blob = struct.pack("<%df" % len(qv), *qv)
-            rows = conn.execute(
-                "SELECT rowid, distance FROM chunks_vec WHERE embedding MATCH ? "
-                "AND k = ? ORDER BY distance",
-                (blob, vec_k),
-            ).fetchall()
+            # kinds пробрасывается в SQL (проверено: sqlite-vec поддерживает
+            # JOIN при KNN-запросе) — иначе top-k мог состоять из «чужих» типов
+            sql = ("SELECT v.rowid, v.distance FROM chunks_vec v "
+                   "JOIN chunks c ON c.id = v.rowid "
+                   "JOIN files f ON f.id = c.file_id "
+                   "WHERE v.embedding MATCH ? AND v.k = ?")
+            params = [blob, vec_k]
+            if kinds:
+                sql += " AND f.kind IN (%s)" % ",".join("?" * len(kinds))
+                params += list(kinds)
+            rows = conn.execute(sql + " ORDER BY v.distance", params).fetchall()
             for rank, (cid, _d) in enumerate(rows):
                 scores[cid] = scores.get(cid, 0.0) + vec_w / (rrf_k + rank)
         except Exception as e:  # noqa: BLE001
@@ -148,12 +175,20 @@ def search(conn, emb, cfg, query, kinds=None, limit=8):
                         "AND k = ? ORDER BY distance",
                         (blob, vec_k),
                     ).fetchall()
+                    clip_w = float(dig(cfg, "search.clip_weight", 1.0))
+                    # один батч-запрос file_id -> первый чанк вместо N+1
+                    fids = [r[0] for r in rows]
+                    chmap = {}
+                    if fids:
+                        qm = ",".join("?" * len(fids))
+                        for ch in conn.execute(
+                                "SELECT id, file_id FROM chunks "
+                                "WHERE file_id IN (%s) ORDER BY id" % qm, fids):
+                            chmap.setdefault(ch[1], ch[0])
                     for rank, (fid, _d) in enumerate(rows):
-                        ch = conn.execute(
-                            "SELECT id FROM chunks WHERE file_id=? LIMIT 1", (fid,)
-                        ).fetchone()
-                        if ch:
-                            scores[ch[0]] = scores.get(ch[0], 0.0) + 1.0 / (rrf_k + rank)
+                        cid = chmap.get(fid)
+                        if cid is not None:
+                            scores[cid] = scores.get(cid, 0.0) + clip_w / (rrf_k + rank)
         except Exception as e:  # noqa: BLE001
             print("[clip] поиск по содержанию картинок недоступен (%s)" % e,
                   file=sys.stderr)

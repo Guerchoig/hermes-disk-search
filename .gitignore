@@ -12,9 +12,9 @@ index.pause
 
 # Локальные данные (индекс не входит в репозиторий)
 index.db
-index.db
 index.db-shm
 index.db-wal
+index.db*.moved-*
 index.db.moved*
 test_data/
 models/
@@ -30,3 +30,7 @@ data/
 
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
+
+# Личная конфигурация (пути дисков пользователя); образец — config.example.yaml,
+# при первом запуске config.yaml создаётся автоматически
+config.yaml

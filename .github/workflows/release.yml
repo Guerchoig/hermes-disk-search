@@ -103,18 +103,6 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      - name: Удаление предыдущих релизов и тегов
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
-        shell: pwsh
-        run: |
-          $tags = gh release list --limit 100 --json tagName --jq '.[].tagName'
-          foreach ($tag in $tags) {
-            Write-Host "Удаляю предыдущий релиз/тег: $tag"
-            gh release delete "$tag" --yes --cleanup-tag
-          }
-
       - name: Скачивание macOS-ассетов
         uses: actions/download-artifact@v4
         with:

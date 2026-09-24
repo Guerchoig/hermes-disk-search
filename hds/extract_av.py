@@ -38,7 +38,15 @@ def ensure_whisper_model(cfg):
     """Гарантирует локальную копию модели Whisper (через curl, без сетевых
     зависимостей huggingface_hub). Возвращает путь к папке модели."""
     d, name = _model_dir(cfg)
-    missing = [f for f in _WHISPER_FILES if not os.path.exists(os.path.join(d, f))]
+    # частично скачанный model.bin не считается готовым: обрыв сети оставлял
+    # файл на диске, «готовая» модель падала уже при загрузке весов
+    min_model_bytes = 10 * 1024 * 1024
+    missing = []
+    for f in _WHISPER_FILES:
+        p = os.path.join(d, f)
+        if not os.path.exists(p) or (f == "model.bin"
+                                     and os.path.getsize(p) < min_model_bytes):
+            missing.append(f)
     if missing:
         curl = shutil.which("curl")
         for f in missing:

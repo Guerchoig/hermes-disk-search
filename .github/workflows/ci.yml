@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Установка зависимостей
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install faster-whisper psutil pyyaml
+
+      - name: Компиляция всех модулей
+        run: python -m compileall -q hds tools
+
+      - name: Регрессионные тесты
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python -m unittest discover -s tests -v
+
+  # Проверка совместимости с macOS (Apple Silicon M1-M4): зависимости ставятся
+  # без nvidia-* (CUDA на Mac нет), тесты должны проходить без CUDA/Tesseract.
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # Python из Homebrew: сборки python.org (actions/setup-python на macOS)
+      # собраны без поддержки загрузки расширений sqlite3 — sqlite-vec
+      # не загрузится и векторный поиск будет недоступен.
+      - name: Python 3.12 (Homebrew — sqlite3 с загрузкой расширений)
+        run: |
+          PY3="$(brew --prefix python@3.12 2>/dev/null)/bin/python3.12"
+          if [ ! -x "$PY3" ]; then
+            brew install python@3.12
+            PY3="$(brew --prefix python@3.12)/bin/python3.12"
+          fi
+          "$PY3" -c "import sqlite3; c = sqlite3.connect(':memory:'); c.enable_load_extension(False); print('[ok] sqlite3: загрузка расширений доступна')"
+          # PEP 668: brew-python запрещает pip без venv — создаём venv
+          "$PY3" -m venv "$HOME/.hds-venv"
+          echo "$HOME/.hds-venv/bin" >> "$GITHUB_PATH"
+
+      - name: Установка зависимостей
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install faster-whisper psutil pyyaml
+
+      - name: Компиляция всех модулей
+        run: python3 -m compileall -q hds tools
+
+      - name: Регрессионные тесты (macOS)
+        env:
+          PYTHONIOENCODING: utf-8
+        run: python3 -m unittest discover -s tests -v

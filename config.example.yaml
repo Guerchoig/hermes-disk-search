@@ -1,0 +1,85 @@
+# hermes-disk-search — образец конфигурации
+# Либо скопируйте этот файл в config.yaml и поправьте пути,
+# либо просто запустите `python -m hds.cli check` / веб-интерфейс —
+# config.yaml создастся автоматически с настройками по умолчанию.
+index:
+  roots:
+    - 'C:\Users\имя_пользователя'    # корни индексации (диски/папки)
+  exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search-db", "WindowsApps", ".Trash", ".Trashes", "models"]
+  # исключаемые пути-префиксы (каталог или файл целиком; редактируется в UI):
+  exclude_paths: []
+  max_file_mb: 200          # предел для обычных файлов
+  max_media_mb: 2500        # предел для аудио/видео (транскрипция)
+  ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)
+  ocr_lang: "rus+eng"
+  transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
+  whisper_model: small
+  whisper_device: auto      # auto | cuda | vulkan | cpu | metal
+  whisper_load_timeout: 180 # сек; зависание CUDA-загрузки — fallback на CPU
+  whisper_batch: 8          # батчевая транскрипция (0 = отключить)
+  whisper_language: ""      # "" = авто-детекция; "ru" — фиксировать русский
+  clip: true                # CLIP-поиск картинок по содержанию
+  max_chunks: 3000          # максимум чанков на файл (0 = без лимита)
+
+# путь к индексной БД; относительный путь считается от корня проекта
+db_path: 'index.db'
+
+chunk:
+  size: 800                 # символов на чанк (≈400 токенов)
+  overlap: 120              # перекрытие соседних чанков (целые предложения)
+
+embedding:
+  base_url: "http://127.0.0.1:8011/v1"   # llama-server (роль embedding)
+  model: "text-embedding-bge-m3"
+  batch_size: 64
+  dim: 1024                 # bge-m3 = 1024
+
+chat:
+  base_url: "http://127.0.0.1:8010/v1"
+  model: "qwen3.5-9b"
+  thinking: "off"           # off|auto: off — RAG-ответы без размышлений (быстро)
+  temperature: 0.2
+  max_context_chars: 14000
+
+llm_server:
+  bin: ""
+  host: "127.0.0.1"
+  autostart: true
+  start_timeout: 300
+  parallel: 1
+  chat:
+    port: 8010
+    model: "models/chat/qwen3.5-9b-Q6_K.gguf"
+    ctx_per_slot: 16384
+    extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
+  embedding:
+    port: 8011
+    model: "models/embedding/bge-m3-Q8_0.gguf"
+    ctx_per_slot: 8192
+    extra_args: "--batch-size 8192 --ubatch-size 8192 -ngl 99"
+  rerank:
+    port: 8012
+    model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"
+    ctx_per_slot: 8192
+    extra_args: "-ngl 0"
+
+search:
+  vec_k: 40
+  fts_k: 40
+  rrf_k: 60
+  fts_weight: 1.0
+  vec_weight: 1.0
+  clip_weight: 1.0
+  snippet_chars: 500
+
+rerank:
+  enabled: false
+  url: "http://localhost:8012/v1"
+  model: "bge-reranker-v2-m3"
+  timeout: 30
+  max_latency: 15
+
+watch:
+  debounce_seconds: 8
+  reconcile_on_start: true
+  max_stable_wait: 120
