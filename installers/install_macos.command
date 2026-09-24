@@ -39,16 +39,22 @@ else
     fi
 fi
 
-# --- 5. LM Studio (не устанавливаем!) ---
-if curl -s -m 3 http://localhost:1234/v1/models >/dev/null 2>&1; then
-    echo "[ok] LM Studio запущен (localhost:1234)"
+# --- 5. llama.cpp (llama-server) — локальный LLM-бэкенд ---
+if have llama-server; then
+    echo "[ok] llama-server найден в PATH: $(command -v llama-server)"
+elif [ -x "/opt/homebrew/bin/llama-server" ] || [ -x "/usr/local/bin/llama-server" ]; then
+    echo "[ok] llama-server установлен через Homebrew"
+elif have brew; then
+    echo "[..] Устанавливаю llama.cpp (Metal включён автоматически для Apple Silicon)..."
+    brew install llama.cpp
+    have llama-server || { echo "[--] llama-server не установился — скачайте с https://github.com/ggml-org/llama.cpp/releases"; }
 else
-    echo "[!!] LM Studio не отвечает на localhost:1234"
-    echo "     1) Установите: https://lmstudio.ai"
-    echo "     2) Developer -> Start Server"
-    echo "     3) Скачайте чат-модель и embedding text-embedding-bge-m3"
-    echo "        (https://huggingface.co/lm-kit/bge-m3-gguf), загрузите модель"
+    echo "[--] Homebrew не найден — llama.cpp не установлен."
+    echo "    Установите brew (https://brew.sh/) и выполните: brew install llama.cpp"
+    echo "    или скачайте бинарь с https://github.com/ggml-org/llama.cpp/releases"
+    echo "    и укажите путь в config.yaml (llm_server.bin)"
 fi
+have llama-server && llama-server --version 2>/dev/null | head -1
 
 # --- 6. venv ---
 if [ ! -x "$ROOT/.venv/bin/python" ]; then
@@ -59,8 +65,8 @@ fi
 "$ROOT/.venv/bin/python" -m pip install faster-whisper -q
 echo "[ok] зависимости установлены"
 
-# --- 6.1. Модель эмбеддингов bge-m3 (автоскачивание, ~1,2 ГБ, если не установлена) ---
-bash "$ROOT/installers/ensure_embedding_model.sh"
+# --- 6.1. Модели llama-server: bge-m3 (~1,2 ГБ) + qwen3.5-9b Q6_K (~7,5 ГБ) ---
+bash "$ROOT/installers/ensure_models.sh"
 
 # --- 6.2. Metal для транскрипции (mlx-whisper, только Apple Silicon) ---
 if [ "$(uname -m)" = "arm64" ]; then

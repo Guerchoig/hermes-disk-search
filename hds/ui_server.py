@@ -53,69 +53,42 @@ def _venv_python():
     return os.path.join(PROJECT, ".venv", "bin", "python")
 
 
-# --- Модель эмбеддингов: статус / скачивание / загрузка ---------------------
-_MODEL_NAME = "text-embedding-bge-m3"
+# --- LLM-серверы llama.cpp: статус / скачивание GGUF / запуск ---------------
 _MODEL_URL = "https://huggingface.co/lm-kit/bge-m3-gguf/resolve/main/bge-m3-Q8_0.gguf"
-# Контекст, с которым модель обязана быть загружена (единый источник и замеры —
-# hds/config.py: EMB_CONTEXT): LM Studio молча усекает вход длиннее контекста,
-# поэтому задаём его явно при загрузке.
-_EMB_CONTEXT = EMB_CONTEXT
 _EMB_DL = {"running": False, "progress": 0.0, "msg": "", "error": ""}
 
 
 def _gguf_path():
-    home = os.path.expanduser("~")
-    return os.path.join(home, ".lmstudio", "models", "lm-kit",
-                        "bge-m3-gguf", "bge-m3-Q8_0.gguf")
-
-
-def _lm_models():
-    """(server_ok, ids) — опрос LM Studio на localhost:1234."""
-    import requests as rq
-
-    try:
-        r = rq.get("http://localhost:1234/v1/models", timeout=2)
-        return True, [m.get("id") for m in r.json().get("data", [])]
-    except Exception:  # noqa: BLE001
-        return False, []
-
-
-def _match_emb_model(models, config_model):
-    """Сопоставление модели эмбеддингов со списком моделей сервера.
-    Возвращает (exact_id, community_id): точное совпадение с config-именем
-    или id, содержащий базовое имя модели (bge-m3)."""
-    cm = (config_model or "").strip().lower()
-    for m in models:
-        if m and m.strip().lower() == cm:
-            return m, None
-    for m in models:
-        if m and "bge-m3" in m.lower():
-            return None, m
-    return None, None
+    """GGUF embedding-модели в папке проекта (не в ~/.lmstudio)."""
+    return os.path.join(PROJECT, "models", "embedding", "bge-m3-Q8_0.gguf")
 
 
 def _model_status():
-    server_ok, models = _lm_models()
+    """Статус LLM-серверов и моделей для группы «LLM-серверы» UI."""
     cfg, _err = _safe_cfg()
-    from .config import dig
-    cfg_model = dig(cfg, "embedding.model", _MODEL_NAME) or _MODEL_NAME
-    exact, actual = _match_emb_model(models, cfg_model)
+    from . import llama_server
+    st = {"chat": {}, "embedding": {}}
+    for role in ("chat", "embedding"):
+        try:
+            st[role] = llama_server.status(cfg, role)
+        except Exception as e:  # noqa: BLE001
+            st[role] = {"error": str(e), "running": False}
+    emb = st["embedding"]
     return {
+        "servers": st,
+        "rerank_enabled": bool(dig(cfg, "rerank.enabled", False)),
         "gguf_path": _gguf_path(),
         "gguf_ready": os.path.exists(_gguf_path()),
         "downloading": _EMB_DL["running"],
         "progress": _EMB_DL["progress"],
         "msg": _EMB_DL["error"] or _EMB_DL["msg"],
-        "server_ok": server_ok,
-        "config_model": cfg_model,
-        "actual_id": exact or actual or "",
-        "model_loaded": bool(server_ok and (exact or actual)),
-        "mismatch": bool(exact is None and actual),
+        "embedding_ctx_ok": (emb.get("ctx_actual") is None
+                             or emb["ctx_actual"] >= EMB_CONTEXT),
     }
 
 
 def _model_download():
-    """Фоновое скачивание GGUF bge-m3 (~1,2 ГБ) в папку моделей LM Studio."""
+    """Фоновое скачивание GGUF bge-m3 (~1,2 ГБ) в models/embedding/."""
     if _EMB_DL["running"]:
         return {"ok": False, "msg": "Скачивание уже идёт"}
     if os.path.exists(_gguf_path()):
@@ -144,8 +117,8 @@ def _model_download():
                             ("%d МБ" % (total // 1048576)) if total else "?")
             os.replace(tmp, _gguf_path())
             _EMB_DL.update({"running": False, "progress": 100.0,
-                            "msg": "модель скачана — загрузите её кнопкой «Загрузить» "
-                                   "или в LM Studio (Developer → Load)"})
+                            "msg": "модель скачана — запустите эмбеддинг-сервер "
+                                   "кнопкой «Запустить»"})
         except Exception as e:  # noqa: BLE001
             _EMB_DL.update({"running": False, "msg": "",
                             "error": "ошибка скачивания: %s" % e})
@@ -154,92 +127,37 @@ def _model_download():
     return {"ok": True, "msg": "Скачивание начато (~1,2 ГБ, один раз)"}
 
 
-def _loaded_instances(exe):
-    """Загруженные инстансы модели эмбеддингов: [{'id', 'context'}].
+def _llama_start(role):
+    """Запуск llama-сервера роли менеджером (блокирующе, до /health).
 
-    Основной путь — 'lms ps --json' (отдаёт фактический contextLength);
-    при недоступности JSON — разбор таблицы 'lms ps' (context=None).
-    LM Studio держит модель в нескольких копиях, если 'lms load' вызывали
-    повторно (кнопка UI, инсталлятор, рестарты) — каждая копия ест VRAM."""
+    Контекст и флаги задаёт менеджер (llm_server.<role> в config.yaml):
+    при меньшем контексте длинные входы отсекаются, поэтому роль всегда
+    стартует именно через hds.llama_server."""
+    cfg, _err = _safe_cfg()
+    from . import llama_server
+
     try:
-        r = subprocess.run([exe, "ps", "--json"], capture_output=True, timeout=30,
-                           **_NO_WINDOW)
-        data = json.loads((r.stdout or b"").decode("utf-8", errors="replace") or "[]")
-        out = []
-        for m in data:
-            ident = str(m.get("identifier") or m.get("modelKey") or "")
-            if _MODEL_NAME.lower() in ident.lower():
-                ctx = m.get("contextLength")
-                try:
-                    ctx = int(ctx) if ctx else None
-                except (TypeError, ValueError):
-                    ctx = None
-                out.append({"id": ident, "context": ctx})
-        return out
-    except Exception:  # noqa: BLE001
-        pass
-    try:  # откат: старые сборки lms без --json
-        r = subprocess.run([exe, "ps"], capture_output=True, timeout=30, **_NO_WINDOW)
-        out = (r.stdout or b"").decode("utf-8", errors="replace")
-    except Exception:  # noqa: BLE001
-        return []
-    ids = []
-    for ln in out.splitlines():
-        ln = ln.strip()
-        if not ln or ln.startswith("IDENTIFIER") or set(ln) <= set("- "):
-            continue  # заголовок таблицы и разделитель
-        if _MODEL_NAME.lower() in ln.lower():
-            ids.append(ln.split()[0])  # первый токен = идентификатор инстанса
-    return [{"id": i, "context": None} for i in ids]
-
-
-def _model_load():
-    """Загрузка модели в запущенный LM Studio через lms CLI (best effort).
-
-    'lms load' при каждом вызове создаёт НОВЫЙ инстанс модели (дубликаты:
-    клики по кнопке, повторные установки, рестарты UI), поэтому перед
-    загрузкой сверяемся с 'lms ps': одна копия с нужным контекстом — не
-    трогаем, дубликаты или заниженный контекст — выгружаем и поднимаем одну
-    свежую. Контекст задаётся явно (--context-length): LM Studio молча
-    усекает вход длиннее загруженного контекста, и хвост длинных чанков
-    не попадал бы в векторы без единой ошибки в ответе."""
-    exe = shutil.which("lms")
-    if not exe:
-        return {"ok": False, "msg": "CLI 'lms' не найден — откройте LM Studio и "
-                                    "загрузите модель вручную: Developer → "
-                                    "Select a model to load → text-embedding-bge-m3"}
-    try:
-        loaded = _loaded_instances(exe)
-        ctx = loaded[0]["context"] if len(loaded) == 1 else None
-        if len(loaded) == 1 and (ctx is None or ctx >= _EMB_CONTEXT):
-            msg = "Модель уже загружена в LM Studio (%s" % loaded[0]["id"]
-            if ctx:
-                msg += ", контекст %d" % ctx
-            return {"ok": True, "msg": msg + ")"}
-        small = [i for i in loaded if i["context"] and i["context"] < _EMB_CONTEXT]
-        for inst in loaded:  # дубликаты или заниженный контекст: выгрузить
-            try:
-                subprocess.run([exe, "unload", inst["id"]], capture_output=True,
-                               timeout=60, **_NO_WINDOW)
-            except Exception:  # noqa: BLE001
-                pass
-        r = subprocess.run(
-            [exe, "load", _MODEL_NAME, "--context-length", str(_EMB_CONTEXT), "-y"],
-            capture_output=True, timeout=600, **_NO_WINDOW)
-        if r.returncode == 0:
-            msg = "Модель загружена в LM Studio (контекст %d)" % _EMB_CONTEXT
-            if loaded:
-                msg += " (выгружено копий: %d)" % len(loaded)
-            if small:
-                msg += ("; раньше контекст был занижен (%s) — длинные чанки молча "
-                        "усекались, запустите переиндексацию («Старт (переобработка "
-                        "всего)») для восстановления" %
-                        ", ".join(str(i["context"]) for i in small))
-            return {"ok": True, "msg": msg}
-        out = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")[:300]
-        return {"ok": False, "msg": "lms load завершился с ошибкой: %s" % out}
+        info = llama_server.start(cfg, role, wait=True)
     except Exception as e:  # noqa: BLE001
-        return {"ok": False, "msg": "Не удалось выполнить lms load: %s" % e}
+        return {"ok": False, "msg": str(e)}
+    if info.get("reused"):
+        return {"ok": True, "msg": "Сервер '%s' уже запущен (%s)"
+                % (role, llama_server.base_url(cfg, role))}
+    return {"ok": True, "msg": "Сервер '%s' запущен: %s (%d слот(ов))"
+            % (role, llama_server.base_url(cfg, role),
+               info.get("total_slots") or 1)}
+
+
+def _llama_stop(role):
+    """Остановка llama-сервера роли по PID-файлу."""
+    cfg, _err = _safe_cfg()
+    from . import llama_server
+
+    stopped = llama_server.stop(cfg, role)
+    return {"ok": True,
+            "msg": ("Инстанс '%s' остановлен" if stopped
+                    else "PID-файл не найден — '%s' не запускался менеджером "
+                         "(запущенный вручную инстанс не трогаем)" % role)}
 
 
 def _pid_alive(pid):
@@ -1072,7 +990,17 @@ class Handler(BaseHTTPRequestHandler):
             elif self.path == "/api/model/download":
                 self._json(_model_download())
             elif self.path == "/api/model/load":
-                self._json(_model_load())
+                self._json(_llama_start("embedding"))
+            elif self.path == "/api/llama/start":
+                role = (body.get("role") or "").strip()
+                self._json({"ok": False, "msg": "Неизвестная роль: %s" % role}
+                           if role not in ("chat", "embedding", "rerank")
+                           else _llama_start(role))
+            elif self.path == "/api/llama/stop":
+                role = (body.get("role") or "").strip()
+                self._json({"ok": False, "msg": "Недопустимая роль"}
+                           if role not in ("chat", "embedding", "rerank")
+                           else _llama_stop(role))
             elif self.path == "/api/model/adopt":
                 self._json(_set_embedding_model(body.get("model", "")))
             else:
@@ -1087,9 +1015,36 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def _acquire_ui_mutex():
+    """Атомарная защита от двойного запуска (Windows): мьютекс ядра.
+
+    Probe-подключение к порту в run() не атомарно: при двух одновременных
+    стартах оба успевают увидеть свободный порт, а SO_REUSEADDR позволяет
+    двум серверам молча делить один порт. CreateMutexW проверяется
+    атомарно: ERROR_ALREADY_EXISTS (183) — другой UI уже жив.
+    Возвращает (хэндл | None, владение получено?). На не-Windows и при
+    невозможности создать — (None, True): не мешаем, останется probe/bind.
+    """
+    if os.name != "nt":
+        return None, True
+    import ctypes
+
+    k = ctypes.WinDLL("kernel32", use_last_error=True)
+    h = k.CreateMutexW(None, False, "Local\\HermesDiskSearchUI")
+    if not h:
+        return None, True
+    return h, ctypes.get_last_error() != 183  # 183 = ERROR_ALREADY_EXISTS
+
+
 def run(port=8765, open_browser=True):
-    # защита от двойного запуска: на Windows SO_REUSEADDR позволяет двум
-    # серверам молча делить один порт — сначала пробуем «постучаться»
+    # №1 (атомарно): мьютекс — см. _acquire_ui_mutex(); гонка двух лаунчеров
+    # должна отсекаться им, probe ниже остаётся как «пояс» на чужой процесс.
+    _mux, _owned = _acquire_ui_mutex()
+    if _mux is not None and not _owned:
+        print("[ui] UI-сервер уже запущен — выход.", flush=True)
+        return
+    # №2 (не атомарно): на Windows SO_REUSEADDR позволяет двум серверам
+    # молча делить один порт — пробуем «постучаться» к существующему
     import socket as _socket
     probe = _socket.socket()
     probe.settimeout(1.0)
@@ -1103,6 +1058,15 @@ def run(port=8765, open_browser=True):
     finally:
         probe.close()
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    # autostart llama-серверов: chat + embedding поднимаются в фоне
+    # (переживают перезапуск UI); ошибки не мешают работе UI
+    try:
+        cfg, _err = _safe_cfg()
+        if cfg and (cfg.get("llm_server") or {}).get("autostart", True):
+            from . import llama_server
+            llama_server.ensure_async(cfg)
+    except Exception:  # noqa: BLE001
+        pass
     url = "http://127.0.0.1:%d" % port
     print("[ui] интерфейс: %s (Ctrl+C — остановка)" % url, flush=True)
     if open_browser:
@@ -1111,3 +1075,10 @@ def run(port=8765, open_browser=True):
         server.serve_forever()
     except KeyboardInterrupt:
         pass
+    finally:
+        # мьютекс держим весь срок жизни сервера; при аварийном выходе
+        # Windows закроет хэндл вместе с процессом
+        if _mux:
+            import ctypes as _ctypes
+
+            _ctypes.windll.kernel32.CloseHandle(_mux)

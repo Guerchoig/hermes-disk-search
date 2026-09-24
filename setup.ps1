@@ -82,16 +82,73 @@ if (-not (Get-Command tesseract -ErrorAction SilentlyContinue) -and
     Write-Host "[ok] Tesseract OCR найден"
 }
 
-# LM Studio (НЕ устанавливаем автоматически — только проверяем и подсказываем)
-try {
-    $null = Invoke-RestMethod -Uri "http://localhost:1234/v1/models" -TimeoutSec 3
-    Write-Host "[ok] LM Studio запущен (localhost:1234)" -ForegroundColor Green
-} catch {
-    Write-Host "[!!] LM Studio не отвечает на localhost:1234" -ForegroundColor Yellow
-    Write-Host "     1) Установите: https://lmstudio.ai" -ForegroundColor Yellow
-    Write-Host "     2) Запустите сервер: Developer -> Start Server" -ForegroundColor Yellow
-    Write-Host "     3) Скачайте чат-модель (например qwen3.5-9b); модель эмбеддингов" -ForegroundColor Yellow
-    Write-Host "        bge-m3 будет скачана этим установщиком автоматически (шаг ниже)" -ForegroundColor Yellow
+# llama.cpp (llama-server) — локальный LLM-бэкенд: пре-билд с GitHub Releases.
+# CUDA-сборка при NVIDIA, иначе Vulkan (AMD/Intel); llama-server переживает
+# перезапуски UI (отвязанный процесс, управление — python -m hds.llama_server)
+$llamaDir = "$root\tools\llama.cpp"
+$llamaExe = "$llamaDir\llama-server.exe"
+if (Get-Command llama-server -ErrorAction SilentlyContinue) {
+    Write-Host "[ok] llama-server найден в PATH: $((Get-Command llama-server).Source)"
+} elseif (Test-Path $llamaExe) {
+    Write-Host "[ok] llama-server уже установлен: $llamaExe"
+} else {
+    $assetPattern = "llama-*bin-win-cuda*x64*.zip"
+    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        $assetPattern = "*bin-win-vulkan-x64*.zip"
+    }
+    Write-Host "[..] Скачиваю пре-билд llama.cpp ($assetPattern)..."
+    try {
+        # latest-релиз llama.cpp может не содержать бинарей (только nightly-tag) —
+        # берём ПЕРВЫЙ релиз, где есть win-сборка (перебор последних 10)
+        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10" -TimeoutSec 30 |
+            Where-Object { ($_.assets | Where-Object { $_.name -like $assetPattern }).Count -gt 0 } |
+            Select-Object -First 1
+        if (-not $rel) { throw "в последних релизах llama.cpp нет ассета $assetPattern" }
+        $asset = $rel.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
+        if (-not $asset) { throw "в релизе $($rel.tag_name) нет ассета $assetPattern" }
+        $zipPath = Join-Path $env:TEMP $asset.name
+        Write-Host "[..] Загрузка $($asset.name) (llama.cpp $($rel.tag_name))..."
+        $ProgressPreference = "SilentlyContinue"  # иначе прогресс-бар замедляет загрузку в разы
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -TimeoutSec 900
+        if ((Get-Item $zipPath).Length -ne $asset.size) {
+            throw ("zip недокачан: получено {0} байт, ожидалось {1} — перезапустите setup.ps1" -f (Get-Item $zipPath).Length, $asset.size)
+        }
+        New-Item -ItemType Directory -Force -Path $llamaDir | Out-Null
+        Expand-Archive -Path $zipPath -DestinationPath $llamaDir -Force
+        Remove-Item $zipPath -ErrorAction SilentlyContinue
+        # CUDA-сборке нужен runtime: рядом лежит cudart-llama-bin-win-cuda-*.zip
+        if ($assetPattern -like "*cuda*") {
+            $cudart = $rel.assets | Where-Object { $_.name -like "cudart-llama-bin-win-cuda*x64.zip" } | Select-Object -First 1
+            if ($cudart) {
+                $cudartZip = Join-Path $env:TEMP $cudart.name
+                Write-Host "[..] Загрузка $($cudart.name) (CUDA runtime)..."
+                Invoke-WebRequest -Uri $cudart.browser_download_url -OutFile $cudartZip -TimeoutSec 900
+                if ((Get-Item $cudartZip).Length -ne $cudart.size) {
+                    throw ("cudart zip недокачан: {0} != {1}" -f (Get-Item $cudartZip).Length, $cudart.size)
+                }
+                Expand-Archive -Path $cudartZip -DestinationPath $llamaDir -Force
+                Remove-Item $cudartZip -ErrorAction SilentlyContinue
+            } else {
+                # без cudart-DLL (cublas64_12.dll и др.) CUDA-сборка llama-server
+                # не стартует — предупреждаем сразу, а не молчаливым сбоем --version
+                Write-Host "[!!] В релизе $($rel.tag_name) нет cudart-llama-bin-win-cuda-*.zip —" -ForegroundColor Yellow
+                Write-Host "     CUDA-сборка llama-server может не стартовать. Скачайте cudart вручную" -ForegroundColor Yellow
+                Write-Host "     с https://github.com/ggml-org/llama.cpp/releases в $llamaDir" -ForegroundColor Yellow
+            }
+        }
+        # llama.cpp кладёт бинари в подпапку вида llama-<tag>-bin-win-.../
+        $nested = Get-ChildItem -Path $llamaDir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+        if ($nested -and (Split-Path $nested.FullName) -ne $llamaDir) {
+            Move-Item (Join-Path (Split-Path $nested.FullName) "*.exe") $llamaDir -Force -ErrorAction SilentlyContinue
+        }
+        & $llamaExe --version | Select-Object -First 1
+        if ($LASTEXITCODE -ne 0) { throw "llama-server --version упал с кодом $LASTEXITCODE" }
+        Write-Host "[ok] llama-server установлен: $llamaExe" -ForegroundColor Green
+    } catch {
+        Write-Host "[!!] Не удалось скачать llama.cpp: $_" -ForegroundColor Yellow
+        Write-Host "     Скачайте бинарь вручную с https://github.com/ggml-org/llama.cpp/releases" -ForegroundColor Yellow
+        Write-Host "     и укажите путь в config.yaml (llm_server.bin)" -ForegroundColor Yellow
+    }
 }
 
 # --- Создание venv ---
@@ -151,8 +208,43 @@ if ("$cudaCount".Trim() -eq "0") {
     Write-Host "[ok] CUDA доступна ($cudaCount) — whisper.cpp (Vulkan) не требуется"
 }
 
-Write-Host "== Модель эмбеддингов bge-m3 (автоскачивание, ~1,2 ГБ, если не установлена) =="
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\installers\ensure_embedding_model.ps1" -ProjectRoot $root
+# --- CLIP-эмбеддинги картинок: PyTorch с CUDA при NVIDIA ---
+# requirements.txt ставит обычный (CPU) torch: CLIP-кодировщик картинок
+# (sentence-transformers, hds/clip_index.py) при индексации фото работал бы
+# на CPU даже на NVIDIA-машине. Ставим CUDA-сборку по согласию пользователя
+# (колесо ~2,5 ГБ); при неудаче индексация продолжит работать — CLIP на CPU.
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
+    $torchCuda = & $python -c "import torch; print(torch.cuda.is_available())" 2>$null | Select-Object -Last 1
+    if ("$torchCuda".Trim() -ne "True") {
+        $ans = Read-Host "[?] Установить PyTorch с CUDA (CLIP-эмбеддинги картинок на GPU, ~2,5 ГБ)? [y/N]"
+        if ($ans -match '^[YyДд]') {
+            $done = $false
+            foreach ($idx in @("https://download.pytorch.org/whl/cu126",
+                               "https://download.pytorch.org/whl/cu124",
+                               "https://download.pytorch.org/whl/cu121")) {
+                Write-Host "[..] pip install torch --index-url $idx ..."
+                & $python -m pip install --upgrade torch --index-url $idx -q
+                if ($LASTEXITCODE -eq 0) {
+                    $ok = & $python -c "import torch; print(torch.cuda.is_available())" 2>$null | Select-Object -Last 1
+                    if ("$ok".Trim() -eq "True") { $done = $true; break }
+                }
+            }
+            if ($done) {
+                Write-Host "[ok] PyTorch CUDA установлен — CLIP-эмбеддинги картинок на GPU" -ForegroundColor Green
+            } else {
+                Write-Host "[--] PyTorch CUDA не установился (нет колеса под этот Python/драйвер) — CLIP на CPU." -ForegroundColor Yellow
+                Write-Host "     Это не блокер: поиск картинок по содержанию продолжит работать (медленнее)." -ForegroundColor DarkGray
+            }
+        } else {
+            Write-Host "[--] Пропущено: CLIP-эмбеддинги картинок останутся на CPU." -ForegroundColor DarkGray
+        }
+    } else {
+        Write-Host "[ok] PyTorch CUDA уже доступна — CLIP-эмбеддинги картинок на GPU"
+    }
+}
+
+Write-Host "== Модели llama-server: bge-m3 (~1,2 ГБ) + qwen3.5-9b Q6_K (~7,5 ГБ, если не установлены) =="
+& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\installers\ensure_models.ps1" -ProjectRoot $root
 
 Write-Host "== Опционально: предзагрузка модели Whisper (~460 МБ, транскрипция аудио/видео) =="
 $ans = Read-Host "Предзагрузить сейчас? [y/N]"

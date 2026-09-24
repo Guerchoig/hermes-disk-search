@@ -40,6 +40,25 @@ chat:
   model: "fake"
   temperature: 0.2
   max_context_chars: 4000
+llm_server:
+  host: "127.0.0.1"
+  start_timeout: 1
+  autostart: false
+  chat:
+    port: 1
+    model: "models/chat/fake.gguf"
+    ctx_per_slot: 512
+    extra_args: ""
+  embedding:
+    port: 1
+    model: "models/embedding/fake.gguf"
+    ctx_per_slot: 512
+    extra_args: ""
+  rerank:
+    port: 1
+    model: "models/rerank/fake.gguf"
+    ctx_per_slot: 512
+    extra_args: ""
 search:
   vec_k: 10
   fts_k: 10

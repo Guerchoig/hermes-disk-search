@@ -1,8 +1,10 @@
-"""Клиент реранкера (bge-reranker-v2-m3 через llama-server, эндпоинт /v1/rerank).
+"""Клиент реранкера (bge-reranker-v2-m3, эндпоинт /v1/rerank llama-server).
 
-LM Studio не реализует /rerank (issues lmstudio-ai#162, lms#521), поэтому
-реранкер запускается отдельным процессом llama-server
-(`llama-server --reranking --pooling rank --port 8012 --model <gguf>`).
+Реранкер — третий инстанс llama-server (роль rerank, порт 8012, флаги
+`--reranking --pooling rank`), управляется менеджером hds/llama_server.py.
+Эндпоинт /rerank не поддерживается LM Studio (issues lmstudio-ai#162, lms#521) —
+одна из причин переезда проекта на llama-server.
+
 По умолчанию выключен (rerank.enabled: false); при недоступности или превышении
 лимита латентности — деградация без падения (используются результаты без
 реранкинга). Предназначен для ask_my_files (не для интерактивного поиска).

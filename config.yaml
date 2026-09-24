@@ -40,16 +40,39 @@ chunk:
   overlap: 120             # перекрытие соседних чанков (целые предложения)
 
 embedding:
-  base_url: "http://localhost:1234/v1"   # LM Studio
-  model: "text-embedding-bge-m3"         # BAAI bge-m3 GGUF (lm-kit), 1024 dim, 100+ языков
+  base_url: "http://127.0.0.1:8011/v1"   # llama-server (роль embedding)
+  model: "text-embedding-bge-m3"         # --alias llama-server; BAAI bge-m3 GGUF, 1024 dim, 100+ языков
   batch_size: 64
   dim: 1024                # bge-m3 = 1024
 
 chat:
-  base_url: "http://localhost:1234/v1"
-  model: "qwen3.5-9b@q6_k"
+  base_url: "http://127.0.0.1:8010/v1"   # llama-server (роль chat)
+  model: "qwen3.5-9b"                    # --alias llama-server чат-роли
+  thinking: "off"          # off|auto: off — RAG-ответы без размышлений (быстро)
   temperature: 0.2
   max_context_chars: 14000
+
+llm_server:
+  bin: ""                    # путь к llama-server; пусто: tools/llama.cpp/ > PATH
+  host: "127.0.0.1"
+  autostart: true            # поднимать серверы при старте UI/MCP/cli
+  start_timeout: 300         # сек ожидания /health при старте
+  parallel: 1                # 1 запрос одновременно, остальные в очереди llama-server
+  chat:
+    port: 8010
+    model: "models/chat/qwen3.5-9b-Q6_K.gguf"
+    ctx_per_slot: 16384
+    extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
+  embedding:
+    port: 8011
+    model: "models/embedding/bge-m3-Q8_0.gguf"
+    ctx_per_slot: 8192
+    extra_args: "--batch-size 8192 --ubatch-size 8192 -ngl 99"
+  rerank:
+    port: 8012
+    model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"
+    ctx_per_slot: 8192
+    extra_args: "-ngl 0"
 
 search:
   vec_k: 40                # глубина векторного поиска

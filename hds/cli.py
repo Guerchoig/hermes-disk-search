@@ -25,6 +25,9 @@ def _kinds(s):
 
 def cmd_index(args):
     cfg = load()
+    from . import llama_server
+    if llama_server.autostart_on(cfg):
+        llama_server.ensure_async(cfg, ("embedding",))  # к батчам уже поднимется
     conn, emb = _conn(cfg), _emb(cfg)
     roots = args.roots.split(";") if args.roots else None
     if args.rechunk:
@@ -58,6 +61,9 @@ def cmd_search(args):
 
 def cmd_ask(args):
     cfg = load()
+    from . import llama_server
+    if llama_server.autostart_on(cfg):
+        llama_server.ensure_async(cfg)  # chat + embedding
     conn, emb = _conn(cfg), _emb(cfg)
     out = rag.ask(conn, emb, cfg, args.query)
     if args.json:

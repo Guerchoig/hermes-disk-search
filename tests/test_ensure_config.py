@@ -78,10 +78,12 @@ class SafeUiTests(unittest.TestCase):
     def test_model_status_keys(self):
         st = ui_server._model_status()
         for k in ("gguf_path", "gguf_ready", "downloading", "progress",
-                  "msg", "server_ok", "model_loaded"):
+                  "msg", "servers", "embedding_ctx_ok"):
             self.assertIn(k, st)
         self.assertIsInstance(st["gguf_ready"], bool)
         self.assertIsInstance(st["downloading"], bool)
+        for role in ("chat", "embedding"):
+            self.assertIn(role, st["servers"])
 
 
 class DiagTests(unittest.TestCase):
@@ -389,26 +391,35 @@ class RunUiLauncherTests(unittest.TestCase):
                          "(ровно одна вставка URL)")
 
 
-class EmbModelTests(unittest.TestCase):
-    """Сопоставление модели эмбеддингов (LM Studio может отдавать другой id)."""
+class DefaultConfigTests(unittest.TestCase):
+    """ensure_config: дефолтный конфиг настроен на llama-server
+    (порты 8010/8011, секция llm_server, thinking off)."""
 
-    def test_match_exact(self):
-        from hds.ui_server import _match_emb_model
-        self.assertEqual(
-            _match_emb_model(["qwen", "text-embedding-bge-m3"], "text-embedding-bge-m3"),
-            ("text-embedding-bge-m3", None))
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-defcfg-")
+        self.old = os.environ.get("HDS_CONFIG")
+        os.environ["HDS_CONFIG"] = os.path.join(self.tmp, "config.yaml")
+        self.addCleanup(self._restore)
 
-    def test_match_substring(self):
-        from hds.ui_server import _match_emb_model
-        exact, actual = _match_emb_model(["qwen", "lm-kit/bge-m3-gguf"],
-                                         "text-embedding-bge-m3")
-        self.assertIsNone(exact)
-        self.assertEqual(actual, "lm-kit/bge-m3-gguf")
+    def _restore(self):
+        if self.old is None:
+            os.environ.pop("HDS_CONFIG", None)
+        else:
+            os.environ["HDS_CONFIG"] = self.old
 
-    def test_match_none(self):
-        from hds.ui_server import _match_emb_model
-        self.assertEqual(_match_emb_model(["qwen"], "text-embedding-bge-m3"),
-                         (None, None))
+    def test_default_llm_server_section(self):
+        ensure_config()
+        cfg = load()
+        self.assertEqual(cfg["llm_server"]["chat"]["port"], 8010)
+        self.assertEqual(cfg["llm_server"]["embedding"]["port"], 8011)
+        self.assertEqual(cfg["llm_server"]["rerank"]["port"], 8012)
+        self.assertEqual(cfg["llm_server"]["parallel"], 1)
+        self.assertEqual(cfg["embedding"]["base_url"],
+                         "http://127.0.0.1:8011/v1")
+        self.assertEqual(cfg["chat"]["base_url"],
+                         "http://127.0.0.1:8010/v1")
+        self.assertEqual(cfg["chat"]["thinking"], "off")
+        self.assertTrue(cfg["llm_server"]["autostart"])
 
 
 class EmbModelSaveTests(unittest.TestCase):

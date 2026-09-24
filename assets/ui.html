@@ -121,16 +121,19 @@ summary{cursor:pointer;user-select:none}
 </div>
 </div>
 
-<div class="card"><h2>Модель эмбеддингов (поиск по смыслу)</h2>
+<div class="card"><h2>LLM-серверы (llama.cpp)</h2>
 <div id="emb-info" class="mono">…</div>
 <div class="row" style="margin-top:8px">
-<button id="b-emb-dl" onclick="embDl()">⬇ Скачать модель (~1,2 ГБ)</button>
-<button id="b-emb-load" onclick="act('/api/model/load')">⏏ Загрузить в LM Studio</button>
-<button id="b-emb-adopt" onclick="embAdopt()" style="display:none">⤵ Применить имя модели</button>
+<button id="b-emb-dl" onclick="embDl()">⬇ Скачать модель эмбеддингов (~1,2 ГБ)</button>
+<button id="b-emb-load" onclick="act('/api/model/load')">⏏ Запустить эмбеддинг-сервер</button>
+<button id="b-chat-load" onclick="act('/api/llama/start', {role:'chat'})">⏏ Запустить чат-сервер</button>
+<button onclick="act('/api/llama/stop', {role:'embedding'})">■ Остановить эмбеддинг-сервер</button>
+<button onclick="act('/api/llama/stop', {role:'chat'})">■ Остановить чат-сервер</button>
 </div>
-<div class="muted">Модель bge-m3 нужна для поиска «по смыслу»; без неё поиск работает только
-по ключевым словам. Скачивание — один раз, файл кладётся в папку моделей LM Studio,
-затем модель загружается на сервер LM Studio.</div>
+<div class="muted">Модель bge-m3 нужна для поиска «по смыслу»; чат-модель (qwen3.5-9b) — для
+ответов ask_my_files. Серверы поднимаются автоматически при старте UI/MCP (llm_server.autostart)
+и переживают перезапуск. Файлы моделей лежат в папке models/ проекта. Ручное управление:
+python -m hds.llama_server status|start|stop [chat|embedding|rerank].</div>
 </div>
 
 <div class="card"><h2>Настройки (config.yaml)</h2>
@@ -162,19 +165,6 @@ async function autostart(cb){
     headers:{'Content-Type':'application/json'},
     body:JSON.stringify({enabled: cb.checked})});
   refresh();
-}
-async function embAdopt(){
-  try {
-    const m = await (await fetch('/api/model/status')).json();
-    if (!m.actual_id) return;
-    const j = await (await fetch('/api/model/adopt', {method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({model: m.actual_id})})).json();
-    const info = document.getElementById('emb-info');
-    info.textContent = j.msg || (j.ok ? 'Имя модели обновлено' : 'Ошибка');
-    info.style.color = j.ok ? 'var(--ok)' : 'var(--err)';
-  } catch(e){}
-  refresh(); loadDiag(true);
 }
 async function saveRoots(){
   const paths = document.getElementById('roots-input').value.split(';')
@@ -362,17 +352,21 @@ async function refresh(){
     try {
       const m = await (await fetch('/api/model/status')).json();
       const info = document.getElementById('emb-info');
+      const emb = m.servers ? m.servers.embedding : {};
+      const chat = m.servers ? m.servers.chat : {};
       let st;
       if (m.downloading) st = `⏳ скачивание: ${m.msg} (${m.progress || 0}%)`;
-      else if (m.model_loaded && m.mismatch) st = `🟡 модель отвечает под именем «${m.actual_id}», в настройках указано «${m.config_model}»`;
-      else if (m.model_loaded) st = '🟢 модель загружена в LM Studio — поиск по смыслу активен';
-      else if (m.server_ok) st = '🟡 LM Studio запущен, модель не загружена';
-      else if (m.gguf_ready) st = '🟡 файл модели на месте, но LM Studio не запущен (Developer → Start Server)';
-      else st = '🔴 файл модели не скачан — поиск только по ключевым словам';
+      else if (!m.gguf_ready) st = '🔴 файл модели эмбеддингов не скачан — поиск только по ключевым словам';
+      else if (emb.running && !m.embedding_ctx_ok) st = '🟡 эмбеддинг-инстанс с заниженным контекстом (' + (emb.ctx_actual || '?') + ', нужно ≥8192) — python -m hds.llama_server restart embedding';
+      else if (emb.running) st = '🟢 эмбеддинг-сервер отвечает — поиск по смыслу активен';
+      else if (!emb.model_ready) st = '🔴 GGUF не найдена: ' + (emb.model || m.gguf_path) + ' · скачайте кнопкой выше';
+      else st = '🟡 GGUF на месте, эмбеддинг-сервер не запущен';
+      st += ' · ' + (chat.running ? '🟢 чат-сервер отвечает' : '🟡 чат-сервер не запущен (ask_my_files без LLM-ответа)');
+      if (m.rerank_enabled) st += ' · реранкер: ' + (emb.running || chat.running ? 'см. диагностику' : '') + (m.rerank_enabled ? ' включён' : '');
       info.textContent = st + (m.msg && !m.downloading ? ' · ' + m.msg : '');
       document.getElementById('b-emb-dl').disabled = m.downloading || m.gguf_ready;
-      document.getElementById('b-emb-load').disabled = !m.gguf_ready || m.model_loaded || m.downloading;
-      document.getElementById('b-emb-adopt').style.display = m.mismatch ? '' : 'none';
+      document.getElementById('b-emb-load').disabled = m.downloading || emb.running;
+      document.getElementById('b-chat-load').disabled = chat.running;
     } catch(e){}
     loadDiag();
   } catch(e){ console.warn(e); }

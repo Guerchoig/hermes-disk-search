@@ -169,4 +169,14 @@ def reindex_path(path: str) -> str:
 
 
 def run():
+    # autostart llama-серверов (chat + embedding) в фоне: к моменту первого
+    # ask_my_files/search_local_files они, как правило, уже подняты;
+    # ошибки (нет бинаря/модели) не мешают старту MCP-сервера
+    try:
+        cfg = load()
+        if (cfg.get("llm_server") or {}).get("autostart", True):
+            from . import llama_server
+            llama_server.ensure_async(cfg)
+    except Exception:  # noqa: BLE001
+        pass
     mcp.run(transport="stdio")

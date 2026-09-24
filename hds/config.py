@@ -5,11 +5,12 @@ import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Целевой контекст embedding-модели (bge-m3) в LM Studio. При меньшем загруженном
-# контексте LM Studio МОЛЧА усекает вход (проверено: текст 15 644 токена при
-# ctx=8192 дал вектор, равный вектору первых ~8192 токенов, без ошибки в ответе;
-# llama.cpp на то же отвечает явным 400). Чанки проекта: медиана 484 токена,
-# p90 829, максимум 2114 — при ctx=512 ~45 % чанков теряли бы хвост.
+# Целевой контекст embedding-модели (bge-m3) в llama-server (роль embedding).
+# При меньшем загруженном контексте вход отсекается: llama.cpp отвечает явной
+# ошибкой 400, LM Studio (старый бэкенд) усекал МОЛЧА (проверено: текст 15 644
+# токена при ctx=8192 дал вектор, равный вектору первых ~8192 токенов, без
+# ошибки в ответе). Чанки проекта: медиана 484 токена, p90 829, максимум 2114 —
+# при ctx=512 ~45 % чанков теряли бы хвост.
 EMB_CONTEXT = 8192
 
 
@@ -42,15 +43,38 @@ def _default_config_yaml():
         "  overlap: 120             # перекрытие соседних чанков (целые предложения)\n"
         "\n"
         "embedding:\n"
-        "  base_url: \"http://localhost:1234/v1\"   # LM Studio\n"
+        "  base_url: \"http://127.0.0.1:8011/v1\"  # llama-server (hds.llama_server)\n"
         "  model: \"text-embedding-bge-m3\"\n"
         "  batch_size: 64\n"
         "  dim: 1024                # bge-m3 = 1024\n"
         "\n"
         "chat:\n"
-        "  base_url: \"http://localhost:1234/v1\"\n"
-        "  model: \"qwen3.5-9b\"\n"
+        "  base_url: \"http://127.0.0.1:8010/v1\"\n"
+        "  model: \"qwen3.5-9b\"      # --alias llama-server чат-роли\n"
+        "  thinking: \"off\"          # off|auto: off — RAG-ответы без размышлений (быстро)\n"
         "  temperature: 0.2\n"
+        "\n"
+        "llm_server:\n"
+        "  bin: \"\"                    # путь к llama-server; пусто: tools/llama.cpp/ > PATH\n"
+        "  host: \"127.0.0.1\"\n"
+        "  autostart: true            # поднимать серверы при старте UI/MCP/cli\n"
+        "  start_timeout: 300         # сек ожидания /health при старте\n"
+        "  parallel: 1                # 1 запрос одновременно, остальные в очереди\n"
+        "  chat:\n"
+        "    port: 8010\n"
+        "    model: \"models/chat/qwen3.5-9b-Q6_K.gguf\"\n"
+        "    ctx_per_slot: 16384\n"
+        "    extra_args: \"--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99\"\n"
+        "  embedding:\n"
+        "    port: 8011\n"
+        "    model: \"models/embedding/bge-m3-Q8_0.gguf\"\n"
+        "    ctx_per_slot: 8192\n"
+        "    extra_args: \"--batch-size 8192 --ubatch-size 8192 -ngl 99\"\n"
+        "  rerank:\n"
+        "    port: 8012\n"
+        "    model: \"models/rerank/bge-reranker-v2-m3-Q8_0.gguf\"\n"
+        "    ctx_per_slot: 8192\n"
+        "    extra_args: \"-ngl 0\"\n"
         "\n"
         "search:\n"
         "  vec_k: 40\n"

@@ -1,4 +1,8 @@
-"""Клиент эмбеддингов OpenAI-совместимого API (LM Studio / Ollama)."""
+"""Клиент эмбеддингов OpenAI-совместимого API (llama-server / Ollama / LM Studio).
+
+По умолчанию — роль embedding llama-server (порт 8011, hds/llama_server.py);
+любой OpenAI-совместимый сервер продолжает работать через embedding.base_url.
+"""
 import time
 
 import requests
@@ -15,8 +19,7 @@ class Embedder:
         self.batch = max(1, int(batch_size))
         self.timeout = timeout
         self.available = True  # выключается после первой ошибки, чтобы не тормозить поиск
-        # keep-alive: каждое НОВОЕ соединение с LM Studio стоит ~2 с (замер),
-        # переиспользование соединения ускоряет эмбеддинги в разы
+        # keep-alive: переиспользование HTTP-соединения ускоряет эмбеддинги
         self._sess = requests.Session()
 
     def embed(self, texts):
@@ -61,17 +64,23 @@ class Embedder:
             time.sleep(2 * (attempt + 1))
         self.available = False
         low = (last or "").lower()
-        if "no models loaded" in low or "400" in low:
-            hint = ("Модель скачана, но не загружена в LM Studio: веб-интерфейс → "
-                    "группа «Модель эмбеддингов» → «Загрузить в LM Studio», "
-                    "или в LM Studio: Developer → Select a model to load → %s."
-                    % self.model)
+        if "exceed_context" in low or "context size" in low:
+            hint = ("llama-server отвечает ЯВНОЙ ошибкой контекста: модель "
+                    "загружена с ctx меньше длины входа. Запустите роль "
+                    "менеджером (контекст задаётся llm_server.embedding."
+                    "ctx_per_slot = 8192): python -m hds.llama_server "
+                    "restart embedding.")
         elif "connection" in low or "max retries" in low or "failed to establish" in low:
-            hint = ("Похоже, LM Studio не запущен: запустите LM Studio и включите "
-                    "сервер (Developer → Start Server).")
+            hint = ("Похоже, llama-server (роль embedding) не запущен: "
+                    "python -m hds.llama_server start embedding "
+                    "(или «Запустить» в группе «LLM-серверы» веб-интерфейса).")
+        elif "model" in low and ("not found" in low or "no model" in low):
+            hint = ("GGUF-модель не найдена на диске. Скачайте её кнопкой "
+                    "«Скачать модель» в веб-интерфейсе или инсталлятором "
+                    "(installers/ensure_models).")
         else:
-            hint = ("Проверьте состояние модели в веб-интерфейсе: группа "
-                    "«Модель эмбеддингов».")
+            hint = ("Проверьте состояние сервера: python -m hds.llama_server "
+                    "status embedding (или карточка «Проверка компонентов» в UI).")
         raise EmbeddingError(
             "Эмбеддинги недоступны (модель '%s' на %s): %s. %s"
             % (self.model, self.base_url, last, hint)
@@ -82,7 +91,7 @@ def make_embedder(cfg):
     from .config import dig
 
     return Embedder(
-        dig(cfg, "embedding.base_url", "http://localhost:1234/v1"),
-        dig(cfg, "embedding.model", "bge-m3"),
+        dig(cfg, "embedding.base_url", "http://127.0.0.1:8011/v1"),
+        dig(cfg, "embedding.model", "text-embedding-bge-m3"),
         dig(cfg, "embedding.batch_size", 64),
     )

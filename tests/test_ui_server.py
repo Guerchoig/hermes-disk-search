@@ -295,74 +295,44 @@ class CsrfGuardTests(unittest.TestCase):
         self.assertEqual(body.get("error"), "not found")
 
 
-class EmbeddingContextTests(unittest.TestCase):
-    """Контекст embedding-модели: LM Studio молча усекает вход длиннее
-    загруженного контекста (замер: чанки проекта — медиана 484 токена, p90 829,
-    максимум 2114; при ctx=512 ~45 % чанков теряли бы хвост). Поэтому:
-    загрузка — с явным --context-length, а заниженный контекст перезагружается."""
+class LlamaCtlTests(unittest.TestCase):
+    """Управление llama-серверами из UI: переиспользование живого инстанса,
+    понятные ошибки менеджера, остановка (PID-файл, чужие не трогаем)."""
 
-    def _fake_run(self, json_out=None, code=0):
-        """subprocess.run: 'ps --json' отдаёт json_out, 'load' — успех."""
-        calls = []
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="hds-llamactl-")
+        write_config(self.tmp)
 
-        def run(args, **kw):
-            calls.append(list(args))
-            if "ps" in args:
-                out = (json_out or "").encode("utf-8")
-                if "--json" not in args:
-                    out = b"IDENTIFIER  MODEL\n"
-                return mock.Mock(stdout=out, stderr=b"", returncode=0)
-            return mock.Mock(stdout=b"", stderr=b"", returncode=code)
+    def test_start_reuses_running(self):
+        from hds import llama_server as ls
 
-        return run, calls
-
-    def _payload(self, ctx):
-        import json as _json
-
-        return _json.dumps([{"identifier": "text-embedding-bge-m3",
-                             "modelKey": "text-embedding-bge-m3",
-                             "contextLength": ctx}])
-
-    def test_json_parsed_with_context(self):
-        run, _ = self._fake_run(self._payload(8192))
-        with mock.patch.object(ui_server.subprocess, "run", run):
-            inst = ui_server._loaded_instances("lms")
-        self.assertEqual(len(inst), 1)
-        self.assertEqual(inst[0]["id"], "text-embedding-bge-m3")
-        self.assertEqual(inst[0]["context"], 8192)
-
-    def test_fallback_to_table_without_json(self):
-        with mock.patch.object(ui_server.subprocess, "run",
-                               lambda args, **kw: mock.Mock(
-                                   stdout=b"IDENTIFIER  MODEL  STATUS\n"
-                                          b"text-embedding-bge-m3  m  IDLE\n",
-                                   stderr=b"", returncode=0)):
-            inst = ui_server._loaded_instances("lms")
-        self.assertEqual([i["id"] for i in inst], ["text-embedding-bge-m3"])
-        self.assertIsNone(inst[0]["context"])  # контекст неизвестен — не трогаем
-
-    def test_correct_context_not_reloaded(self):
-        run, calls = self._fake_run(self._payload(8192))
-        with mock.patch.object(ui_server.shutil, "which", lambda _n: "lms"), \
-                mock.patch.object(ui_server.subprocess, "run", run):
-            res = ui_server._model_load()
+        det = {"started": False, "reused": True, "state": "llama",
+               "total_slots": 1, "pid": None, "command": []}
+        with mock.patch.object(ls, "start", lambda cfg, role, wait=True: det):
+            res = ui_server._llama_start("embedding")
         self.assertTrue(res["ok"])
-        self.assertIn("уже загружена", res["msg"])
-        self.assertFalse([c for c in calls if "load" in c])
+        self.assertIn("уже запущен", res["msg"])
 
-    def test_small_context_reloaded_with_flag(self):
-        run, calls = self._fake_run(self._payload(512))
-        with mock.patch.object(ui_server.shutil, "which", lambda _n: "lms"), \
-                mock.patch.object(ui_server.subprocess, "run", run):
-            res = ui_server._model_load()
+    def test_start_reports_manager_error(self):
+        from hds import llama_server as ls
+
+        def boom(cfg, role, wait=True):
+            raise RuntimeError("GGUF-модель роли 'embedding' не найдена")
+        with mock.patch.object(ls, "start", boom):
+            res = ui_server._llama_start("embedding")
+        self.assertFalse(res["ok"])
+        self.assertIn("GGUF", res["msg"])
+
+    def test_stop_reports_pid_file_state(self):
+        from hds import llama_server as ls
+
+        with mock.patch.object(ls, "stop", lambda cfg, role: True):
+            res = ui_server._llama_stop("embedding")
         self.assertTrue(res["ok"])
-        self.assertIn("8192", res["msg"])
-        self.assertIn("занижен", res["msg"])
-        loads = [c for c in calls if "load" in c]
-        self.assertEqual(len(loads), 1)
-        self.assertIn("--context-length", loads[0])
-        self.assertIn("8192", loads[0])
-        self.assertTrue([c for c in calls if "unload" in c])  # старая выгружена
+        self.assertIn("остановлен", res["msg"])
+        with mock.patch.object(ls, "stop", lambda cfg, role: False):
+            res = ui_server._llama_stop("chat")
+        self.assertIn("не запускался менеджером", res["msg"])
 
 
 if __name__ == "__main__":

@@ -19,6 +19,10 @@ index.db.moved*
 test_data/
 models/
 
+# llama.cpp: бинарь и runtime llama-server (~0,6-1 ГБ) + PID-файлы/логи менеджера
+tools/llama.cpp/
+data/
+
 # Среда
 .env
 .idea/

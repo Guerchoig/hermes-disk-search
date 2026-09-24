@@ -1,4 +1,4 @@
-"""Фаза 0: eval-набор и замер качества поиска (recall@k, MRR, латентность).
+﻿"""Фаза 0: eval-набор и замер качества поиска (recall@k, MRR, латентность).
 
 Запуск из корня проекта (см. PLAN_INDEX_QUALITY.md):
 
@@ -16,6 +16,7 @@
 import argparse
 import json
 import os
+import re
 import statistics
 import struct
 import sys
@@ -47,54 +48,70 @@ def _conn(cfg):
     return dbmod.connect(db_abs_path(cfg), int(dig(cfg, "embedding.dim", 1024)))
 
 
-def _chat_generate(cfg, chunk_text, timeout=120):
-    """Один вопрос по фрагменту через локальную чат-модель (None при сбое)."""
-    import re
+def _chat_generate(cfg, chunk_text, timeout=180):
+    """Один вопрос по фрагменту через чат-роль llama-server (None при сбое).
 
+    Payload собирается тем же кодом, что и в продакшн-RAG (hds.rag._chat_payload):
+    при chat.thinking=off размышления отключаются chat_template_kwargs —
+    llama-server, в отличие от LM Studio, уважает этот параметр. Разбор ответа
+    остаётся устойчивым к «думающим» режимам (thinking=auto)."""
     import requests
 
-    url = dig(cfg, "chat.base_url", "http://localhost:1234/v1").rstrip("/") \
-        + "/chat/completions"
-    payload = {
-        "model": dig(cfg, "chat.model", "local-model"),
-        "temperature": 0.4,
-        # «думающим» моделям (qwen3.5) нужен запас: размышления съедают лимит,
-        # при малых max_tokens ответ обрезается до пустого/недописанного
-        "max_tokens": 400,
-        "messages": [
-            {"role": "system",
-             "content": "Отвечай сразу, без рассуждений и пояснений. /no_think"},
-            {"role": "user", "content": Q_PROMPT % chunk_text},
-        ],
-    }
-    r = requests.post(url, json=payload, timeout=timeout)
+    from hds.rag import _chat_payload, _chat_url
+
+    payload = _chat_payload(cfg, [
+        {"role": "system",
+         "content": "Ты генерируешь контрольные вопросы для проверки поиска. "
+                    "В ответе — только сам вопрос, одна строка, без пояснений."},
+        {"role": "user", "content": Q_PROMPT % chunk_text},
+    ])
+    payload["temperature"] = 0.4  # разнообразие формулировок важнее строгости RAG
+    r = requests.post(_chat_url(cfg), json=payload, timeout=timeout)
     r.raise_for_status()
-    msg = r.json()["choices"][0]["message"]
+    msg = r.json()["choices"][0]["message"] or {}
+    return _extract_question(msg)
+
+
+_T_OPEN = "<" + "think" + ">"   # теги собираем конкатенацией (как в hds.rag):
+_T_CLOSE = "<" + "/" + "think" + ">"  # часть редакторов/линтеров «съедает» их
+
+
+def _extract_question(msg):
+    """Вопрос из ответа модели: content -> reasoning_content -> строка с «?».
+
+    При thinking=auto текст может прийти в reasoning_content с мусором в начале
+    («Thinking Process:») — берём последнюю содержательную строку с «?»."""
     q = (msg.get("content") or "").strip()
     if not q:
-        # «думающие» модели (qwen3.5 и т.п.) кладут ответ в reasoning_content,
-        # оставляя content пустым — берём текст оттуда
         q = (msg.get("reasoning_content") or "").strip()
-    # выбросить блок размышлений <think>…</think>, если модель его писала
-    q = re.sub(r"<think>.*?</think>", "", q, flags=re.S).strip()
+    if not q:
+        return None
+    # inline-теги размышлений (сервер не вынес их в reasoning_content)
+    q = re.sub(re.escape(_T_OPEN) + r".*?" + re.escape(_T_CLOSE), "", q, flags=re.S)
     q = q.strip("\"'`«» \n\r\t")
-    lines = [l.strip(" \"'`«» \t") for l in q.splitlines() if l.strip()]
+    lines = [l.strip(" \"'`«» \t*-") for l in q.splitlines() if l.strip()]
     if not lines:
         return None
-    # вопрос обычно в КОНЦЕ (после размышлений) и заканчивается «?»;
-    # первая строка reasoning у «думающих» моделей — мусор («Thinking Process:»)
+    # вопрос обычно в конце (после размышлений) и заканчивается «?»;
+    # первая строка reasoning — мусор («Thinking Process:»)
     q = lines[-1]
     if not q.endswith("?"):
-        candidates = [l for l in lines if l.endswith("?")]
-        if candidates:
-            q = candidates[-1]
-    if len(q) < 8 or q.rstrip(": ").lower() in ("thinking process", "thinking"):
-        return None  # мусор вместо вопроса — чанк пропускается
+        cand = [l for l in lines if l.endswith("?")]
+        if cand:
+            q = cand[-1]
+    q = q.lstrip("*- ").strip()
+    if len(q) < 8 or "?" not in q \
+            or q.rstrip(": ").lower() in ("thinking process", "thinking"):
+        return None  # мусор/отказ вместо вопроса — чанк пропускается
     return q
 
 
 def generate(cfg, n):
     """Сгенерировать golden-set: N вопросов по случайным чанкам индекса."""
+    from hds import llama_server
+
+    if llama_server.autostart_on(cfg):
+        llama_server.ensure(cfg, ("chat",))  # генерация ждёт ответов чат-роли
     conn = _conn(cfg)
     rows = conn.execute(
         "SELECT c.id, c.text, f.kind FROM chunks c JOIN files f ON f.id=c.file_id "
@@ -183,6 +200,10 @@ def measure(cfg):
     """Замер recall@5/10, MRR и латентности по веткам fts/vec/hybrid."""
     from hds.embedder import make_embedder
 
+    from hds import llama_server
+
+    if llama_server.autostart_on(cfg):
+        llama_server.ensure(cfg, ("embedding",))  # иначе векторная ветка выпадет
     if not os.path.exists(GOLDEN):
         print("Нет %s — сначала запустите --generate" % GOLDEN)
         return 1

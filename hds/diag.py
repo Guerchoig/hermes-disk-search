@@ -6,10 +6,8 @@
           "fail" — критично (индексация и поиск не работают).
 Зонды сети короткие (таймаут 3 с, без ретраев), чтобы UI не подвисал.
 """
-import json
 import os
 import shutil
-import subprocess
 import sys
 
 IS_MAC = sys.platform == "darwin"
@@ -17,29 +15,6 @@ IS_MAC = sys.platform == "darwin"
 
 def _norm_url(u):
     return (u or "").rstrip("/")
-
-
-def _loaded_embedding_context(lms_exe):
-    """Фактический контекст загруженной embedding-модели (None, если неизвестен).
-
-    LM Studio отдаёт его в 'lms ps --json' (поле contextLength). Значение важно:
-    при контексте меньше целевого (config.EMB_CONTEXT) LM Studio МОЛЧА усекает
-    вход длиннее контекста — длинные чанки попадают в индекс неполно.
-    """
-    try:
-        p = subprocess.run([lms_exe, "ps", "--json"], capture_output=True,
-                           timeout=20)
-        for m in json.loads((p.stdout or b"").decode("utf-8", "replace") or "[]"):
-            ident = str(m.get("identifier") or m.get("modelKey") or "")
-            if "bge-m3" in ident.lower():
-                ctx = m.get("contextLength")
-                try:
-                    return int(ctx) if ctx else None
-                except (TypeError, ValueError):
-                    return None
-    except Exception:  # noqa: BLE001
-        return None
-    return None
 
 
 def run_checks(cfg=None):
@@ -88,107 +63,61 @@ def run_checks(cfg=None):
         else:
             add("roots", "ok", "Корни индексации: %s" % ", ".join(roots))
 
-    # 3. LM Studio + чат-модель
-    import requests as rq
-    base = _norm_url(dig(cfg, "chat.base_url", "http://localhost:1234/v1"))
-    try:
-        r = rq.get(base + "/models", timeout=3)
-        models = [m.get("id") for m in r.json().get("data", [])]
-        chat_model = dig(cfg, "chat.model", "")
-        if chat_model and models and chat_model not in models:
-            # LM Studio может отдавать id без суффикса квантизации ('qwen3.5-9b@q6_k').
-            b = chat_model.split("@")[0].strip().lower()
-            near = next((m for m in models if m and m.split("@")[0].strip().lower() == b), None)
-            if near:
-                add("chat", "warn",
-                    "Чат-модель '%s' не совпадает с загруженной '%s'" % (chat_model, near),
-                    fix="Уточните имя chat.model в группе «Настройки».")
-            else:
-                add("chat", "warn", "Чат-модель '%s' не загружена" % chat_model,
-                    "доступно: %s" % ", ".join(m for m in models if m)[:160],
-                    "В LM Studio: Developer → Select a model to load → %s "
-                    "(если модели нет — скачайте её в LM Studio, раздел Search)." % chat_model)
-        else:
-            add("chat", "ok", "Чат-модель '%s' отвечает" % (chat_model or "?"))
-    except Exception as e:  # noqa: BLE001
-        add("chat", "fail", "LM Studio недоступен (%s)" % base, str(e),
-            "Установите LM Studio (https://lmstudio.ai), запустите сервер "
-            "(Developer → Start Server) и загрузите чат-модель.")
+    # 3. LLM-серверы llama.cpp — чат-роль (ask_my_files, не критично для поиска)
+    from . import llama_server as _ls
 
-    # 4. Эмбеддинги (короткий зонд без ретраев)
+    det_chat = _ls.probe(cfg, "chat")
+    if det_chat["state"] == _ls.STATE_LLAMA:
+        add("chat", "ok", "Чат-сервер llama.cpp отвечает ('%s')"
+            % str(dig(cfg, "chat.model", "qwen3.5-9b") or "?"))
+    elif det_chat["state"] == _ls.STATE_FOREIGN:
+        add("chat", "warn",
+            "Порт %s занят посторонним сервисом (не llama-server чат-роли)"
+            % _ls.base_url(cfg, "chat"),
+            fix="Освободите порт или смените llm_server.chat.port в config.yaml.")
+    else:
+        add("chat", "warn", "Чат-сервер llama.cpp не запущен — ask_my_files "
+            "работает без LLM-ответа (только список найденных файлов)",
+            fix="Запустите: python -m hds.llama_server start chat "
+                "(или кнопка «Запустить» в группе «LLM-серверы» веб-интерфейса).")
+
+    # 4. Эмбеддинги (роль embedding llama-server) — критично для поиска
     emb_model = dig(cfg, "embedding.model", "text-embedding-bge-m3")
-    emb_url = _norm_url(dig(cfg, "embedding.base_url", "http://localhost:1234/v1"))
-    try:
-        r = rq.post(emb_url + "/embeddings",
-                    json={"model": emb_model, "input": ["ping"]}, timeout=10)
-        if r.status_code == 200:
-            add("emb", "ok", "Эмбеддинги: модель '%s' отвечает" % emb_model)
+    det_emb = _ls.probe(cfg, "embedding")
+    if det_emb["state"] == _ls.STATE_LLAMA:
+        add("emb", "ok", "Эмбеддинги: llama-server отвечает ('%s')" % emb_model)
+    elif det_emb["state"] == _ls.STATE_FOREIGN:
+        add("emb", "fail",
+            "Порт %s занят посторонним сервисом (не llama-server роли embedding)"
+            % _ls.base_url(cfg, "embedding"),
+            fix="Освободите порт или смените llm_server.embedding.port в config.yaml.")
+    else:
+        emb_model_path = _ls.status(cfg, "embedding")["model"]
+        if not os.path.isfile(emb_model_path):
+            add("emb", "fail",
+                "GGUF-модель эмбеддингов не найдена: %s" % emb_model_path,
+                fix="Скачайте кнопкой «Скачать модель» в группе «LLM-серверы» "
+                    "веб-интерфейса или запустите installers/ensure_models. "
+                    "Без неё поиск работает только по ключевым словам.")
         else:
-            raise RuntimeError("HTTP %s" % r.status_code)
-    except Exception as e:  # noqa: BLE001
-        # сервер может знать модель под другим идентификатором (bge-m3) —
-        # ищем её в списке моделей и пробуем зонд с фактическим именем
-        actual = None
-        try:
-            r2 = rq.get(emb_url + "/models", timeout=3)
-            for m in (m.get("id") or "" for m in r2.json().get("data", [])):
-                if "bge-m3" in m.lower():
-                    actual = m
-                    break
-        except Exception:  # noqa: BLE001
-            pass
-        handled = False
-        if actual and actual != emb_model:
-            try:
-                r3 = rq.post(emb_url + "/embeddings",
-                             json={"model": actual, "input": ["ping"]}, timeout=10)
-                if r3.status_code == 200:
-                    add("emb", "warn",
-                        "Эмбеддинги работают, но сервер отдаёт модель под именем '%s', "
-                        "а в config.yaml указано '%s'" % (actual, emb_model),
-                        fix="В группе «Модель эмбеддингов» нажмите «Применить имя "
-                            "модели» — embedding.model в настройках обновится "
-                            "автоматически.")
-                    handled = True
-            except Exception:  # noqa: BLE001
-                pass
-        if not handled:
-            # Таймаут пинга ≠ «модель не загружена»: под нагрузкой (очередь
-            # эмбеддингов при индексации, GPU 100%) зонд просто не успевает
-            # дождаться ответа. /v1/models — каталог моделей, а не список
-            # загруженных; если модель в каталоге есть, честнее сообщить
-            # «сервер занят», чем вводить в заблуждение красным «fail».
-            busy = isinstance(e, rq.exceptions.Timeout)
-            if busy and actual:
-                add("emb", "warn",
-                    "LM Studio не ответил на пинг эмбеддингов за 10 с — судя по всему, "
-                    "сервер занят очередью запросов (обычно во время индексации). "
-                    "Модель '%s' в каталоге есть." % emb_model,
-                    fix="Если индексация сейчас не идёт — загрузите модель: кнопка "
-                        "«Загрузить в LM Studio» в группе «Модель эмбеддингов» выше "
-                        "(дубликаты, если появятся, кнопка убирает сама).")
-            else:
-                add("emb", "fail",
-                    "Эмбеддинги недоступны: модель '%s' не загружена" % emb_model,
-                    fix="Скачайте модель и загрузите её в LM Studio (тип Embedding): "
-                        "кнопка «Скачать модель» в группе «Модель эмбеддингов» выше, затем "
-                        "«Загрузить в LM Studio». Без неё поиск работает только по ключевым словам.")
+            add("emb", "fail", "Эмбеддинг-сервер llama.cpp не запущен",
+                fix="Запустите: python -m hds.llama_server start embedding "
+                    "(или кнопка «Запустить» в группе «LLM-серверы»). Без неё "
+                    "поиск работает только по ключевым словам.")
 
-    # 4b. Контекст embedding-модели: LM Studio МОЛЧА усекает вход длиннее
-    # загруженного контекста — хвост длинных чанков не попадает в векторы
-    # (llama.cpp на то же отвечает явной ошибкой 400, LM Studio — нет).
+    # 4b. Контекст embedding-инстанса: меньше EMB_CONTEXT — хвост длинных
+    # чанков не попадает в векторы (llama-server вернёт явный 400 по входу
+    # длиннее контекста, но лучше перезапустить с нужным контекстом).
     from .config import EMB_CONTEXT
-    _lms = shutil.which("lms")
-    if _lms:
-        ctx = _loaded_embedding_context(_lms)
-        if ctx and ctx < EMB_CONTEXT:
-            add("embctx", "warn",
-                "Модель эмбеддингов загружена с контекстом %d (нужно %d) — "
-                "длинные фрагменты индексируются неполно" % (ctx, EMB_CONTEXT),
-                fix="LM Studio молча обрезает вход длиннее контекста. Нажмите "
-                    "«Загрузить в LM Studio» в группе «Модель эмбеддингов» — кнопка "
-                    "перезагрузит модель с контекстом %d, затем запустите "
-                    "переиндексацию («Старт (переобработка всего)»)." % EMB_CONTEXT)
+    _ctx = _ls.props_context(det_emb["props"]) \
+        if det_emb["state"] == _ls.STATE_LLAMA else None
+    if _ctx and _ctx < EMB_CONTEXT:
+        add("embctx", "warn",
+            "Эмбеддинг-инстанс запущен с контекстом %d (нужно %d) — длинные "
+            "фрагменты индексируются неполно" % (_ctx, EMB_CONTEXT),
+            fix="Контекст задаёт llm_server.embedding.ctx_per_slot (%d): "
+                "python -m hds.llama_server restart embedding, затем "
+                "переиндексация («Старт (переобработка всего)»)." % EMB_CONTEXT)
 
     # 5. Tesseract OCR
     from .extractors import _tesseract_ready
@@ -286,10 +215,9 @@ def run_checks(cfg=None):
             add("rerank", "warn",
                 "rerank.enabled включён, но реранкер не отвечает — "
                 "ask_my_files работает без реранкинга",
-                fix="Запустите llama-server с реранк-моделью: llama-server "
-                    "--reranking --pooling rank --port 8012 "
-                    "--model <путь к bge-reranker-v2-m3-Q8_0.gguf> "
-                    "(GGUF ~600 МБ; LM Studio /rerank не реализует).")
+                fix="Запустите роль реранкера менеджером: python -m hds.llama_server "
+                    "start rerank (модель llm_server.rerank.model, GGUF ~600 МБ; "
+                    "LM Studio /rerank не реализует).")
 
     # 8. mpxj (MS Project)
     try:

@@ -155,6 +155,21 @@ llama.cpp, определение пулинга), `diag_a3b_reference.py` (эт
 - `installers/ensure_embedding_model.ps1` (Windows) и `.sh` (macOS): загрузка с
   `--context-length 8192`, проверка фактического контекста, предупреждение/перезагрузка.
 - `README.md`: требование контекста 8192, колонка CONTEXT в `lms ps`, объяснение.
+
+### Актуализация: миграция на llama-server (завершена)
+
+- LM Studio полностью заменён тремя инстансами llama.cpp `llama-server`
+  (менеджер `hds/llama_server.py`, конфиг — секция `llm_server` в config.yaml):
+  **chat** :8010 (генерация, БЕЗ `--jinja`), **embedding** :8011
+  (`--embedding --pooling cls`, ctx 8192), **rerank** :8012
+  (`--reranking --pooling rank`). Одна GGUF-модель = один процесс, `--parallel 1`.
+- Вход длиннее контекста теперь даёт **явную ошибку 400** (тихое усечение LM
+  Studio ушло вместе с LM Studio); контроль бюджета токенов остаётся
+  (`hds/indexer.clip_for_embedding`) как защита чанков от потери хвоста.
+- Размышления qwen3.5 отключаются `chat_template_kwargs {enable_thinking: false}`
+  при `chat.thinking: off` — то, чего LM Studio не умел (bug #1990);
+  golden-set eval-генератора (`tools/eval_retrieval.py`) использует тот же путь.
+- Открытый вопрос §8.3 закрыт: переезд на llama-server выполнен.
 - Тесты: `tests/test_diag.py` (новый), `tests/test_ui_server.py` (+4) — всего 148 OK.
 - Проверено: `check` зелёный; симуляция ctx=512 даёт корректное предупреждение.
 
@@ -303,8 +318,8 @@ python -m unittest discover -s tests
 .\.venv\Scripts\python.exe -m hds.cli check
 # Фаза A: инструменты диагностики
 $env:PYTHONPATH='<корень проекта>'; .\.venv\Scripts\python.exe tools\diag_a1_tokens.py
-# состояние LM Studio (колонка CONTEXT должна быть 8192)
-lms ps
+# состояние llama-server (роли chat/embedding/rerank, порты 8010/8011/8012)
+python -m hds.llama_server status
 # состояние индекса
 .\.venv\Scripts\python.exe -m hds.cli status
 ```
