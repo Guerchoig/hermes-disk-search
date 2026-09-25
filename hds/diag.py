@@ -97,7 +97,9 @@ def run_checks(cfg=None):
             add("emb", "fail",
                 "GGUF-модель эмбеддингов не найдена: %s" % emb_model_path,
                 fix="Скачайте кнопкой «Скачать модель» в группе «LLM-серверы» "
-                    "веб-интерфейса или запустите installers/ensure_models. "
+                    "веб-интерфейса или запустите установщик общего рантайма: "
+                    "installers/ensure_llama_runtime.ps1 -Models embedding "
+                    "(macOS: bash installers/ensure_llama_runtime.sh --models embedding). "
                     "Без неё поиск работает только по ключевым словам.")
         else:
             add("emb", "fail", "Эмбеддинг-сервер llama.cpp не запущен",

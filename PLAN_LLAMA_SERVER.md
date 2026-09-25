@@ -6,6 +6,23 @@
 CLI check/start/stop/status/restart/run) и его установщики
 (`install.ps1` шаг 3, `install.sh` шаг 3).
 
+> **Актуализация 2026-09-25 — общий llama-рантайм машины (см.
+> `PLAN_SHARED_LLAMA_RUNTIME.md`).** Пункты этого плана про хранение GGUF в
+> `models/{chat,embedding,rerank}` проекта и установщик `ensure_models.*`
+> **устарели**: модели и бинарь llama-server переехали в общий каталог машины
+> (`%LOCALAPPDATA%\llama-runtime` на Windows, `~/Library/Application Support/llama-runtime`
+> на macOS; переопределяется `%LLAMA_RUNTIME_DIR%`), тот же, что у
+> anonymizer_proxy. Роли в `config.yaml` ссылаются на модели спецификатором
+> **`shared:<role>`** (резолвится через `hds/llama_runtime.py` по манифесту
+> `models/<role>/current.json`), установщики рантайма —
+> **`installers/ensure_llama_runtime.ps1`** (Windows) и
+> **`installers/ensure_llama_runtime.sh`** (macOS; SYNC-COPY с proxy), а
+> `installers/ensure_models.ps1` и `ensure_models.sh` **удалены**. Общая
+> чат-модель одна на оба проекта и меняется из UI
+> (виджет «Чат-модель» в группе «LLM-серверы») или командой
+> `python -m hds.llama_runtime switch <файл>`. Статус и остаток работ —
+> в `PLAN_SHARED_LLAMA_RUNTIME.md`.
+
 ## 0. Мотивация
 
 LM Studio не позволяет тонко управлять thinking-моделями (reasoning budget,
@@ -133,25 +150,30 @@ thinking-модель может завершить генерацию ВНУТ�
 
 ```yaml
 llm_server:
-  bin: ""                     # путь к llama-server; пусто: tools/llama.cpp/ > PATH
+  bin: ""                     # путь к llama-server; пусто: общий llama-рантайм > tools/llama.cpp/ > PATH
   host: "127.0.0.1"
   autostart: true             # ensure() при старте UI/MCP/cli (неблокирующе)
   start_timeout: 300
+  # shared:<role> — GGUF из ОБЩЕГО llama-рантайма машины
+  # (%LOCALAPPDATA%\llama-runtime\models\<role>\); смена общей чат-модели — из
+  # UI (виджет «Чат-модель») или `python -m hds.llama_runtime switch <файл>`
   chat:
     port: 8010
-    model: "models/chat/qwen3.5-9b-Q6_K.gguf"
+    model: "shared:chat"
     ctx_per_slot: 16384
     extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
   embedding:
     port: 8011
-    model: "models/embedding/bge-m3-Q8_0.gguf"
+    model: "shared:embedding"
     ctx_per_slot: 8192
     extra_args: "--batch-size 8192 --ubatch-size 8192 -ngl 99"
   rerank:
     port: 8012
-    model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"
+    model: "shared:rerank"
     ctx_per_slot: 8192
-    extra_args: "-ngl 0"
+    # --batch-size/--ubatch-size обязательны: фрагмент длиннее physical batch
+    # (дефолт 512) llama-server отвергает ошибкой 500 (проверено на живой машине)
+    extra_args: "-ngl 0 --batch-size 8192 --ubatch-size 8192"
 ```
 
 Сопутствующие правки: `chat.base_url` → `http://127.0.0.1:8010/v1`,

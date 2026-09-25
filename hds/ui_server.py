@@ -59,7 +59,16 @@ _EMB_DL = {"running": False, "progress": 0.0, "msg": "", "error": ""}
 
 
 def _gguf_path():
-    """GGUF embedding-модели в папке проекта (не в ~/.lmstudio)."""
+    """GGUF embedding-модели: общий llama-рантайм (config.yaml
+    llm_server.embedding.model: shared:embedding), иначе — файл проекта."""
+    try:
+        cfg, _err = _safe_cfg()
+        from . import llama_server
+        p = llama_server._abs_model(cfg, "embedding")
+        if os.path.isfile(p):
+            return p
+    except Exception:  # noqa: BLE001
+        pass
     return os.path.join(PROJECT, "models", "embedding", "bge-m3-Q8_0.gguf")
 
 
@@ -158,6 +167,97 @@ def _llama_stop(role):
             "msg": ("Инстанс '%s' остановлен" if stopped
                     else "PID-файл не найден — '%s' не запускался менеджером "
                          "(запущенный вручную инстанс не трогаем)" % role)}
+
+
+# --- Общая чат-модель (llama-рантайм машины, общий с anonymizer_proxy) ------
+# Файлы моделей — в едином каталоге (%LOCALAPPDATA%\llama-runtime\models),
+# активная чат-модель — манифест models\chat\current.json (спецификатор
+# shared:chat в config.yaml). Смена модели применяется ко ВСЕМ проектам:
+# их llama-инстансы перезапускаются по реестру projects.json.
+_CHAT_JOB = {"running": False, "stage": "", "msg": "", "result": None}
+
+
+def _chat_model_status():
+    """Данные виджета «Чат-модель»: доступные файлы, пресеты, текущая,
+    реестр проектов и состояние фоновой операции."""
+    from . import llama_runtime, llama_server
+
+    cfg, _err = _safe_cfg()
+    info = llama_runtime.chat_models_overview()
+    try:
+        info["server"] = llama_server.status(cfg, "chat")
+    except Exception as e:  # noqa: BLE001
+        info["server"] = {"error": str(e), "running": False}
+    info["job"] = dict(_CHAT_JOB)
+    return info
+
+
+def _chat_model_restart_self(cfg):
+    """Перезапуск чат-инстанса ЭТОГО проекта с моделью из манифеста."""
+    from . import llama_server
+
+    try:
+        was_up = llama_server.probe(cfg, "chat")["state"] == llama_server.STATE_LLAMA
+        llama_server.stop(cfg, "chat")
+        if was_up or llama_server.autostart_on(cfg):
+            info = llama_server.start(cfg, "chat", wait=True)
+            return {"ok": True, "msg": "чат-сервер перезапущен (%s слотов)"
+                    % (info.get("total_slots") or "?")}
+        return {"ok": True,
+                "msg": "чат-сервер не был запущен — стартует при следующем "
+                       "старте UI/MCP"}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": str(e)}
+
+
+def _chat_model_job_worker(filename, restart):
+    """Фон: скачать пресет (если нужно) и применить модель во всех проектах."""
+    from . import llama_runtime
+
+    cfg, _err = _safe_cfg()
+
+    def progress(pct, msg):
+        _CHAT_JOB["stage"] = "download"
+        _CHAT_JOB["msg"] = "%.1f%%  %s" % (pct, msg)
+
+    try:
+        _CHAT_JOB.update({"running": True, "stage": "apply",
+                          "msg": "меняю модель...", "result": None})
+        info = llama_runtime.switch_chat_model(
+            filename, restart=restart,
+            self_root=PROJECT,
+            self_restart=lambda: _chat_model_restart_self(cfg),
+            progress=progress)
+        _CHAT_JOB["result"] = info
+        _CHAT_JOB["msg"] = (("активная модель: %s" % filename) if info.get("ok")
+                            else info.get("msg", "не удалось"))
+    except Exception as e:  # noqa: BLE001
+        _CHAT_JOB["result"] = {"ok": False, "msg": str(e)}
+        _CHAT_JOB["msg"] = str(e)
+    finally:
+        _CHAT_JOB["running"] = False
+        _CHAT_JOB["stage"] = ""
+
+
+def _chat_model_set(filename, restart=True):
+    """Запустить смену общей чат-модели (в фоне; прогресс — GET /api/chat-model)."""
+    from . import llama_runtime
+
+    filename = os.path.basename((filename or "").strip())
+    if not filename:
+        return {"ok": False, "msg": "Укажите модель"}
+    on_disk = (llama_runtime.models_dir("chat") / filename).is_file()
+    if not on_disk and filename not in llama_runtime.CHAT_PRESETS:
+        return {"ok": False,
+                "msg": "Модель '%s' не найдена в llama-рантайме и не "
+                       "является известным пресетом" % filename}
+    if _CHAT_JOB["running"]:
+        return {"ok": False, "msg": "Смена модели уже выполняется"}
+    threading.Thread(target=_chat_model_job_worker,
+                     args=(filename, restart), daemon=True).start()
+    what = "применяю" if on_disk else "скачиваю (%s)" % filename
+    return {"ok": True, "msg": "%s — прогресс в виджете «Чат-модель»" % what}
+
 
 
 def _pid_alive(pid):
@@ -901,6 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(_build_trees())
             elif self.path == "/api/model/status":
                 self._json(_model_status())
+            elif self.path == "/api/chat-model":
+                self._json(_chat_model_status())
             elif self.path == "/api/diagnostics":
                 from .diag import run_checks
                 cfg, cfg_err = _safe_cfg()
@@ -1003,6 +1105,9 @@ class Handler(BaseHTTPRequestHandler):
                            else _llama_stop(role))
             elif self.path == "/api/model/adopt":
                 self._json(_set_embedding_model(body.get("model", "")))
+            elif self.path == "/api/chat-model/set":
+                self._json(_chat_model_set(body.get("file", ""),
+                                           restart=bool(body.get("restart", True))))
             else:
                 self._json({"error": "not found"}, 404)
         except Exception as e:  # noqa: BLE001

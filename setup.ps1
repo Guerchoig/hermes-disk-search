@@ -82,73 +82,24 @@ if (-not (Get-Command tesseract -ErrorAction SilentlyContinue) -and
     Write-Host "[ok] Tesseract OCR найден"
 }
 
-# llama.cpp (llama-server) — локальный LLM-бэкенд: пре-билд с GitHub Releases.
-# CUDA-сборка при NVIDIA, иначе Vulkan (AMD/Intel); llama-server переживает
-# перезапуски UI (отвязанный процесс, управление — python -m hds.llama_server)
-$llamaDir = "$root\tools\llama.cpp"
-$llamaExe = "$llamaDir\llama-server.exe"
-if (Get-Command llama-server -ErrorAction SilentlyContinue) {
-    Write-Host "[ok] llama-server найден в PATH: $((Get-Command llama-server).Source)"
-} elseif (Test-Path $llamaExe) {
-    Write-Host "[ok] llama-server уже установлен: $llamaExe"
-} else {
-    $assetPattern = "llama-*bin-win-cuda*x64*.zip"
-    if (-not (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
-        $assetPattern = "*bin-win-vulkan-x64*.zip"
-    }
-    Write-Host "[..] Скачиваю пре-билд llama.cpp ($assetPattern)..."
-    try {
-        # latest-релиз llama.cpp может не содержать бинарей (только nightly-tag) —
-        # берём ПЕРВЫЙ релиз, где есть win-сборка (перебор последних 10)
-        $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=10" -TimeoutSec 30 |
-            Where-Object { ($_.assets | Where-Object { $_.name -like $assetPattern }).Count -gt 0 } |
-            Select-Object -First 1
-        if (-not $rel) { throw "в последних релизах llama.cpp нет ассета $assetPattern" }
-        $asset = $rel.assets | Where-Object { $_.name -like $assetPattern } | Select-Object -First 1
-        if (-not $asset) { throw "в релизе $($rel.tag_name) нет ассета $assetPattern" }
-        $zipPath = Join-Path $env:TEMP $asset.name
-        Write-Host "[..] Загрузка $($asset.name) (llama.cpp $($rel.tag_name))..."
-        $ProgressPreference = "SilentlyContinue"  # иначе прогресс-бар замедляет загрузку в разы
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -TimeoutSec 900
-        if ((Get-Item $zipPath).Length -ne $asset.size) {
-            throw ("zip недокачан: получено {0} байт, ожидалось {1} — перезапустите setup.ps1" -f (Get-Item $zipPath).Length, $asset.size)
-        }
-        New-Item -ItemType Directory -Force -Path $llamaDir | Out-Null
-        Expand-Archive -Path $zipPath -DestinationPath $llamaDir -Force
-        Remove-Item $zipPath -ErrorAction SilentlyContinue
-        # CUDA-сборке нужен runtime: рядом лежит cudart-llama-bin-win-cuda-*.zip
-        if ($assetPattern -like "*cuda*") {
-            $cudart = $rel.assets | Where-Object { $_.name -like "cudart-llama-bin-win-cuda*x64.zip" } | Select-Object -First 1
-            if ($cudart) {
-                $cudartZip = Join-Path $env:TEMP $cudart.name
-                Write-Host "[..] Загрузка $($cudart.name) (CUDA runtime)..."
-                Invoke-WebRequest -Uri $cudart.browser_download_url -OutFile $cudartZip -TimeoutSec 900
-                if ((Get-Item $cudartZip).Length -ne $cudart.size) {
-                    throw ("cudart zip недокачан: {0} != {1}" -f (Get-Item $cudartZip).Length, $cudart.size)
-                }
-                Expand-Archive -Path $cudartZip -DestinationPath $llamaDir -Force
-                Remove-Item $cudartZip -ErrorAction SilentlyContinue
-            } else {
-                # без cudart-DLL (cublas64_12.dll и др.) CUDA-сборка llama-server
-                # не стартует — предупреждаем сразу, а не молчаливым сбоем --version
-                Write-Host "[!!] В релизе $($rel.tag_name) нет cudart-llama-bin-win-cuda-*.zip —" -ForegroundColor Yellow
-                Write-Host "     CUDA-сборка llama-server может не стартовать. Скачайте cudart вручную" -ForegroundColor Yellow
-                Write-Host "     с https://github.com/ggml-org/llama.cpp/releases в $llamaDir" -ForegroundColor Yellow
-            }
-        }
-        # llama.cpp кладёт бинари в подпапку вида llama-<tag>-bin-win-.../
-        $nested = Get-ChildItem -Path $llamaDir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
-        if ($nested -and (Split-Path $nested.FullName) -ne $llamaDir) {
-            Move-Item (Join-Path (Split-Path $nested.FullName) "*.exe") $llamaDir -Force -ErrorAction SilentlyContinue
-        }
-        & $llamaExe --version | Select-Object -First 1
-        if ($LASTEXITCODE -ne 0) { throw "llama-server --version упал с кодом $LASTEXITCODE" }
-        Write-Host "[ok] llama-server установлен: $llamaExe" -ForegroundColor Green
-    } catch {
-        Write-Host "[!!] Не удалось скачать llama.cpp: $_" -ForegroundColor Yellow
-        Write-Host "     Скачайте бинарь вручную с https://github.com/ggml-org/llama.cpp/releases" -ForegroundColor Yellow
-        Write-Host "     и укажите путь в config.yaml (llm_server.bin)" -ForegroundColor Yellow
-    }
+# llama.cpp (llama-server) + GGUF-модели — ОБЩИЙ llama-рантайм машины
+# (%LLAMA_RUNTIME_DIR% / %LOCALAPPDATA%\llama-runtime): тот же бинарь (одна
+# сборка cuda|vulkan) и тот же набор моделей, что у anonymizer_proxy; смена
+# чат-модели применяется ко всем проектам сразу. llama-server переживает
+# перезапуски UI (отвязанный процесс, управление — python -m hds.llama_server).
+Write-Host "== Общий llama-рантайм (llama-server + GGUF-модели) =="
+try {
+    & powershell -NoProfile -ExecutionPolicy Bypass `
+        -File "$root\installers\ensure_llama_runtime.ps1" `
+        -Models chat,embedding,rerank `
+        -ProjectName "hermes-disk-search" `
+        -ProjectRoot $root `
+        -RestartArgs "-m hds.llama_server restart chat"
+    if ($LASTEXITCODE -ne 0) { throw "ensure_llama_runtime.ps1 завершился с кодом $LASTEXITCODE" }
+} catch {
+    Write-Host "[!!] Общий llama-рантайм не готов: $_" -ForegroundColor Yellow
+    Write-Host "     Повторите: powershell -File installers\ensure_llama_runtime.ps1 -Models chat,embedding,rerank" -ForegroundColor Yellow
+    Write-Host "     (поиск по ключевым словам работает и без GGUF-моделей)" -ForegroundColor Yellow
 }
 
 # --- Создание venv ---
@@ -243,8 +194,10 @@ if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     }
 }
 
-Write-Host "== Модели llama-server: bge-m3 (~1,2 ГБ) + qwen3.5-9b Q6_K (~7,5 ГБ, если не установлены) =="
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\installers\ensure_models.ps1" -ProjectRoot $root
+Write-Host "== Модели llama-server: общий llama-рантайм (см. шаг выше) =="
+Write-Host "   bge-m3 + чат-модель + реранкер установлены в общий каталог" -ForegroundColor DarkGray
+Write-Host "   ensure_models.ps1 больше не используется (модели обеспечены" -ForegroundColor DarkGray
+Write-Host "   installers\ensure_llama_runtime.ps1 — один набор на все проекты)." -ForegroundColor DarkGray
 
 Write-Host "== Опционально: предзагрузка модели Whisper (~460 МБ, транскрипция аудио/видео) =="
 $ans = Read-Host "Предзагрузить сейчас? [y/N]"

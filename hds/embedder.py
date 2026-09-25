@@ -76,9 +76,12 @@ class Embedder:
                     "python -m hds.llama_server start embedding "
                     "(или «Запустить» в группе «LLM-серверы» веб-интерфейса).")
         elif "model" in low and ("not found" in low or "no model" in low):
-            hint = ("GGUF-модель не найдена на диске. Скачайте её кнопкой "
-                    "«Скачать модель» в веб-интерфейсе или инсталлятором "
-                    "(installers/ensure_models).")
+            hint = ("GGUF-модель не найдена на диске (общий llama-рантайм). "
+                    "Скачайте её кнопкой «Скачать модель» в веб-интерфейсе "
+                    "или установщиком рантайма (installers/"
+                    "ensure_llama_runtime.ps1 -Models embedding — Windows, "
+                    "bash installers/ensure_llama_runtime.sh --models "
+                    "embedding — macOS).")
         else:
             hint = ("Проверьте состояние сервера: python -m hds.llama_server "
                     "status embedding (или карточка «Проверка компонентов» в UI).")

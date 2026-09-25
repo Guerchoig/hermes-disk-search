@@ -40,6 +40,10 @@ else
 fi
 
 # --- 5. llama.cpp (llama-server) — локальный LLM-бэкенд ---
+# Ставим через Homebrew (как раньше); в общий llama-рантайм машины бинарь
+# подключит шаг 6.1 ссылкой — оттуда его берут все проекты (hds.llama_server
+# через hds/llama_runtime.py). Без brew бинарь можно и не ставить здесь:
+# шаг 6.1 скачает готовую сборку llama.cpp с GitHub Releases.
 if have llama-server; then
     echo "[ok] llama-server найден в PATH: $(command -v llama-server)"
 elif [ -x "/opt/homebrew/bin/llama-server" ] || [ -x "/usr/local/bin/llama-server" ]; then
@@ -65,8 +69,20 @@ fi
 "$ROOT/.venv/bin/python" -m pip install faster-whisper -q
 echo "[ok] зависимости установлены"
 
-# --- 6.1. Модели llama-server: bge-m3 (~1,2 ГБ) + qwen3.5-9b Q6_K (~7,5 ГБ) ---
-bash "$ROOT/installers/ensure_models.sh"
+# --- 6.1. Общий llama-рантайм машины (llama-server + GGUF-модели) ---
+# Единый с anonymizer_proxy каталог: бинарь llama.cpp (Homebrew или пре-билд
+# с GitHub Releases) и модели chat/embedding/rerank лежат в
+# ~/Library/Application Support/llama-runtime (переопределяется
+# LLAMA_RUNTIME_DIR). Модели в папку проекта больше не скачиваются.
+# Идемпотентно: повторный запуск (в т.ч. установщиком второго проекта) ничего
+# не докачивает; проект регистрируется в projects.json — смена общей
+# чат-модели перезапускает его llama-инстансы.
+bash "$ROOT/installers/ensure_llama_runtime.sh" \
+    --models chat,embedding,rerank \
+    --project-name hermes-disk-search \
+    --project-root "$ROOT" \
+    --restart-args "-m hds.llama_server restart chat" \
+    || echo "[--] Общий llama-рантайм не готов — поиск по ключевым словам работает и без него"
 
 # --- 6.2. Metal для транскрипции (mlx-whisper, только Apple Silicon) ---
 if [ "$(uname -m)" = "arm64" ]; then

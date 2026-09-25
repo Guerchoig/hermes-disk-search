@@ -130,9 +130,18 @@ summary{cursor:pointer;user-select:none}
 <button onclick="act('/api/llama/stop', {role:'embedding'})">■ Остановить эмбеддинг-сервер</button>
 <button onclick="act('/api/llama/stop', {role:'chat'})">■ Остановить чат-сервер</button>
 </div>
-<div class="muted">Модель bge-m3 нужна для поиска «по смыслу»; чат-модель (qwen3.5-9b) — для
+<div class="row" style="margin-top:8px">
+<label>Общая чат-модель:</label>
+<select id="chat-model-sel" class="mono" style="min-width:300px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:5px"></select>
+<button onclick="applyChatModel()">⏏ Применить и перезапустить</button>
+<span id="chat-model-msg" class="muted"></span>
+</div>
+<div class="muted">Модель bge-m3 нужна для поиска «по смыслу»; чат-модель — для
 ответов ask_my_files. Серверы поднимаются автоматически при старте UI/MCP (llm_server.autostart)
-и переживают перезапуск. Файлы моделей лежат в папке models/ проекта. Ручное управление:
+и переживают перезапуск. GGUF-модели лежат в ОБЩЕМ llama-рантайме машины
+(%LOCALAPPDATA%\llama-runtime\models) — том же, что использует anonymizer_proxy:
+одна сборка llama.cpp (cuda|vulkan) и один набор моделей; смена чат-модели
+применяется к обоим проектам сразу. Ручное управление:
 python -m hds.llama_server status|start|stop [chat|embedding|rerank].</div>
 </div>
 
@@ -159,6 +168,63 @@ async function embDl(){
   } catch(e){}
   refresh();
   loadDiag(true);
+}
+/* ---- Общая чат-модель (llama-рантайм машины, общий с anonymizer_proxy) ---- */
+let _chatJobTimer = null;
+function chatJobReport(res){
+  const a = (res && res.applied) || [];
+  if (!a.length) return '';
+  return ' · ' + a.map(x => x.name + (x.ok ? ': ok' : ': ' + x.msg)).join('; ');
+}
+function scheduleChatJobPoll(job){
+  clearTimeout(_chatJobTimer);
+  if (!job || !job.running) return;
+  _chatJobTimer = setTimeout(loadChatModel, 2000);
+}
+async function loadChatModel(){
+  let info;
+  try { info = await (await fetch('/api/chat-model')).json(); } catch(e) { return; }
+  const sel = document.getElementById('chat-model-sel');
+  const msg = document.getElementById('chat-model-msg');
+  if (!sel || !msg || info.error) return;
+  const cur = info.current || '';
+  const rows = (info.available || []).map(m => Object.assign({downloaded:true}, m));
+  (info.presets || []).forEach(p => {
+    if (!rows.some(r => r.file === p.file)) rows.push(p);
+  });
+  const keep = sel.options.length === 0 ? cur : (sel.value || cur);
+  sel.innerHTML = rows.map(r =>
+    `<option value="${r.file}"${r.file === keep ? ' selected' : ''}>${r.file}` +
+    (r.downloaded ? (r.size_human ? ` — на диске (${r.size_human})` : ' — на диске')
+                  : ` — скачать ${r.size_hint || ''}`) + '</option>').join('');
+  const job = info.job || {};
+  if (job.running) {
+    msg.textContent = '⏳ ' + (job.msg || '…');
+  } else if (job.result) {
+    msg.textContent = (job.result.ok ? '✅ ' : '❌ ') + (job.msg || '') +
+      chatJobReport(job.result);
+  } else {
+    const proj = (info.projects || []).map(p => p.name).join(', ');
+    msg.textContent = 'текущая: ' + (cur || 'не задана') +
+      (proj ? ' · проекты: ' + proj : '') +
+      (info.binary_ok ? '' : ' · ⚠ бинарь llama-server не найден');
+  }
+  scheduleChatJobPoll(job);
+}
+async function applyChatModel(){
+  const sel = document.getElementById('chat-model-sel');
+  if (!sel || !sel.value) return;
+  if (!confirm('Применить модель ' + sel.value + '?\n\nllama-серверы всех ' +
+      'проектов (включая anonymizer_proxy) будут перезапущены: текущие ' +
+      'локальные запросы прервутся. Отсутствующий пресет будет скачан.')) return;
+  try {
+    const j = await (await fetch('/api/chat-model/set', {method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({file: sel.value, restart: true})})).json();
+    document.getElementById('chat-model-msg').textContent = j.msg || 'готово';
+  } catch(e){}
+  scheduleChatJobPoll({running: true});
+  setTimeout(loadChatModel, 1500);
 }
 async function autostart(cb){
   await fetch('/api/watch/autostart', {method:'POST',
@@ -368,6 +434,7 @@ async function refresh(){
       document.getElementById('b-emb-load').disabled = m.downloading || emb.running;
       document.getElementById('b-chat-load').disabled = chat.running;
     } catch(e){}
+    loadChatModel();
     loadDiag();
   } catch(e){ console.warn(e); }
 }

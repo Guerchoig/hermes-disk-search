@@ -18,7 +18,7 @@ UI/MCP/CLI). Все инстансы стартуют с --parallel 1: одно�
 Конфигурация — секция llm_server в config.yaml (defaults в коде):
 
     llm_server:
-      bin: ""            # путь к llama-server; пусто: tools/llama.cpp/ > PATH
+      bin: ""            # путь к llama-server; пусто: общий llama-рантайм > tools/llama.cpp/ > PATH
       host: "127.0.0.1"
       autostart: true
       start_timeout: 300
@@ -132,7 +132,23 @@ def api_url(cfg, role):
 
 
 def _abs_model(cfg, role):
-    p = _role_cfg(cfg, role)["model"]
+    """Путь GGUF роли.
+
+    Спецификатор shared:<role> — модель из манифеста ОБЩЕГО llama-рантайма
+    машины (llama_runtime.py: тот же файл, что использует anonymizer_proxy),
+    что даёт синхронную смену чат-модели во всех проектах. Иначе — обычный
+    путь (относительный разрешается от корня проекта).
+    """
+    from . import llama_runtime
+
+    p = str(_role_cfg(cfg, role)["model"] or "").strip()
+    if p.startswith(llama_runtime.SHARED_PREFIX):
+        try:
+            return os.path.normpath(str(llama_runtime.resolve_model(p, role)))
+        except FileNotFoundError:
+            # рантайм/модель ещё не установлены — отдаём каталог роли:
+            # build_command покажет понятную ошибку с путём
+            return os.path.normpath(str(llama_runtime.models_dir(role)))
     if not os.path.isabs(p) and len(p) > 2 and p[1] != ":":
         p = os.path.join(PROJECT_ROOT, p)
     # Windows-путь с буквой диска os.path.isabs распознаёт и так
@@ -201,16 +217,40 @@ def props_context(props):
 # ==================== Бинарь и команда запуска ====================
 
 def find_binary(cfg):
-    """Путь к llama-server: llm_server.bin > tools/llama.cpp/ > PATH. '' — нет."""
+    """Путь к llama-server: llm_server.bin > общий рантайм > tools/llama.cpp/ > PATH.
+
+    Общий llama-рантайм машины (llama_runtime.py) — первое звено после
+    явного llm_server.bin: одна сборка llama.cpp на все проекты
+    (Windows — пре-билд в %LOCALAPPDATA%\\llama-runtime\\bin,
+    macOS — bin/ рантайма со ссылкой на бинарь Homebrew).
+    '' — не найден.
+    """
     b = str((cfg.get("llm_server") or {}).get("bin") or "").strip()
     if b:
         return b
+    from . import llama_runtime
+
+    shared = llama_runtime.find_binary()
+    if shared:
+        return shared
     exe = "llama-server.exe" if sys.platform == "win32" else "llama-server"
     local = os.path.join(PROJECT_ROOT, "tools", "llama.cpp", exe)
     if os.path.isfile(local):
         return local
     found = shutil.which("llama-server")
     return str(found) if found else ""
+
+
+def _ensure_hint(role=None):
+    """Команда установщика общего рантайма для текущей ОС (тексты ошибок).
+
+    Windows — установщик PowerShell, macOS/Linux — bash-скрипт
+    (SYNC-COPY-пара: installers/ensure_llama_runtime.ps1 | .sh).
+    """
+    models = role or "chat,embedding,rerank"
+    if sys.platform == "win32":
+        return "installers\\ensure_llama_runtime.ps1 -Models %s" % models
+    return "bash installers/ensure_llama_runtime.sh --models %s" % models
 
 
 def build_command(cfg, role):
@@ -224,15 +264,17 @@ def build_command(cfg, role):
     bin_path = find_binary(cfg)
     if not bin_path:
         raise RuntimeError(
-            "llama-server не найден (llm_server.bin пуст, tools/llama.cpp/ и "
-            "PATH пусты). Установите llama.cpp установщиком проекта или "
-            "укажите путь в llm_server.bin")
+            "llama-server не найден (llm_server.bin пуст, общий llama-рантайм "
+            "и tools/llama.cpp/ проекта пусты, PATH пуст). Установите общий "
+            "рантайм: %s — либо укажите путь в llm_server.bin"
+            % _ensure_hint())
     model = _abs_model(cfg, role)
     if not os.path.isfile(model):
         raise RuntimeError(
             "GGUF-модель роли '%s' не найдена: %s. Скачайте её "
-            "(installers/ensure_models или кнопка «Скачать модель» в UI) "
-            "или укажите другой путь в llm_server.%s.model" % (role, model, role))
+            "(%s или кнопка «Скачать модель» в UI) "
+            "или укажите другой путь в llm_server.%s.model"
+            % (role, model, _ensure_hint(role), role))
     alias = str(dig(cfg, _MODEL_KEY[role], role) or role)
     par = parallel(cfg)
     total_ctx = par * r["ctx_per_slot"]

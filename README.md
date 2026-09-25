@@ -47,19 +47,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
 1. Находит рабочий Python 3.x и понятно ругается, если его нет (заглушка Store и т.п.).
 2. Ставит недостающее через winget: **ffmpeg** — автоматически; **Tesseract OCR** — по вашему разрешению; создаёт окружение - venv и устанавливает компоненты из файла зависимостей (+ faster-whisper).
 3. **Ставит llama.cpp (llama-server)** — пре-билд с GitHub Releases (CUDA-сборка
-   при NVIDIA, иначе Vulkan для AMD/Intel) в `tools\llama.cpp\`; управляет
-   серверами менеджер `python -m hds.llama_server` (порты 8010/8011/8012).
-4. **Скачивает GGUF-модели** в папку проекта `models\`: embedding `bge-m3` (Q8_0,
-   ~1,2 ГБ) и чат-модель `qwen3.5-9b` (Q6_K, ~7,5 ГБ, unsloth/Qwen3.5-9B-Instruct-GGUF);
-   если модели уже скачаны в `~/.lmstudio` — копируются оттуда. Позже модели можно
-   скачать/запустить кнопками в веб-интерфейсе (группа «LLM-серверы»).
+   при NVIDIA, иначе Vulkan для AMD/Intel) в **общий каталог машины**
+   `%LOCALAPPDATA%\llama-runtime\bin` — тот же рантайм, что у `anonymizer_proxy`
+   (одна сборка llama.cpp и один набор моделей на машину); управляет серверами
+   менеджер `python -m hds.llama_server` (порты 8010/8011/8012).
+4. **Скачивает GGUF-модели** в общий рантайм `%LOCALAPPDATA%\llama-runtime\models\`
+   (embedding `bge-m3` Q8_0 ~1,2 ГБ, общая чат-модель `Qwen3.5-9B-Q6_K` ~7,5 ГБ,
+   реранкер `bge-reranker-v2-m3` ~600 МБ) скриптом
+   `installers\ensure_llama_runtime.ps1`; если модели уже скачаны в `~/.lmstudio`
+   — копируются оттуда, повторный запуск ничего не перекачивает. Позже модели
+   можно скачать/запустить кнопками в веб-интерфейсе (группа «LLM-серверы»).
 5. Замечает `config.yaml` с путями с другого компьютера (отсутствующие диски) и предлагает заменить их на профиль этого компьютера.
 6. По запросу предзагружает модель Whisper (~460 МБ), создаёт ярлык «Hermes Disk Search» на рабочем столе и (по запросу) автозапуск watcher'а, подключает MCP-сервер к Hermes Desktop и (если установлен) к Cline Desktop.
 
 Что нужно от пользователя:
 
 1. **Python 3.10+** с python.org (галочка «Add python.exe to PATH») — установить если не установлен.
-2. **llama.cpp и модели ставятся установщиком автоматически** — ручных действий не требуется. Серверы поднимаются сами при старте веб-интерфейса/MCP (`llm_server.autostart`); ручное управление: `python -m hds.llama_server status|start|stop`.
+2. **llama.cpp и модели ставятся установщиком автоматически** — ручных действий не требуется. Серверы поднимаются сами при старте веб-интерфейса/MCP (`llm_server.autostart`); ручное управление: `python -m hds.llama_server status|start|stop`. Бинарь и GGUF лежат в общем llama-рантайме машины (`%LOCALAPPDATA%\llama-runtime`), общем с `anonymizer_proxy`; общая чат-модель меняется из UI или `python -m hds.llama_runtime switch <файл>` (см. «Общий llama-рантайм и смена чат-модели»).
 3. **MS Project (.mpp)** — поддерживается «из коробки»: `mpxj` входит в requirements.txt; нужна установка Java 11+ (JDK). Если Java не установлена системно, индексатор сам подхватит пользовательскую JDK из `%LOCALAPPDATA%\jdk-21\` (Temurin 21).
 
 После установки командная строка не нужна: ярлык «Hermes Disk Search» открывает веб-интерфейс, где делается всё — корни индексации, старт/стоп индексации и watcher'а, перенос базы, скачивание/загрузка модели эмбеддингов, правка config.yaml. Веб-интерфейс запускается даже с отсутствующим или испорченным config.yaml (покажет ошибку и предложит поправить).
@@ -100,9 +104,16 @@ bash installers/install_macos.command
 
 Инсталлятор сам ставит недостающее через Homebrew (python3, ffmpeg, **llama.cpp** —
 Metal для Apple Silicon включён автоматически, опционально Tesseract +
-`tesseract-lang` для русского OCR), создаёт venv, ставит зависимости,
-**скачивает GGUF-модели llama-server** в `models/` проекта (bge-m3 и qwen3.5-9b
-Q6_K; если они уже есть в `~/.lmstudio` — копируются оттуда),
+`tesseract-lang` для русского OCR), создаёт venv, ставит зависимости и собирает
+**общий llama-рантайм машины** (`installers/ensure_llama_runtime.sh`): llama-server
+и GGUF-модели (bge-m3, общая чат-модель Qwen3.5-9B Q6_K, реранкер) лежат в
+`~/Library/Application Support/llama-runtime` — единый каталог с
+`anonymizer_proxy` и общий набор моделей (на Windows тот же рантайм — в
+`%LOCALAPPDATA%\llama-runtime`). Бинарь llama.cpp берётся из Homebrew
+(в `bin/` рантайма кладётся ссылка — апгрейд llama.cpp подхватывается сам), а
+если brew нет — скачивается готовой сборкой с GitHub Releases (карантин
+Gatekeeper снимается автоматически); уже скачанные в `~/.lmstudio` модели
+копируются, повторный запуск ничего не перекачивает. Далее инсталлятор
 копирует приложение «HDS Индексация» в ~/Applications, подключает MCP-сервер
 к Hermes Desktop и Cline Desktop (если установлен) и запускает диагностику `python -m hds.cli check`.
 
@@ -118,6 +129,14 @@ Q6_K; если они уже есть в `~/.lmstudio` — копируются 
 - **Tesseract**: `brew install tesseract tesseract-lang`; языки лежат в
   `/opt/homebrew/share/tessdata` — код подхватывает их автоматически.
 - **MS Project (.mpp)**: нужна Java — `brew install openjdk` (индексатор найдёт её сам).
+- **llama-server (локальные модели)**: тот же общий llama-рантайм, что на Windows —
+  `~/Library/Application Support/llama-runtime` (переопределяется `LLAMA_RUNTIME_DIR`).
+  Бинарь `bin/llama-server` — ссылка на `brew install llama.cpp` (Metal на Apple Silicon
+  включается сам), модели `chat`/`embedding`/`rerank` — в `models/`. Управление то же:
+  `python -m hds.llama_server status|start|stop` и `python -m hds.llama_runtime list`.
+  Если на Intel-маке роль не стартует (нет Metal-бэкенда), поставьте `-ngl 0` в
+  `llm_server.<роль>.extra_args`; если llama-server жалуется на `--cache-type-k/v q8_0`
+  (нужно flash-attention) — добавьте `-fa on` в те же `extra_args`.
 - **Корни индексации**: в `config.yaml` укажите свои папки, например:
 
 ```yaml
@@ -286,10 +305,12 @@ Windows предзагружает модель Whisper заранее, чтоб
     после клонирования выполните `chmod +x`) и приложение
     `shortcuts/macos/HermesDiskSearchIndex.app` (иконка внутри, копируется инсталлятором в ~/Applications).
 - **Инсталляторы** (проверяют и доустанавливают недостающее; llama.cpp и модели
-  ставят сами, Hermes не устанавливают — предупреждают и дают ссылки):
+  ставят сами в общий llama-рантайм машины, Hermes не устанавливают —
+  предупреждают и дают ссылки):
   - Windows: `installers\install_windows.ps1` (Python, ffmpeg, Tesseract по желанию, venv,
     ярлыки, автозапуск watcher по выбору).
-  - macOS: `installers/install_macos.command` (brew, python3, ffmpeg, llama.cpp, модели,
+  - macOS: `installers/install_macos.command` (brew, python3, ffmpeg, llama.cpp →
+    общий рантайм `~/Library/Application Support/llama-runtime`, модели,
     tesseract-lang, venv, Whisper-модель по желанию, установка .app, интеграция с Hermes).
 - **Архивы релиза** — см. раздел «Архивы релиза»: иконки и mac-приложение теперь
   входят в состав архивов (`assets/` в репозитории — тот же источник).
@@ -328,6 +349,69 @@ Windows предзагружает модель Whisper заранее, чтоб
 Проверка состояния: `python -m hds.llama_server status` (или карточка «Проверка
 компонентов» / группа «LLM-серверы» в веб-интерфейсе — там же кнопки запуска
 и скачивания моделей). Логи инстансов: `data/logs/llama_<role>.log`.
+
+### Общий llama-рантайм и смена чат-модели
+
+llama-server и GGUF-модели лежат не в папке проекта, а в **общем каталоге
+машины** (переопределяется `LLAMA_RUNTIME_DIR`):
+
+| ОС | Каталог рантайма |
+|----|------------------|
+| Windows | `%LOCALAPPDATA%\llama-runtime` |
+| macOS | `~/Library/Application Support/llama-runtime` |
+| Linux | `~/.local/share/llama-runtime` |
+
+Каталог общий с `anonymizer_proxy`: одна сборка llama.cpp (Windows — cuda|vulkan,
+macOS — Metal/Homebrew), один набор моделей, одни и те же файлы (общая
+чат-модель, `embedding`, `rerank`):
+
+```
+llama-runtime\
+  bin\                  llama-server(.exe) + DLL/dylib (Windows: сборка cuda|vulkan;
+                        macOS: ссылка на brew install llama.cpp)
+  models\chat\          GGUF чат-моделей + current.json (активная)
+  models\embedding\     bge-m3-Q8_0.gguf
+  models\rerank\        bge-reranker-v2-m3-q8_0.gguf
+  projects.json         реестр проектов (перезапуск их llama-инстансов)
+  version.json          вариант сборки (cuda|vulkan|cpu|metal) + источник
+```
+
+- **`shared:<role>`** в `llm_server.<role>.model` (config.yaml) — «файл из
+  манифеста общего рантайма» (`models\<role>\current.json`): путь к GGUF менять
+  не нужно. Абсолютный путь к файлу — escape-hatch (приоритетнее `shared:`).
+- **Смена чат-модели** видна обоим проектам сразу:
+  - в веб-интерфейсе — группа «LLM-серверы» → виджет «Чат-модель»: выбрать
+    файл или пресет → «Применить и перезапустить». Модель пишется в манифест,
+    chat-инстанс этого проекта и llama-инстансы всех проектов из
+    `projects.json` (в т.ч. `anonymizer_proxy`) перезапускаются;
+  - из командной строки:
+    `.venv\Scripts\python.exe -m hds.llama_runtime switch Qwen3.5-9B-Q6_K.gguf`
+    (`--no-download` — не скачивать отсутствующий пресет, `--no-restart` —
+    только переписать манифест).
+- **Обзор рантайма**: `python -m hds.llama_runtime list` (текущая модель,
+  файлы, пресеты, бинарь, проекты) и `python -m hds.llama_runtime dir` (пути).
+- **Установка/переустановка**: идемпотентный установщик рантайма —
+  `installers\ensure_llama_runtime.ps1` (Windows, вызывает `setup.ps1`) и
+  `installers/ensure_llama_runtime.sh` (macOS, вызывает `install_macos.command`);
+  повторный запуск ничего не докачивает. Роли `embedding`/`rerank`, которых нет
+  у proxy, докачиваются установщиком этого проекта.
+- **Установщик моделей**: полезное из старого `installers/ensure_models.*`
+  (fallback-копирование уже скачанных GGUF из `~/.lmstudio` вместо повторной
+  загрузки ~9 ГБ) перенесено в ensure-скрипт рантайма; `ensure_models.ps1` и
+  `ensure_models.sh` **удалены** — и на Windows, и на macOS модели обеспечивает
+  установщик общего рантайма.
+- **`models/` проекта** больше не содержит GGUF llama: там остаются только
+  Whisper-модели (`models\whisper-cpp`, `models\whisper-small`).
+- **Реранкеру нужны `--batch-size/--ubatch-size`**: фрагмент длиннее physical
+  batch (дефолт 512) llama-server отвергает ошибкой 500 («input is too large to
+  process»), поэтому в дефолтном `llm_server.rerank.extra_args` они заданы
+  (8192 — как у роли `embedding`).
+- **macOS**: тот же рантайм в `~/Library/Application Support/llama-runtime`;
+  бинарь — ссылка на `brew install llama.cpp` (или пре-билд с GitHub Releases,
+  если brew нет), модели скачивает `installers/ensure_llama_runtime.sh`.
+  `shared:<role>` в config.yaml работает так же, как на Windows. Escape-hatch:
+  `llm_server.bin` (путь к бинарю) и `python -m hds.llama_runtime` (`list`, `dir`,
+  `switch`, `download`, `register`) — общие для обеих ОС.
 
 ## Веб-интерфейс (UI)
 
@@ -661,10 +745,10 @@ bash installers/install_cline_macos.sh
 
 | Параметр      | По умолчанию | Описание                                                                                       |
 | --------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `bin`               | `""`                       | Путь к llama-server; пусто: `tools/llama.cpp/` → PATH                                  |
+| `bin`               | `""`                       | Путь к llama-server; пусто: общий llama-рантайм (`%LOCALAPPDATA%\llama-runtime\bin` — Windows, `~/Library/Application Support/llama-runtime/bin` — macOS) → `tools/llama.cpp/` → PATH                                  |
 | `host` / `parallel` | `127.0.0.1` / `1`          | 1 запрос одновременно на инстанс, остальные в очереди                                  |
 | `autostart`         | `true`                     | Поднимать chat+embedding при старте UI/MCP/cli (в фоне)                                |
-| `<role>.port` / `.model` / `.ctx_per_slot` / `.extra_args` | 8010/8011/8012 | Параметры каждого инстанса (модели — в `models/` проекта)                   |
+| `<role>.port` / `.model` / `.ctx_per_slot` / `.extra_args` | 8010/8011/8012 | Параметры каждого инстанса (модели — `shared:<role>` из общего рантайма; явный путь к GGUF — escape-hatch)                   |
 
 ### `search` — гибридный поиск
 
@@ -677,12 +761,12 @@ bash installers/install_cline_macos.sh
 
 ### `rerank` — реранкер для ask_my_files (по умолчанию выключен)
 
-Cross-encoder `bge-reranker-v2-m3` (MIT) переставляет топ-20 кандидатов поиска и оставляет топ-8 для генерации ответа — самый стабильный источник прироста точности RAG. 
+Cross-encoder `bge-reranker-v2-m3` (MIT) переставляет топ-20 кандидатов поиска и оставляет топ-8 для генерации ответа — самый стабильный источник прироста точности RAG. GGUF берётся из общего рантайма (`shared:rerank` → `llama-runtime\models\rerank\`), а `--batch-size/--ubatch-size` в `llm_server.rerank.extra_args` обязательны: фрагмент длиннее physical batch (дефолт 512) llama-server отвергает ошибкой 500 («input is too large to process»).
 
 Роль `rerank` запускается менеджером llama-server (LM Studio эндпоинт `/rerank` не реализует):
 
 ```powershell
-python -m hds.llama_server start rerank   # модель: llm_server.rerank.model (models/rerank/...)
+python -m hds.llama_server start rerank   # модель: llm_server.rerank.model (shared:rerank → llama-runtime\models\rerank\)
 ```
 
 Затем включите `rerank.enabled: true` (галочка в веб-интерфейсе). На CPU реранк 20 фрагментов занимает секунды; при латентности выше `rerank.max_latency` реранкер авто-отключается до перезапуска, поиск продолжает работать без него. Статус —`python -m hds.cli check`.
@@ -705,6 +789,12 @@ python -m hds.llama_server start rerank   # модель: llm_server.rerank.mode
 
 - Windows: события ФС через ReadDirectoryChangesW, автозапуск — Планировщик задач.
 - macOS: события через FSEvents (`brew install ffmpeg tesseract-lang`), Whisper работает на CPU/Metal, автозапуск через LaunchAgent.
+- Общий llama-рантайм (llama-server + GGUF-модели) — кроссплатформенный: Windows
+  `%LOCALAPPDATA%\llama-runtime` (сборка cuda|vulkan), macOS
+  `~/Library/Application Support/llama-runtime` (Metal/Homebrew или пре-билд),
+  Linux `~/.local/share/llama-runtime`; установщики — `installers/ensure_llama_runtime.ps1`
+  (Windows) и `installers/ensure_llama_runtime.sh` (macOS), регистрация в
+  `projects.json` и смена общей чат-модели — одинаково (`python -m hds.llama_runtime`).
 - Хранилище и поиск полностью кроссплатформенные (SQLite + sqlite-vec + FTS5).
 
 ## Файлы в корзине не индексируются
@@ -731,13 +821,15 @@ python -m hds.llama_server start rerank   # модель: llm_server.rerank.mode
 | `hds/extractors.py`, `extract_static.py`, `extract_av.py` | PDF/Office/текст; MPP/картинки; аудио/видео                                                                                                                    |
 | `hds/db.py`                                                   | SQLite: files/chunks + FTS5 + vec0                                                                                                                                                    |
 | `hds/embedder.py`                                             | клиент /v1/embeddings (llama-server/Ollama/LM Studio)                                                                                                                           |
-| `hds/llama_server.py`                                         | менеджер llama-server: probe/start/stop/status/ensure (роли chat/embedding/rerank) + CLI                                                                       |
+| `hds/llama_server.py`                                         | менеджер llama-server: probe/start/stop/status/ensure (роли chat/embedding/rerank) + CLI; общий рантайм — `hds/llama_runtime.py`                                                                       |
+| `hds/llama_runtime.py`                                        | общий llama-рантайм машины: пути по ОС, бинарь, `shared:<role>`, манифест чат-модели, реестр проектов, пресеты, `switch`/`download`/`register` + CLI (SYNC-COPY с anonymizer_proxy) |
+| `installers/ensure_llama_runtime.ps1`, `installers/ensure_llama_runtime.sh` | идемпотентный установщик общего рантайма: llama-server + модели chat/embedding/rerank (Windows / macOS; SYNC-COPY с anonymizer_proxy) |
 | `hds/search.py`                                               | гибридный поиск RRF + сниппеты                                                                                                                                  |
 | `hds/rag.py`                                                  | ответ с цитатами через чат-модель                                                                                                                         |
 | `hds/cli.py`                                                  | CLI                                                                                                                                                                                   |
 | `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер (Hermes, Cline и другие MCP-клиенты)                                                                                                                   |
 | `install_cline.ps1`, `installers/install_cline_macos.sh`    | подключение disk-search к Cline Desktop/CLI (MCP-сервер + скилл)                                                                                               |
 | `gen_fixtures.py`                                             | тестовые файлы для smoke-теста                                                                                                                                   |
-| `tests/`                                                      | регрессионные тесты (71 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI) |
+| `tests/`                                                      | регрессионные тесты (209 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI, общий llama-рантайм) |
 | `.github/workflows/release.yml`                               | GitHub Actions: тесты → сборка → релиз (с удалением предыдущих)                                                                                 |
 | `releasing.md`                                                | правила выпуска релизов                                                                                                                                          |
