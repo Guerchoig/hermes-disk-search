@@ -122,9 +122,15 @@ class ManifestResolveTests(TempRuntime):
         self.assertEqual(lr.resolve_model("shared:chat"), d / "a.gguf")
         self.assertEqual(lr.resolve_model("shared"), d / "a.gguf")  # роль по умолчанию
 
-        # регистр имени в манифесте не важен (Windows/APFS регистронезависимы)
+        # регистр имени в манифесте не важен: на Windows/APFS (регистронезависимы)
+        # файл находится по прямому пути, на Linux/case-sensitive APFS — поиском
+        # по каталогу. Проверяем платформенно-нейтрально: возвращённый путь
+        # обязан существовать, а имя — совпадать с файлом на диске (сравнение
+        # строк регистрозависимо, WindowsPath — нет, поэтому сравниваем .name).
         lr.set_current_chat("A.GGUF")
-        self.assertEqual(lr.resolve_model("shared:chat"), d / "a.gguf")
+        resolved = lr.resolve_model("shared:chat")
+        self.assertTrue(resolved.is_file())
+        self.assertEqual(resolved.name.lower(), "a.gguf")
 
         # обычный путь возвращается как есть
         self.assertEqual(lr.resolve_model("/tmp/x.gguf"), Path("/tmp/x.gguf"))
