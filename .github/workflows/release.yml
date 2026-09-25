@@ -124,7 +124,18 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.version }}"
+          # Заметки ищем в двух вариантах имени: RELEASE_NOTES_v0.10.0.md
+          # (как в releasing.md и в релизах до 0.5.10) и RELEASE_NOTES_0.10.0.md
+          # (вариант без префикса v, который использовался в 0.6.0–0.9.0).
+          # Без второго варианта gh release create уходил на --generate-notes
+          # и заметки молча не попадали в релиз (так было в 0.6.0–0.9.0).
           $noteFile = "RELEASE_NOTES_$tag.md"
+          if (-not (Test-Path $noteFile)) {
+            $noV = $tag -replace '^v', ''
+            if (Test-Path "RELEASE_NOTES_$noV.md") {
+              $noteFile = "RELEASE_NOTES_$noV.md"
+            }
+          }
           $macZip = Join-Path 'dist' "hermes-disk-search-$tag-macos.zip"
           $assets = @(
             "hermes-disk-search-$tag-windows.zip",
