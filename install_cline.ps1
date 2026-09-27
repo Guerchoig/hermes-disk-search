@@ -30,9 +30,55 @@ $targets = @(
     (Join-Path $clineDir "data\settings\cline_mcp_settings.json"),
     (Join-Path $clineDir "mcp.json")
 )
-& $py (Join-Path $root "installers\cline_mcp_merge.py") --python $py `
-    --mcp-start (Join-Path $root "mcp_start.py") --targets $targets
+# Общий http-инстанс MCP (:8787): Cline подключается по URL и НЕ запускает
+# собственный процесс. При stdio каждая сессия клиента рождала новый процесс,
+# а долгоживущий hub-демон (code-sidecar) оставлял их сиротами.
+$mcpUrl = (& $py -c "import sys; sys.path.insert(0, r'$root'); from hds import mcp_http; from hds.config import load; print(mcp_http.url(load()))").Trim()
+if (-not $mcpUrl) { throw "Не удалось определить URL MCP-сервера (см. config.yaml) — настройки Cline не изменены" }
+# restart-if-stale вместо start: живой инстанс переиспользуется, но если на порту
+# работает СТАРЫЙ код (проект обновили) — сервер перезапускается.
+Push-Location $root
+$mcpRaw = & $py -m hds.cli mcp-http restart-if-stale
+Pop-Location
+$mcpInfo = $null
+try { $mcpInfo = $mcpRaw | ConvertFrom-Json } catch { }
+if ($mcpInfo -and $mcpInfo.action) {
+    $verbs = @{ started = "поднят"; restarted = "перезапущен (на порту был старый код)"; reused = "уже актуален — переиспользован" }
+    $verb = $verbs["$($mcpInfo.action)"]
+    if (-not $verb) { $verb = "$($mcpInfo.action)" }
+    Write-Host "[ok] Общий MCP-сервер ($mcpUrl) $verb"
+    if ($mcpInfo.reason -and "$($mcpInfo.action)" -eq "restarted") {
+        Write-Host "     причина: $($mcpInfo.reason)" -ForegroundColor DarkGray
+    }
+} elseif ($mcpInfo -and $mcpInfo.error) {
+    Write-Host "[!!] MCP-сервер: $($mcpInfo.error)" -ForegroundColor Yellow
+} else {
+    Write-Host ($mcpRaw | Out-String).Trim() -ForegroundColor Yellow
+}
+& $py (Join-Path $root "installers\cline_mcp_merge.py") --mode http --url $mcpUrl `
+    --targets $targets
 if ($LASTEXITCODE -ne 0) { throw "Ошибка правки настроек MCP Cline — см. сообщение выше" }
+
+# --- Контроль глазами самого Cline (если CLI в PATH) ---
+# Cline валидирует файл настроек ЦЕЛИКОМ: одна неверная запись = теряются ВСЕ
+# MCP-серверы, поэтому проверяем не только форму (её контролирует
+# cline_mcp_merge.py), но и то, что клиент принимает файл. Без $ErrorActionPreference
+# = "Continue" stderr CLI (node) обрывает скрипт, поэтому временно ослабляем его.
+if ($clineCmd) {
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $clineCheck = (& cline config mcp --json 2>&1 | Out-String).Trim()
+    $ErrorActionPreference = $eap
+    if ($clineCheck -match 'Invalid MCP settings' -or $clineCheck -match '"type"\s*:\s*"error"') {
+        Write-Host "[!!] Cline считает настройки MCP невалидными — он отбросит файл целиком:" -ForegroundColor Yellow
+        Write-Host "     $clineCheck" -ForegroundColor Yellow
+        Write-Host "     Файл: $($targets[0])" -ForegroundColor Yellow
+    } elseif ($clineCheck -match 'disk-search') {
+        Write-Host "[ok] Cline видит сервер disk-search"
+    } else {
+        Write-Host "[--] Cline не перечислил disk-search — проверьте MCP Servers в приложении" -ForegroundColor Yellow
+    }
+}
 
 # --- Скилл disk-search ---
 $skillSrc = Join-Path $root "hermes-skill\disk-search.md"

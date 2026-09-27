@@ -2,7 +2,8 @@
 # Интеграция disk-search с Hermes Desktop для macOS — аналог install_hermes.ps1.
 # Можно запускать В ЛЮБОЙ МОМЕНТ: до установки Hermes (запустить повторно после)
 # или после. Регистрирует:
-#   1) MCP-сервер disk-search в <Hermes>/config.yaml (секция mcp_servers)
+#   1) MCP-сервер disk-search (подключение по URL общего http-инстанса :8787)
+#      в <Hermes>/config.yaml (секция mcp_servers)
 #   2) скилл disk-search (правило «поиск файлов — через MCP, а не grep»)
 #   3) tools.tool_search.enabled: "off" — все инструменты всегда в промпте
 # Идемпотентно: повторный запуск обновляет блоки, не дублируя их.
@@ -35,18 +36,29 @@ echo "== Подключение disk-search к Hermes ($HERMES_DIR) =="
 # --- 1. MCP-сервер + tools.tool_search (правка config.yaml с сохранением комментариев) ---
 PY="$ROOT/.venv/bin/python"
 [ -x "$PY" ] || PY="$(command -v python3)"
-"$PY" - "$CFG" "$ROOT/.venv/bin/python" "$ROOT/mcp_start.py" <<'PYEOF'
+# Один общий http-инстанс MCP (:8787): Hermes подключается по URL и не запускает
+# свой процесс на каждую сессию (живой инстанс переиспользуется).
+# restart-if-stale вместо start — как в install_hermes.ps1: если на порту работает
+# СТАРЫЙ код (проект обновили), сервер перезапускается, а не переиспользуется.
+MCP_URL="$("$PY" -c "import sys; sys.path.insert(0, '$ROOT'); from hds import mcp_http; from hds.config import load; print(mcp_http.url(load()))" 2>/dev/null)"
+( cd "$ROOT" && "$PY" -m hds.cli mcp-http restart-if-stale >/dev/null 2>&1 ) || true
+"$PY" - "$CFG" "$ROOT/.venv/bin/python" "$ROOT/mcp_start.py" "$MCP_URL" <<'PYEOF'
 import re, sys
 
-cfg_path, venv_py, mcp_start = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg_path, venv_py, mcp_start, mcp_url = (list(sys.argv[1:5]) + [""])[:4]
 with open(cfg_path, encoding="utf-8-sig") as f:
     text = f.read()
 
-mcp_block = ("  disk-search:\n"
-             "    command: %s\n"
-             "    args:\n"
-             "      - %s\n"
-             "    timeout: 300\n" % (venv_py, mcp_start))
+if mcp_url:
+    mcp_block = ("  disk-search:\n"
+                 "    url: %s\n"
+                 "    timeout: 300\n" % mcp_url)
+else:
+    mcp_block = ("  disk-search:\n"
+                 "    command: %s\n"
+                 "    args:\n"
+                 "      - %s\n"
+                 "    timeout: 300\n" % (venv_py, mcp_start))
 rx_block = re.compile(r"(?m)^  disk-search:\r?\n(?:    [^\r\n]*\r?\n?)*")
 if rx_block.search(text):
     text = rx_block.sub(lambda m: mcp_block, text, count=1)
@@ -85,7 +97,7 @@ try:
     d = yaml.safe_load(open(cfg_path, encoding="utf-8-sig"))
     ds = (d.get("mcp_servers") or {}).get("disk-search")
     ts = ((d.get("tools") or {}).get("tool_search") or {})
-    assert ds and ds.get("command"), "mcp_servers.disk-search не на месте"
+    assert ds and (ds.get("url") or ds.get("command")), "mcp_servers.disk-search не на месте"
     assert ts.get("enabled") == "off", "tools.tool_search.enabled != off"
     print("[ok] config.yaml Hermes валиден, disk-search зарегистрирован")
 except ImportError:

@@ -388,6 +388,15 @@ llama-runtime\
     `.venv\Scripts\python.exe -m hds.llama_runtime switch Qwen3.5-9B-Q6_K.gguf`
     (`--no-download` — не скачивать отсутствующий пресет, `--no-restart` —
     только переписать манифест).
+- **Один llama-инстанс на две программы (экономия ~6,6 ГБ)**: рантайм общий, но
+  инстансы могут быть своими у каждого проекта (proxy — 8080, hermes — 8010…8012).
+  На этой машине proxy переключён на **общий инстанс hermes (8010)**: в
+  `anonymizer_proxy\.env` → `LLM_SERVER_PORT=8010`, и proxy при старте видит живой
+  llama (probe по `/props`) и **переиспользует** его, второй процесс не поднимает.
+  Условие — контекст инстанса: `llm_server.chat.ctx_per_slot: 32768` (proxy
+  предупреждает при меньшем: длинные файлы упадут с «request exceeds the available
+  context size»). Владеет инстансом тот, кто поднял его первым (его PID-файл);
+  второй проект только подключается по HTTP.
 - **Обзор рантайма**: `python -m hds.llama_runtime list` (текущая модель,
   файлы, пресеты, бинарь, проекты) и `python -m hds.llama_runtime dir` (пути).
 - **Установка/переустановка**: идемпотентный установщик рантайма —
@@ -450,6 +459,8 @@ python -m hds.cli ui          # сервер + браузер откроется
 — cross-origin запросы из браузера отклоняются. Статусы отражают **истинное состояние
 любых процессов**: индексация определяется через heartbeat-файл (`index.heartbeat.json`
 обновляется индексатором каждые ~30 с, кросс-процессно), watcher — через `watch.lock`
+(файл занимается **атомарно**: два одновременных старта — автозапуск + кнопка в UI,
+двойной клик — не дают двух наблюдателей; устаревший lock снимается по живости PID)
 и живость PID.
 
 ## Watcher: наблюдатель файловой системы
@@ -529,19 +540,121 @@ Watcher — постоянно работающий фоновый процес�
 - **Удалить БД** = переиндексировать всё с нуля.
 - **Рост**: ~4 КБ (вектор) + текст на чанк; полный `D:\` — потенциально несколько ГБ.
 
+## MCP-сервер: один инстанс на машину (streamable-http)
+
+По протоколу MCP при транспорте **stdio** процесс сервера запускает сам клиент:
+у каждого агента (Hermes Desktop, Cline Desktop, Cline CLI, автономный Cline) и
+каждой их сессии — свой процесс `mcp_start.py` (~250 МБ), а долгоживущие
+hub-демоны клиентов (Cline `code-sidecar`) оставляют ещё и сирот: stdin такого
+процесса не закрывается, и старый сервер не выходит сам.
+
+Поэтому штатный режим — **один общий инстанс на машину**: MCP-сервер поднимается
+менеджером `hds/mcp_http.py` на `http://127.0.0.1:8787/mcp` (streamable-http),
+а клиенты только подключаются по URL. Сколько бы агентов ни работало —
+python-процесс один (плюс venv-лаунчер, как у watcher'а).
+
+| | stdio | streamable-http (по умолчанию) |
+|---|---|---|
+| процессов MCP | по одному на клиента и сессию | **один на машину** |
+| кто запускает | клиент при подключении | автозапуск ОС + старт UI/MCP/CLI |
+| сироты после перезапусков | накапливаются | невозможны |
+
+Управление (параметры — секция `mcp_http` в `config.yaml`):
+
+```powershell
+.\.venv\Scripts\python.exe -m hds.cli mcp-http status             # состояние, PID, URL, версия, актуальность кода
+.\.venv\Scripts\python.exe -m hds.cli mcp-http start              # поднять (живой инстанс переиспользуется)
+.\.venv\Scripts\python.exe -m hds.cli mcp-http stop               # остановить (по PID-файлу, иначе — по владельцу порта)
+.\.venv\Scripts\python.exe -m hds.cli mcp-http restart            # безусловный stop + start
+.\.venv\Scripts\python.exe -m hds.cli mcp-http restart-if-stale   # перезапуск, только если на порту старый код
+.\.venv\Scripts\python.exe -m hds.cli mcp-http check              # exit 0 — наш инстанс жив
+.\.venv\Scripts\python.exe -m hds.cli mcp-http stop-stdio         # разовая чистка старых stdio-сирот
+```
+
+Живой инстанс опознаётся по `GET /health` (`{"app": "disk-search"}`): если порт
+занял чужой сервис, `start` честно падает с ошибкой, а не подменяет порт. Сервер
+отвязан от агентов (переживает их перезапуск), лог — `data\logs\mcp_http.log`,
+PID — `data\mcp_http.pid`. Инстанс, поднятый автозапуском ОС (`mcp-http run`) или
+руками, PID-файла не пишет — `stop`/`restart` находят его по владельцу порта
+(убивают только если на порту отвечает НАШ `/health`). Автозапуск при входе в
+систему — задача Планировщика `HermesDiskSearchMcp` (ставится
+`install_autostart.ps1`).
+
+### Обновление проекта: перезапуск общего MCP-сервера
+
+Сервер живёт отдельным процессом и переживает перезапуск UI и агентов — значит
+после обновления кода (`git pull`, распаковка нового архива релиза) на порту
+продолжает работать **старый** код. `start` здесь не поможет: живой инстанс он
+переиспользует, второго процесса не появляется. Порядок такой:
+
+```powershell
+# 1) обновить код (git pull / распаковать архив) и, при необходимости, зависимости
+# 2) перезапустить общий MCP-сервер — этого достаточно, клиенты ходят по тому же URL:
+.\.venv\Scripts\python.exe -m hds.cli mcp-http restart-if-stale
+```
+
+`restart-if-stale` сравнивает ответ `/health` с кодом в папке проекта и
+перезапускает сервер **только при расхождении**:
+
+- другая `version` (в `/health` против `hds/__init__.py`);
+- нет метки сборки `build` — инстанс старше самого механизма;
+- метка `build` (максимальный mtime исходников на момент старта сервера)
+  разошлась с текущей — так ловятся и правки без поднятия версии.
+
+Если код актуален — инстанс переиспользуется; если сервер не поднят — он просто
+запускается. Клиенты (Hermes/Cline) ходят по тому же URL, поэтому перезапуск для
+них незаметен: они переподключаются к новому процессу (в Hermes — с новой сессией
+или кнопкой reconnect в разделе MCP). Тот же шаг выполняют `install_hermes.ps1` и
+`install_cline.ps1` (а значит и `setup.ps1`) — обновление через инсталлятор
+перезапускает сервер само.
+
+Проверить, нужен ли перезапуск, и увидеть причину:
+
+```powershell
+.\.venv\Scripts\python.exe -m hds.cli mcp-http status   # version / code_version / stale / stale_reason
+```
+
+Безусловный перезапуск (например, когда правили секцию `mcp_http` в `config.yaml`)
+— обычный `mcp-http restart`.
+
+**Никаких консольных окон.** Сервер запускается через `pythonw.exe` (GUI-подсистема):
+у процесса нет консоли вообще, и в Windows Terminal не появляется лишняя вкладка
+(`python.exe` получает консоль даже с `CREATE_NO_WINDOW`, а при «терминале по
+умолчанию» Windows Terminal она всплывает видимым окном). Вывод сервера идёт
+только в `data\logs\mcp_http.log`.
+
+Вернуться к stdio можно без правок проекта: в конфигах клиентов заменить `url` на
+`command`/`args` (см. разделы про Hermes и Cline ниже); `python -m hds.cli serve`
+остаётся прежним режимом (его же использует `mcp_start.py`).
+
 ## Интеграция с Hermes
 
 Hermes Agent Desktop должен знать про наш MCP-сервер и уметь им пользоваться.
 Всё это делает один скрипт — **`install_hermes.ps1`** (Windows) или
 **`installers/install_hermes_macos.sh`** (macOS):
 
-1. регистрирует MCP-сервер `disk-search` в `<Hermes>\config.yaml` (секция `mcp_servers`);
+1. поднимает ОБЩИЙ MCP-сервер (`python -m hds.cli mcp-http restart-if-stale`,
+   :8787 — живой инстанс переиспользуется, но если на порту работает старый код
+   проекта, сервер перезапускается) и
+   регистрирует подключение `disk-search` по URL в `<Hermes>\config.yaml`
+   (секция `mcp_servers`);
 2. устанавливает скилл `disk-search` в `<Hermes>\skills\` — правило для агента:
    «поиск файлов на компе — через MCP disk-search, а не через ripgrep/терминал»;
 3. выставляет `tools.tool_search.enabled: "off"` — без этого Hermes прячет 27
    инструментов (включая все MCP) за discovery-протоколом `tool_search`, который
    локальные модели (Qwen3.5-9B) не проходят, и начинает искать через ripgrep;
-4. проверяет итоговый `config.yaml` на валидность.
+4. прописывает в `<Hermes>\.env` обход системного прокси для loopback-адресов
+   (`NO_PROXY=localhost,127.0.0.1,::1`; если системный прокси включён, он ещё и
+   зеркалится в `HTTP(S)_PROXY`, чтобы внешний трафик шёл через него как раньше).
+   HTTP-движок Hermes (`httpx2`) берёт прокси из реестра Windows через
+   `urllib.request.getproxies()`, а та **игнорирует** исключения прокси
+   (`ProxyOverride` = `localhost;127.*`), поэтому без этого блока запросы к
+   `127.0.0.1:8787` уходят в системный прокси: сервер отвечает `503`,
+   MCP-подключение падает с `MCPError: Server returned an error response`,
+   сервер «паркуется» — и агент заявляет, что MCP-инструменты disk-search
+   недоступны (в `logs\agent.log` при этом видно `disk-search failed initial
+   connection ... parking until a reconnect is requested`);
+5. проверяет итоговый `config.yaml` на валидность.
 
 ### Когда Hermes уже установлен
 
@@ -578,10 +691,11 @@ powershell -File install_hermes.ps1
 ```yaml
 mcp_servers:
   disk-search:
-    command: C:\Users\Sasha\hermes-disk-search\.venv\Scripts\python.exe
-    args:
-      - C:\Users\Sasha\hermes-disk-search\mcp_start.py
+    url: http://127.0.0.1:8787/mcp     # ОБЩИЙ инстанс (streamable-http)
     timeout: 300
+    # Альтернатива (stdio — процесс на каждого клиента):
+    # command: C:\Users\Sasha\hermes-disk-search\.venv\Scripts\python.exe
+    # args: [C:\Users\Sasha\hermes-disk-search\mcp_start.py]
 ```
 
 2. Скопировать скилл: `hermes-skill\SKILL.md` → `<Hermes>\skills\disk-search\SKILL.md`
@@ -596,11 +710,38 @@ tools:
     enabled: "off"
 ```
 
+4. В `<Hermes>\.env` добавить обход системного прокси для loopback. **Обязательно,
+   если в системе включён HTTP-прокси** (xray, clash, корпоративный прокси и т.п.):
+
+```
+NO_PROXY=localhost,127.0.0.1,::1
+no_proxy=localhost,127.0.0.1,::1
+# если системный прокси включён — зеркалим его, чтобы интернет шёл через него:
+HTTP_PROXY=http://127.0.0.1:10809
+HTTPS_PROXY=http://127.0.0.1:10809
+```
+
+   Причина: HTTP-клиент Hermes (`httpx2`) определяет прокси через
+   `urllib.request.getproxies()`, которая берёт `ProxyServer` из реестра Windows и
+   **не учитывает `ProxyOverride`** (`localhost;127.*;…`). В результате запросы к
+   общему MCP-серверу (`http://127.0.0.1:8787/mcp`) идут не напрямую, а в системный
+   прокси, который отвечает `503` — Hermes получает
+   `MCPError: Server returned an error response`, паркует `disk-search` и его
+   инструменты становятся агенту недоступны. С `.env` Hermes грузит эти значения с
+   `override=True`, и loopback-адреса идут напрямую, а внешний трафик — через прокси.
+
 ### Проверка
 
-- Перезапустите Hermes Desktop (или начните новую сессию чата).
-- В логе `logs\agent.log` должна появиться строка
-  `MCP server 'disk-search' (stdio): registered 10 tool(s)`.
+- Перезапустите Hermes Desktop (или начните новую сессию чата). Важно:
+  `NO_PROXY`/`HTTP(S)_PROXY` из `.env` читаются при старте процесса, поэтому после
+  правки `.env` нужен именно перезапуск приложения, а не только новая сессия.
+- В логе `logs\agent.log` должна появиться строка регистрации MCP-сервера
+  `disk-search` с транспортом `http` (URL `http://127.0.0.1:8787/mcp`).
+- Сервер поднят? Проверка: `.\.venv\Scripts\python.exe -m hds.cli mcp-http status`.
+- Если в `logs\agent.log` снова `disk-search failed initial connection ... Server
+  returned an error response` — запрос к MCP ушёл в системный прокси: проверьте,
+  что блок `NO_PROXY` действительно дописан в `<Hermes>\.env` (и что прокси в
+  системе реально включён).
 - В чате: «найди на этом компе фильмы» — агент должен вызвать
   `mcp__disk_search__search_local_files` (видно в UI как вызов инструмента).
 
@@ -611,7 +752,9 @@ Cline (https://cline.bot/desktop) тоже умеет пользоваться d
 **`installers/install_cline_macos.sh`** (macOS); он вызывается автоматически из
 `setup.ps1` / `installers/install_macos.command` и:
 
-1. регистрирует MCP-сервер `disk-search` в настройках Cline:
+1. поднимает ОБЩИЙ MCP-сервер (`python -m hds.cli mcp-http restart-if-stale`,
+   :8787 — живой инстанс переиспользуется, на старом коде проекта перезапускается) и
+   регистрирует подключение `disk-search` по URL в настройках Cline:
    `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json` (Windows) /
    `~/.cline/data/settings/cline_mcp_settings.json` (macOS) — единый файл
    MCP-настроек Cline Desktop и Cline CLI; дополнительно обновляется
@@ -626,6 +769,18 @@ Cline (https://cline.bot/desktop) тоже умеет пользоваться d
    (`search_local_files` / `ask_my_files`), а не встроенный поиск/терминал;
 3. правит только секцию `mcpServers` JSON — остальные серверы и настройки
    Cline сохраняются; повторный запуск обновляет запись, не дублируя её.
+
+Запись пишется в плоской форме из документации Cline
+(`{"type": "streamableHttp", "url": ...}`) — обёртка `"transport"` устарела и
+для http-сервера невалидна. Ошибка в форме записи приводит к тому, что Cline
+отбрасывает файл настроек целиком: `Invalid MCP settings at
+"...cline_mcp_settings.json": mcpServers.disk-search: Invalid input`, и в сессии
+пропадают ВСЕ MCP-инструменты (агент уходит искать файлы терминалом). Проверка
+после установки: `cline config mcp --json` — список серверов без ошибок.
+Оба инсталлятора (Windows и macOS) делают это сами: после записи контролируют
+форму через `installers/cline_mcp_merge.py`, а если в PATH есть CLI `cline` —
+дополнительно спрашивают у самого клиента (`cline config mcp --json`) и печатают
+предупреждение, если Cline считает настройки невалидными.
 
 ### Когда Cline уже установлен
 
@@ -659,18 +814,29 @@ bash installers/install_cline_macos.sh
 {
   "mcpServers": {
     "disk-search": {
-      "command": "C:\\\\Users\\\\<user>\\\\hermes-disk-search\\\\.venv\\\\Scripts\\\\python.exe",
-      "args": ["C:\\\\Users\\\\<user>\\\\hermes-disk-search\\\\mcp_start.py"],
-      "env": {},
+      "type": "streamableHttp",
+      "url": "http://127.0.0.1:8787/mcp",
+      "autoApprove": ["search_local_files", "ask_my_files", "index_status",
+                      "start_indexing", "stop_indexing", "reindex_path"],
+      "timeout": 300,
       "disabled": false
     }
   }
 }
 ```
 
-   macOS-вариант — абсолютные пути:
-   `"command": "/Users/<user>/hermes-disk-search/.venv/bin/python"`,
-   `"args": ["/Users/<user>/hermes-disk-search/mcp_start.py"]`.
+   Альтернатива (stdio — Cline запускает процесс сам, по одному на клиента):
+   `"command": "<python из venv>", "args": ["<путь>/mcp_start.py"], "env": {}`
+   (плоские поля, без обёртки).
+
+   **Важно про форму записи.** Cline валидирует файл настроек целиком: при
+   неверной записи отбрасывается ВЕСЬ файл — пропадают все MCP-серверы, а не
+   только `disk-search`. Обёртка `"transport": {"type": "http", ...}`
+   недопустима: во вложенном `transport` схема Cline принимает только
+   `stdio` / `sse` / `streamableHttp` (маппинг `http` → `streamableHttp` работает
+   лишь в плоской форме), и клиент пишет `Invalid MCP settings at
+   "...cline_mcp_settings.json": mcpServers.disk-search: Invalid input`.
+   Проверка: `cline config mcp --json` должен перечислить серверы без ошибок.
 2. Скопировать скилл: `hermes-skill/disk-search.md` →
    `~/.cline/skills/disk-search/SKILL.md`
    (Windows: `%USERPROFILE%\.cline\skills\disk-search\SKILL.md`).
@@ -750,6 +916,15 @@ bash installers/install_cline_macos.sh
 | `autostart`         | `true`                     | Поднимать chat+embedding при старте UI/MCP/cli (в фоне)                                |
 | `<role>.port` / `.model` / `.ctx_per_slot` / `.extra_args` | 8010/8011/8012 | Параметры каждого инстанса (модели — `shared:<role>` из общего рантайма; явный путь к GGUF — escape-hatch)                   |
 
+### `mcp_http` — общий MCP-сервер (streamable-http)
+
+| Параметр | По умолчанию | Описание |
+| ----------------- | -------------------- | ---------------------------------------------------------------------------------------- |
+| `host` / `port` | `127.0.0.1` / `8787` | Адрес ОДНОГО инстанса MCP на машину (клиенты Cline/Hermes ходят по URL) |
+| `path` | `/mcp` | Путь streamable-http endpoint (`http://host:port/mcp`) |
+| `autostart` | `true` | Поднимать при старте UI/MCP/cli (живой инстанс переиспользуется, второго не появляется) |
+| `start_timeout` | `30` | Сек ожидания `GET /health` при старте |
+
 ### `search` — гибридный поиск
 
 | Параметр  | По умолчанию | Описание                                                                                          |
@@ -827,9 +1002,10 @@ python -m hds.llama_server start rerank   # модель: llm_server.rerank.mode
 | `hds/search.py`                                               | гибридный поиск RRF + сниппеты                                                                                                                                  |
 | `hds/rag.py`                                                  | ответ с цитатами через чат-модель                                                                                                                         |
 | `hds/cli.py`                                                  | CLI                                                                                                                                                                                   |
-| `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер (Hermes, Cline и другие MCP-клиенты)                                                                                                                   |
+| `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер (stdio: Hermes, Cline и другие MCP-клиенты)                                                                                                                   |
+| `hds/mcp_http.py`                                          | Менеджер ОБЩЕГО MCP-сервера (streamable-http, :8787): один инстанс на машину для всех агентов                                                       |
 | `install_cline.ps1`, `installers/install_cline_macos.sh`    | подключение disk-search к Cline Desktop/CLI (MCP-сервер + скилл)                                                                                               |
 | `gen_fixtures.py`                                             | тестовые файлы для smoke-теста                                                                                                                                   |
-| `tests/`                                                      | регрессионные тесты (209 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI, общий llama-рантайм) |
+| `tests/`                                                      | регрессионные тесты (233 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI, общий llama-рантайм, общий MCP-сервер) |
 | `.github/workflows/release.yml`                               | GitHub Actions: тесты → сборка → релиз (с удалением предыдущих)                                                                                 |
 | `releasing.md`                                                | правила выпуска релизов                                                                                                                                          |
