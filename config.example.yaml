@@ -50,7 +50,7 @@ llm_server:
   chat:
     port: 8010
     model: "models/chat/qwen3.5-9b-Q6_K.gguf"
-    ctx_per_slot: 16384
+    ctx_per_slot: 32768       # 32K: если инстанс ОБЩИЙ с anonymizer_proxy (порт 8010)
     extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
   embedding:
     port: 8011
@@ -62,6 +62,16 @@ llm_server:
     model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"
     ctx_per_slot: 8192
     extra_args: "-ngl 0"
+
+# MCP-сервер в режиме streamable-http: ОДИН инстанс на машину (клиенты идут
+# по URL). При stdio каждый клиент (Cline, Hermes, ...) поднимает свой процесс.
+mcp_http:
+  host: "127.0.0.1"
+  port: 8787
+  path: "/mcp"               # streamable-http endpoint
+  autostart: true            # поднимать при старте UI/MCP/cli (живой переиспользуется)
+  start_timeout: 30          # сек ожидания /health при старте
+
 
 search:
   vec_k: 40

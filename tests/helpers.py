@@ -59,6 +59,12 @@ llm_server:
     model: "models/rerank/fake.gguf"
     ctx_per_slot: 512
     extra_args: ""
+mcp_http:
+  host: "127.0.0.1"
+  port: 1
+  path: "/mcp"
+  autostart: false
+  start_timeout: 1
 search:
   vec_k: 10
   fts_k: 10

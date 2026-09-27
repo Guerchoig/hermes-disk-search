@@ -5,6 +5,11 @@ import yaml
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+# Имя приложения в MCP (serverInfo.name) и маркер health-эндпоинта
+# (/health: {"app": APP_NAME}): по нему менеджер hds.mcp_http отличает СВОЙ
+# живой http-инстанс от чужого сервиса, занявшего тот же порт (probe).
+APP_NAME = "disk-search"
+
 # Целевой контекст embedding-модели (bge-m3) в llama-server (роль embedding).
 # При меньшем загруженном контексте вход отсекается: llama.cpp отвечает явной
 # ошибкой 400, LM Studio (старый бэкенд) усекал МОЛЧА (проверено: текст 15 644
@@ -69,7 +74,7 @@ def _default_config_yaml():
         "  chat:\n"
         "    port: 8010\n"
         "    model: \"shared:chat\"      # shared:<role> — GGUF общего llama-рантайма\n"
-        "    ctx_per_slot: 16384\n"
+        "    ctx_per_slot: 32768      # 32K: нужно и общему инстансу с прокси-проектом\n"
         "    extra_args: \"--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99\"\n"
         "  embedding:\n"
         "    port: 8011\n"
@@ -83,6 +88,13 @@ def _default_config_yaml():
         "    # --batch-size/--ubatch-size обязательны: фрагмент длиннее physical\n"
         "    # batch (дефолт 512) даёт 500 (\"input is too large to process\")\n"
         "    extra_args: \"-ngl 0 --batch-size 8192 --ubatch-size 8192\"\n"
+        "\n"
+        "mcp_http:\n"
+        "  host: \"127.0.0.1\"\n"
+        "  port: 8787               # ОДИН http-инстанс MCP на машину (клиенты идут по URL)\n"
+        "  path: \"/mcp\"             # streamable-http endpoint\n"
+        "  autostart: true          # поднимать при старте UI/MCP/cli (переиспользует живой)\n"
+        "  start_timeout: 30        # сек ожидания /health при старте\n"
         "\n"
         "search:\n"
         "  vec_k: 40\n"

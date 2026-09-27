@@ -421,6 +421,14 @@ class DefaultConfigTests(unittest.TestCase):
         self.assertEqual(cfg["chat"]["thinking"], "off")
         self.assertTrue(cfg["llm_server"]["autostart"])
 
+    def test_default_mcp_http_section(self):
+        """Общий MCP-сервер (streamable-http) настроен по умолчанию: :8787."""
+        ensure_config()
+        cfg = load()
+        self.assertEqual(cfg["mcp_http"]["port"], 8787)
+        self.assertEqual(cfg["mcp_http"]["path"], "/mcp")
+        self.assertTrue(cfg["mcp_http"]["autostart"])
+
 
 class EmbModelSaveTests(unittest.TestCase):
     """«Применить имя модели»: замена embedding.model в config.yaml."""

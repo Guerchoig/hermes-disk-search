@@ -83,8 +83,14 @@ def _model_status():
         except Exception as e:  # noqa: BLE001
             st[role] = {"error": str(e), "running": False}
     emb = st["embedding"]
+    try:
+        from . import mcp_http
+        mcp = mcp_http.status(cfg)
+    except Exception as e:  # noqa: BLE001
+        mcp = {"error": str(e), "running": False}
     return {
         "servers": st,
+        "mcp": mcp,
         "rerank_enabled": bool(dig(cfg, "rerank.enabled", False)),
         "gguf_path": _gguf_path(),
         "gguf_ready": os.path.exists(_gguf_path()),
@@ -1170,6 +1176,12 @@ def run(port=8765, open_browser=True):
         if cfg and (cfg.get("llm_server") or {}).get("autostart", True):
             from . import llama_server
             llama_server.ensure_async(cfg)
+        # Общий MCP-сервер (streamable-http): ОДИН инстанс на машину, чтобы
+        # клиенты (Cline/Hermes) не плодили процессы. Живой переиспользуется.
+        if cfg:
+            from . import mcp_http
+            if mcp_http.autostart_on(cfg):
+                mcp_http.ensure_async(cfg)
     except Exception:  # noqa: BLE001
         pass
     url = "http://127.0.0.1:%d" % port

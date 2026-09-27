@@ -46,7 +46,8 @@ class RoleConfigTests(unittest.TestCase):
         cfg = {}
         chat = ls._role_cfg(cfg, "chat")
         self.assertEqual(chat["port"], 8010)
-        self.assertEqual(chat["ctx_per_slot"], 16384)
+        # 32K (не 16K): инстанс может быть ОБЩИМ с anonymizer_proxy
+        self.assertEqual(chat["ctx_per_slot"], 32768)
         emb = ls._role_cfg(cfg, "embedding")
         self.assertEqual(emb["port"], 8011)
         self.assertEqual(emb["ctx_per_slot"], 8192)

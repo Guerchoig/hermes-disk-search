@@ -7,14 +7,40 @@ try:
 except ImportError:  # mcp 1.x
     from mcp.server.fastmcp import FastMCP as _Server
 
+from . import build_stamp
 from . import db as dbmod, indexer, rag, search
-from .config import PROJECT_ROOT, dig, db_abs_path, load
+from .config import APP_NAME, PROJECT_ROOT, dig, db_abs_path, load
 from .embedder import make_embedder
 
-mcp = _Server("disk-search")
+mcp = _Server(APP_NAME)
+
+# Метка сборки на момент СТАРТА процесса: по ней hds.mcp_http понимает, что на
+# порту работает старый код после обновления проекта. Считается РОВНО ОДИН РАЗ —
+# пересчёт в обработчике /health всегда дал бы текущие исходники, и «протухание»
+# никогда не детектировалось бы.
+_BUILD_STAMP = build_stamp()
 
 _idx_lock = threading.Lock()
 _idx_state = {"running": False, "last_result": ""}
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(_request):
+    """Health-эндпоинт http-транспорта (в stdio не используется).
+
+    По нему hds.mcp_http отличает СВОЙ живой инстанс от чужого сервиса на том
+    же порту: probe читает {"app": "disk-search"}. Поля `version` и `build`
+    (метка сборки = mtime исходников на момент старта) позволяют менеджеру
+    понять, что на порту работает СТАРЫЙ код после обновления проекта —
+    `mcp-http restart-if-stale` перезапускает такой инстанс.
+    """
+    from starlette.responses import JSONResponse
+
+    from . import __version__ as version
+
+    return JSONResponse({"app": APP_NAME, "version": version,
+                         "build": _BUILD_STAMP,
+                         "transport": "streamable-http"})
 
 
 def _fmt_elapsed(sec):
@@ -162,10 +188,21 @@ def reindex_path(path: str) -> str:
         conn.close()
 
 
-def run():
-    # autostart llama-серверов (chat + embedding) в фоне: к моменту первого
-    # ask_my_files/search_local_files они, как правило, уже подняты;
-    # ошибки (нет бинаря/модели) не мешают старту MCP-сервера
+def run(transport="stdio", host=None, port=None, path=None, stateless=False):
+    """Запустить MCP-сервер (блокирующе, до остановки).
+
+    transport="stdio" (по умолчанию, обратная совместимость) — по протоколу
+    MCP КАЖДЫЙ клиент запускает свой процесс; используйте `mcp_start.py` или
+    `python -m hds.cli serve`.
+
+    transport="streamable-http" — ОДИН сервер на машину (менеджер
+    `python -m hds.cli mcp-http`), клиенты подключаются по URL
+    (`http://127.0.0.1:8787/mcp`) и процесс не плодят.
+
+    autostart llama-серверов (chat + embedding) выполняется в фоне в обоих
+    режимах: к моменту первого ask_my_files/search_local_files они, как
+    правило, уже подняты; ошибки (нет бинаря/модели) не мешают старту.
+    """
     try:
         cfg = load()
         if (cfg.get("llm_server") or {}).get("autostart", True):
@@ -173,4 +210,16 @@ def run():
             llama_server.ensure_async(cfg)
     except Exception:  # noqa: BLE001
         pass
-    mcp.run(transport="stdio")
+    if transport == "stdio":
+        mcp.run(transport="stdio")
+        return
+    kwargs = {}
+    if host:
+        kwargs["host"] = str(host)
+    if port:
+        kwargs["port"] = int(port)
+    if path:
+        kwargs["streamable_http_path"] = str(path)
+    if stateless:
+        kwargs["stateless_http"] = True
+    mcp.run(transport=transport, **kwargs)

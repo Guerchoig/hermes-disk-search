@@ -64,7 +64,10 @@ _DEFAULTS = {
     "chat": {
         "port": 8010,
         "model": "models/chat/qwen3.5-9b-Q6_K.gguf",
-        "ctx_per_slot": 16384,
+        # 32K: столько требует прокси-проект (anonymizer_proxy) для длинных
+        # файлов, когда он ПЕРЕИСПОЛЬЗУЕТ этот инстанс (общий llama-сервер).
+        # Одному HDS хватало 16K, но один инстанс на две программы экономичнее.
+        "ctx_per_slot": 32768,
         # KV-кэш q8_0: вдвое меньше VRAM (12 ГБ-машина: chat Q6_K + emb на GPU)
         "extra_args": "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99",
     },

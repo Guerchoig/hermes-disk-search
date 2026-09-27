@@ -300,9 +300,29 @@ def cmd_ui(args):
 
 
 def cmd_serve(args):
+    """MCP-сервер: по умолчанию stdio (процесс на КАЖДОГО клиента).
+
+    transport=streamable-http — для ОДНОГО инстанса на машину; штатно его
+    поднимает менеджер `python -m hds.cli mcp-http` (лишних процессов нет).
+    """
     from .mcp_server import run
-    run()
+
+    run(transport=args.transport, host=args.host, port=args.port, path=args.path)
     return 0
+
+
+def cmd_mcp_http(args):
+    """Менеджер общего MCP-сервера в режиме streamable-http (один на машину)."""
+    from . import mcp_http
+
+    argv = [args.action]
+    if args.host:
+        argv += ["--host", args.host]
+    if args.port:
+        argv += ["--port", str(args.port)]
+    if args.path:
+        argv += ["--path", args.path]
+    return mcp_http.main(argv)
 
 
 def main(argv=None):
@@ -387,7 +407,28 @@ def main(argv=None):
     pdb.set_defaults(fn=cmd_db_move)
 
     psv = sub.add_parser("serve", help="MCP-сервер для Hermes (stdio)")
+    psv.add_argument("--transport",
+                     choices=["stdio", "sse", "streamable-http"], default="stdio",
+                     help="stdio — процесс на каждого клиента; streamable-http — общий сервер по URL")
+    psv.add_argument("--host", help="хост http-транспорта (по умолчанию mcp_http.host)")
+    psv.add_argument("--port", type=int,
+                     help="порт http-транспорта (по умолчанию mcp_http.port)")
+    psv.add_argument("--path", help="путь streamable-http endpoint (по умолчанию /mcp)")
     psv.set_defaults(fn=cmd_serve)
+
+    pmh = sub.add_parser("mcp-http",
+                         help="менеджер общего MCP-сервера (streamable-http): ОДИН инстанс на машину")
+    pmh.add_argument("action", nargs="?", default="status",
+                     choices=["check", "start", "stop", "stop-stdio",
+                              "status", "restart", "restart-if-stale", "run"],
+                     help="start/stop/restart — управление; restart-if-stale — перезапуск, "
+                          "только если на порту старый код (штатное обновление проекта); "
+                          "run — foreground (автозапуск ОС); "
+                          "stop-stdio — разовая чистка stdio-сирот (mcp_start.py)")
+    pmh.add_argument("--host", help="переопределить mcp_http.host")
+    pmh.add_argument("--port", type=int, help="переопределить mcp_http.port")
+    pmh.add_argument("--path", help="переопределить mcp_http.path")
+    pmh.set_defaults(fn=cmd_mcp_http)
 
     args = p.parse_args(argv)
     return args.fn(args)

@@ -59,10 +59,16 @@ def _pid_alive(pid):
 
 def _lock_pid_is_watcher(pid):
     """Живой процесс с этим PID — действительно watcher? PID мог быть
-    переиспользован ОС под другую программу (классическая ловушка lock-файлов)."""
+    переиспользован ОС под другую программу (классическая ловушка lock-файлов).
+
+    Без psutil отвечаем ПЕССИМИСТИЧНО (True): «не знаю» не должно приводить к
+    запуску второго watcher'а — дубль хуже, чем пропущенный старт.
+    """
     try:
         import psutil
-
+    except ImportError:  # noqa: BLE001 — psutil в requirements, но вдруг нет
+        return True
+    try:
         p = psutil.Process(int(pid))
         if "python" not in (p.name() or "").lower():
             return False
@@ -71,19 +77,44 @@ def _lock_pid_is_watcher(pid):
         return False
 
 
-def _acquire_lock(cfg):
+def _lock_is_stale(lock):
+    """lock оставлен умершим/чужим процессом? При неуверенности — НЕ stale."""
+    try:
+        with open(lock) as f:
+            pid = int((f.read() or "").strip() or 0)
+    except (ValueError, OSError):
+        return True  # пустой/нечитаемый файл — защищать нечего
+    if pid <= 0 or not _pid_alive(pid):
+        return True
+    return not _lock_pid_is_watcher(pid)
+
+
+def _acquire_lock(cfg, attempts=3):
+    """Атомарно занять watch.lock; None — уже работает другой watcher.
+
+    РЕГРЕССИЯ (дубли watcher'а): раньше «файл есть? → жив ли PID?» и запись
+    файла были РАЗНЫМИ шагами — два одновременных старта (автозапуск в момент
+    входа + кнопка «Запустить» в UI, двойной клик по ярлыку, гонка задач)
+    успевали оба пройти проверку до появления файла, и оба писали lock.
+    Теперь файл создаётся эксклюзивно (O_CREAT|O_EXCL): проигравший получает
+    FileExistsError и выходит. Устаревший lock (процесс умер/чужой) снимается
+    и попытка повторяется.
+    """
     lock = os.path.join(PROJECT_ROOT, "watch.lock")
-    if os.path.exists(lock):
+    for _ in range(max(1, attempts)):
         try:
-            pid = int(open(lock).read().strip())
-            if _pid_alive(pid) and _lock_pid_is_watcher(pid):
+            fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        except FileExistsError:
+            if not _lock_is_stale(lock):
                 return None  # уже работает
-        except (ValueError, OSError):
-            pass
-        _remove_lock(lock)
-    with open(lock, "w") as f:
-        f.write(str(os.getpid()))
-    return lock
+            _remove_lock(lock)  # lock от умершего watcher'а
+            continue
+        except OSError:
+            return None  # нет прав/ФС чудит — не рискуем вторым watcher'ом
+        with os.fdopen(fd, "w") as f:
+            f.write(str(os.getpid()))
+        return lock
+    return None
 
 
 class _Handler:

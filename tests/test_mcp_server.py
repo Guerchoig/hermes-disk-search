@@ -38,5 +38,31 @@ class StartIndexingSingleThreadTests(unittest.TestCase):
         self.assertIn("уже идёт", res)
 
 
+class HealthBuildStampTests(unittest.TestCase):
+    """РЕГРЕССИЯ: метка сборки считалась прямо в обработчике /health, то есть на
+    каждый запрос — и всегда совпадала с текущими исходниками. Из-за этого
+    hds.mcp_http не мог увидеть, что на порту работает СТАРЫЙ код, и
+    `mcp-http restart-if-stale` не перезапускал сервер после обновления."""
+
+    def _body(self):
+        import asyncio
+        import json
+
+        resp = asyncio.run(mcp_server._health(None))
+        return json.loads(resp.body.decode("utf-8"))
+
+    def test_build_is_captured_once_at_import(self):
+        with mock.patch.object(mcp_server, "build_stamp", lambda: 999.0):
+            body = self._body()
+        self.assertEqual(body["build"], mcp_server._BUILD_STAMP)
+        self.assertNotEqual(body["build"], 999.0,
+                            "метка сборки фиксируется при старте процесса, а не в обработчике")
+
+    def test_health_marks_own_instance(self):
+        body = self._body()
+        self.assertEqual(body["app"], mcp_server.APP_NAME)
+        self.assertTrue(body["version"])
+
+
 if __name__ == "__main__":
     unittest.main()
