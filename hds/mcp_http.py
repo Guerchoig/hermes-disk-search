@@ -143,9 +143,15 @@ def probe(cfg=None, timeout=_PROBE_TIMEOUT):
 
 def _no_window():
     """Флаги subprocess: консольные утилиты (tasklist/taskkill/powershell/pgrep)
-    не должны вспыхивать окнами при вызове из UI/автозапуска (Windows)."""
-    return {"creationflags": subprocess.CREATE_NO_WINDOW} \
-        if sys.platform == "win32" else {}
+    не должны вспыхивать окнами при вызове из UI/автозапуска (Windows).
+
+    Флаги берём через getattr: атрибуты существуют только в Windows-сборке
+    subprocess, а тесты подменяют sys.platform на «win32» и на macOS/Linux —
+    прямое обращение падало бы AttributeError.
+    """
+    if sys.platform != "win32":
+        return {}
+    return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
 
 
 def _popen_kwargs():
@@ -153,12 +159,13 @@ def _popen_kwargs():
 
     CREATE_NO_WINDOW в дополнение к DETACHED_PROCESS — старт из UI
     (pythonw/автозапуск ОС) не рождает мигающее консольное окно (Windows).
+    Флаги — через getattr (см. _no_window).
     """
-    if sys.platform == "win32":
-        return {"creationflags": (subprocess.DETACHED_PROCESS
-                                  | subprocess.CREATE_NEW_PROCESS_GROUP
-                                  | subprocess.CREATE_NO_WINDOW)}
-    return {"start_new_session": True}
+    if sys.platform != "win32":
+        return {"start_new_session": True}
+    return {"creationflags": (getattr(subprocess, "DETACHED_PROCESS", 0)
+                              | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                              | getattr(subprocess, "CREATE_NO_WINDOW", 0))}
 
 
 def _python():
