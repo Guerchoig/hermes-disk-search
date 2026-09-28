@@ -40,6 +40,7 @@ def _default_config_yaml():
         "  max_media_mb: 2500        # предел для аудио/видео (транскрипция)\n"
         "  ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)\n"
         "  ocr_lang: \"rus+eng\"\n"
+        "  ocr_tesseract_cmd: \"\"   # путь к tesseract(.exe), если не в PATH (задаёт установщик)\n"
         "  transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)\n"
         "  whisper_model: small\n"
         "  whisper_device: auto      # auto | cuda | vulkan | cpu | metal\n"

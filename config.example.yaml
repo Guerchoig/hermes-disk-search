@@ -12,6 +12,7 @@ index:
   max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)
   ocr_lang: "rus+eng"
+  ocr_tesseract_cmd: ""     # путь к tesseract(.exe), если не в PATH
   transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
   whisper_model: small
   whisper_device: auto      # auto | cuda | vulkan | cpu | metal

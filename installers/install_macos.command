@@ -69,6 +69,13 @@ fi
 "$ROOT/.venv/bin/python" -m pip install faster-whisper -q
 echo "[ok] зависимости установлены"
 
+# --- 6.0. OCR (Tesseract): путь для .app/LaunchAgent и языки rus/eng ---
+# .app и LaunchAgent стартуют с минимальным PATH: tesseract из Homebrew там не
+# находится (в UI — «Tesseract OCR не найден»), а при ocr_lang="rus+eng" нужен
+# пакет rus (его ставит tesseract-lang). Шаг прописывает index.ocr_tesseract_cmd
+# в config.yaml и проверяет языковые пакеты.
+"$ROOT/.venv/bin/python" "$ROOT/installers/configure_ocr.py" || true
+
 # --- 6.1. Общий llama-рантайм машины (llama-server + GGUF-модели) ---
 # Единый с anonymizer_proxy каталог: бинарь llama.cpp (Homebrew или пре-билд
 # с GitHub Releases) и модели chat/embedding/rerank лежат в

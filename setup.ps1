@@ -211,6 +211,18 @@ if ($ans -match '^[YyДд]') {
     Write-Host "[--] Пропущено: модель скачается автоматически при первой транскрипции." -ForegroundColor DarkGray
 }
 
+Write-Host "== OCR (Tesseract): путь для запуска из ярлыка и языки rus/eng =="
+# hermes-disk-search стартует из ярлыка/агента с минимальным PATH: tesseract.exe
+# из Program Files там не находится (в UI появляется «Tesseract OCR не найден»),
+# а базовый пакет UB-Mannheim не содержит русского языка. Шаг прописывает
+# index.ocr_tesseract_cmd в config.yaml и раскладывает rus+eng в
+# %LOCALAPPDATA%\Tesseract-OCR\tessdata (без прав администратора; HDS сам
+# подключает этот каталог через TESSDATA_PREFIX).
+& $python "$root\installers\configure_ocr.py"
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[--] OCR не настроен автоматически — см. сообщения выше." -ForegroundColor DarkGray
+}
+
 Write-Host "== Проверка config.yaml (пути с другого компьютера) =="
 $cfgPath = "$root\config.yaml"
 if (Test-Path $cfgPath) {
