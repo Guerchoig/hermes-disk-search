@@ -1,0 +1,31 @@
+; --- Settings ---
+; Action on detect:	Report only
+; Scan objects:	All objects
+; Use iChecker:	Yes
+; Use iSwift:	Yes
+; Try disinfect:	No
+; Try delete:	No
+; Try delete container:	No
+; Scan archives:	No
+; Exclude by mask:	No
+; Include by mask:	No
+; Objects to scan:	
+; 	"C:\Users\Sasha\hermes-disk-search\tools\parity\out\sidecar_a\"	Enable = Yes	Recursive = Yes
+; 	"C:\Users\Sasha\hermes-disk-search\tools\parity\spikes\target\release\hash_parity.exe"	Enable = Yes	Recursive = No
+; 	"C:\Users\Sasha\hermes-disk-search\tools\parity\spikes\target\release\dll_probe.exe"	Enable = Yes	Recursive = No
+; ------------------
+2026-09-29 21:04:42	Scan_Objects$5795                          starting   1          
+2026-09-29 21:04:42	Scan_Objects$5795                          running    100        
+2026-09-29 21:04:42	Scan_Objects$5795                          completed             
+;  --- Statistics ---
+; Time Start:	2026-09-29 21:04:42
+; Time Finish:	2026-09-29 21:04:42
+; Processed objects:	4
+; Total OK:	2
+; Total detected:	0
+; Suspicions:	0
+; Total skipped:	2
+; Password protected:	0
+; Corrupted:	0
+; Errors:	0
+;  ------------------
