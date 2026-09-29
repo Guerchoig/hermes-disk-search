@@ -1,0 +1,38 @@
+{
+ "config": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\measure.yaml",
+ "bench_files": 500,
+ "media": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench_media\\медиа_замер.wav",
+ "A_idle_watcher": {
+  "roles": {},
+  "vram_peak_mib": null,
+  "vram_min_mib": null,
+  "samples": 0,
+  "last": null
+ },
+ "B_index_500": {
+  "roles": {},
+  "vram_peak_mib": null,
+  "vram_min_mib": null,
+  "samples": 0,
+  "last": null,
+  "sec": 2.0,
+  "exit_code": 0,
+  "stdout_tail": "[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход.\r\n"
+ },
+ "C_transcribe": {
+  "roles": {},
+  "vram_peak_mib": null,
+  "vram_min_mib": null,
+  "samples": 0,
+  "last": null,
+  "sec": 2.0,
+  "exit_code": 0,
+  "stdout_tail": "[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход.\r\n"
+ },
+ "D_first_search": {
+  "rc": 1,
+  "out_tail": "Ничего не найдено.\r\n",
+  "err_tail": "",
+  "sample_after": null
+ }
+}

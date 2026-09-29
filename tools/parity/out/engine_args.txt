@@ -1,0 +1,57 @@
+=== embed_body_json (rc=0) ===
+args: ['bridge', 'embed', '--model', 'C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf', '--body-json', '{"input":["тест"],"model":"bge-m3","n_gpu_layers":0}']
+embed_start model=C:\Users\Sasha\AppData\Local\llama-runtime\models\embedding\bge-m3-Q8_0.gguf source=body-json devices=<default>
+{"model":"bge-m3","object":"list","usage":{"prompt_tokens":3,"total_tokens":3},"data":[{"embedding":[-0.0049620927311480045,0.04100554436445236,-0.03226904571056366,-0.006253096275031567,-0.013859648257493973,0.013417800888419151,-0.013647309504449368,0.03880349546670914,0.005541464313864708,-0.004827659577131271,0.021510040387511253,0.018909508362412453,-0.002067349385470152,0.005522578489035368,-0.0006553591811098158,-0.04350106418132782,-0.014421426691114902,-0.014004241675138474,0.003760472172871232,-0.05473722890019417,-0.010071421042084694,-0.014441757462918758,0.06155123934149742,0.0172272901982069,0.02013373002409935,0.005457509309053421,-0.05604151636362076,-0.02816522866487503,-0.01097782514989376,0.009481529705226421,0.00718342512845993,0.0015724364202469587,0.018474366515874863,-0.06460690498352051,-0.06250063329935074,-0.04601431265473366,0.01970772258937359,-0.052666570991277695,-0.05184922739863396,-0.004714434966444969,0.039290864020586014,-0.01690797507762909,-0.005268936976790428,-0.02464642934501171,0.0017043118132278323,-0.012716065160930157,0.04110165685415268,-0.016188472509384155,-0.012491652742028236,-0.010742542333900928,0.011320681311190128,-0.013939750380814075,0.05868713557720184,-0.03178421035408974,-0.0018982035107910633,0.021228691563010216,0.015453720465302467,-0.028729263693094254,-0.08246444910764694,0.007380597293376923,-0.022451788187026978,0.008237406611442566,-0.002546412870287895,0.043548986315727234,0.014336208812892437,0.07437898218631744,0.03043220564723015,0.013073321431875229,-0.010967602953314781,-0.007406470365822315,-0.015671104192733765,0.0002499172405805439,0.021469721570611,0.010007440112531185,-0.05035978555679321,0.02975926361978054,0.03572581708431244,0.009704729542136192,0.04198312386870384,-0.04316231235861778,0.03340065851807594,0.015078132972121239,-0.01028094720095396,0.0027877879329025745,-0.0007854413124732673,-0.01426662877202034,0.011882043443620205,-0.040416326373815536,-0.00181659369263798,-0.021517502143979073,-0.02609984204173088,-0.04641933739185333,0.014768637716770172,-0.032225146889686584,-0.033037394285202026,0.023794766515493393,0.017141466960310936,0.03677252680063248,0.043210674077272415,-0.013538592495024204,0.02409888431429863,0.0008472045883536339,0.006513269152492285,-0.025721142068505287,0.05426233261823654,0.008032464422285557,0.042813386768102646,0.03626653179526329,0.028164466843008995,-0.0034883960615843534,0.021140648052096367,0.012498763389885426,0.01147399004548788,0.034425076097249985,0.019624093547463417,0.01140926405787468,-0.00925206858664751,0.00818406417965889,-0.0022286525927484035,-0.022483712062239647,0.0636964738368988,0.018478011712431908,0.030244609341025352,-0.006615304853767157,-0.04298567399382591,-0.01036166213452816,0.011819195933640003,0.003025165293365717,-0.015308203175663948,-0.03520873561501503,0.0385989435017108
+
+=== embed_body_json_min (rc=0) ===
+args: ['bridge', 'embed', '--model', 'C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf', '--body-json', '{"input":["тест"]}']
+embed_start model=C:\Users\Sasha\AppData\Local\llama-runtime\models\embedding\bge-m3-Q8_0.gguf source=body-json devices=<default>
+{"model":"bge-m3-Q8_0.gguf","object":"list","usage":{"prompt_tokens":3,"total_tokens":3},"data":[{"embedding":[-0.0049620927311480045,0.04100554436445236,-0.03226904571056366,-0.006253096275031567,-0.013859648257493973,0.013417800888419151,-0.013647309504449368,0.03880349546670914,0.005541464313864708,-0.004827659577131271,0.021510040387511253,0.018909508362412453,-0.002067349385470152,0.005522578489035368,-0.0006553591811098158,-0.04350106418132782,-0.014421426691114902,-0.014004241675138474,0.003760472172871232,-0.05473722890019417,-0.010071421042084694,-0.014441757462918758,0.06155123934149742,0.0172272901982069,0.02013373002409935,0.005457509309053421,-0.05604151636362076,-0.02816522866487503,-0.01097782514989376,0.009481529705226421,0.00718342512845993,0.0015724364202469587,0.018474366515874863,-0.06460690498352051,-0.06250063329935074,-0.04601431265473366,0.01970772258937359,-0.052666570991277695,-0.05184922739863396,-0.004714434966444969,0.039290864020586014,-0.01690797507762909,-0.005268936976790428,-0.02464642934501171,0.0017043118132278323,-0.012716065160930157,0.04110165685415268,-0.016188472509384155,-0.012491652742028236,-0.010742542333900928,0.011320681311190128,-0.013939750380814075,0.05868713557720184,-0.03178421035408974,-0.0018982035107910633,0.021228691563010216,0.015453720465302467,-0.028729263693094254,-0.08246444910764694,0.007380597293376923,-0.022451788187026978,0.008237406611442566,-0.002546412870287895,0.043548986315727234,0.014336208812892437,0.07437898218631744,0.03043220564723015,0.013073321431875229,-0.010967602953314781,-0.007406470365822315,-0.015671104192733765,0.0002499172405805439,0.021469721570611,0.010007440112531185,-0.05035978555679321,0.02975926361978054,0.03572581708431244,0.009704729542136192,0.04198312386870384,-0.04316231235861778,0.03340065851807594,0.015078132972121239,-0.01028094720095396,0.0027877879329025745,-0.0007854413124732673,-0.01426662877202034,0.011882043443620205,-0.040416326373815536,-0.00181659369263798,-0.021517502143979073,-0.02609984204173088,-0.04641933739185333,0.014768637716770172,-0.032225146889686584,-0.033037394285202026,0.023794766515493393,0.017141466960310936,0.03677252680063248,0.043210674077272415,-0.013538592495024204,0.02409888431429863,0.0008472045883536339,0.006513269152492285,-0.025721142068505287,0.05426233261823654,0.008032464422285557,0.042813386768102646,0.03626653179526329,0.028164466843008995,-0.0034883960615843534,0.021140648052096367,0.012498763389885426,0.01147399004548788,0.034425076097249985,0.019624093547463417,0.01140926405787468,-0.00925206858664751,0.00818406417965889,-0.0022286525927484035,-0.022483712062239647,0.0636964738368988,0.018478011712431908,0.030244609341025352,-0.006615304853767157,-0.04298567399382591,-0.01036166213452816,0.011819195933640003,0.003025165293365717,-0.015308203175663948,-0.03520873561501503,0.038598
+
+=== embed_text (rc=1) ===
+args: ['bridge', 'embed', '--model', 'C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf', '--text', 'тест']
+error: embed requires --markdown or --body-json
+
+=== rerank_body_json (rc=0) ===
+args: ['bridge', 'rerank', '--model', 'C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\rerank\\bge-reranker-v2-m3-q8_0.gguf', '--body-json', '{"query":"документооборот","documents":["архив","погода"],"n_gpu_layers":0}']
+rerank_start model=C:\Users\Sasha\AppData\Local\llama-runtime\models\rerank\bge-reranker-v2-m3-q8_0.gguf source=body-json devices=<default>
+{"model":"bge-reranker-v2-m3-q8_0.gguf","object":"list","usage":{"prompt_tokens":17,"total_tokens":17},"results":[{"index":0,"relevance_score":-2.6046760082244873},{"index":1,"relevance_score":-9.54196834564209}]}
+rerank_summary batches=1 total_docs=2 total_ms=58.99 docs_per_s=33.91
+
+build: 0 (unknown) with MSVC 19.44.35223.0 for Windows AMD64
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes
+load_backend: loaded CUDA backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-cuda.dll
+load_backend: loaded RPC backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-rpc.dll
+load_backend: loaded CPU backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-cpu-haswell.dll
+srv    load_model: loading model 'C:\Users\Sasha\AppData\Local\llama-runtime\models\rerank\bge-reranker-v2-m3-q8_0.gguf'
+common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on
+llama_params_fit_impl: no devices with dedicated memory found
+llama_params_fit: successfully fit params to free device memory
+llama_params_fit: fitting params to free memory took 1.01 seconds
+llama_model_loader: loaded meta data with 35 key-value pairs and 393 tensors from C:\Users\Sasha\AppData\Local\llama-runtime\models\rerank\bge-reranker-v2-m3-q8_0.gguf (version GGUF V3 (latest))
+llama_model_loader: Dumping metadata keys/values. Note: KV overrides do not apply in this output.
+llama_model_loader: - kv   0:                       general.architecture str              = bert
+llama_model_loader: - kv   1:                               general.type str              = model
+llama_model_loader: - kv   2:                               general.name str              = Bge M3
+llama_model_loader: - kv   3:                       general.organization str              = BAAI
+llama_model_loader: - kv   4:                         general.size_label str              = 568M
+llama_model_loader: - kv   5:                            general.license str              = apache-2.0
+llama_model_loader: - kv   6:                               general.tags arr[str,4]       = ["transformers", "sentence-transforme...
+llama_model_loader: - kv   7:                          general.languages arr[str,1]       = ["multilingual"]
+llama_model_loader: - kv   8:                           bert.block_count u32              = 24
+llama_model_loader: - kv   9:                        bert.context_length u32              = 8192
+llama_model_loader: - kv  10:                      bert.embedding_length u32              = 1024
+llama_model_loader: - kv  11:                   bert.feed_forward_length u32              =
+
+=== audio_body_json_cpu (rc=1) ===
+args: ['bridge', 'audio', '--audio-file', 'C:\\Users\\Sasha\\hermes-disk-search\\test_data\\jfk.wav', '--mode', 'speech', '--custom', 'default', '--whisper-model', 'C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__whisper-large-v3-turbo-GGML\\whisper-large-v3-turbo-GGML.bin', '--body-json', '{"whisper_no_gpu":true}']
+audio_start model=<audio-only> devices=<default> n_ctx=32768 n_parallel=1
+
+build: 0 (unknown) with MSVC 19.44.35223.0 for Windows AMD64
+ggml_cuda_init: found 1 CUDA devices:
+  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes
+load_backend: loaded CUDA backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-cuda.dll
+load_backend: loaded RPC backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-rpc.dll
+load_backend: loaded CPU backend from C:\Users\Sasha\AppData\Roaming\OpenResearchTools\TranscribeOffline\Engine\ggml-cpu-haswell.dll
+error: audio transcriptions call failed rc=-1 status=400 bridge_err='{"error":{"code":400,"message":"Request must contain 'audio' or 'input_audio' object with fields {data, format}.","type":"invalid_request_error"}}' out_err='{"error":{"code":400,"message":"Request must contain 'audio' or 'input_audio' object with fields {data, format}.","type":"invalid_request_error"}}'

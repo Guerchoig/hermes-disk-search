@@ -1,0 +1,19 @@
+# Паритет-harness: в git идут golden-файлы (сжатые, ~1,8 МБ), код и сырые JSON-результаты;
+# воспроизводимое и тяжёлое — исключается.
+fixtures/
+measurements/
+__pycache__/
+out/sidecar_a/
+out/bench/
+out/bench_media/
+out/clip_onnx/
+out/ru_clip/
+out/whisper_ascii/
+out/whisper_out_ascii/
+out/whisper_out_ru/
+out/whisper_cmp_eng_jfk/
+out/whisper_cmp_eng_ru/
+out/measure.db*
+out/hash_parity.jsonl
+out/lemma_corpus.tsv
+out/engine_probe_*.txt

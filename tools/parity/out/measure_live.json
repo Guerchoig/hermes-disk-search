@@ -1,0 +1,548 @@
+{
+ "started": "2026-09-29 17:35:19",
+ "A_now": [
+  {
+   "ts": "17:35:26",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:35:47",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:36:09",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:36:30",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:36:51",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.4
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:37:12",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  }
+ ],
+ "watcher_started": {
+  "alive_after_20s": true,
+  "output_tail": ""
+ },
+ "A_watcher_idle": [
+  {
+   "ts": "17:37:53",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 43460,
+     "role": "watch",
+     "ws_mb": 4.6,
+     "ws_priv_mb": 0.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 25776,
+     "role": "watch",
+     "ws_mb": 47.6,
+     "ws_priv_mb": 30.9,
+     "private_mb": 517.4
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:38:14",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 43460,
+     "role": "watch",
+     "ws_mb": 4.6,
+     "ws_priv_mb": 0.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 25776,
+     "role": "watch",
+     "ws_mb": 47.7,
+     "ws_priv_mb": 31,
+     "private_mb": 517.4
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  },
+  {
+   "ts": "17:38:35",
+   "vram_used_mib": 10705,
+   "procs": [
+    {
+     "pid": 20808,
+     "role": "mcp",
+     "ws_mb": 5.1,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 20828,
+     "role": "mcp",
+     "ws_mb": 71,
+     "ws_priv_mb": 43.9,
+     "private_mb": 4007.5
+    },
+    {
+     "pid": 36672,
+     "role": "ui",
+     "ws_mb": 2.7,
+     "ws_priv_mb": 0,
+     "private_mb": 1.1
+    },
+    {
+     "pid": 14012,
+     "role": "ui",
+     "ws_mb": 230.6,
+     "ws_priv_mb": 211.8,
+     "private_mb": 5659.6
+    },
+    {
+     "pid": 43460,
+     "role": "watch",
+     "ws_mb": 4.6,
+     "ws_priv_mb": 0.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 25776,
+     "role": "watch",
+     "ws_mb": 47.7,
+     "ws_priv_mb": 30.9,
+     "private_mb": 517.3
+    },
+    {
+     "pid": 16244,
+     "role": "llama-server",
+     "ws_mb": 1543.8,
+     "ws_priv_mb": 1482.7,
+     "private_mb": 13259.7
+    },
+    {
+     "pid": 21220,
+     "role": "llama-server",
+     "ws_mb": 1253.4,
+     "ws_priv_mb": 1231.7,
+     "private_mb": 2423.8
+    },
+    {
+     "pid": 37992,
+     "role": "llama-server",
+     "ws_mb": 992.3,
+     "ws_priv_mb": 566.5,
+     "private_mb": 1186.8
+    }
+   ]
+  }
+ ]
+}

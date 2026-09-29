@@ -1,0 +1,34 @@
+# Изолированная конфигурация для замеров W0 (боевой индекс не затрагивается)
+index:
+  roots:
+    - 'C:/Users/Sasha/hermes-disk-search/tools/parity/out/bench'
+  exclude_dirs: []
+  exclude_paths: []
+  max_file_mb: 200
+  max_media_mb: 2500
+  ocr: true
+  ocr_lang: "rus+eng"
+  ocr_tesseract_cmd: 'C:\Program Files\Tesseract-OCR\tesseract.exe'
+  transcribe: true
+  whisper_model: small
+  whisper_device: auto
+  whisper_batch: 8
+  clip: false
+  max_chunks: 3000
+db_path: 'C:/Users/Sasha/hermes-disk-search/tools/parity/out/measure.db'
+chunk:
+  size: 800
+  overlap: 120
+embedding:
+  base_url: "http://127.0.0.1:8011/v1"
+  model: "text-embedding-bge-m3"
+  batch_size: 64
+  dim: 1024
+chat:
+  base_url: "http://127.0.0.1:8010/v1"
+  model: "qwen3.5-9b"
+  thinking: "off"
+llm_server:
+  autostart: false
+mcp_http:
+  autostart: false

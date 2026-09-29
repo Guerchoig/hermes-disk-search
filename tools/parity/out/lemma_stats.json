@@ -1,0 +1,13 @@
+{
+ "tokens": 100000,
+ "unique": 25316,
+ "sec_total": 0.74,
+ "us_per_token": 7.4,
+ "tokens_per_sec": 135809,
+ "changed_vs_form": 206,
+ "cache_size": 25316,
+ "cache_max": 50000,
+ "corpus_tsv_mb": 1.84,
+ "corpus_path": "tools\\parity\\out\\lemma_corpus.tsv",
+ "sec_warm": 0.03
+}

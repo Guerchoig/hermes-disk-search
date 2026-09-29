@@ -1,0 +1,22 @@
+{
+ "engine": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+ "whisper_model_mb": 1549.3,
+ "ascii": {
+  "rc": 0,
+  "sec": 32.1,
+  "new_files": [
+   "jfk.md"
+  ],
+  "stdout_tail": "audio_start model=<audio-only> devices=<default> n_ctx=32768 n_parallel=1\n\r\n[00:00:00.000 --> 00:00:10.400]   And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.\r\n{\"mode\":\"speech\",\"custom\":\"default\",\"diarization\":{\"enabled\":false},\"output\":{\"path\":\"C:\\\\Users\\\\Sasha\\\\hermes-disk-search\\\\tools\\\\parity\\\\out\\\\whisper_out_ascii\\\\jfk.md\",\"format\":\"md\",\"speaker_turns\":false},\"stats\":{\"num_words\":22,\"num_segments\":3,\"source_audio_seconds\":11.13},\"timings_sec\":{\"total\":31.9705287,\"whisper\":31.9670694}}\naudio_summary load_ms=131.77 request_ms=31971.58 status=200\n",
+  "stderr_tail": "build: 0 (unknown) with MSVC 19.44.35223.0 for Windows AMD64\r\nggml_cuda_init: found 1 CUDA devices:\r\n  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes\r\nload_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll\r\nload_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll\r\nload_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll\r\nsrv   operator (): audio pipeline: whisper model source=local path=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__whisper-large-v3-turbo-GGML\\whisper-large-v3-turbo-GGML.bin\r\nload_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll\r\nload_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll\r\nload_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll\r\noutput_json: saving output to 'C:\\Users\\Sasha\\AppData\\Local\\Temp\\engine_audio_1790691651890_36cd\\whisper_transcript.json'\r\n"
+ },
+ "non_ascii": {
+  "rc": 0,
+  "sec": 30.8,
+  "new_files": [
+   "РґРѕСЂРѕРіР°_РґРѕРјРѕР№.md"
+  ],
+  "stdout_tail": "audio_start model=<audio-only> devices=<default> n_ctx=32768 n_parallel=1\n\r\n[00:00:00.000 --> 00:00:10.400]   And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.\r\n{\"mode\":\"speech\",\"custom\":\"default\",\"diarization\":{\"enabled\":false},\"output\":{\"path\":\"C:\\\\Users\\\\Sasha\\\\hermes-disk-search\\\\tools\\\\parity\\\\out\\\\whisper_out_ru\\\\дорога_домой.md\",\"format\":\"md\",\"speaker_turns\":false},\"stats\":{\"num_words\":22,\"num_segments\":3,\"source_audio_seconds\":11.13},\"timings_sec\":{\"total\":30.608755,\"whisper\":30.6053076}}\naudio_summary load_ms=122.49 request_ms=30609.87 status=200\n",
+  "stderr_tail": "build: 0 (unknown) with MSVC 19.44.35223.0 for Windows AMD64\r\nggml_cuda_init: found 1 CUDA devices:\r\n  Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes\r\nload_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll\r\nload_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll\r\nload_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll\r\nsrv   operator (): audio pipeline: whisper model source=local path=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__whisper-large-v3-turbo-GGML\\whisper-large-v3-turbo-GGML.bin\r\nload_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll\r\nload_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll\r\nload_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll\r\noutput_json: saving output to 'C:\\Users\\Sasha\\AppData\\Local\\Temp\\engine_audio_1790691684028_42e7\\whisper_transcript.json'\r\n"
+ }
+}

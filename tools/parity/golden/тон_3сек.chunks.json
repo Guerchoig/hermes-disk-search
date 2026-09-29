@@ -1,0 +1,13 @@
+{
+ "file": "тон_3сек.wav",
+ "kind": "media",
+ "cut": 0,
+ "chunks": [
+  {
+   "text": "Медиафайл: тон_3сек.wav\ncodec_name=pcm_s16le\nduration=3.000000",
+   "page": null,
+   "t_start": null,
+   "t_end": null
+  }
+ ]
+}

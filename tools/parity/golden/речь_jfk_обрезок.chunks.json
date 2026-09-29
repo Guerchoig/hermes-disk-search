@@ -1,0 +1,19 @@
+{
+ "file": "речь_jfk_обрезок.wav",
+ "kind": "media",
+ "cut": 0,
+ "chunks": [
+  {
+   "text": "Медиафайл: речь_jfk_обрезок.wav\ncodec_name=pcm_s16le\nduration=4.000000",
+   "page": null,
+   "t_start": null,
+   "t_end": null
+  },
+  {
+   "text": "And so, my fellow Americans, ask...",
+   "page": null,
+   "t_start": 0.0,
+   "t_end": 4.0
+  }
+ ]
+}

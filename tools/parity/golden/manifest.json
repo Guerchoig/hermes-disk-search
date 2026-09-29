@@ -1,0 +1,183 @@
+{
+ "generated": "2026-09-29 16:44:57",
+ "python": "3.14.6",
+ "sqlite_vec": "0.1.9",
+ "pymorphy3": "2.0.6",
+ "lemmatizer_available": true,
+ "chunk": {
+  "size": 800,
+  "overlap": 120
+ },
+ "max_chunks": 3000,
+ "vector_max_chunks": 1000,
+ "content_hash": {
+  "algo": "blake2b",
+  "digest_size": 16,
+  "head_bytes": 262144,
+  "input": "str(size) + head[0:262144] + tail[-262144:]"
+ },
+ "vector_search_available": true,
+ "embeddings_error": "",
+ "embeddings": {
+  "base_url": "http://127.0.0.1:8011/v1",
+  "model": "text-embedding-bge-m3",
+  "dim": 1024
+ },
+ "transcribe": true,
+ "clip": false,
+ "ocr": true,
+ "queries": [
+  "Работа с документооборотом согласование договоров",
+  "Настройки отчёта пороговые суммы",
+  "Техническое задание интеграция ERP",
+  "Акт сверки взаиморасчетов",
+  "Комплектующие контроллер склада",
+  "Обрезка реестра МАРКЕР-ГЛУБОКО",
+  "Журнал обработки ошибок САЙРА-МАРКЕР",
+  "Скан договора подряда Спринт",
+  "Накладная дата склад",
+  "многоуровневые заголовки архив согласования"
+ ],
+ "files": {
+  "акты_сверки_многостраничный.pdf": {
+   "kind": "pdf",
+   "size": 6746,
+   "content_hash": "a65dc1d60be38fc89c17ffe32e9d7fcd",
+   "n_segments": 6,
+   "n_chunks": 6,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "большой_реестр.csv": {
+   "kind": "text",
+   "size": 8803358,
+   "content_hash": "c2d7c5c9f7ebfa87a039e4a8cbf0e3d7",
+   "n_segments": 1,
+   "n_chunks": 3000,
+   "cut": 3778,
+   "error": "",
+   "vectorized": false
+  },
+  "видео_заставка_2сек.mp4": {
+   "kind": "media",
+   "size": 11989,
+   "content_hash": "718648f629ef9ea333ecf29ea444b49f",
+   "n_segments": 2,
+   "n_chunks": 1,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "журнал_обработки.log": {
+   "kind": "text",
+   "size": 3605040,
+   "content_hash": "79b45a565a7a8cc4cfed3dc788c49a8e",
+   "n_segments": 1,
+   "n_chunks": 3000,
+   "cut": 436,
+   "error": "",
+   "vectorized": false
+  },
+  "записка_ртк_полная.docx": {
+   "kind": "docx",
+   "size": 35986,
+   "content_hash": "3559a17b2b3eed9c1ecf0485f878872d",
+   "n_segments": 4,
+   "n_chunks": 3,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "инструкция_документооборот.md": {
+   "kind": "text",
+   "size": 973,
+   "content_hash": "ee26de2a0cf997e280d199972ece7530",
+   "n_segments": 3,
+   "n_chunks": 3,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "накладная_с_exif.jpg": {
+   "kind": "image",
+   "size": 9043,
+   "content_hash": "eec1c0ba944e27ce707e0df542f3466b",
+   "n_segments": 1,
+   "n_chunks": 1,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "презентация_цс_с_таблицей.pptx": {
+   "kind": "pptx",
+   "size": 29671,
+   "content_hash": "15125b724bc1daf479ff59ce6c5b05dd",
+   "n_segments": 2,
+   "n_chunks": 2,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "реестр_систем_полный.xlsx": {
+   "kind": "xlsx",
+   "size": 111076,
+   "content_hash": "ce0bd7ac4c1fa4697074dfea1eb92dc1",
+   "n_segments": 3,
+   "n_chunks": 332,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "речь_jfk_обрезок.wav": {
+   "kind": "media",
+   "size": 128078,
+   "content_hash": "e189bfbd291df0b81c4a6ca3343b58a0",
+   "n_segments": 2,
+   "n_chunks": 2,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "речь_русская_обрезок.wav": {
+   "kind": "media",
+   "size": 160078,
+   "content_hash": "32019f55e4aa75c3cfb1addc3068fff3",
+   "n_segments": 2,
+   "n_chunks": 2,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "скан_договора_без_текста.pdf": {
+   "kind": "pdf",
+   "size": 2404059,
+   "content_hash": "441c9017ee962049bd1034ba60fbbf80",
+   "n_segments": 2,
+   "n_chunks": 2,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "тон_3сек.wav": {
+   "kind": "media",
+   "size": 96078,
+   "content_hash": "c591ab9c574fb60809338f1b1ab59d95",
+   "n_segments": 1,
+   "n_chunks": 1,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
+  "цветы_без_exif.jpg": {
+   "kind": "image",
+   "size": 8013,
+   "content_hash": "beb0be2b539037f9871dfab85d050ccf",
+   "n_segments": 1,
+   "n_chunks": 1,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  }
+ }
+}

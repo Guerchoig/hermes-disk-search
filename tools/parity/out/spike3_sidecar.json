@@ -1,0 +1,134 @@
+{
+ "variant": "A (python-build-standalone + site-packages, без bootloader)",
+ "venv_python": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\sidecar_a\\venv\\Scripts\\python.exe",
+ "sizes_mb": {
+  "python_dir": 120.9,
+  "venv": 100.5,
+  "total": 221.4
+ },
+ "probe": {
+  "cold_start_sec": 0.22,
+  "hello": {
+   "protocol": 1,
+   "python": "3.12.14",
+   "capabilities": [
+    "text",
+    "pdf",
+    "docx",
+    "xlsx",
+    "pptx",
+    "ocr",
+    "normalize"
+   ],
+   "pid": 23496
+  },
+  "rss_after_hello": {
+   "ws_priv_mb": 34.5,
+   "commit_mb": 37.5,
+   "tree": [
+    {
+     "pid": 5652,
+     "name": "python#4",
+     "ws_priv_mb": 0.5,
+     "commit_mb": 0.8
+    },
+    {
+     "pid": 23496,
+     "name": "python#5",
+     "ws_priv_mb": 34,
+     "commit_mb": 36.7
+    }
+   ]
+  },
+  "extracts": [
+   {
+    "file": "отчет_цс.pdf",
+    "kind": "pdf",
+    "segments": 1,
+    "worker_ms": 86.6,
+    "wall_sec": 0.09,
+    "text_head": "····· ·· ······· ········ ·····, 2025\n············· 1·:··············· ······ 2."
+   },
+   {
+    "file": "записка_ртк.docx",
+    "kind": "docx",
+    "segments": 1,
+    "worker_ms": 322.5,
+    "wall_sec": 0.32,
+    "text_head": "На этапе предпроектного обследования было принято решение использовать 1С:Докуме"
+   },
+   {
+    "file": "реестр_систем.xlsx",
+    "kind": "xlsx",
+    "segments": 1,
+    "worker_ms": 456.2,
+    "wall_sec": 0.46,
+    "text_head": "Лист: Системы\nПроект | Система | Статус\nИРИС | 1С:Документооборот | внедрен\nРТК "
+   },
+   {
+    "file": "презентация_цс.pptx",
+    "kind": "pptx",
+    "segments": 1,
+    "worker_ms": 358.0,
+    "wall_sec": 0.36,
+    "text_head": "Презентация проекта ЦС\nВ проекте ЦС (Цифровой склад) использовался 1С:Документоо"
+   },
+   {
+    "file": "проект_ирис.txt",
+    "kind": "text",
+    "segments": 1,
+    "worker_ms": 1.0,
+    "wall_sec": 0.0,
+    "text_head": "Проект ИРИС (2024 год).\r\nВ проекте ИРИС для Газпром нефтехим Салават использовал"
+   }
+  ],
+  "rss_after_extracts": {
+   "ws_priv_mb": 72.7,
+   "commit_mb": 89.6,
+   "tree": [
+    {
+     "pid": 5652,
+     "name": "python#4",
+     "ws_priv_mb": 0.5,
+     "commit_mb": 0.8
+    },
+    {
+     "pid": 23496,
+     "name": "python#5",
+     "ws_priv_mb": 72.2,
+     "commit_mb": 88.8
+    }
+   ]
+  },
+  "exit_on_stdin_close": {
+   "ok": true,
+   "sec": 0.08,
+   "code": 0
+  },
+  "stderr_tail": "warning: The `fitz` API is deprecated and will be removed in future. Use `import pymupdf` instead.\r\n"
+ },
+ "defender": {
+  "mpcmd": "C:\\Program Files\\Windows Defender\\MpCmdRun.exe",
+  "exists": true,
+  "scans": [
+   {
+    "path": "tools\\parity\\out\\sidecar_a\\venv\\Scripts\\python.exe",
+    "rc": 2,
+    "sec": 0.0,
+    "output_tail": "CmdTool: Failed with hr = 0x80004005. Check C:\\Users\\Sasha\\AppData\\Local\\Temp\\MpCmdRun.log for more information"
+   },
+   {
+    "path": "tools\\parity\\spike3_worker.py",
+    "rc": 2,
+    "sec": 0.0,
+    "output_tail": "CmdTool: Failed with hr = 0x80004005. Check C:\\Users\\Sasha\\AppData\\Local\\Temp\\MpCmdRun.log for more information"
+   },
+   {
+    "path": "tools\\parity\\out\\sidecar_a\\venv\\Lib\\site-packages\\pymorphy3",
+    "rc": 2,
+    "sec": 0.0,
+    "output_tail": "CmdTool: Failed with hr = 0x80004005. Check C:\\Users\\Sasha\\AppData\\Local\\Temp\\MpCmdRun.log for more information"
+   }
+  ]
+ }
+}

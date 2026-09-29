@@ -1,0 +1,32 @@
+{
+ "generated": "2026-09-29 17:53:09",
+ "models": {
+  "vision": {
+   "path": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\clip_onnx\\vision\\clip_vision.onnx",
+   "sec": 10.1,
+   "mb": 335.3
+  },
+  "text": {
+   "path": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\clip_onnx\\text\\clip_text_xlmr.onnx",
+   "sec": 7.0,
+   "mb": 514.1
+  }
+ },
+ "vision_preprocess": "sentence-transformers CLIPImageProcessor",
+ "vision_model_id": "sentence-transformers/clip-ViT-B-32",
+ "vision": {
+  "n": 2,
+  "cos_min": 1.0,
+  "cos_mean": 1.0
+ },
+ "text": {
+  "n": 10,
+  "cos_min": 1.0,
+  "cos_mean": 1.0
+ },
+ "shapes": {
+  "vision_out": "['MatMulimage_embeds_dim_0', 512]",
+  "text_out": "['LayerNormalizationlast_hidden_state_dim_0', 'LayerNormalizationlast_hidden_state_dim_1', 768]"
+ },
+ "verdict": "ПАРИТЕТ (cos >= 0,999 оба энкодера)"
+}

@@ -1,0 +1,14 @@
+{
+ "file": "цветы_без_exif.jpg",
+ "kind": "image",
+ "error": "",
+ "segments": [
+  {
+   "text": "Изображение: 480x360 px, формат JPEG\nпапка: fixtures",
+   "page": null,
+   "t_start": null,
+   "t_end": null,
+   "head": null
+  }
+ ]
+}
