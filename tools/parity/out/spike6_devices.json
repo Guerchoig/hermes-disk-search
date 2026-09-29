@@ -1,18 +1,18 @@
 {
- "measured_span_sec": 0.42,
+ "measured_span_sec": 0.38,
  "nvidia_before": {
-  "used_mib": 11186.0,
+  "used_mib": 3767.0,
   "total_mib": 12288.0,
-  "free_mib": 930.0
+  "free_mib": 8349.0
  },
  "nvidia_after": {
-  "used_mib": 11186.0,
+  "used_mib": 3767.0,
   "total_mib": 12288.0,
-  "free_mib": 930.0
+  "free_mib": 8349.0
  },
  "engine": {
   "rc": 0,
-  "raw": "devices_count=2\ndevice index=0 backend=CUDA name=CUDA0 desc=NVIDIA GeForce RTX 3060 type=1 free_mib=11255.0 total_mib=12287.5\ndevice index=1 backend=CPU name=CPU desc=AMD Ryzen 7 5700G with Radeon Graphics          type=0 free_mib=36987.8 total_mib=64935.2",
+  "raw": "devices_count=2\ndevice index=0 backend=CUDA name=CUDA0 desc=NVIDIA GeForce RTX 3060 type=1 free_mib=11255.0 total_mib=12287.5\ndevice index=1 backend=CPU name=CPU desc=AMD Ryzen 7 5700G with Radeon Graphics          type=0 free_mib=39968.5 total_mib=64935.2",
   "devices": [
    {
     "index": 0,
@@ -29,13 +29,13 @@
     "name": "CPU",
     "desc": "AMD Ryzen 7 5700G with Radeon Graphics",
     "type": 0,
-    "free_mib": 36987.8,
+    "free_mib": 39968.5,
     "total_mib": 64935.2
    }
   ]
  },
  "nvidia_free_drift_mib": 0.0,
- "engine_minus_nvidia_mib": 10325.0,
+ "engine_minus_nvidia_mib": 2906.0,
  "total_delta_mib": -0.5,
  "verdict": "метрика free движка НЕ равна реальной свободной VRAM"
 }

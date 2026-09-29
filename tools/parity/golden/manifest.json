@@ -1,5 +1,5 @@
 {
- "generated": "2026-09-29 16:44:57",
+ "generated": "2026-09-29 19:33:19",
  "python": "3.14.6",
  "sqlite_vec": "0.1.9",
  "pymorphy3": "2.0.6",
@@ -42,7 +42,7 @@
   "акты_сверки_многостраничный.pdf": {
    "kind": "pdf",
    "size": 6746,
-   "content_hash": "a65dc1d60be38fc89c17ffe32e9d7fcd",
+   "content_hash": "d62b683f041d904039b78a4fdac93645",
    "n_segments": 6,
    "n_chunks": 6,
    "cut": 0,
@@ -82,7 +82,7 @@
   "записка_ртк_полная.docx": {
    "kind": "docx",
    "size": 35986,
-   "content_hash": "3559a17b2b3eed9c1ecf0485f878872d",
+   "content_hash": "70262d757d036e6fd24297f5e5e5259d",
    "n_segments": 4,
    "n_chunks": 3,
    "cut": 0,
@@ -109,10 +109,20 @@
    "error": "",
    "vectorized": true
   },
+  "план_проекта_копия.mpp": {
+   "kind": "mpp",
+   "size": 421888,
+   "content_hash": "f2a2ac016af4c4a1937d78789d59e997",
+   "n_segments": 1,
+   "n_chunks": 4,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
   "презентация_цс_с_таблицей.pptx": {
    "kind": "pptx",
    "size": 29671,
-   "content_hash": "15125b724bc1daf479ff59ce6c5b05dd",
+   "content_hash": "e3978b7fe1956553fe76a6991e59f7b7",
    "n_segments": 2,
    "n_chunks": 2,
    "cut": 0,
@@ -122,7 +132,7 @@
   "реестр_систем_полный.xlsx": {
    "kind": "xlsx",
    "size": 111076,
-   "content_hash": "ce0bd7ac4c1fa4697074dfea1eb92dc1",
+   "content_hash": "96b81b1899f62d466e2b4bfe8978a0c4",
    "n_segments": 3,
    "n_chunks": 332,
    "cut": 0,
@@ -149,10 +159,20 @@
    "error": "",
    "vectorized": true
   },
+  "русская_речь_60сек.wav": {
+   "kind": "media",
+   "size": 1920078,
+   "content_hash": "02af216c8d550a38b27ac19a248ac382",
+   "n_segments": 3,
+   "n_chunks": 3,
+   "cut": 0,
+   "error": "",
+   "vectorized": true
+  },
   "скан_договора_без_текста.pdf": {
    "kind": "pdf",
    "size": 2404059,
-   "content_hash": "441c9017ee962049bd1034ba60fbbf80",
+   "content_hash": "84fc776d704ca4bc890e4f76ad4f8c46",
    "n_segments": 2,
    "n_chunks": 2,
    "cut": 0,

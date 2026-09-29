@@ -278,10 +278,17 @@ def gen_media():
 
 
 def gen_mpp(src):
-    """Копия реального .mpp (генерировать без Java/mpxj нельзя)."""
-    if not src or not os.path.exists(src):
-        print("[skip] .mpp: реальный файл не передан (--mpp-src); ветка mpp "
-              "покрывается реальным деревом (полигон §12.3)")
+    """Копия реального .mpp (генерировать без Java/mpxj нельзя).
+
+    Путь можно задать флагом --mpp-src или переменной HDS_PARITY_MPP; по умолчанию
+    берётся реальный проектный файл, проверенный в W0 (извлечение mpxj даёт задачи
+    с датами и ресурсами).
+    """
+    if not src:
+        src = (r"D:\САША\ИРИС\00 Проекты Ирис\Пресейл\Агротерра"
+               r"\ПГ АгроТерра Согласование договоров v2.mpp")
+    if not os.path.exists(src):
+        print("[skip] .mpp: файл не найден (%s); задайте --mpp-src" % src)
         return None
     dst = os.path.join(FIX, "план_проекта_копия.mpp")
     with open(src, "rb") as a, open(dst, "wb") as b:
@@ -289,16 +296,39 @@ def gen_mpp(src):
     return dst
 
 
+def gen_speech(src):
+    """Обрезок реальной русской речи (60 с) из боевого файла — фикстура для ASR."""
+    import shutil
+
+    if not src:
+        src = (r"D:\НИНА\Documents\uvSC_Projects\Project007"
+               r"\Sound_161124190550_001_001.wav")
+    ffmpeg = shutil.which("ffmpeg")
+    if not os.path.exists(src) or not ffmpeg:
+        print("[skip] русская речь: источник не найден (%s)" % src)
+        return None
+    dst = os.path.join(FIX, "русская_речь_60сек.wav")
+    subprocess.run([ffmpeg, "-y", "-ss", "120", "-t", "60", "-i", src,
+                    "-ar", "16000", "-ac", "1", dst],
+                   capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+    return dst if os.path.exists(dst) else None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--mpp-src", default=os.environ.get("HDS_PARITY_MPP", ""),
                     help="путь к реальному .mpp для копирования в фикстуры")
+    ap.add_argument("--speech-src", default=os.environ.get("HDS_PARITY_SPEECH", ""),
+                    help="путь к реальной русской речи для фикстуры (обрезок 60 с)")
     args = ap.parse_args()
     os.makedirs(FIX, exist_ok=True)
     made = [gen_md(), gen_docx(), gen_xlsx(), gen_pptx(),
             gen_pdf_multipage(), gen_pdf_scan(), gen_big_csv(), gen_big_log()]
     made.extend(gen_images())
     made.extend(gen_media())
+    speech = gen_speech(getattr(args, "speech_src", ""))
+    if speech:
+        made.append(speech)
     mpp = gen_mpp(args.mpp_src)
     if mpp:
         made.append(mpp)

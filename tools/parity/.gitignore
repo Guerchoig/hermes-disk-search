@@ -8,12 +8,11 @@ out/bench/
 out/bench_media/
 out/clip_onnx/
 out/ru_clip/
-out/whisper_ascii/
-out/whisper_out_ascii/
-out/whisper_out_ru/
-out/whisper_cmp_eng_jfk/
-out/whisper_cmp_eng_ru/
+out/ru_clip_out/
+out/whisper_*/
 out/measure.db*
 out/hash_parity.jsonl
 out/lemma_corpus.tsv
 out/engine_probe_*.txt
+out/repro_*.out
+out/repro_*.err

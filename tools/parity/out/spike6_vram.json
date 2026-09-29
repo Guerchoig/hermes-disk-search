@@ -1,0 +1,54 @@
+{
+ "baseline": {
+  "used": 3767.0,
+  "free": 8349.0
+ },
+ "generated": "2026-09-29 19:00:08",
+ "embed": {
+  "label": "embed bge-m3",
+  "rc": 0,
+  "sec": 2.6,
+  "vram_before_used": 3767.0,
+  "vram_after_used": 3767.0,
+  "peak_delta_mib": 0.0,
+  "released_mib": 0.0,
+  "cpu_sec": 4.1,
+  "rss_mb_peak": 955.2,
+  "cpu_ratio": 1.6,
+  "stderr_tail": "6\r\nslot update_slots: id  0 | task 7 | n_tokens = 0, memory_seq_rm [0, end)\r\nslot update_slots: id  0 | task 7 | prompt processing progress, n_tokens = 6, batch.n_tokens = 6, progress = 1.000000\r\nslot update_slots: id  0 | task 7 | prompt done, n_tokens = 6, batch.n_tokens = 6\r\nslot      release: id  0 | task 7 | stop processing: n_tokens = 6, truncated = 0\r\nsrv  update_slots: all slots are idle\r\n",
+  "stdout_tail": "96,-0.006524402182549238,-0.03509943559765816,0.003072848543524742,-0.04174581915140152,-0.0018262391677126288,0.006382566876709461,0.04859307408332825,0.001063880743458867,0.02976599708199501,-0.007451133336871862,0.05884324386715889,0.008489537984132767,-0.009060423821210861,-0.001978345913812518,0.041185833513736725,0.03235777094960213,-0.055240385234355927,-0.03478708490729332,-0.0009398488909937441,-0.01423634123057127,0.014145337045192719,0.003971220459789038,0.014932984486222267,-0.020894186571240425,0.004958402365446091,-0.021939117461442947,0.024543490260839462,0.022228974848985672,-0.002287765732035041,0.020967187359929085,-0.0026358491741120815,0.028251761570572853,0.00010929477866739035,0.016180653125047684,-0.015157157555222511,-0.01741122081875801,0.018455950543284416],\"index\":7,\"object\":\"embedding\"}]}\nembed_summary batches=1 total_items=8 total_ms=154.39 items_per_s=51.82\n"
+ },
+ "chat": {
+  "label": "chat reasoning=off",
+  "rc": 0,
+  "sec": 91.4,
+  "vram_before_used": 3767.0,
+  "vram_after_used": 3767.0,
+  "peak_delta_mib": 0.0,
+  "released_mib": 0.0,
+  "cpu_sec": 493.5,
+  "rss_mb_peak": 7300.4,
+  "cpu_ratio": 5.4,
+  "stderr_tail": "iming: id  0 | task 0 | \r\nprompt eval time =    1353.13 ms /    45 tokens (   30.07 ms per token,    33.26 tokens per second)\r\n       eval time =   60007.86 ms /   288 tokens (  208.36 ms per token,     4.80 tokens per second)\r\n      total time =   61360.99 ms /   333 tokens\r\nslot      release: id  0 | task 0 | stop processing: n_tokens = 332, truncated = 0\r\nsrv  update_slots: all slots are idle\r\n",
+  "stdout_tail": "chat_start model=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__Qwen3.5-9B-GGUF\\Qwen3.5-9B-Q4_K_M.gguf markdown=<none> prompt_chars=136 devices=<default> n_ctx=50000 n_predict=10000 n_parallel=1\nchat_summary load_ms=29674.73 infer_ms=61380.14 total_ms=91054.87 prompt_tokens=45 output_tokens=288 total_tokens=333 prompt_tps=33.26 output_tps=4.80 end_to_end_tps=3.66 eos=1 truncated=0 stop=1 output_chars=6\n",
+  "answer": "",
+  "has_thinking_tags": false
+ },
+ "whisper": {
+  "label": "whisper turbo (GPU, свободная VRAM)",
+  "rc": 0,
+  "sec": 62.0,
+  "vram_before_used": 3767.0,
+  "vram_after_used": 3767.0,
+  "peak_delta_mib": 0.0,
+  "released_mib": 0.0,
+  "cpu_sec": 240.8,
+  "rss_mb_peak": 2087.5,
+  "cpu_ratio": 3.89,
+  "stderr_tail": "e\\ggml-cuda.dll\r\nload_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll\r\nload_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll\r\noutput_json: saving output to 'C:\\Users\\Sasha\\AppData\\Local\\Temp\\engine_audio_1790697709346_9b48\\whisper_transcript.json'\r\n",
+  "stdout_tail": "и идем дальше.\r\n[00:00:39.460 --> 00:00:45.220]   Значит, я надеюсь, те, кто помогли, уже все подтянулись, собственно говоря, да.\r\n[00:00:45.220 --> 00:00:53.240]   Вот вопрос у нас от Фаниля.\r\n[00:00:53.240 --> 00:00:55.840]   Сколько будет длиться вебинар, соответственно, на него отвечаю.\r\n[00:00:55.840 --> 00:00:57.420]   Регламент сегодняшнего занятия.\r\n[00:00:57.420 --> 00:00:59.140]   Говорю вам сразу, чтобы вы все были в курсе.\r\n[00:00:59.480 --> 00:01:00.000]   Значит, по поводу\r\n{\"mode\":\"speech\",\"custom\":\"default\",\"diarization\":{\"enabled\":false},\"output\":{\"path\":\"C:\\\\Users\\\\Sasha\\\\hermes-disk-search\\\\tools\\\\parity\\\\out\\\\whisper_free_vram\\\\clip_300_360.md\",\"format\":\"md\",\"speaker_turns\":false},\"stats\":{\"num_words\":133,\"num_segments\":19,\"source_audio_seconds\":60.73},\"timings_sec\":{\"total\":61.8014352,\"whisper\":61.7902669}}\naudio_summary load_ms=119.82 request_ms=61803.22 status=200\n",
+  "segments": 6,
+  "stats": "\"stats\":{\"num_words\":133,\"num_segments\":19,\"source_audio_seconds\":60.73}",
+  "text": "Значит, я надеюсь, те, кто помогли, уже все подтянулись, собственно говоря, да.\r"
+ }
+}

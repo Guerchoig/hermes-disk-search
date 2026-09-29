@@ -1,0 +1,43 @@
+{
+ "baseline_vram": 3767.0,
+ "whisper_cpu_default": {
+  "label": "whisper по умолчанию",
+  "rc": 0,
+  "sec": 69.9,
+  "vram_base": 3767.0,
+  "vram_peak": 3767.0,
+  "vram_delta": 0.0,
+  "stderr_key_lines": [
+   "ggml_cuda_init: found 1 CUDA devices:",
+   "Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll"
+  ],
+  "summary": "audio_summary load_ms=131.14 request_ms=69692.16 status=200",
+  "stdout_tail": "оворю вам сразу, чтобы вы все были в курсе.\r\n[00:00:59.480 --> 00:01:00.000]   Значит, по поводу\r\n{\"mode\":\"speech\",\"custom\":\"default\",\"diarization\":{\"enabled\":false},\"output\":{\"path\":\"C:\\\\Users\\\\Sasha\\\\hermes-disk-search\\\\tools\\\\parity\\\\out\\\\whisper_gpu_t\\\\clip_300_360.md\",\"format\":\"md\",\"speaker_turns\":false},\"stats\":{\"num_words\":133,\"num_segments\":19,\"source_audio_seconds\":60.73},\"timings_sec\":{\"total\":69.690664,\"whisper\":69.6839025}}\naudio_summary load_ms=131.14 request_ms=69692.16 status=200\n"
+ },
+ "whisper_gpu_device": {
+  "label": "whisper --whisper-gpu-device 0",
+  "rc": 0,
+  "sec": 4.3,
+  "vram_base": 3767.0,
+  "vram_peak": 5790.0,
+  "vram_delta": 2023.0,
+  "stderr_key_lines": [
+   "ggml_cuda_init: found 1 CUDA devices:",
+   "Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll"
+  ],
+  "summary": "audio_summary load_ms=125.15 request_ms=4041.85 status=200",
+  "stdout_tail": " Говорю вам сразу, чтобы вы все были в курсе.\r\n[00:00:59.500 --> 00:01:00.000]   Значит, по поводу\r\n{\"mode\":\"speech\",\"custom\":\"default\",\"diarization\":{\"enabled\":false},\"output\":{\"path\":\"C:\\\\Users\\\\Sasha\\\\hermes-disk-search\\\\tools\\\\parity\\\\out\\\\whisper_gpu_t\\\\clip_300_360.md\",\"format\":\"md\",\"speaker_turns\":false},\"stats\":{\"num_words\":133,\"num_segments\":19,\"source_audio_seconds\":60.73},\"timings_sec\":{\"total\":4.0402637,\"whisper\":4.0324371}}\naudio_summary load_ms=125.15 request_ms=4041.85 status=200\n"
+ }
+}

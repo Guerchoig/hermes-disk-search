@@ -24,7 +24,7 @@ OUT = os.path.join(BASE, "out")
 BENCH = os.path.join(OUT, "bench")
 MEDIA = os.path.join(OUT, "bench_media")
 CFG = os.path.join(OUT, "measure.yaml")
-SAMPLE = os.path.join(BASE, "sample_procs.ps1")
+SAMPLE = os.path.join(BASE, "sample_procs_light.ps1")
 PY = os.path.join(ROOT, ".venv", "Scripts", "python.exe")
 N_FILES = 500
 
@@ -38,6 +38,29 @@ def sh(cmd, timeout=3600, env=None):
             (r.stderr or b"").decode("utf-8", "replace"), r.returncode)
 
 
+def kill_tree(pid):
+    """Убить дерево процессов (роли hds — пары launcher→worker, terminate() мало)."""
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)], capture_output=True)
+
+
+def heartbeat_age():
+    hb = os.path.join(ROOT, "index.heartbeat.json")
+    if not os.path.exists(hb):
+        return None
+    return time.time() - os.path.getmtime(hb)
+
+
+def wait_heartbeat_stale(limit_sec=60):
+    """Ждём, пока чужой/свой heartbeat перестанет блокировать запуск (index_running < 30 с)."""
+    t0 = time.time()
+    while time.time() - t0 < limit_sec:
+        age = heartbeat_age()
+        if age is None or age > 35:
+            return True
+        time.sleep(5)
+    return False
+
+
 def sample_once():
     out, _, rc = sh(["powershell", "-NoProfile", "-File", SAMPLE], timeout=120)
     try:
@@ -47,9 +70,11 @@ def sample_once():
 
 
 class Sampler(threading.Thread):
-    """Сэмплирование процессов и VRAM с заданным интервалом."""
+    """Сэмплирование процессов и VRAM. Интервал 20 с: Win32_PerfFormattedData
+    тяжелый и при частых опросах сам тормозит замеряемую нагрузку (наблюдалось:
+    частота индексации падала с 400 до 2 файлов/мин)."""
 
-    def __init__(self, interval=5):
+    def __init__(self, interval=20):
         super().__init__(daemon=True)
         self.interval = interval
         self.stop_event = threading.Event()
@@ -158,10 +183,15 @@ def make_media():
 
 def run_scenario(name, cmd, env=None, max_sec=3600):
     print("\n=== сценарий %s ===" % name)
-    s = Sampler(interval=5)
+    s = Sampler(interval=20)
     s.start()
-    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=subprocess.PIPE,
-                            stderr=subprocess.STDOUT, env={**os.environ, **(env or {})})
+    # Вывод пишем в ФАЙЛ, а не в PIPE: индексатор печатает много, и невычитываемый
+    # PIPE переполняется (64 КБ) — процесс встаёт на записи (наблюдалось: 34 файла).
+    log_path = os.path.join(OUT, "run_%s.log" % "".join(
+        c if c.isalnum() else "_" for c in name)[:40])
+    log = open(log_path, "w", encoding="utf-8", errors="replace")
+    proc = subprocess.Popen(cmd, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT,
+                            env={**os.environ, **(env or {})})
     t0 = time.time()
     while proc.poll() is None and time.time() - t0 < max_sec:
         time.sleep(2)
@@ -171,11 +201,15 @@ def run_scenario(name, cmd, env=None, max_sec=3600):
             proc.wait(timeout=30)
         except subprocess.TimeoutExpired:
             proc.kill()
-    out = (proc.stdout.read() or b"").decode("utf-8", "replace") if proc.stdout else ""
+    kill_tree(proc.pid)                # дерево, а не только родитель
+    log.close()
+    with open(log_path, encoding="utf-8", errors="replace") as f:
+        out = f.read()
     s.stop()
     res = s.summary()
     res["sec"] = round(time.time() - t0, 1)
     res["exit_code"] = proc.returncode
+    res["log"] = os.path.relpath(log_path, ROOT)
     res["stdout_tail"] = out[-600:]
     roles = ", ".join("%s ws=%.0f/priv=%.0f" % (k, v["ws_peak"], v["priv_peak"])
                       for k, v in sorted(res["roles"].items()))
@@ -190,13 +224,38 @@ def main():
     results = {"config": CFG, "bench_files": len(os.listdir(BENCH)),
                "media": media}
     env = {"HDS_CONFIG": CFG}
+    # остаток от предыдущей сессии: index.pause ставит НОВЫЕ прогоны на паузу.
+    # Для изолированных замеров убираем его на время и возвращаем в конце.
+    pause = os.path.join(ROOT, "index.pause")
+    pause_bak = pause + ".parity_measure_bak"
+    if os.path.exists(pause):
+        os.replace(pause, pause_bak)
+        results["index_pause_moved"] = True
+    try:
+        run_scenarios(results, media, env)
+    finally:
+        if os.path.exists(pause_bak):
+            os.replace(pause_bak, pause)
+            results["index_pause_restored"] = True
+    with open(os.path.join(OUT, "measure_results.json"), "w", encoding="utf-8") as f:
+        json.dump(results, f, ensure_ascii=False, indent=1)
+    print("\nсохранено: out/measure_results.json")
 
-    # A: простой с работающим watcher'ом (изолированный корень)
+
+def run_scenarios(results, media, env):
+    # B: индексация 500 файлов на пустой изолированной БД (первой — иначе мерить нечего)
+    results["B_index_500"] = run_scenario(
+        "B index 500 файлов",
+        [PY, "-m", "hds.cli", "index", "--roots", BENCH, "--quiet"], env=env)
+
+    # A: простой с работающим watcher'ом (после B indexed — watcher действительно простаивает)
+    wlog = open(os.path.join(OUT, "run_watcher.log"), "w", encoding="utf-8",
+                errors="replace")
     watcher = subprocess.Popen([PY, "-m", "hds.cli", "watch"], cwd=ROOT,
-                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               stdout=wlog, stderr=subprocess.STDOUT,
                                env={**os.environ, **env})
-    time.sleep(25)                       # старт + reconcile
-    s = Sampler(interval=5)
+    time.sleep(30)                       # старт + reconcile (файлы уже в индексе)
+    s = Sampler(interval=20)
     s.start()
     time.sleep(60)                       # простой 60 с (в плане 10 мин — зафиксировано)
     s.stop()
@@ -210,11 +269,10 @@ def main():
         watcher.wait(timeout=20)
     except subprocess.TimeoutExpired:
         watcher.kill()
-
-    # B: индексация 500 файлов
-    results["B_index_500"] = run_scenario(
-        "B index 500 файлов",
-        [PY, "-m", "hds.cli", "index", "--roots", BENCH, "--quiet"], env=env)
+    kill_tree(watcher.pid)
+    wlog.close()
+    print("  heartbeat устарел: %s (возраст %.0f с)"
+          % (wait_heartbeat_stale(), heartbeat_age() or -1))
 
     # C: транскрипция
     if media:

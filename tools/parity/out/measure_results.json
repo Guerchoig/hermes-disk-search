@@ -2,37 +2,154 @@
  "config": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\measure.yaml",
  "bench_files": 500,
  "media": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench_media\\медиа_замер.wav",
- "A_idle_watcher": {
-  "roles": {},
-  "vram_peak_mib": null,
-  "vram_min_mib": null,
-  "samples": 0,
-  "last": null
- },
+ "index_pause_moved": true,
  "B_index_500": {
-  "roles": {},
-  "vram_peak_mib": null,
-  "vram_min_mib": null,
-  "samples": 0,
-  "last": null,
-  "sec": 2.0,
+  "roles": {
+   "index": {
+    "ws_peak": 122.4,
+    "priv_peak": 597,
+    "n": 6
+   },
+   "llama-server": {
+    "ws_peak": 1648.7,
+    "priv_peak": 2106.7,
+    "n": 3
+   }
+  },
+  "vram_peak_mib": 1074,
+  "vram_min_mib": 1072,
+  "samples": 3,
+  "last": {
+   "ts": "20:35:36",
+   "vram_used_mib": 1074,
+   "procs": [
+    {
+     "pid": 19048,
+     "role": "index",
+     "ws_mb": 4.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 31212,
+     "role": "index",
+     "ws_mb": 118.1,
+     "private_mb": 592.6
+    },
+    {
+     "pid": 43936,
+     "role": "llama-server",
+     "ws_mb": 1648.7,
+     "private_mb": 2106.7
+    }
+   ]
+  },
+  "sec": 48.2,
   "exit_code": 0,
-  "stdout_tail": "[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход.\r\n"
+  "log": "tools\\parity\\out\\run_B_index_500_файлов.log",
+  "stdout_tail": "earch\\tools\\parity\\out\\bench\\bench_0496.txt -> indexed(6 чанков) (0.1 с)\n[497] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench\\bench_0497.txt -> indexed(6 чанков) (0.1 с)\n[498] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench\\bench_0498.txt -> indexed(6 чанков) (0.1 с)\n[499] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench\\bench_0499.txt -> indexed(6 чанков) (0.1 с)\n[500] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench\\bench_0500.pptx -> indexed(1 чанков) (0.0 с)\n⏱ 00:00:47 | просмотрено 500 | обработано 500 | ошибок 0 | 637 файлов/мин\n[done] {'indexed': 500}\n"
+ },
+ "A_idle_watcher": {
+  "roles": {
+   "watch": {
+    "ws_peak": 46.4,
+    "priv_peak": 517.6,
+    "n": 6
+   },
+   "llama-server": {
+    "ws_peak": 1648.7,
+    "priv_peak": 2106.7,
+    "n": 3
+   }
+  },
+  "vram_peak_mib": 1074,
+  "vram_min_mib": 1074,
+  "samples": 3,
+  "last": {
+   "ts": "20:36:54",
+   "vram_used_mib": 1074,
+   "procs": [
+    {
+     "pid": 12184,
+     "role": "watch",
+     "ws_mb": 4.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 42080,
+     "role": "watch",
+     "ws_mb": 46.4,
+     "private_mb": 517.5
+    },
+    {
+     "pid": 43936,
+     "role": "llama-server",
+     "ws_mb": 1648.7,
+     "private_mb": 2106.7
+    }
+   ]
+  }
  },
  "C_transcribe": {
-  "roles": {},
-  "vram_peak_mib": null,
-  "vram_min_mib": null,
-  "samples": 0,
-  "last": null,
-  "sec": 2.0,
-  "exit_code": 0,
-  "stdout_tail": "[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход.\r\n"
+  "roles": {
+   "index": {
+    "ws_peak": 71.9,
+    "priv_peak": 543.1,
+    "n": 2
+   },
+   "llama-server": {
+    "ws_peak": 1648.7,
+    "priv_peak": 2106.7,
+    "n": 1
+   }
+  },
+  "vram_peak_mib": 1074,
+  "vram_min_mib": 1074,
+  "samples": 1,
+  "last": {
+   "ts": "20:37:13",
+   "vram_used_mib": 1074,
+   "procs": [
+    {
+     "pid": 28744,
+     "role": "index",
+     "ws_mb": 4.6,
+     "private_mb": 0.8
+    },
+    {
+     "pid": 23588,
+     "role": "index",
+     "ws_mb": 71.9,
+     "private_mb": 543.1
+    },
+    {
+     "pid": 43936,
+     "role": "llama-server",
+     "ws_mb": 1648.7,
+     "private_mb": 2106.7
+    }
+   ]
+  },
+  "sec": 18.2,
+  "exit_code": 3221226505,
+  "log": "tools\\parity\\out\\run_C_транскрипция_30_с_аудио.log",
+  "stdout_tail": "arch\\tools\\parity\\out\\bench_media\n[scan] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench_media\n[..] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench_media\\медиа_замер.wav — извлечение аудио + Whisper-транскрипция (1 МБ), может занять несколько минут...\n[whisper] Загрузка модели из C:\\Users\\Sasha\\hermes-disk-search\\models\\whisper-small (cuda/float16) ...\n[whisper] Модель готова\n[1] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench_media\\медиа_замер.wav -> indexed(2 чанков) (2.4 с)\n⏱ 00:00:02 | просмотрено 1 | обработано 1 | ошибок 0 | 25 файлов/мин\n[done] {'indexed': 1}\n"
  },
  "D_first_search": {
-  "rc": 1,
-  "out_tail": "Ничего не найдено.\r\n",
+  "rc": 0,
+  "out_tail": "зовался 1С:Документооборот для согласования договоров подряда. Архив согласования хранится в базе docob-iris. Дополнительно развернут модуль интеграции с 1С:ERP.\r\n\r\n[5] C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\bench\\bench_0015.txt  (score 0.0302)\r\n    Проект ИРИС (2024 год).\r В проекте ИРИС для Газпром нефтехим Салават использовался 1С:Документооборот для согласования договоров подряда. Архив согласования хранится в базе docob-iris. Дополнительно развернут модуль интеграции с 1С:ERP.\r\n",
   "err_tail": "",
-  "sample_after": null
- }
+  "sample_after": {
+   "ts": "20:37:31",
+   "vram_used_mib": 1074,
+   "procs": [
+    {
+     "pid": 43936,
+     "role": "llama-server",
+     "ws_mb": 1649,
+     "private_mb": 2106.7
+    }
+   ]
+  }
+ },
+ "index_pause_restored": true
 }

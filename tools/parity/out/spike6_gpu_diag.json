@@ -1,0 +1,82 @@
+{
+ "baseline_vram": 3767.0,
+ "chat_gpu": {
+  "label": "chat --n-gpu-layers 99",
+  "rc": 0,
+  "sec": 8.3,
+  "vram_base": 3767.0,
+  "vram_peak": 3767.0,
+  "vram_delta": 0.0,
+  "stderr_key_lines": [
+   "ggml_cuda_init: found 1 CUDA devices:",
+   "Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll",
+   "common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on",
+   "llama_params_fit_impl: no devices with dedicated memory found",
+   "llama_params_fit: successfully fit params to free device memory",
+   "load_tensors: offloading output layer to GPU",
+   "load_tensors: offloading 31 repeating layers to GPU",
+   "load_tensors: offloaded 33/33 layers to GPU"
+  ],
+  "summary": "chat_summary load_ms=5579.60 infer_ms=2427.02 total_ms=8006.62 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=24.80 output_tps=5.05 end_to_end_tps=3.12 eos=1 truncated=0 stop=1 output_chars=14",
+  "stdout_tail": "chat_start model=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__Qwen3.5-9B-GGUF\\Qwen3.5-9B-Q4_K_M.gguf markdown=<none> prompt_chars=4 devices=<default> n_ctx=8192 n_predict=16 n_parallel=1\nchat_summary load_ms=5579.60 infer_ms=2427.02 total_ms=8006.62 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=24.80 output_tps=5.05 end_to_end_tps=3.12 eos=1 truncated=0 stop=1 output_chars=14\n"
+ },
+ "chat_devices": {
+  "label": "chat --devices CUDA0 --n-gpu-layers 99",
+  "rc": 0,
+  "sec": 2.9,
+  "vram_base": 3767.0,
+  "vram_peak": 8674.0,
+  "vram_delta": 4907.0,
+  "stderr_key_lines": [
+   "ggml_cuda_init: found 1 CUDA devices:",
+   "Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll",
+   "common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on",
+   "llama_params_fit_impl: projected to use 6120 MiB of device memory vs. 11203 MiB of free device memory",
+   "llama_params_fit_impl: will leave 5082 >= 1024 MiB of free device memory, no changes needed",
+   "llama_params_fit: successfully fit params to free device memory",
+   "llama_model_load_from_file_impl: using device CUDA0 (NVIDIA GeForce RTX 3060) (0000:01:00.0) - 11255 MiB free",
+   "load_tensors: offloading output layer to GPU",
+   "load_tensors: offloading 31 repeating layers to GPU",
+   "load_tensors: offloaded 33/33 layers to GPU",
+   "load_tensors:        CUDA0 model buffer size =  4812.25 MiB",
+   "llama_context:  CUDA_Host  output buffer size =     0.95 MiB",
+   "llama_kv_cache:      CUDA0 KV buffer size =   256.00 MiB",
+   "llama_memory_recurrent:      CUDA0 RS buffer size =    50.25 MiB",
+   "sched_reserve:      CUDA0 compute buffer size =  1002.00 MiB",
+   "sched_reserve:  CUDA_Host compute buffer size =    64.04 MiB"
+  ],
+  "summary": "chat_summary load_ms=2430.69 infer_ms=276.92 total_ms=2707.61 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=185.71 output_tps=47.38 end_to_end_tps=9.23 eos=1 truncated=0 stop=1 output_chars=14",
+  "stdout_tail": "chat_start model=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__Qwen3.5-9B-GGUF\\Qwen3.5-9B-Q4_K_M.gguf markdown=<none> prompt_chars=4 devices=CUDA0 n_ctx=8192 n_predict=16 n_parallel=1\nchat_summary load_ms=2430.69 infer_ms=276.92 total_ms=2707.61 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=185.71 output_tps=47.38 end_to_end_tps=9.23 eos=1 truncated=0 stop=1 output_chars=14\n"
+ },
+ "chat_gpu_flag": {
+  "label": "chat --gpu 1 --n-gpu-layers 99",
+  "rc": 0,
+  "sec": 6.3,
+  "vram_base": 3767.0,
+  "vram_peak": 3767.0,
+  "vram_delta": 0.0,
+  "stderr_key_lines": [
+   "ggml_cuda_init: found 1 CUDA devices:",
+   "Device 0: NVIDIA GeForce RTX 3060, compute capability 8.6, VMM: yes",
+   "load_backend: loaded CUDA backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cuda.dll",
+   "load_backend: loaded RPC backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-rpc.dll",
+   "load_backend: loaded CPU backend from C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine\\ggml-cpu-haswell.dll",
+   "common_init_result: fitting params to device memory, for bugs during this step try to reproduce them with -fit off, or provide --verbose logs if the bug only occurs with -fit on",
+   "llama_params_fit_impl: projected to use 0 MiB of device memory vs. 39627 MiB of free device memory",
+   "llama_params_fit_impl: will leave 39627 >= 1024 MiB of free device memory, no changes needed",
+   "llama_params_fit: successfully fit params to free device memory",
+   "llama_model_load_from_file_impl: using device CPU (AMD Ryzen 7 5700G with Radeon Graphics         ) (unknown id) - 39789 MiB free",
+   "load_tensors: offloading output layer to GPU",
+   "load_tensors: offloading 31 repeating layers to GPU",
+   "load_tensors: offloaded 33/33 layers to GPU"
+  ],
+  "summary": "chat_summary load_ms=3415.73 infer_ms=2599.33 total_ms=6015.06 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=19.82 output_tps=5.02 end_to_end_tps=4.16 eos=1 truncated=0 stop=1 output_chars=14",
+  "stdout_tail": "chat_start model=C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__Qwen3.5-9B-GGUF\\Qwen3.5-9B-Q4_K_M.gguf markdown=<none> prompt_chars=4 devices=<default> n_ctx=8192 n_predict=16 n_parallel=1\nchat_summary load_ms=3415.73 infer_ms=2599.33 total_ms=6015.06 prompt_tokens=16 output_tokens=9 total_tokens=25 prompt_tps=19.82 output_tps=5.02 end_to_end_tps=4.16 eos=1 truncated=0 stop=1 output_chars=14\n"
+ }
+}
