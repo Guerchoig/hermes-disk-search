@@ -579,6 +579,9 @@ installers/                 # setup.ps1 (Win), install_macos.command (ранта
 
 #### W2. Ядро на Rust (5–7 недель)
 
+> **Детальный план — `PLAN_W2_LLM_HOST.md`** (по итогам W0: R29/R32/R33, паритеты, замеры,
+> ARB-тесты, график по неделям, Definition of Done).
+
 **Задачи**
 
 1. `hds-index`: обход (`walkdir`) с `exclude_dirs`/`exclude_paths` (границы компонентов,
@@ -1096,11 +1099,15 @@ PID-файлах и эвристиках владения:
 ```yaml
 gpu:
   policy: query_priority      # query_priority | indexing_priority | manual
+  devices: "CUDA0"            # ОБЯЗАТЕЛЬНО (R32): без явного устройства движок считает на CPU
+  n_gpu_layers: 99            # 99 = все слои на GPU
+  # vram_source: nvml         # источник истины по свободной VRAM (R29); memory_free движка не использовать
   reserve_mb: 1024            # не выедать под ноль
   evict_idle_sec: 600         # внешний предохранитель к grace движка
   pause_index_on_query: true  # запрос важнее индексации
   priorities: { chat: 100, embedding: 40, rerank: 30, whisper: 20 }
-  # vram_budget_mb: 11000     # опционально; иначе считаем по memory_free
+  # vram_budget_mb: 11000     # опционально; иначе считаем по NVML
+  # external_vram_mb: 0       # вычет на чужих потребителей GPU (например, anonymizer_proxy)
 llm:
   host: 127.0.0.1
   chat:      { model: "shared:chat",      retention: keep,      n_ctx: 32768 }
@@ -2032,3 +2039,8 @@ model_kind:      TEXT | VISION | EMBEDDINGS | RERANK | WHISPER | REALTIME_AUDIO 
   проверена заказчиком из Проводника — «ни на одном объекте угроз не обнаружено». Ложных
   срабатываний нет ⇒ решение §10.5 (вариант A без PyInstaller-bootloader'а) подтверждено
   замером. Ограничение инструмента: этот билд `avp.com` не рекурсирует по папкам.
+* 1.9 (29.09.2026) — подготовлен **детальный план W2**: новый документ `PLAN_W2_LLM_HOST.md`
+  (треки A «llm-host + диспетчер VRAM + фасад» и B «ядро индексации», задачи с оценками,
+  график 5–7 недель, 11 измеримых критериев приёмки на базе harness W0, риски W2-1…W2-6,
+  7 открытых вопросов, Definition of Done). В §8.6.2 добавлены обязательные ключи конфига
+  `gpu.devices`/`gpu.n_gpu_layers` (R32), `vram_source: nvml` (R29) и `external_vram_mb`.
