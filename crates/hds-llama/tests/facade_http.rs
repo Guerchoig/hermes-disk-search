@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use hds_llama::facade::{handle, Backend, ChatRequest, ServerConfig, Usage};
+use hds_llama::facade::{handle, Backend, ChatRequest, ServerConfig, Thinking, Usage};
 use hds_llama::http;
 use serde_json::Value;
 
@@ -18,10 +18,29 @@ use serde_json::Value;
 struct Fake {
     /// Роль, которую «подняли» (для `/props`).
     up: Vec<String>,
+    /// Какие режимы размышлений пришли в `chat` (по вызовам) — этим проверяем,
+    /// что один и тот же инстанс/порт обслуживает и `chat`, и `chat-think`.
+    seen_thinking: std::sync::Mutex<Vec<Thinking>>,
+}
+
+impl Fake {
+    fn new(up: Vec<String>) -> Fake {
+        Fake {
+            up,
+            seen_thinking: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    fn thinking_log(&self) -> Vec<Thinking> {
+        self.seen_thinking.lock().map(|v| v.clone()).unwrap_or_default()
+    }
 }
 
 impl Backend for Fake {
     fn chat(&self, req: &ChatRequest) -> hds_llama::Result<(String, Usage)> {
+        if let Ok(mut seen) = self.seen_thinking.lock() {
+            seen.push(req.thinking);
+        }
         let lt = '\u{3c}';
         let gt = '\u{3e}';
         let text = format!(
@@ -156,9 +175,7 @@ fn get(port: u16, path: &str) -> (u16, String) {
 /// Основные эндпоинты фасада: живой чат, эмбеддинги, реранк, /health, /props, /v1/models.
 #[test]
 fn facade_serves_llama_server_compatible_endpoints() {
-    let backend = Arc::new(Fake {
-        up: vec!["chat".to_string()],
-    });
+    let backend = Arc::new(Fake::new(vec!["chat".to_string()]));
     let (port, stop) = {
         let listener = TcpListener::bind("127.0.0.1:0").expect("порт");
         let p = listener.local_addr().unwrap().port();
@@ -226,6 +243,33 @@ fn facade_serves_llama_server_compatible_endpoints() {
         .unwrap()
         .contains("секрет"));
 
+    // ГЛАВНОЕ для §8.7 основного плана: оба режима обслужил ОДИН инстанс/порт
+    // (роль «chat»), режим берётся из запроса, а не из инстанса: `chat` → off,
+    // `chat-think` → on. Именно поэтому второй чат-инстанс не нужен (в 12 ГБ не влез бы).
+    assert_eq!(
+        backend.thinking_log(),
+        vec![Thinking::Off, Thinking::On],
+        "один и тот же инстанс обязан отдать оба режима по флагам запроса"
+    );
+
+    // и обратное: `enable_thinking: false` (так шлёт MCP) перебивает алиас `chat-think`
+    let (status, body) = post(
+        port,
+        "/v1/chat/completions",
+        r#"{"model":"chat-think","chat_template_kwargs":{"enable_thinking":false},
+            "messages":[{"role":"user","content":"2+2?"}]}"#,
+    );
+    assert_eq!(status, 200, "{body}");
+    let v: Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        v["choices"][0]["message"].get("reasoning_content").is_none(),
+        "MCP (enable_thinking=false) получает ответ без размышлений"
+    );
+    assert_eq!(
+        backend.thinking_log(),
+        vec![Thinking::Off, Thinking::On, Thinking::Off]
+    );
+
     // эмбеддинги и реранк — как у llama-server
     let (status, body) = post(port, "/v1/embeddings", r#"{"input":["a","b"],"model":"embedding"}"#);
     assert_eq!(status, 200, "{body}");
@@ -242,7 +286,7 @@ fn facade_serves_llama_server_compatible_endpoints() {
 /// Ошибки: неизвестный путь (404), пустое/битое тело (400), роль не поднята (503).
 #[test]
 fn facade_reports_errors_with_clear_messages() {
-    let backend = Arc::new(Fake { up: vec![] }); // ни одна роль не поднята
+    let backend = Arc::new(Fake::new(vec![])); // ни одна роль не поднята
     let (port, stop) = start(cfg_for(0), Arc::clone(&backend));
 
     // неизвестный путь
@@ -289,9 +333,7 @@ fn facade_reports_errors_with_clear_messages() {
 #[test]
 #[ignore = "диагностика: запускать с --ignored --nocapture, печатает сырые байты"]
 fn debug_keepalive_raw() {
-    let backend = Arc::new(Fake {
-        up: vec!["chat".to_string()],
-    });
+    let backend = Arc::new(Fake::new(vec!["chat".to_string()]));
     let listener = TcpListener::bind("127.0.0.1:0").expect("порт");
     let port = listener.local_addr().unwrap().port();
     let stop = Arc::new(AtomicBool::new(false));
@@ -339,9 +381,7 @@ fn debug_keepalive_raw() {
 
 #[test]
 fn http_transport_handles_keep_alive_continue_and_chunked() {
-    let backend = Arc::new(Fake {
-        up: vec!["chat".to_string()],
-    });
+    let backend = Arc::new(Fake::new(vec!["chat".to_string()]));
     let listener = TcpListener::bind("127.0.0.1:0").expect("порт");
     let port = listener.local_addr().unwrap().port();
     let stop = Arc::new(AtomicBool::new(false));

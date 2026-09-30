@@ -515,6 +515,24 @@ cargo run -p hds-llama --release --bin chat_probe -- --json tools\parity\out\w2_
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
 ```
 
+**Один инстанс — два режима (требование §8.7 основного плана).** Внешний агент должен
+получать чат **с размышлениями**, а MCP в тот же момент — **без**; у нас это один и тот же
+инстанс `chat`, потому что `reasoning`/`reasoning_budget`/`reasoning_format` — **поля запроса**
+(`struct llama_server_cluster_chat_request`), а не свойство инстанса. Доказательства:
+
+* `bin/chat_probe` прогнал по одному инстансу 4 запроса в разном режиме (`off`, `off`, `on+none`,
+  без флага) — режимы не «залипают» (артефакт `out/w2_chat_contract.json`);
+* живой фасад: на одном порту/инстансе прошли `chat` (thinking off, «4» за 226 мс) и
+  `chat-think` (`reasoning_content` 103 символа) — один прогон `facade_smoke.ps1`;
+* тест-страж `facade_http::facade_serves_llama_server_compatible_endpoints`: три запроса на
+  **один** порт дают журнал режимов `[off, on, off]`, причём третий — это MCP-путь
+  (`chat_template_kwargs.enable_thinking = false`), который перебивает даже алиас `chat-think`.
+
+Почему это важно: второй чат-инстанс (≈8,5 ГБ «модель + KV») в 12 ГБ не влезает, так что
+разделение режимов «по инстансам» было бы невозможно. Оговорка: при `n_parallel = 1`
+одновременные запросы стоят в очереди (стриминга у cluster API нет), но режимы при этом
+не конфликтуют.
+
 ## 8. Состояние и следующий шаг
 
 * Тесты: `cargo test --workspace` — **61 проверка green** (facade_core 10 + facade_http 3 + arbiter 14
