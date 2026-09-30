@@ -3,10 +3,11 @@
 > Дополняет `MIGRATION_PLAN_RUST.md` §4 W2, §8.4–§8.7. Все технические решения из основного
 > плана сохранены; здесь — детализация задач, порядок работ, тесты и приёмка.
 > Основание: факты, полученные в W0 (`tools/parity/SPIKES.md` §1–§14).
-> **Статус на 30.09.2026: работы идут** — закрыты A1, A2, A3, A4 (шаг 1), B1, B2, B3
+> **Статус на 30.09.2026: работы идут** — закрыты A1, A2, A3, A4 (шаги 1–2), B1, B2, B3
 > в ветке `w2-llm-host`; журнал с цифрами и **передача в новый чат** —
 > `tools/parity/W2_REPORT.md` (там же §9: состояние, коммиты, карта кода, команды,
-> открытые вопросы, грабли). Дальше: A4 шаг 2 → A5 → B4 → B6.
+> открытые вопросы, грабли; §7.1 — диспетчер VRAM с живыми прогонами).
+> Дальше: A5 (фасад `:8010–8012`) → A6 (резидентный `llm-host`) → B4 → B6.
 
 ## 1. Что меняется в W2 по итогам W0
 
@@ -189,7 +190,7 @@ embedding — bge-m3, CUDA0; rerank — `-ngl 0` → CPU-роль (как был
 
 ### A4. Диспетчер VRAM (4–5 дней) — ядро ценности W2
 
-🚧 **Шаг 1 выполнен 30.09.2026**: `crates/hds-llama/src/gguf.rs` (метаданные GGUF,
+✅ **Шаг 1 выполнен 30.09.2026**: `crates/hds-llama/src/gguf.rs` (метаданные GGUF,
 ключи по суффиксу — у bge-m3 `bert.*`, у чата `qwen35.*`), `src/budget.rs`
 (оценка «файл + KV + 5 %», вердикт с точными цифрами, без авто-деградации),
 `bin/vram_budget`; калибровка против замера A1 (bge-m3: оценка 636 МиБ против
@@ -198,8 +199,20 @@ embedding — bge-m3, CUDA0; rerank — `-ngl 0` → CPU-роль (как был
 пустой карте; llama-server жил за счёт `--cache-type-k/v q8_0`, а у cluster API
 ручки типа KV нет. Решение за заказчиком: `llm.chat.n_ctx: 16384` (≈9,5 ГБ) или
 замер фактического KV движка. Детали — `tools/parity/W2_REPORT.md` §7.
-Осталось по A4: вытеснение по `gpu.priorities`, `index.pause` при нехватке,
-наблюдаемость в `hdsw llm-host status`.
+
+✅ **Шаг 2 выполнен 30.09.2026**: вытеснение по `gpu.priorities`, `index.pause` при
+нехватке и наблюдаемость. Артефакты: `src/dispatch.rs` (чистые решения `plan_query`/
+`plan_indexing`/`idle_evictions` + `apply` через кластер), `src/pause.rs` (шлюз
+`index.pause`: вложенность, RAII-аренда, **чужую паузу не снимаем**, `read_heartbeat`
+с флагом `paused`), `src/status.rs` + `bin/llm_host_status` (роли/состояния/бюджет/
+«NVML − baseline»/пауза/heartbeat/прогноз, человек + `--json`),
+`bin/llm_host_dispatch` (прогон решения на живом движке: `--apply`, `--budget-mb`
+для A-7, `--kind query|indexing`). Новые ключи `gpu.policy`, `gpu.pause_index_on_query`,
+`gpu.external_vram_mb`, `gpu.vram_source`. Тесты `arbiter`/`pause_gate`/`status_report`
+(14 + 6 + 2), живые прогоны — `W2_REPORT.md` §7.1.
+Осталось по A4 (шаг 3): ретраи/`FAILED` без бесконечного цикла (§8.6.2) и
+автоматизация ARB-сценариев (`arb_scenarios.py`) — после появления резидентного
+`llm-host` (A6).
 
 Бюджет:
 * источник истины — **NVML** (`nvml-wrapper`) на Windows/Linux с NVIDIA: `memory.used/free/total`;

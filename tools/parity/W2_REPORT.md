@@ -330,26 +330,81 @@ cargo test -p hds-llama                                    # включает к
 cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2_a4_budget.json
 ```
 
+### 7.1. A4 (шаг 2) — диспетчер VRAM: вытеснение по приоритетам, `index.pause`, `status`
+
+Что сделано (то, что дальше позовёт резидентный `llm-host` (A5/A6)):
+
+| Модуль | Что внутри |
+|---|---|
+| `config.rs` (`gpu.*`) | `gpu.policy` (`query_priority`/`indexing_priority`/`manual`), `gpu.pause_index_on_query`, `gpu.external_vram_mb`, `gpu.vram_source`; `effective_free_mib()` — `vram_budget_mb` **сужает** замер (ручка критерия A-7), `external_vram_mb` вычитается, `priority_of()` (роль вне списка = 0) |
+| `vram.rs` | `VramSource::parse/as_config_key/is_trusted`: `gpu.vram_source: engine` даёт warning про R29, а не молчаливую подмену |
+| `pause.rs` | `IndexPause`: файл `index.pause` создаётся **пустым** (как UI), счётчик вложенности для нескольких одновременных запросов, RAII-аренда (`PauseLease`), `read_heartbeat` (свежесть 30 с + флаг `paused`, R30), `stop_requested` |
+| `dispatch.rs` | чистые решения `plan_query`/`plan_indexing`/`idle_evictions`/`eviction_order` + исполнение `apply` (кластер + шлюз паузы) |
+| `status.rs` | `StatusReport::build/lines/json`: поля §A4 (`state/retention/active/queued/last_error`), бюджет, «NVML − baseline», пауза/heartbeat, прогноз диспетчера |
+| `bin/llm_host_status` | наблюдаемость: устройства, NVML-бюджет, пауза и heartbeat, роли, **прогноз** «если запрос придёт сейчас», `--json` для UI |
+| `bin/llm_host_dispatch` | прогон решения на живом движке: `--apply` (пауза → выгрузка → загрузка → снятие паузы), `--budget-mb` (сужение бюджета), `--kind query|indexing`, замер NVML до/после |
+
+Правила решений (проверяются `tests/arbiter.rs`, 14 тестов — без движка и GPU):
+
+| Ситуация | Решение |
+|---|---|
+| свободной VRAM хватает | ничего не трогаем (`Fits`), индексные роли не выгружаем |
+| на запрос не хватает | `PauseIndex` → выгрузка `whisper → rerank → embedding` ровно до достатка → `FitsAfterEviction` |
+| не хватает и после вытеснения | `ReportShortage` с цифрами (нужно/свободно/резерв/освобождено/недостаёт) и явной строкой «авто-деградации нет (`llm.model_policy: fixed`)» — `NotEnough` |
+| замера VRAM нет | `Unknown`: не гадаем, вытеснение и пауза не выполняются |
+| `gpu.policy: manual` | только отчёт, никаких автоматических действий |
+| `gpu.policy: indexing_priority` | индексные роли не вытесняем, запрос ждёт |
+| индексации не хватает | первым выгружается резидент (`chat`), index-роли не трогаем (ARB-3) |
+| простой роли | `min(grace роли, gpu.evict_idle_sec)` (ARB-5) |
+| инстанс занят запросом / чужой (`owned = false`) | не вытесняется никогда |
+
+Живые прогоны на этой машине (артефакты — `out/w2_a4_*.json`):
+
+| Прогон | Цифры |
+|---|---|
+| `llm_host_status --json out/w2_a4_status.json` | NVML: занято 8552 / 12288 МиБ, свободно 3562; чат: файл 7112 МиБ, 32 слоя, 4 головы KV, `n_ctx 32768`, KV f16 4096 → **нужно 11564 МиБ** (+резерв 1024); `index.pause` стоит (это пауза **пользователя**, вложенность 0), heartbeat отсутствует; прогноз запроса чата: `not_enough`, недостаёт **9026 МиБ** |
+| `llm_host_dispatch --role chat --json out/w2_a4_dispatch.json` | вердикт `not_enough`, выгрузок 0 (своих инстансов в процессе нет — факт A3), отчёт в лог |
+| `llm_host_dispatch --role chat --budget-mb 3000 --json out/w2_a4_dispatch_budget.json` | cap сузил бюджет: свободно **3000** МиБ → «недостаёт **9588** МиБ»; действия: пауза + обеспечить загрузку + отчёт (критерий A-7) |
+| `llm_host_dispatch --role embedding --kind indexing --apply --json out/w2_a4_indexing.json` | вердикт `fits`: нужно 1660 МиБ (модель+KV 636 + резерв 1024), свободно 3562; пауза не ставится; чужой `index.pause` **не тронут**, NVML-дельта 0 |
+
+**Находка живого прогона (регресс в собственном коде, исправлен):** `resume()` вызывался «на всякий
+случай» после запроса и **удалял `index.pause`, поставленный пользователем** — то есть запрос молча
+возобновлял индексацию, которую остановил человек (§8.6.2 запрещает именно это). Исправление:
+удаляется только файл, **созданный нами** (флаг `ours_created`); вызов `resume()` без активной аренды —
+no-op. Тесты: `resume_without_our_pause_keeps_user_file`, `lease_over_user_pause_keeps_it_until_force`
+(`tests/pause_gate.rs`). Файл `index.pause` на машине восстановлен.
+
+```powershell
+# --- A4 шаг 2: диспетчер VRAM и наблюдаемость ---
+cargo test -p hds-llama --test arbiter --test pause_gate --test status_report   # 14 + 6 + 2
+cargo run -p hds-llama --release --bin llm_host_status -- --json tools\parity\out\w2_a4_status.json
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --budget-mb 3000
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --kind indexing --apply
+```
+
 ## 8. Состояние и следующий шаг
 
-* Тесты: `cargo test --workspace` — **25 проверок green** (chunker 6 + chunker-parity 1
-  + hash 4 + walk 2 + config 2 + gguf 2 + registry 6 + VRAM-калибровка 2), тяжёлые
-  (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–7): `crates/hds-index` (kinds/walk/hash/chunker),
+* Тесты: `cargo test --workspace` — **47 проверок green** (arbiter 14 + pause_gate 6 + chunker 6
+  + chunker-parity 1 + hash 4 + walk 2 + config 2 + gguf 2 + registry 6 + category 2 + VRAM-калибровка 2),
+  тяжёлые (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
+* Артефакты W2 (шаги 1–8): `crates/hds-index` (kinds/walk/hash/chunker),
   `crates/hds-llama` (обвязка движка, `a1_device_probe`, `runtime`/`config`/`registry`,
-  `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget` + `vram_budget`),
+  `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget`/`vram_budget`, **`pause`/`dispatch`/`status`
+  + `llm_host_status`/`llm_host_dispatch`**),
   `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
   `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
   эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
-  `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`).
+  `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`, `w2_a4_status.json`,
+  `w2_a4_dispatch*.json`, `w2_a4_indexing.json`).
 * Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
   R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
   Новый вопрос к заказчику: `llm.chat.n_ctx` при f16-KV (§7) — 32768 не влезает
   в 12 ГБ, нужен либо `16384`, либо замер фактического KV движка.
-* Следующее: **A4 шаг 2** — вытеснение по `gpu.priorities`, `index.pause` при
-  нехватке VRAM, наблюдаемость в `hdsw llm-host status`; **A5** — фасад `:8010–8012`
-  (формат как у llama-server); **B4** — конвейер `process_file` (фазы, атомарный
-  коммит на файл, `clip_for_embedding`, `max_chunks`, прогресс и heartbeat).
+* Следующее: **A5** — фасад `:8010–8012` (формат как у llama-server; `/health`, `/props`,
+  `chat`/`chat-think`, embeddings, rerank), поверх `dispatch`+`pause`+`status` из A4 шага 2;
+  затем **A6** — резидентный `llm-host` (создание инстансов по `registry::plan`, применение
+  решений `dispatch::apply`, подкоманды CLI) и **B4** — конвейер `process_file`.
 
 ## 9. Передача в новый чат (состояние W2 на 30.09.2026)
 
@@ -362,9 +417,11 @@ cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2
 | `7b8c36e` | **A2** `runtime`/`config`/`registry` + `llm_host_plan` | 8 тестов + прогон по боевому `config.yaml` |
 | `efe1168` | **A3** проба кросс-процессной адресации | замер: адресации нет → фасад обязателен (W2-2 закрыт) |
 | `3418ade` | **A4 шаг 1** GGUF-метаданные + бюджет VRAM + `vram_budget` | калибровка bge-m3: 636 МиБ против замера +636 МиБ |
+| `ff130a8` | передача в новый чат (шапка плана, §9, README, STATUS) | — |
+| _(этот коммит)_ | **A4 шаг 2** диспетчер VRAM (`dispatch`/`pause`/`status`) + `llm_host_status`/`llm_host_dispatch` | 14 + 6 + 2 теста; живые прогоны §7.1 (в т.ч. регресс паузы пользователя найден и закрыт); хэш — `git log -1` |
 
-Ветка `w2-llm-host` (5 коммитов), `main` и боевой индекс **не тронуты**,
-Python-версия продолжает работать. `cargo test --workspace` — **25 проверок green**
+Ветка `w2-llm-host` (7 коммитов), `main` и боевой индекс **не тронуты**,
+Python-версия продолжает работать. `cargo test --workspace` — **47 проверок green**
 (+ `#[ignore]`-паритет 50 файлов и сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
 
 ### 9.2. Статус задач W2
@@ -374,7 +431,7 @@ Python-версия продолжает работать. `cargo test --workspa
 | A1 обвязка движка | ✅ | — |
 | A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `hdsw llm-host devices/status` (войдут с CLI, A6/B7) |
 | A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
-| A4 диспетчер VRAM | 🚧 шаг 1/3 | вытеснение по `gpu.priorities`, `index.pause` при нехватке, наблюдаемость/статус |
+| A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев (`arb_scenarios.py`, после A6) |
 | A5 фасад `:8010–8012` | ⏳ | `/health`, `/props`, `chat`/`chat-think` (thinking-маппинг §11.4), embeddings, rerank |
 | A6 значения по умолчанию и совместимость | ⏳ | дефолты конфига, `llm_server.mode`, миграция установки |
 | B1 обход/лимиты/exclude | ✅ | — |
@@ -406,14 +463,18 @@ Python-версия продолжает работать. `cargo test --workspa
 | `crates/hds-llama/src/registry.rs` | `plan`/`plan_strict`, `RolePlan::Ready/Failed`, `PlannedInstance` |
 | `crates/hds-llama/src/gguf.rs` | метаданные GGUF (ключи по суффиксу: `bert.*`, `qwen35.*`) |
 | `crates/hds-llama/src/budget.rs` | `kv_cache_mib`, `estimate_need_mib`, `check_fit`/`Fit` |
-| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget` |
+| `crates/hds-llama/src/pause.rs` | `IndexPause`/`PauseLease` (`index.pause`, вложенность, чужую паузу не снимаем), `read_heartbeat` |
+| `crates/hds-llama/src/dispatch.rs` | арбитр VRAM: `plan_query`/`plan_indexing`/`idle_evictions`, `Action`/`Verdict`/`Plan`, `apply` (кластер) |
+| `crates/hds-llama/src/status.rs` | `StatusReport` (роли/бюджет/пауза/прогноз, `lines` + `json`) |
+| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch` |
+| `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report` |
 | `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды) |
 
 ### 9.4. Команды проверки (copy-paste, из корня репозитория)
 
 ```powershell
 # --- базовые проверки ---
-cargo test --workspace                                # 25 проверок (быстрые)
+cargo test --workspace                                # 47 проверок (быстрые)
 cargo test -p hds-index --test chunker_parity -- --nocapture   # golden 16/16, 6363 чанка
 .\.venv\Scripts\python.exe tools\parity\spike2_hash.py
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 (переснимите эталон)
@@ -425,6 +486,12 @@ cargo run -p hds-llama --release --bin llm_host_plan -- --json tools\parity\out\
 cargo run -p hds-llama --release --bin vram_budget   -- --json tools\parity\out\w2_a4_budget.json
 cargo run -p hds-llama --release --bin a1_device_probe            # 5 вариантов устройства, ~2 мин
 cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # второй процесс: --list
+
+# --- A4 шаг 2: диспетчер VRAM (вытеснение по приоритетам, index.pause, статус) ---
+cargo run -p hds-llama --release --bin llm_host_status  -- --json tools\parity\out\w2_a4_status.json
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat                       # решение без действий
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --budget-mb 3000      # сужение бюджета (A-7)
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --kind indexing --apply
 ```
 
 ### 9.5. Открытые вопросы и решения
@@ -434,8 +501,14 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # вто
 * **Решено и не переоткрывать:** без авто-деградации кванта; llama-server удаляется
   в конце W2; кросс-процессной адресации нет → фасад обязателен; устройство — числовым
   `manual_devices_csv`; cwd движка + вендорские каталоги обязательны; бюджет VRAM — по NVML.
-* **Осталось измерить (A4 шаг 2):** фактический KV чат-модели при загрузке (нужно окно
-  со свободной VRAM) — сравнить с оценкой `vram_budget`.
+* **Осталось измерить (A4 шаг 2 → A6):** фактический KV чат-модели при загрузке —
+  нужен кластерный инстанс и окно со свободной VRAM (на машине занято 8,5 ГБ штатными
+  ролями Python-версии). Замер снимается `llm_host_dispatch --role chat --apply`
+  после создания инстанса в `llm-host`; до этого оценка — f16 (§7.1).
+* **Не переоткрывать после A4 шага 2:** `index.pause` снимает только тот, кто его
+  поставил (`ours_created`) — чужую (пользовательскую) паузу запросы не трогают; занятые
+  запросом и чужие (не наши) инстансы не вытесняются никогда; роль вне `gpu.priorities`
+  получает приоритет 0; при `gpu.policy: manual` диспетчер только сообщает.
 
 ### 9.6. Правило паритета (как проверять новые куски)
 
@@ -467,6 +540,13 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # вто
    бинарные векторы) — нет (см. `tools/parity/.gitignore`).
 7. Тесты, которым нужны модели/диск, обязаны **пропускаться** без них (печатать
    `пропуск: …`), иначе `cargo test` ломается на чужой машине.
+8. **`index.pause` — чужой не снимать.** `resume()` без активной аренды удалял файл,
+   поставленный пользователем (регресс A4 шага 2, пойман живым прогоном). Теперь удаляется
+   только файл, созданный нами (`ours_created`); в `llm-host` пауза берётся через
+   `PauseLease` (RAII), и снимается на `Drop` только своя.
+9. **Прогон с `--apply` меняет состояние машины.** Перед прогоном проверяйте `index.pause`
+   и что выгружается: `llm_host_dispatch` сначала показывает решение, и только `--apply`
+   его выполняет (без флага ничего не трогается).
 
 
 * Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков

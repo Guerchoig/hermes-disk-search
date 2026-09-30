@@ -1,0 +1,58 @@
+{
+  "actions": [
+    "пауза индексации: запрос роли 'chat': нужно 12588 МиБ, свободно 3562 МиБ",
+    "обеспечить загрузку роли 'chat'",
+    "отчёт о нехватке VRAM: не хватает VRAM для роли 'chat': нужно 11564 МиБ (модель+KV) + резерв 1024 = 12588 МиБ, свободно 3562 МиБ, вытеснение освободило 0 МиБ — недостаёт 9026 МиБ. Авто-деградации нет (`llm.model_policy: fixed`): смените модель в UI или уменьшите llm.chat.n_ctx / квант вручную"
+  ],
+  "applied": false,
+  "apply_log": [],
+  "config": "C:\\Users\\Sasha\\hermes-disk-search\\config.yaml",
+  "devices": [
+    {
+      "backend": "CUDA",
+      "bridge_device_index": 0,
+      "description": "NVIDIA GeForce RTX 3060",
+      "device_type": 1,
+      "memory_free": 11801722880,
+      "memory_total": 12884377600,
+      "name": "CUDA0"
+    },
+    {
+      "backend": "CPU",
+      "bridge_device_index": 1,
+      "description": "AMD Ryzen 7 5700G with Radeon Graphics         ",
+      "device_type": 0,
+      "memory_free": 35046887424,
+      "memory_total": 68089540608,
+      "name": "CPU"
+    }
+  ],
+  "file_mib": 7112,
+  "free_mib_before": 3562,
+  "freed_mib": 0,
+  "gpu": {
+    "budget_mb": null,
+    "evict_idle_sec": 600,
+    "external_vram_mb": 0,
+    "policy": "query_priority",
+    "priorities": {
+      "chat": 100,
+      "embedding": 40,
+      "rerank": 30,
+      "whisper": 20
+    },
+    "reserve_mb": 1024
+  },
+  "instances": [],
+  "kind": "query",
+  "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+  "need_mib": 11564,
+  "notes": [
+    "не хватает VRAM для роли 'chat': нужно 11564 МиБ (модель+KV) + резерв 1024 = 12588 МиБ, свободно 3562 МиБ, вытеснение освободило 0 МиБ — недостаёт 9026 МиБ. Авто-деградации нет (`llm.model_policy: fixed`): смените модель в UI или уменьшите llm.chat.n_ctx / квант вручную",
+    "вытеснено всё, что можно (занятые и чужие инстансы не трогаем)"
+  ],
+  "role": "chat",
+  "used_mib_after": 8645,
+  "used_mib_before": 8552,
+  "verdict": "not_enough"
+}

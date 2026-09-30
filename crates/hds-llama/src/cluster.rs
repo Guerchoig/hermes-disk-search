@@ -49,6 +49,9 @@ pub struct Instance {
     pub state: i32,
     pub state_name: String,
     pub retention_mode: i32,
+    /// Grace роли (`load_on_demand_grace_seconds`) — порог автовыгрузки движка;
+    /// нужен диспетчеру VRAM, чтобы не выгружать раньше движка (A4 шаг 2).
+    pub load_on_demand_grace_seconds: i32,
     pub model_kind: i32,
     pub active_request_count: i32,
     pub queued_request_count: i32,
@@ -302,6 +305,7 @@ impl Cluster {
                     state: it.state,
                     state_name: state::name(it.state).to_string(),
                     retention_mode: it.retention_mode,
+                    load_on_demand_grace_seconds: it.load_on_demand_grace_seconds,
                     model_kind: it.model_kind,
                     active_request_count: it.active_request_count,
                     queued_request_count: it.queued_request_count,

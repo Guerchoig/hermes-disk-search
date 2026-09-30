@@ -1,0 +1,124 @@
+{
+  "baseline_used_mib": null,
+  "config": "C:\\Users\\Sasha\\hermes-disk-search\\config.yaml",
+  "devices": [
+    "index=0 backend=CUDA name=CUDA0 free=11255 МиБ total=12288 МиБ",
+    "index=1 backend=CPU name=CPU free=33305 МиБ total=64935 МиБ"
+  ],
+  "dispatcher": {
+    "forecast": [
+      "вердикт not_enough: нужно 12588 МиБ (модель+KV 11564 + резерв 1024), свободно 3562 МиБ, освобождено 0 МиБ",
+      "пауза индексации: запрос роли 'chat': нужно 12588 МиБ, свободно 3562 МиБ",
+      "обеспечить загрузку роли 'chat'",
+      "отчёт о нехватке VRAM: не хватает VRAM для роли 'chat': нужно 11564 МиБ (модель+KV) + резерв 1024 = 12588 МиБ, свободно 3562 МиБ, вытеснение освободило 0 МиБ — недостаёт 9026 МиБ. Авто-деградации нет (`llm.model_policy: fixed`): смените модель в UI или уменьшите llm.chat.n_ctx / квант вручную",
+      "не хватает VRAM для роли 'chat': нужно 11564 МиБ (модель+KV) + резерв 1024 = 12588 МиБ, свободно 3562 МиБ, вытеснение освободило 0 МиБ — недостаёт 9026 МиБ. Авто-деградации нет (`llm.model_policy: fixed`): смените модель в UI или уменьшите llm.chat.n_ctx / квант вручную",
+      "вытеснено всё, что можно (занятые и чужие инстансы не трогаем)"
+    ],
+    "forecast_role": "chat",
+    "last_decision": []
+  },
+  "effective_free_mib": 3562,
+  "engine_dir": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "external_vram_mb": 0,
+  "gpu": {
+    "pause_index_on_query": true,
+    "policy": "query_priority",
+    "priorities": {
+      "chat": 100,
+      "embedding": 40,
+      "rerank": 30,
+      "whisper": 20
+    }
+  },
+  "host": "127.0.0.1",
+  "index": {
+    "heartbeat": null,
+    "pause_file": "C:\\Users\\Sasha\\hermes-disk-search\\index.pause",
+    "paused": true
+  },
+  "mode": "embedded",
+  "model_policy": "fixed",
+  "parallel": 1,
+  "reserve_mib": 1024,
+  "roles": [
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8010/v1",
+      "devices_csv": "0",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+      "model_ready": true,
+      "n_ctx": 32768,
+      "n_gpu_layers": 99,
+      "need_mib": 11564,
+      "notes": [
+        "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)",
+        "chat: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8010,
+      "queued_request_count": 0,
+      "retention": "keep",
+      "role": "chat",
+      "running": false,
+      "state": "—",
+      "state_code": null,
+      "vram_measured_mib": null
+    },
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8011/v1",
+      "devices_csv": "0",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf",
+      "model_ready": true,
+      "n_ctx": 8192,
+      "n_gpu_layers": 99,
+      "need_mib": 636,
+      "notes": [
+        "embedding: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8011,
+      "queued_request_count": 0,
+      "retention": "on_demand",
+      "role": "embedding",
+      "running": false,
+      "state": "—",
+      "state_code": null,
+      "vram_measured_mib": null
+    },
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8012/v1",
+      "devices_csv": "1",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\rerank\\bge-reranker-v2-m3-q8_0.gguf",
+      "model_ready": true,
+      "n_ctx": 8192,
+      "n_gpu_layers": 0,
+      "need_mib": 637,
+      "notes": [
+        "rerank: -ngl 0 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8012,
+      "queued_request_count": 0,
+      "retention": "on_demand",
+      "role": "rerank",
+      "running": false,
+      "state": "—",
+      "state_code": null,
+      "vram_measured_mib": null
+    }
+  ],
+  "runtime_root": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime",
+  "used_by_us_mib": null,
+  "vram": {
+    "free_mib": 3562,
+    "total_mib": 12288,
+    "used_mib": 8552
+  },
+  "vram_budget_mb": null,
+  "vram_source": "nvml",
+  "warnings": [
+    "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)"
+  ]
+}

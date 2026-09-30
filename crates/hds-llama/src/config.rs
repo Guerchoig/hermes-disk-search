@@ -20,6 +20,7 @@ use serde_yaml::Value;
 
 use crate::error::{EngineError, Result};
 use crate::ffi::{model_kind, retention};
+use crate::vram::VramSource;
 
 /// Роли, которые поднимает `llm-host` (порядок важен для логов/`status`).
 pub const ROLES: [&str; 4] = ["chat", "embedding", "rerank", "whisper"];
@@ -54,6 +55,37 @@ impl Mode {
     }
 }
 
+/// `gpu.policy` — как диспетчер реагирует на конкуренцию запроса и индексации
+/// (§8.6.2 основного плана). По умолчанию запрос важнее индексации.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuPolicy {
+    /// Запрос важнее: пауза индексации + выгрузка индексных ролей по приоритетам.
+    QueryPriority,
+    /// Индексация важнее: индексные роли не трогаем, запрос получает отчёт о нехватке.
+    IndexingPriority,
+    /// Ничего не делаем автоматически — только отчёт (ручной режим).
+    Manual,
+}
+
+impl GpuPolicy {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GpuPolicy::QueryPriority => "query_priority",
+            GpuPolicy::IndexingPriority => "indexing_priority",
+            GpuPolicy::Manual => "manual",
+        }
+    }
+
+    /// Разбор значения ключа (неизвестное ⇒ `QueryPriority`, как в §8.6.2).
+    pub fn parse(s: &str) -> GpuPolicy {
+        match s.trim().to_lowercase().as_str() {
+            "indexing_priority" | "indexing-priority" | "index" => GpuPolicy::IndexingPriority,
+            "manual" | "off" | "none" => GpuPolicy::Manual,
+            _ => GpuPolicy::QueryPriority,
+        }
+    }
+}
+
 /// `gpu.*`: бюджет VRAM, устройство и приоритеты вытеснения (§A4).
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
@@ -67,6 +99,15 @@ pub struct GpuConfig {
     pub evict_idle_sec: u64,
     /// Приоритеты вытеснения: chat 100, embedding 40, rerank 30, whisper 20.
     pub priorities: BTreeMap<String, i32>,
+    /// `gpu.policy` (A4 шаг 2): что делать при нехватке VRAM.
+    pub policy: GpuPolicy,
+    /// `gpu.pause_index_on_query` (A4 шаг 2): ставить `index.pause` на время запроса.
+    pub pause_index_on_query: bool,
+    /// `gpu.external_vram_mb`: вычет на чужих потребителей GPU (пока `anonymizer_proxy`
+    /// не переехал на движок — из бюджета не вычитаем, ключ оставлен как ручка).
+    pub external_vram_mb: u64,
+    /// `gpu.vram_source`: источник истины по свободной VRAM (`nvml` по умолчанию).
+    pub vram_source: VramSource,
 }
 
 impl Default for GpuConfig {
@@ -84,7 +125,50 @@ impl Default for GpuConfig {
             vram_budget_mb: None,
             evict_idle_sec: 600, // решение заказчика 29.09.2026
             priorities,
+            policy: GpuPolicy::QueryPriority, // §8.6.2: запрос важнее индексации
+            pause_index_on_query: true,
+            external_vram_mb: 0,
+            vram_source: VramSource::Nvml, // R29: только NVML — источник истины
         }
+    }
+}
+
+impl GpuConfig {
+    /// Свободная VRAM, которой реально можно распоряжаться (A4 шаг 2).
+    ///
+    /// * источник замера — NVML (или, при `gpu.vram_source: engine`, `list_devices` —
+    ///   **недостоверно**, R29);
+    /// * `gpu.vram_budget_mb`, если задан, **сужает** замер (ручка для проверки
+    ///   критерия A-7: «искусственно сузили бюджет → появились точные цифры нехватки»);
+    /// * `gpu.external_vram_mb` вычитается как чужая занятость GPU.
+    ///
+    /// `None` означает «замера нет» — диспетчер не гадает и сообщает об этом.
+    pub fn effective_free_mib(&self, measured_free_mib: Option<u64>) -> Option<u64> {
+        let free = measured_free_mib?;
+        let free = match self.vram_budget_mb {
+            Some(cap) => free.min(cap),
+            None => free,
+        };
+        Some(free.saturating_sub(self.external_vram_mb))
+    }
+
+    /// Приоритет роли для вытеснения: чем меньше число, тем раньше она выгружается.
+    /// Роль, которой нет в `gpu.priorities`, получает 0 (вытесняется первой) —
+    /// так новая роль не сможет незаметно «выдавить» чат.
+    pub fn priority_of(&self, role: &str) -> i32 {
+        self.priorities.get(role).copied().unwrap_or(0)
+    }
+
+    /// Строка о бюджете для `hdsw llm-host status` / логов (точные цифры).
+    pub fn budget_note(&self) -> String {
+        format!(
+            "резерв {} МиБ, вычет на чужих {} МиБ, cap {}",
+            self.reserve_mb,
+            self.external_vram_mb,
+            self.vram_budget_mb
+                .map(|v| format!("{v} МиБ"))
+                .unwrap_or_else(|| "не задан (берём NVML как есть)".to_string())
+        )
     }
 }
 
@@ -198,6 +282,42 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
             if let (Some(name), Some(num)) = (k.as_str(), v.as_i64()) {
                 gpu.priorities.insert(name.to_string(), num as i32);
             }
+        }
+    }
+    // A4 шаг 2: политика диспетчера, пауза индексации, чужой вычет и источник VRAM.
+    if let Some(v) = dig_str(root, "gpu.policy") {
+        let parsed = GpuPolicy::parse(&v);
+        if !["query_priority", "indexing_priority", "manual"].contains(&v.trim().to_lowercase().as_str())
+        {
+            warnings.push(format!(
+                "gpu.policy: неизвестное значение «{v}» — используем {}",
+                parsed.as_str()
+            ));
+        }
+        gpu.policy = parsed;
+    }
+    if let Some(v) = dig_bool(root, "gpu.pause_index_on_query") {
+        gpu.pause_index_on_query = v;
+    }
+    if let Some(v) = dig_i64(root, "gpu.external_vram_mb") {
+        gpu.external_vram_mb = v.max(0) as u64;
+    }
+    if let Some(v) = dig_str(root, "gpu.vram_source") {
+        match VramSource::parse(&v) {
+            Some(src) => {
+                if !src.is_trusted() {
+                    // R29: `memory_free` движка врёт до +7,7 ГБ — предупреждаем явно
+                    warnings.push(
+                        "gpu.vram_source: engine — цифры `list_devices` недостоверны (R29); \
+                         для бюджета VRAM используйте nvml"
+                            .to_string(),
+                    );
+                }
+                gpu.vram_source = src;
+            }
+            None => warnings.push(format!(
+                "gpu.vram_source: неизвестное значение «{v}» — используем nvml (R29)"
+            )),
         }
     }
 

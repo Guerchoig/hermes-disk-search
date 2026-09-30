@@ -64,6 +64,24 @@ llm_server:
     ctx_per_slot: 8192
     extra_args: "-ngl 0"
 
+# GPU и диспетчер VRAM (W2, A4; все ключи необязательные — ниже значения по умолчанию)
+gpu:
+  policy: query_priority     # query_priority | indexing_priority | manual:
+                             #   query     — запрос важнее: индексация встаёт на паузу,
+                             #               индексные роли выгружаются по приоритетам;
+                             #   indexing  — индекс важнее: роли не вытесняем, запрос ждёт;
+                             #   manual    — ничего не делаем сами, только отчёт
+  device_index: 1            # 0 = CPU, 1 = первый GPU (без явного выбора движок уйдёт на CPU, R32)
+  n_gpu_layers: -1           # -1 = все слои на GPU (приоритетнее legacy `-ngl` в extra_args)
+  reserve_mb: 1024           # не выедаем под ноль
+  evict_idle_sec: 600        # внешний предохранитель: простой роли → выгрузка
+  pause_index_on_query: true # ставить index.pause, пока обслуживается запрос
+  # vram_source: nvml        # источник истины по VRAM (R29); `engine` = list_devices, недостоверно
+  # vram_budget_mb: 11000    # опционально: сузить бюджет (диагностика/критерий A-7)
+  # external_vram_mb: 0      # вычет на чужих потребителей GPU (например, anonymizer_proxy)
+  priorities: { chat: 100, embedding: 40, rerank: 30, whisper: 20 }
+                             # меньше число = выгружается раньше; роли вне списка → 0
+
 # MCP-сервер в режиме streamable-http: ОДИН инстанс на машину (клиенты идут
 # по URL). При stdio каждый клиент (Cline, Hermes, ...) поднимает свой процесс.
 mcp_http:

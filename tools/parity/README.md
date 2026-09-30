@@ -52,6 +52,8 @@
 | `crates/hds-llama` (`bin/llm_host_plan`) | A2: сухой прогон плана инстансов по `config.yaml` (роль → модель из общего рантайма, устройство, `n_ctx`/`ngl`/retention) → `out/w2_a2_plan.json` |
 | `crates/hds-llama` (`bin/a3_instance_probe`) | A3: кросс-процессная проверка (`--hold` держит инстанс, `--list`/`--call` из другого процесса) |
 | `crates/hds-llama` (`bin/vram_budget`) | A4 (шаг 1): бюджет VRAM по ролям — метаданные GGUF, KV f16/q8_0, вердикт «влезает/не хватает» → `out/w2_a4_budget.json` |
+| `crates/hds-llama` (`bin/llm_host_status`) | A4 (шаг 2): `hdsw llm-host status` — устройства, NVML-бюджет, роли/состояния, `index.pause`+heartbeat, **прогноз диспетчера**; `--json` (поля для UI) → `out/w2_a4_status.json` |
+| `crates/hds-llama` (`bin/llm_host_dispatch`) | A4 (шаг 2): решение диспетчера на живом движке (`--kind query|indexing`, `--budget-mb` для A-7, `--apply`: пауза → выгрузка по приоритетам → загрузка → снятие паузы) → `out/w2_a4_dispatch*.json` |
 | `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
@@ -84,7 +86,7 @@ cd tools\parity\spikes; cargo test --test spike1_db -- --ignored --nocapture; cd
 .\.venv\Scripts\python.exe tools\parity\golden_queries.py
 
 # --- W2: Rust-ядро (воркспейс `crates/`) ---
-cargo test --workspace                                             # hash 4 + walk 2 + chunker 6 + chunker-parity 1
+cargo test --workspace                                             # 47 проверок (hash/walk/chunker + A2/A4)
 cargo test -p hds-index --test chunker_parity -- --nocapture         # B3: 16 фикстур / 6 363 чанка (golden)
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 на реальных файлах
 .\\.venv\\Scripts\\python.exe tools\\parity\\walk_parity.py --real
@@ -92,6 +94,10 @@ $env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --n
 cargo run -p hds-llama --release --bin a1_device_probe             # устройство/VRAM/скорость (A1)
 cargo run -p hds-llama --release --bin llm_host_plan               # план инстансов по config.yaml (A2)
 cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # A3: два процесса (см. W2_REPORT §6)
+cargo run -p hds-llama --release --bin vram_budget                 # A4-1: бюджет «модель + KV» по ролям
+cargo run -p hds-llama --release --bin llm_host_status             # A4-2: статус (роли, VRAM, пауза, прогноз)
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat            # A4-2: решение диспетчера
+cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --apply    # A4-2: выполнить (пауза/выгрузка/загрузка)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

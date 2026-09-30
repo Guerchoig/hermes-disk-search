@@ -35,3 +35,11 @@ path = "src/bin/a3_instance_probe.rs"
 [[bin]]
 name = "vram_budget"
 path = "src/bin/vram_budget.rs"
+
+[[bin]]
+name = "llm_host_status"
+path = "src/bin/llm_host_status.rs"
+
+[[bin]]
+name = "llm_host_dispatch"
+path = "src/bin/llm_host_dispatch.rs"

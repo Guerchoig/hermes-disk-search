@@ -46,6 +46,37 @@ impl VramSource {
             VramSource::EngineDevices => "engine-list-devices",
         }
     }
+
+    /// Значение ключа конфига `gpu.vram_source` (`nvml` | `engine`).
+    pub fn as_config_key(&self) -> &'static str {
+        match self {
+            VramSource::Nvml => "nvml",
+            VramSource::EngineDevices => "engine",
+        }
+    }
+
+    /// Разбор `gpu.vram_source`. `auto` = NVML (источник истины по умолчанию, R29);
+    /// неизвестное значение ⇒ `None` (вызывающий добавляет warning, но не падает).
+    pub fn parse(s: &str) -> Option<VramSource> {
+        match s.trim().to_lowercase().as_str() {
+            "nvml" | "auto" | "" => Some(VramSource::Nvml),
+            "engine" | "list_devices" | "list-devices" => Some(VramSource::EngineDevices),
+            _ => None,
+        }
+    }
+
+    /// Можно ли доверять цифрам источника: NVML — да (источник истины),
+    /// `memory_free` движка — нет (R29: расхождение до +7,7 ГБ).
+    pub fn is_trusted(&self) -> bool {
+        matches!(self, VramSource::Nvml)
+    }
+}
+
+impl Default for VramSource {
+    /// Дефолт W2 — NVML: движок вводит в заблуждение (R29).
+    fn default() -> Self {
+        VramSource::Nvml
+    }
 }
 
 /// Источник данных о свободной/занятой VRAM.
