@@ -16,3 +16,9 @@ out/lemma_corpus.tsv
 out/engine_probe_*.txt
 out/repro_*.out
 out/repro_*.err
+# W2: тяжёлое/воспроизводимое (в git идут out/walk_parity_synthetic.json и
+# out/hash_vectors.json — маленькие эталоны для быстрых тестов)
+out/walk_parity.json
+out/walk_parity_real.json
+out/walk_tree/
+out/hash_vectors/

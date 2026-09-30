@@ -1,0 +1,24 @@
+# hds-llama — трек A плана W2 (PLAN_W2_LLM_HOST.md §4): обвязка движка
+# openresearchtools/engine (cluster API) через libloading, выбор устройства,
+# бюджет VRAM по NVML, далее — реестр инстансов, арбитр и фасад :8010–8012.
+[package]
+name = "hds-llama"
+description = "Хост LLM/эмбеддингов: cluster API движка, устройства, бюджет VRAM"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+libloading.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+nvml-wrapper.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
+[[bin]]
+name = "a1_device_probe"
+path = "src/bin/a1_device_probe.rs"

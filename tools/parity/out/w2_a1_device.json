@@ -1,0 +1,224 @@
+{
+  "generated": "unix=1790750999",
+  "host": "DESKTOP-N58CSKV",
+  "engine_dir": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "engine_lib": "multi-node-server.dll",
+  "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf",
+  "model_mb": 605,
+  "n_ctx": 8192,
+  "nvml_gpu": "NVIDIA GeForce RTX 3060",
+  "nvml_before": {
+    "total_mib": 12288,
+    "used_mib": 8606,
+    "free_mib": 3508
+  },
+  "devices": [
+    {
+      "bridge_device_index": 0,
+      "device_type": 1,
+      "memory_free": 11801722880,
+      "memory_total": 12884377600,
+      "backend": "CUDA",
+      "name": "CUDA0",
+      "description": "NVIDIA GeForce RTX 3060"
+    },
+    {
+      "bridge_device_index": 1,
+      "device_type": 0,
+      "memory_free": 36098244608,
+      "memory_total": 68089540608,
+      "backend": "CPU",
+      "name": "CPU",
+      "description": "AMD Ryzen 7 5700G with Radeon Graphics         "
+    }
+  ],
+  "engine_memory_free_note": "list_devices: free=11255 МиБ, NVML: free=3508 МиБ, расхождение +7747 МиБ (R29)",
+  "cwd_note": "текущий каталог переключён на каталог движка: C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine (иначе ggml-бэкенды не грузятся)",
+  "variants": [
+    {
+      "label": "none",
+      "manual_devices_csv": null,
+      "allow_cpu": null,
+      "created": true,
+      "instance_id": 1,
+      "error": "",
+      "state": "LOADED",
+      "last_error": "",
+      "nvml_base": {
+        "total_mib": 12288,
+        "used_mib": 8606,
+        "free_mib": 3508
+      },
+      "nvml_peak": {
+        "total_mib": 12288,
+        "used_mib": 9266,
+        "free_mib": 2848
+      },
+      "nvml_after_unload": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "vram_delta_mib": 660,
+      "embed_ok": true,
+      "embed_error": "",
+      "metrics": {
+        "loaded_this_call": 0,
+        "prompt_tokens": 0,
+        "decoded_tokens": 0,
+        "prompt_ms": 0.0,
+        "predicted_ms": 0.0,
+        "request_total_ms": 311.3502,
+        "prompt_tokens_per_second": 0.0,
+        "total_tokens_per_second": 0.0
+      },
+      "load_ms": 2010,
+      "embed_ms": 348,
+      "verdict": "GPU"
+    },
+    {
+      "label": "csv_bridge_index",
+      "manual_devices_csv": "0",
+      "allow_cpu": null,
+      "created": true,
+      "instance_id": 2,
+      "error": "",
+      "state": "LOADED",
+      "last_error": "",
+      "nvml_base": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "nvml_peak": {
+        "total_mib": 12288,
+        "used_mib": 9266,
+        "free_mib": 2848
+      },
+      "nvml_after_unload": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "vram_delta_mib": 636,
+      "embed_ok": true,
+      "embed_error": "",
+      "metrics": {
+        "loaded_this_call": 0,
+        "prompt_tokens": 0,
+        "decoded_tokens": 0,
+        "prompt_ms": 0.0,
+        "predicted_ms": 0.0,
+        "request_total_ms": 215.7262,
+        "prompt_tokens_per_second": 0.0,
+        "total_tokens_per_second": 0.0
+      },
+      "load_ms": 1848,
+      "embed_ms": 253,
+      "verdict": "GPU"
+    },
+    {
+      "label": "csv_bridge_index_plus1",
+      "manual_devices_csv": "1",
+      "allow_cpu": null,
+      "created": true,
+      "instance_id": 3,
+      "error": "",
+      "state": "LOADED",
+      "last_error": "",
+      "nvml_base": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "nvml_peak": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "nvml_after_unload": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "vram_delta_mib": 0,
+      "embed_ok": true,
+      "embed_error": "",
+      "metrics": {
+        "loaded_this_call": 0,
+        "prompt_tokens": 0,
+        "decoded_tokens": 0,
+        "prompt_ms": 0.0,
+        "predicted_ms": 0.0,
+        "request_total_ms": 4221.7111,
+        "prompt_tokens_per_second": 0.0,
+        "total_tokens_per_second": 0.0
+      },
+      "load_ms": 1869,
+      "embed_ms": 4282,
+      "verdict": "CPU"
+    },
+    {
+      "label": "csv_device_name",
+      "manual_devices_csv": "CUDA0",
+      "allow_cpu": null,
+      "created": false,
+      "instance_id": null,
+      "error": "create: движок вернул ошибку (rc=-1): manual device selection is no longer available",
+      "state": "",
+      "last_error": "",
+      "nvml_base": null,
+      "nvml_peak": null,
+      "nvml_after_unload": null,
+      "vram_delta_mib": null,
+      "embed_ok": false,
+      "embed_error": "",
+      "metrics": null,
+      "load_ms": 0,
+      "embed_ms": 0,
+      "verdict": "failed_create"
+    },
+    {
+      "label": "csv_bridge_index_strict",
+      "manual_devices_csv": "0",
+      "allow_cpu": false,
+      "created": true,
+      "instance_id": 4,
+      "error": "",
+      "state": "LOADED",
+      "last_error": "",
+      "nvml_base": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "nvml_peak": {
+        "total_mib": 12288,
+        "used_mib": 9266,
+        "free_mib": 2848
+      },
+      "nvml_after_unload": {
+        "total_mib": 12288,
+        "used_mib": 8630,
+        "free_mib": 3484
+      },
+      "vram_delta_mib": 636,
+      "embed_ok": true,
+      "embed_error": "",
+      "metrics": {
+        "loaded_this_call": 0,
+        "prompt_tokens": 0,
+        "decoded_tokens": 0,
+        "prompt_ms": 0.0,
+        "predicted_ms": 0.0,
+        "request_total_ms": 439.0175,
+        "prompt_tokens_per_second": 0.0,
+        "total_tokens_per_second": 0.0
+      },
+      "load_ms": 1959,
+      "embed_ms": 473,
+      "verdict": "GPU"
+    }
+  ],
+  "conclusion": "рабочий вариант: 'csv_bridge_index' (0); gpu.device_index = 1 (0 = CPU, 1 = первый GPU) -> manual_devices_csv = Some(\"0\"); рост VRAM Some(636) МиБ"
+}

@@ -2,10 +2,13 @@
 
 > **Коротко.** Здесь живёт всё, что нужно, чтобы (а) проверять паритет новой реализации с текущей
 > Python-версией и (б) воспроизводить замеры W0. Журнал результатов с цифрами —
-> `SPIKES.md` (читать первым), детальный план W2 — `../PLAN_W2_LLM_HOST.md`,
+> `SPIKES.md` (читать первым), журнал W2 — `W2_REPORT.md`, детальный план W2 —
+> `../PLAN_W2_LLM_HOST.md`,
 > основной план — `../MIGRATION_PLAN_RUST.MD` (там §4 W0, §10.0 статус платформ, §12/§13 приёмка).
 > Все скрипты запускаются из **корня репозитория** интерпретатором проекта:
 > `.\.venv\Scripts\python.exe <скрипт>` (Windows) / `python3 <скрипт>` (macOS).
+> Rust-проверки — крейты воркспейса `crates/` (`cargo test`, `cargo run -p hds-llama …`).
+
 
 ## 1. Состав каталога
 
@@ -41,6 +44,15 @@
 | `proc_tree.ps1` | память дерева процессов (роли — пары launcher→worker) |
 | `lemma_baseline.py` | корпус лемматизации: 100 000 токенов из боевой БД + эталон pymorphy3 + тайминги |
 
+### W2: инструменты трека A (llm-host) и B (ядро)
+| Файл / крейт | Что делает |
+|---|---|
+| `W2_REPORT.md` | журнал W2 с цифрами: A1 (выбор устройства, NVML, скорость), B1 (обход/лимиты), B2 (`content_hash`) и находки, которых не было в плане |
+| `crates/hds-llama` (`bin/a1_device_probe`) | A1: инстанс пятью способами (`none`, CSV-индекс, индекс+1, имя, `allow_cpu=false`), NVML-пик и скорость → `out/w2_a1_device.json` |
+| `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`) | B1/B2: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа |
+| `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
+| `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
+
 ### Данные
 | Путь | Что это |
 |---|---|
@@ -67,6 +79,13 @@ cd tools\parity\spikes; cargo test --test spike1_db -- --ignored --nocapture; cd
 
 # --- golden по боевой БД (read-only) ---
 .\.venv\Scripts\python.exe tools\parity\golden_queries.py
+
+# --- W2: Rust-ядро (воркспейс `crates/`) ---
+cargo test --workspace                                             # hash 4 + walk 2 (быстрые)
+cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 на реальных файлах
+.\\.venv\\Scripts\\python.exe tools\\parity\\walk_parity.py --real
+$env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --nocapture
+cargo run -p hds-llama --release --bin a1_device_probe             # устройство/VRAM/скорость (A1)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
@@ -100,13 +119,25 @@ cd tools\parity\spikes; cargo test --test spike1_db -- --ignored --nocapture; cd
    золотые файлы поиска «поедут».
 8. **AV**: на машине заказчика Windows Defender выключен, активен Kaspersky (`avp.com`); папки
    CLI не сканирует — папку воркера проверяют из Проводника (`SPIKES.md` §5).
+9. **Движок грузит ggml-бэкенды относительно ТЕКУЩЕГО каталога процесса**: без cwd = каталог
+   движка `list_devices` пуст и инференс уходит на CPU при `n_gpu_layers = -1` (находка A1,
+   `W2_REPORT.md` §1.3). В обвязке — `Engine::activate()`; отдельно: каталог движка
+   **не самодостаточен**, зависимости `avcodec-62.dll` и пр. лежат в `Engine\vendor\ffmpeg\bin`
+   (без них `LoadLibraryExW` даёт код 126).
+10. **Длинные пути (>260)**: Rust (`\\?\`) статит и читает их, Python — нет (`WinError 3`).
+    В паритете такие пути дают `SkippedStat` на стороне Python — это осознанное расхождение
+    (Rust-ядро сможет проиндексировать больше файлов), а не дефект.
+11. **`precheck` сравнивать с оглядкой на волатильность**: эталон `walk_parity.py` переснимайте
+    перед прогоном Rust-теста (как в спайке 2), иначе логи/`index.heartbeat.json` дадут шум.
 
 ## 4. Что читать первым в новом чате
 
 1. `SPIKES.md` — журнал W0: замеры (§1, §14), спайки (§3–§10), риски/находки (§11, §14.7),
    go/no-go (§12), остаток (§13).
-2. `../PLAN_W2_LLM_HOST.md` — план W2: треки A/B, критерии приёмки, график, DoD, приложение
+2. `W2_REPORT.md` — журнал W2: A1 (устройство/VRAM/скорость + находки про cwd движка и
+   вендорские DLL), B1 (паритет обхода 96 318 файлов), B2 (`content_hash` 9 векторов + 50/50).
+3. `../PLAN_W2_LLM_HOST.md` — план W2: треки A/B, критерии приёмки, график, DoD, приложение
    с точными структурами движка (§11).
-3. `../MIGRATION_PLAN_RUST.MD` — §10.0 (статус платформ), §8.6 (диспетчер VRAM), §12–§13
+4. `../MIGRATION_PLAN_RUST.MD` — §10.0 (статус платформ), §8.6 (диспетчер VRAM), §12–§13
    (приёмка и память), риск-регистр (R26–R34).
 

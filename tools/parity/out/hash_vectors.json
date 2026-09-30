@@ -1,0 +1,60 @@
+{
+ "generated": "2026-09-30 09:30:44",
+ "window": 262144,
+ "vectors": [
+  {
+   "name": "bytes_0",
+   "len": 0,
+   "pattern": "i%251",
+   "expected": "1240a4684403b160e6597a653a88f56c"
+  },
+  {
+   "name": "bytes_1",
+   "len": 1,
+   "pattern": "i%251",
+   "expected": "1e8819f8482394ff1dcb603b1d9c1142"
+  },
+  {
+   "name": "bytes_1024",
+   "len": 1024,
+   "pattern": "i%251",
+   "expected": "8426f71bb35a522de902d3b86aedba59"
+  },
+  {
+   "name": "bytes_262143",
+   "len": 262143,
+   "pattern": "i%251",
+   "expected": "71c59257dafd1e24caf5a537dd245b7a"
+  },
+  {
+   "name": "bytes_262144",
+   "len": 262144,
+   "pattern": "i%251",
+   "expected": "709f695e536f25cd2947886fff0aff77"
+  },
+  {
+   "name": "bytes_262145",
+   "len": 262145,
+   "pattern": "i%251",
+   "expected": "4f9cd13544d03380e34eda412d3ca91c"
+  },
+  {
+   "name": "bytes_524287",
+   "len": 524287,
+   "pattern": "i%251",
+   "expected": "700b6f898c19c0ce123ab4f43c36dfe7"
+  },
+  {
+   "name": "bytes_524288",
+   "len": 524288,
+   "pattern": "i%251",
+   "expected": "7f217c5faf7d6c039b956c4f49563af0"
+  },
+  {
+   "name": "bytes_786439",
+   "len": 786439,
+   "pattern": "i%251",
+   "expected": "84f67f6ccd512774b78f084ae9adf516"
+  }
+ ]
+}

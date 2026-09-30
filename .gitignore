@@ -28,6 +28,8 @@ data/
 .idea/
 .vscode/
 
+# Rust (воркспейс `crates/`, спайки W0 `tools/parity/spikes`)
+target/
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
 

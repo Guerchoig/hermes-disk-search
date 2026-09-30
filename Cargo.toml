@@ -1,0 +1,29 @@
+# Воркспейс ядра hermes-disk-search (MIGRATION_PLAN_RUST.md §2.4).
+#
+# Внутри — только боевые крейты (W2 и дальше). Спайки W0
+# (`tools/parity/spikes`) остаются отдельным крейтом вне воркспейса: у них свой
+# Cargo.lock, свои версии крейтов и они не должны тянуть зависимости продукта.
+[workspace]
+resolver = "2"
+members = ["crates/hds-index", "crates/hds-llama"]
+exclude = ["tools/parity/spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+
+[workspace.dependencies]
+blake2 = "0.10"
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+libloading = "0.8"
+walkdir = "2"
+directories = "6"
+nvml-wrapper = "0.13"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }

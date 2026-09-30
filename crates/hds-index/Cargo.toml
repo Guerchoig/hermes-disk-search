@@ -1,0 +1,14 @@
+# hds-index — трек B плана W2 (PLAN_W2_LLM_HOST.md §5): обход/лимиты/exclude,
+# content_hash, далее — чанкер, конвейер process_file, watcher, prune.
+[package]
+name = "hds-index"
+description = "Ядро индексации: обход файлов, исключения, лимиты, content_hash"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+blake2.workspace = true
+hex.workspace = true
+walkdir.workspace = true
+serde_json.workspace = true

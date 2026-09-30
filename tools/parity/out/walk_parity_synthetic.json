@@ -1,0 +1,55 @@
+{
+ "generated": "2026-09-30 10:01:16",
+ "scenarios": [
+  {
+   "name": "synthetic",
+   "roots": [
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree"
+   ],
+   "exclude_dirs": [
+    "node_modules",
+    ".git",
+    "__pycache__"
+   ],
+   "exclude_paths": [
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\backup"
+   ],
+   "limits": {
+    "max_file_mb": 1,
+    "max_media_mb": 2
+   },
+   "files": [
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\big_report.txt",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\.hidden\\secret.txt",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\backup2\\new.txt",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\clip.mp3",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\photo.jpg",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\plan.mpp",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\readme.md",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\report.pdf",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\unknown.xyz",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\video.mp4",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\~$таблица.xlsx",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\схема.docx",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\sub\\backup\\nested.txt",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\sub\\deep\\notes.txt"
+   ],
+   "precheck": {
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\big_report.txt": "SkippedBig",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\.hidden\\secret.txt": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\backup2\\new.txt": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\clip.mp3": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\photo.jpg": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\plan.mpp": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\readme.md": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\report.pdf": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\unknown.xyz": "SkippedType",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\video.mp4": "SkippedBig",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\~$таблица.xlsx": "SkippedType",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\ok\\схема.docx": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\sub\\backup\\nested.txt": "Ok",
+    "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\walk_tree\\sub\\deep\\notes.txt": "Ok"
+   }
+  }
+ ]
+}

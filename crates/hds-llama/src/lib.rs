@@ -1,0 +1,28 @@
+//! `hds-llama` — хост LLM/эмбеддингов (трек A плана W2).
+//!
+//! Состав на текущий момент (шаг A1):
+//! * [`engine_dir`] — поиск каталога движка (конфиг → `%APPDATA%` → рядом с `.exe`);
+//! * [`engine`] — загрузка `multi-node-server.dll` через `libloading`
+//!   с обязательным `SetDllDirectoryW`; резолв экспортов cluster API;
+//! * [`cluster`] — устройства, инстансы (`create/load/unload/remove`),
+//!   `embeddings`/`rerank`/`chat_complete`;
+//! * [`device`] — правила выбора устройства и маппинг `gpu.device_index`;
+//! * [`vram`] — бюджет VRAM по NVML (`VramProbe`, `VramSampler`) и фолбэк.
+//!
+//! Дальше по треку A: A2 реестр инстансов и маппинг `llm_server.*`/`llm.*`/`gpu.*`,
+//! A3 адресация клиентов, A4 диспетчер VRAM, A5 фасад `:8010–8012`.
+
+pub mod cluster;
+pub mod device;
+pub mod engine;
+pub mod engine_dir;
+pub mod error;
+pub mod ffi;
+pub mod vram;
+
+pub use cluster::{ChatOutcome, Cluster, Device, Instance, InstanceSpec, JsonOutcome, Metrics};
+pub use device::{selection_from_config_index, DeviceSelection};
+pub use engine::{ClusterApi, Engine};
+pub use engine_dir::{find_engine_dir, ENGINE_LIB};
+pub use error::{EngineError, Result};
+pub use vram::{NvmlProbe, VramProbe, VramSampler, VramSnapshot, VramSource};

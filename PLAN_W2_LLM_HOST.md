@@ -64,7 +64,8 @@
 2. **Кросс-процессная адресация** — по факту W0 (спайк 6а) DLL грузится, но способ
    «из другого процесса» ещё не проверен: план предусматривает оба варианта
    (внутрипроцессно + локальный RPC), решение фиксируется в задаче A3.
-3. **Обязательный GPU**: все инстансы в W2 создаются с явным `manual_devices_csv`.
+3. **Обязательный GPU**: все инстансы в W2 создаются с явным `manual_devices_csv`
+   (числовой bridge-индекс, см. A1) и `allow_cpu = false`.
 4. **Бюджет VRAM — по NVML**, а не по `memory_free` движка (R29).
 
 ## 4. Трек A. `llm-host` + диспетчер VRAM + фасад (приоритет, 3–4 недели)
@@ -98,6 +99,16 @@
   NVML/скорость. Критерий: GPU-варианты дают рост VRAM и кратное ускорение; выбранный способ
   фиксируется в конфиге как `gpu.device_index`. (В W0 через `example-cli` сработал
   `--devices CUDA0`, а `--gpu 1` — нет; нужно понять, какой индекс ожидает наша обвязка.)
+  ✅ **Выполнено 30.09.2026** (`crates/hds-llama/src/bin/a1_device_probe.rs`,
+  результаты — `tools/parity/W2_REPORT.md` §1, сырой отчёт
+  `tools/parity/out/w2_a1_device.json`): работает `manual_devices_csv="0"` (CUDA0,
+  VRAM +636 МиБ, инференс 253 мс против 4 282 мс на CPU), имя устройства отвергается,
+  `gpu.device_index = 1` → `manual_devices_csv="0"`.
+* **Обязательные требования к процессу (находки A1, без них GPU-путь недостижим):**
+  держать текущим каталог движка (`Engine::activate()`, движок грузит ggml-бэкенды
+  относительно `.`) и добавлять в путь поиска DLL вендорские каталоги
+  (`Engine\vendor\ffmpeg\bin` и пр.) через `AddDllDirectory` — иначе `LoadLibraryExW`
+  падает с кодом 126, `list_devices` пуст и инференс молча уходит на CPU (R32).
 * Ошибки/таймауты: коды возврата + `*_last_error`; у bridge-результатов дополнительно
   проверять `out.ok == 1` и `out.error_json` (документированное правило), запись в
   `data/logs/llm-host.log`.
@@ -108,7 +119,7 @@
 |---|---|---|
 | `llm.chat.model` (`shared:chat` → `models/chat/current.json`) | `model_path`, `name="chat"`, `model_kind=TEXT` | Qwen3.5-9B-Q6_K |
 | `llm.chat.n_ctx` | `n_ctx` | 32768 |
-| `gpu.device_index` (**обязательно**, `0` = CPU, `1` = первый GPU) | `manual_devices_csv` (или `gpu` в bridge-API) | определяется `list_devices()`; **без указания устройства Windows/Linux → CPU-only** (документация движка) |
+| `gpu.device_index` (**обязательно**, `0` = CPU, `1` = первый GPU) | `manual_devices_csv` (**числовой** bridge-индекс; имя не принимается — A1) | определяется `list_devices()`; `0` → CSV с индексом CPU-устройства (не «пусто»: без выбора сборка ушла на GPU — A1); `allow_cpu = false`, чтобы откат на CPU был ошибкой, а не тишиной |
 | `gpu.n_gpu_layers` | `n_gpu_layers` | `-1` = полностью на GPU (дефолт движка) |
 | `llm.chat.retention` | `retention_mode` | `KEEP_LOADED` (1) |
 | `llm.embedding/rerank/whisper.retention` | `retention_mode` + `load_on_demand_grace_seconds` | `LOAD_ON_DEMAND` (2), grace 300 с |
@@ -316,8 +327,13 @@ active_request_count/queued_request_count/last_error/занимаемая VRAM (
 | `gpu.evict_idle_sec` | **600 с — устраивает** (и приоритеты `chat:100, embedding:40, rerank:30, whisper:20` принимаются) |
 
 Осталось выяснить по ходу работ (не блокирует старт):
-1. **Какой индекс устройства ожидает обвязка** (`gpu=<index>` vs `devices="<name>"`) — первый
-   тест A1; в W0 через `example-cli` сработал `--devices CUDA0`, а `--gpu 1` — нет.
+1. ~~**Какой индекс устройства ожидает обвязка**~~ — ✅ **выяснено 30.09.2026 (A1)**:
+   cluster API принимает **числовой** `manual_devices_csv` = bridge-индекс устройства
+   (`"0"` → `CUDA0`, `"1"` → `CPU`); имя (`"CUDA0"`) отвергается с
+   `manual device selection is no longer available`; «без устройства» на проверенной
+   сборке ушло на GPU, а не на CPU, как обещает документация. Детали,
+   цифры VRAM/скорости и требования (cwd движка + вендорские каталоги DLL) —
+   `tools/parity/W2_REPORT.md` §1.
 2. **Кросс-процессная адресация** — тест A3; при неудаче гарантированный путь «клиенты → фасад».
 
 ## 10. Что считается «сделано» (Definition of Done для W2)
