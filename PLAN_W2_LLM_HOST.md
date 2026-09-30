@@ -133,6 +133,11 @@
   `hds-llama::runtime` (порт `hds/llama_runtime.py`: `runtime_dir`, `models_dir`,
   `current_file`, `read_current`, `set_current_chat`, `resolve_model`, `download_chat_model`,
   `chat_models_overview`, `version_file`) и перезагружает инстанс `chat`.
+  ⚠️ **Обязательное требование (SPIKES §14.7):** `shared:<role>` разрешается в **общем рантайме**
+  (`%LOCALAPPDATA%\llama-runtime` / `~/Library/Application Support/llama-runtime`), а не в
+  `<project>/models/<role>` — текущий Python-менеджер именно здесь и падает («GGUF-модель роли
+  'chat' не найдена» при живом файле). В W2 добавить: `hdsw check` печатает «искали здесь / нашли
+  это» по каждой роли и негативный тест «файла нет → понятное сообщение с двумя путями».
 
 
 ### A3. Кросс-процессная адресация и клиенты (3 дня)
