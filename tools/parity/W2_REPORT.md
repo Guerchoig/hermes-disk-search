@@ -140,6 +140,9 @@ cargo run -p hds-llama --release --bin a1_device_probe -- --no-cwd-fix   # во�
 | `synthetic` (собирается скриптом в `out/walk_tree`) | `exclude_dirs` по имени в другом регистре (`NODE_MODULES`), `exclude_paths` по границе компонента (`backup` исключён, `backup2` — нет), `~$`-лок, нетиповой вид, лимит обычного файла и медиа, каталог с исключённым именем на глубине | **14/14** файлов, все решения `precheck` совпали |
 | `real` (боевой `D:\` из `config.yaml`: 2 исключённых префикса + 22 каталога по имени) | реальные имена (кириллица, скобки, «лишние» точки), длинные пути | **96 318/96 318** файлов за **5,2 с** (Python — 5,1 с), решения `precheck` совпали |
 
+Дампы: `out/walk_parity_synthetic.json` (маленький, коммитится — быстрый тест
+доступен всем) и `out/walk_parity_real.json` (тяжёлый, только локально, в git не идёт).
+
 Гейт: сценарий `real` идёт только при `HDS_WALK_PARITY_REAL=1` (обход всего диска
 не нужен в каждом прогоне):
 
@@ -192,20 +195,46 @@ cargo test -p hds-index --test hash_parity -- --nocapture
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50
 ```
 
-## 4. Состояние и следующий шаг
+## 4. B3 — чанкер (`crates/hds-index/src/chunker.rs`)
 
-* Тесты: `cargo test --workspace` — 6 проверок green (hash 4 + walk 2), тяжёлый
-  паритет 50 файлов и сценарий `real` — по флагу/`#[ignore]`.
-* Артефакты A1/B1/B2: `crates/hds-index`, `crates/hds-llama`, `tools/parity/walk_parity.py`,
+Дословный порт `hds/chunker.py`: рекурсивное разбиение «абзац → строка →
+предложение → слово», перекрытие **целыми предложениями**, запрет смешивать
+сегменты с разными `page`/`t_start`/`t_end` и разные секции (`head` идёт в начало
+каждого чанка секции). Ключевая деталь порта: Python считает **символы**
+(`len(str)`), а Rust — байты, поэтому все длины в порте — `chars().count()`
+(смещения срезов при этом байтовые: разделители ASCII, куски те же).
+
+| Проверка | Результат |
+|---|---|
+| Golden-паритет (`tests/chunker_parity.rs`, 16 фикстур) | **16/16 ok, 6 363 чанка** — совпадение пополе (текст/`page`/`t_start`/`t_end`) |
+| Числа манифеста (`n_segments`, `n_chunks`, `cut`) | совпали, включая обрезку `max_chunks=3000`: «большой_реестр» 3000 + cut 3778, «журнал_обработки» 3000 + cut 436 |
+| Крупные фикстуры (`.json.gz`) | читаются тем же тестом (`flate2`), т.е. паритет покрывает и 8,8 МБ csv |
+| Модульные тесты (не требуют golden) | 6 проверок: пустые сегменты, `head` в каждом чанке секции, смена метаданных/секции, перекрытие хвостом, длинное «слово» режется по символам (800/800/400 — поведение Python) |
+
+```powershell
+cargo test -p hds-index --test chunker_parity -- --nocapture   # 16/16, 6363 чанка
+```
+
+Осознанное расхождение (задокументировано в модуле): `\s` в Python-регулярке
+покрывает также `\x1c`–`\x1f` и `\x85`; Rust `char::is_whitespace` их не включает.
+На 16 фикстурах расхождения нет (такие символы в документах не встречаются).
+
+## 5. Состояние и следующий шаг
+
+* Тесты: `cargo test --workspace` — **13 проверок green** (chunker 6 + chunker-parity 1
+  + hash 4 + walk 2), тяжёлые (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
+* Артефакты W2 (шаги 1–4): `crates/hds-index` (kinds/walk/hash/chunker),
+  `crates/hds-llama` (обвязка движка + A1-проба), `tools/parity/walk_parity.py`,
   `tools/parity/hash_vectors.py`, `tools/parity/W2_REPORT.md` (этот файл);
-  сырые отчёты локально — `tools/parity/out/w2_a1_device.json`,
-  `out/walk_parity.json`, `out/hash_vectors.json`, `out/hash_parity.jsonl`
-  (каталог `out/` в git не коммитится, как и в W0).
+  сырые отчёты локально — `out/w2_a1_device.json`, `out/walk_parity*.json`,
+  `out/hash_vectors.json`, `out/hash_parity.jsonl`; в git из `out/` идут только
+  маленькие эталоны (`walk_parity_synthetic.json`, `hash_vectors.json`, `w2_a1_device.json`).
 * Следующее по графику (§6 плана W2): **A2** — реестр инстансов и маппинг
   `llm_server.*`/`llm.*`/`gpu.*` → `instance_params` (с учётом выводов §1.2–1.4),
-  **B3** — чанкер (дословный порт `hds/chunker.py`, паритет по `*.chunks.json`).
+  **B4** — конвейер `process_file` (фазы, атомарный коммит на файл, `clip_for_embedding`,
+  `max_chunks`, прогресс с теми же полями и heartbeat).
 * Открытые вопросы для A2: подтвердить на chat-модели, что `reasoning=off` без
   блоков размышлений работает через cluster-инстанс (в W0 проверялось через
-  bridge-API), и решить, нужен ли `hdsw llm-host` собственный `EngineCwd`-лог.
+  bridge-API), и нужен ли `hdsw llm-host` отдельный лог `EngineCwd`.
 
 

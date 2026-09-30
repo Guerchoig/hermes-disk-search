@@ -12,10 +12,12 @@
 //! * [`walk`] — обход корней с `exclude_dirs`/`exclude_paths`, лимиты размеров,
 //!   `~$`-файлы Office, предварительные проверки файла (`FileFilter`).
 
+pub mod chunker;
 pub mod hash;
 pub mod kinds;
 pub mod walk;
 
+pub use chunker::{make_chunks, Chunk, Segment, DEFAULT_OVERLAP, DEFAULT_SIZE};
 pub use hash::{content_hash, hash_of_parts, HASH_WINDOW};
 pub use kinds::{kind_of, Kind, MEDIA_KINDS};
 pub use walk::{

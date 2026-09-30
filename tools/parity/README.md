@@ -49,7 +49,7 @@
 |---|---|
 | `W2_REPORT.md` | журнал W2 с цифрами: A1 (выбор устройства, NVML, скорость), B1 (обход/лимиты), B2 (`content_hash`) и находки, которых не было в плане |
 | `crates/hds-llama` (`bin/a1_device_probe`) | A1: инстанс пятью способами (`none`, CSV-индекс, индекс+1, имя, `allow_cpu=false`), NVML-пик и скорость → `out/w2_a1_device.json` |
-| `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`) | B1/B2: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа |
+| `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
 
@@ -81,7 +81,8 @@ cd tools\parity\spikes; cargo test --test spike1_db -- --ignored --nocapture; cd
 .\.venv\Scripts\python.exe tools\parity\golden_queries.py
 
 # --- W2: Rust-ядро (воркспейс `crates/`) ---
-cargo test --workspace                                             # hash 4 + walk 2 (быстрые)
+cargo test --workspace                                             # hash 4 + walk 2 + chunker 6 + chunker-parity 1
+cargo test -p hds-index --test chunker_parity -- --nocapture         # B3: 16 фикстур / 6 363 чанка (golden)
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 на реальных файлах
 .\\.venv\\Scripts\\python.exe tools\\parity\\walk_parity.py --real
 $env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --nocapture
