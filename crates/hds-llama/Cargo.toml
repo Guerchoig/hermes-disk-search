@@ -59,3 +59,7 @@ path = "src/bin/chat_probe.rs"
 [[bin]]
 name = "llm_host_facade"
 path = "src/bin/llm_host_facade.rs"
+
+[[bin]]
+name = "llm_host"
+path = "src/bin/llm_host.rs"

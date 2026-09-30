@@ -1,0 +1,147 @@
+{
+  "baseline_used_mib": 2396,
+  "config": "C:\\Users\\Sasha\\hermes-disk-search\\config.yaml",
+  "devices": [
+    "index=0 backend=CUDA name=CUDA0 free=11255 МиБ total=12288 МиБ",
+    "index=1 backend=CPU name=CPU free=19523 МиБ total=64935 МиБ"
+  ],
+  "dispatcher": {
+    "forecast": [],
+    "forecast_role": null,
+    "last_decision": []
+  },
+  "dispatcher_enabled": true,
+  "dispatcher_log": [],
+  "effective_free_mib": 9625,
+  "engine_dir": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "external_vram_mb": 0,
+  "gpu": {
+    "pause_index_on_query": true,
+    "policy": "query_priority",
+    "priorities": {
+      "chat": 100,
+      "embedding": 40,
+      "rerank": 30,
+      "whisper": 20
+    }
+  },
+  "host": "127.0.0.1",
+  "index": {
+    "heartbeat": null,
+    "pause_file": "C:\\Users\\Sasha\\hermes-disk-search\\index.pause",
+    "paused": true
+  },
+  "instances_by_role": [
+    "chat=1",
+    "embedding=2",
+    "rerank=3"
+  ],
+  "lines": [
+    "конфиг: C:\\Users\\Sasha\\hermes-disk-search\\config.yaml | режим llm: embedded | host 127.0.0.1 | parallel 1 | модель: fixed",
+    "диспетчер VRAM: gpu.policy query_priority | пауза индексации при запросе true | приоритеты {\"chat\": 100, \"embedding\": 40, \"rerank\": 30, \"whisper\": 20}",
+    "движок: C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine | рантайм: C:\\Users\\Sasha\\AppData\\Local\\llama-runtime",
+    "устройства: index=0 backend=CUDA name=CUDA0 free=11255 МиБ total=12288 МиБ; index=1 backend=CPU name=CPU free=19523 МиБ total=64935 МиБ",
+    "VRAM (nvml): занято 2489 / всего 12288 МиБ, свободно 9625 МиБ; к использованию 9625 МиБ (резерв 1024, вычет на чужих 0, cap не задан)",
+    "наша занятость (NVML − baseline 2396 МиБ): 93 МиБ",
+    "индексация: пауза ДА (C:\\Users\\Sasha\\hermes-disk-search\\index.pause) | heartbeat: нет данных",
+    "роли (3):",
+    "  chat      port=8010  state=LOADED   retention=keep      n_ctx=32768  devices=1    ngl=0    нужно      0 МиБ модель=C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+    "    ^ chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)",
+    "    ^ chat: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers",
+    "  embedding port=8011  state=UNLOADED retention=on_demand n_ctx=8192   devices=1    ngl=0    нужно      0 МиБ модель=C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf",
+    "    ^ embedding: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers",
+    "  rerank    port=8012  state=UNLOADED retention=on_demand n_ctx=8192   devices=1    ngl=0    нужно      0 МиБ модель=C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\rerank\\bge-reranker-v2-m3-q8_0.gguf",
+    "    ^ rerank: -ngl 0 взят из legacy extra_args; перенесите в gpu.n_gpu_layers",
+    "предупреждения:",
+    "  [warn] chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)"
+  ],
+  "log_file": "C:\\Users\\Sasha\\AppData\\Local\\Temp\\llm-host-smoke.log",
+  "mode": "embedded",
+  "model_policy": "fixed",
+  "parallel": 1,
+  "pid": 49232,
+  "pid_file": "C:\\Users\\Sasha\\AppData\\Local\\Temp\\llm-host-smoke.pid",
+  "reserve_mib": 1024,
+  "roles": [
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8010/v1",
+      "devices_csv": "1",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+      "model_ready": true,
+      "n_ctx": 32768,
+      "n_gpu_layers": 0,
+      "need_mib": 0,
+      "notes": [
+        "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)",
+        "chat: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8010,
+      "queued_request_count": 0,
+      "retention": "keep",
+      "role": "chat",
+      "running": true,
+      "state": "LOADED",
+      "state_code": 2,
+      "vram_measured_mib": null
+    },
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8011/v1",
+      "devices_csv": "1",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf",
+      "model_ready": true,
+      "n_ctx": 8192,
+      "n_gpu_layers": 0,
+      "need_mib": 0,
+      "notes": [
+        "embedding: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8011,
+      "queued_request_count": 0,
+      "retention": "on_demand",
+      "role": "embedding",
+      "running": false,
+      "state": "UNLOADED",
+      "state_code": 0,
+      "vram_measured_mib": null
+    },
+    {
+      "active_request_count": 0,
+      "base_url": "http://127.0.0.1:8012/v1",
+      "devices_csv": "1",
+      "last_error": "",
+      "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\rerank\\bge-reranker-v2-m3-q8_0.gguf",
+      "model_ready": true,
+      "n_ctx": 8192,
+      "n_gpu_layers": 0,
+      "need_mib": 0,
+      "notes": [
+        "rerank: -ngl 0 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8012,
+      "queued_request_count": 0,
+      "retention": "on_demand",
+      "role": "rerank",
+      "running": false,
+      "state": "UNLOADED",
+      "state_code": 0,
+      "vram_measured_mib": null
+    }
+  ],
+  "runtime_root": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime",
+  "uptime_sec": 9,
+  "used_by_us_mib": 93,
+  "vram": {
+    "free_mib": 9625,
+    "total_mib": 12288,
+    "used_mib": 2489
+  },
+  "vram_budget_mb": null,
+  "vram_source": "nvml",
+  "warnings": [
+    "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)"
+  ]
+}

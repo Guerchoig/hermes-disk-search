@@ -62,11 +62,15 @@ impl Response {
         match self.status {
             200 => "OK",
             400 => "Bad Request",
+            403 => "Forbidden",
             404 => "Not Found",
             405 => "Method Not Allowed",
+            409 => "Conflict",
             411 => "Length Required",
             413 => "Payload Too Large",
             500 => "Internal Server Error",
+            501 => "Not Implemented",
+            502 => "Bad Gateway",
             503 => "Service Unavailable",
             _ => "Error",
         }
@@ -276,4 +280,92 @@ fn write_response<W: Write>(w: &mut W, resp: &Response, keep_alive: bool) -> std
     w.write_all(head.as_bytes())?;
     w.write_all(body.as_bytes())?;
     w.flush()
+}
+
+/// Разобрать `http://host:port/path` (`Result` — только `http://`, см. ниже).
+fn split_url(url: &str) -> Result<(String, u16, String)> {
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        EngineError::Other(format!(
+            "поддерживается только http:// (TLS у фасада нет) — получено {url}"
+        ))
+    })?;
+    let (authority, path) = match rest.split_once('/') {
+        Some((a, p)) => (a, format!("/{p}")),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|_| EngineError::Other(format!("не разобран порт в URL: {url}")))?,
+        ),
+        None => (authority.to_string(), 80),
+    };
+    if host.is_empty() {
+        return Err(EngineError::Other(format!("в URL нет хоста: {url}")));
+    }
+    Ok((host, port, path))
+}
+
+/// Мини-клиент HTTP/1.1 (без зависимостей): внутренний CLI (`/internal/*`) и
+/// режим `llm_server.mode: facade`.
+///
+/// Возвращает `(статус, JSON)` — в т.ч. для не-2xx (тело ошибки разбирает
+/// вызывающий: `facade::proxy` отдаёт текст апстрима как есть). `chunked`-ответ
+/// апстрима не поддержан: наши серверы всегда отвечают с `Content-Length`, а
+/// клиенты движка — не наш случай (честная ошибка вместо «пустого JSON»).
+pub fn client_json(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    timeout: Duration,
+) -> Result<(u16, Value)> {
+    use std::io::Read;
+    use std::net::ToSocketAddrs;
+
+    let (host, port, path) = split_url(url)?;
+    let addr = (host.as_str(), port)
+        .to_socket_addrs()
+        .map_err(|e| EngineError::Other(format!("не разобран адрес {host}:{port}: {e}")))?
+        .next()
+        .ok_or_else(|| EngineError::Other(format!("адрес {host}:{port} не разрешился")))?;
+    let mut sock = TcpStream::connect_timeout(&addr, timeout.min(Duration::from_secs(10)))
+        .map_err(|e| EngineError::Other(format!("не подключиться к {host}:{port}: {e}")))?;
+    sock.set_read_timeout(Some(timeout)).ok();
+    sock.set_write_timeout(Some(Duration::from_secs(30))).ok();
+
+    let payload = body.unwrap_or("");
+    let request = format!(
+        "{} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+        method.to_ascii_uppercase(),
+        payload.as_bytes().len()
+    );
+    sock.write_all(request.as_bytes())
+        .map_err(|e| EngineError::Other(format!("не отправить запрос в {url}: {e}")))?;
+    sock.flush().ok();
+
+    let mut buf = Vec::new();
+    sock.read_to_end(&mut buf)
+        .map_err(|e| EngineError::Other(format!("не прочитать ответ {url}: {e}")))?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    let (head, body_text) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let status = head
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| EngineError::Other(format!("ответ {url} не HTTP: {:?}", head.trim())))?;
+    if head.to_ascii_lowercase().contains("transfer-encoding") {
+        return Err(EngineError::Other(format!(
+            "{url} ответил chunked-телом — этот клиент его не разбирает"
+        )));
+    }
+    let json = if body_text.trim().is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_str(body_text)
+            .map_err(|e| EngineError::Other(format!("ответ {url} не JSON: {e}")))?
+    };
+    Ok((status, json))
 }

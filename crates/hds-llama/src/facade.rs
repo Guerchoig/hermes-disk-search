@@ -51,6 +51,12 @@ pub enum Route {
     Chat,
     Embeddings,
     Rerank,
+    /// A6: внутренний API управления (`/internal/*`) — для CLI `llm-host`.
+    InternalStatus,
+    InternalLoad,
+    InternalUnload,
+    InternalDevices,
+    InternalStop,
     /// Не нашли — 404 с понятным текстом.
     NotFound,
 }
@@ -68,7 +74,40 @@ impl Route {
 
     /// Нужен ли телу запроса JSON.
     pub fn needs_body(&self) -> bool {
-        matches!(self, Route::Chat | Route::Embeddings | Route::Rerank)
+        matches!(
+            self,
+            Route::Chat
+                | Route::Embeddings
+                | Route::Rerank
+                | Route::InternalLoad
+                | Route::InternalUnload
+        )
+    }
+
+    /// Внутренний маршрут управления (не для внешних клиентов).
+    ///
+    /// Их обслуживает **только** фасад на loopback: снаружи они позволяют
+    /// выгрузить чужие роли и остановить хост, поэтому при
+    /// `ServerConfig.internal = false` отвечаем `403`.
+    pub fn is_internal(&self) -> bool {
+        matches!(
+            self,
+            Route::InternalStatus
+                | Route::InternalLoad
+                | Route::InternalUnload
+                | Route::InternalDevices
+                | Route::InternalStop
+        )
+    }
+
+    /// Путь апстрима для режима `llm_server.mode: facade` (без `/v1`).
+    pub fn upstream_path(&self) -> Option<&'static str> {
+        match self {
+            Route::Chat => Some("chat/completions"),
+            Route::Embeddings => Some("embeddings"),
+            Route::Rerank => Some("rerank"),
+            _ => None,
+        }
     }
 }
 
@@ -85,9 +124,15 @@ pub fn route(method: &str, path: &str) -> Route {
         ("POST", "/rerank") | ("POST", "/v1/rerank") | ("POST", "/v1/rerank/rerank") => {
             Route::Rerank
         }
+        ("GET", "/internal/status") | ("GET", "/v1/internal/status") => Route::InternalStatus,
+        ("GET", "/internal/devices") | ("GET", "/v1/internal/devices") => Route::InternalDevices,
+        ("POST", "/internal/load") | ("POST", "/v1/internal/load") => Route::InternalLoad,
+        ("POST", "/internal/unload") | ("POST", "/v1/internal/unload") => Route::InternalUnload,
+        ("POST", "/internal/stop") | ("POST", "/v1/internal/stop") => Route::InternalStop,
         _ => Route::NotFound,
     }
 }
+
 
 /// Режим размышлений (план §11.4): `off` → движок форсирует `reasoning_budget = 0`,
 /// `on` → `reasoning_budget = -1` и видимый формат (`reasoning_format = none`),
@@ -483,6 +528,57 @@ pub trait Backend: Send + Sync {
     fn rerank(&self, body_json: &str) -> Result<String>;
     /// Факты об инстансе роли для `/props` (`None` — роль не поднята).
     fn props(&self, role: &str) -> Option<Value>;
+
+    // --- A6: внутренний API управления (`/internal/*`) ---
+    //
+    // Методы с реализацией по умолчанию: подделки в тестах и будущие чужие
+    // бэкенды не обязаны их поддерживать — тогда фасад честно отвечает 501.
+
+    /// Готовый `StatusReport` (роли/бюджет/пауза/прогноз) + человеческие строки.
+    fn internal_status(&self) -> Result<Value> {
+        Err(crate::error::EngineError::Other(
+            "внутренний status недоступен: backend не умеет отчёт (режим без кластера)".to_string(),
+        ))
+    }
+
+    /// Загрузить роль (`/internal/load`, тело `{"role": "chat"}`).
+    fn internal_load(&self, role: &str) -> Result<Value> {
+        Err(crate::error::EngineError::Other(format!(
+            "внутренний load недоступен для роли '{role}'"
+        )))
+    }
+
+    /// Выгрузить роль (`/internal/unload`).
+    fn internal_unload(&self, role: &str) -> Result<Value> {
+        Err(crate::error::EngineError::Other(format!(
+            "внутренний unload недоступен для роли '{role}'"
+        )))
+    }
+
+    /// Устройства движка (`/internal/devices`).
+    fn internal_devices(&self) -> Result<Value> {
+        Err(crate::error::EngineError::Other(
+            "внутренний devices недоступен: движок не загружен".to_string(),
+        ))
+    }
+
+    /// Попросить хост завершиться (`/internal/stop`).
+    fn internal_stop(&self) -> Result<Value> {
+        Err(crate::error::EngineError::Other(
+            "внутренний stop недоступен".to_string(),
+        ))
+    }
+
+    /// Базовый URL внешнего владельца для режима `llm_server.mode: facade`
+    /// (`http://host:port/v1`). `None` — режим `embedded` (работаем через кластер).
+    ///
+    /// Если URL задан, фасад **проксирует** запрос роли как есть: это позволяет
+    /// держать на боевых портах OpenAI-совместимый поверх без собственных
+    /// инстансов (GPU принадлежит другому процессу).
+    fn upstream(&self, role: &str) -> Option<String> {
+        let _ = role;
+        None
+    }
 }
 
 /// Настройки фасада (из конфига: порты ролей, `chat.thinking`, `chat.max_tokens`,
@@ -497,6 +593,10 @@ pub struct ServerConfig {
     pub thinking: Thinking,
     pub max_tokens: i32,
     pub temperature: f32,
+    /// Обслуживать `/internal/*` (CLI `llm-host`). `false` — отвечаем `403`:
+    /// эти маршруты управляют ролями и остановкой процесса, поэтому их нельзя
+    /// выставлять наружу (фасад слушает loopback, но лишняя страховка бесплатна).
+    pub internal: bool,
 }
 
 impl Default for ServerConfig {
@@ -513,9 +613,11 @@ impl Default for ServerConfig {
             thinking: Thinking::Off,
             max_tokens: 600,
             temperature: 0.2,
+            internal: true,
         }
     }
 }
+
 
 impl ServerConfig {
     pub fn port_of(&self, role: &str) -> Option<u16> {
@@ -542,6 +644,110 @@ fn props_role(cfg: &ServerConfig, backend: &dyn Backend) -> Option<(String, Valu
     None
 }
 
+/// Внутренний API управления (`/internal/*`) — для CLI `llm-host` (A6).
+///
+/// Отдельная ветка, потому что это не инференс: ответы — машинные отчёты
+/// (готовый `StatusReport`, список устройств, результат load/unload), а не
+/// OpenAI-совместимые формы, и доступны они только при `cfg.internal`.
+fn handle_internal(
+    req: &crate::http::Request,
+    cfg: &ServerConfig,
+    backend: &dyn Backend,
+    r: Route,
+) -> crate::http::Response {
+    use crate::http::Response;
+    if !cfg.internal {
+        return Response::error(
+            403,
+            "внутренний API выключен (ServerConfig.internal = false): он управляет \
+             ролями и остановкой llm-host",
+            "forbidden",
+        );
+    }
+    match r {
+        Route::InternalStatus => match backend.internal_status() {
+            Ok(v) => Response::ok(v),
+            Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
+        },
+        Route::InternalDevices => match backend.internal_devices() {
+            Ok(v) => Response::ok(v),
+            Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
+        },
+        Route::InternalStop => match backend.internal_stop() {
+            Ok(v) => Response::ok(v),
+            Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
+        },
+        Route::InternalLoad | Route::InternalUnload => {
+            let role = match internal_role(req) {
+                Ok(r) => r,
+                Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
+            };
+            let res = if r == Route::InternalLoad {
+                backend.internal_load(&role)
+            } else {
+                backend.internal_unload(&role)
+            };
+            match res {
+                Ok(v) => Response::ok(v),
+                // роль не найдена / состояние не позволяет — это не «не реализовано»
+                Err(e) => Response::error(409, &e.to_string(), "server_error"),
+            }
+        }
+        _ => Response::error(400, "маршрут не является внутренним", "invalid_request_error"),
+    }
+}
+
+/// Роль из тела внутреннего запроса (`{"role": "chat"}`); пустое тело — `chat`
+/// (так `llm-host load` без аргумента работает с чатом, как `llama_server status`).
+fn internal_role(req: &crate::http::Request) -> Result<String> {
+    if req.body.trim().is_empty() {
+        return Ok("chat".to_string());
+    }
+    let v = crate::http::parse_body(req)?;
+    v.get("role")
+        .and_then(|r| r.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            crate::error::EngineError::Other("в теле запроса нет поля role".to_string())
+        })
+}
+
+/// Ответ внешнего владельца **как есть** (режим `llm_server.mode: facade`).
+///
+/// Ничего не пересобираем: апстрим — уже OpenAI-совместимый сервер, а любая
+/// нормализация потеряла бы его поля (`reasoning_content`, `usage` и пр.).
+fn proxy(req: &crate::http::Request, base: &str, r: Route) -> crate::http::Response {
+    use crate::http::Response;
+    let Some(path) = r.upstream_path() else {
+        return Response::error(400, "маршрут не проксируется", "invalid_request_error");
+    };
+    let url = format!("{}/{}", base.trim_end_matches('/'), path);
+    // чат отвечает минутами (RAG-контекст), остальные роли — заметно быстрее
+    let timeout = if r == Route::Chat {
+        std::time::Duration::from_secs(600)
+    } else {
+        std::time::Duration::from_secs(120)
+    };
+    match crate::http::client_json(&req.method, &url, Some(&req.body), timeout) {
+        Ok((status, json)) if (200..300).contains(&status) => Response { status: 200, json },
+        Ok((status, json)) => {
+            let msg = json
+                .get("error")
+                .and_then(|e| e.get("message"))
+                .and_then(|m| m.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("upstream {url} ответил статусом {status}"));
+            Response::error(if status == 404 { 502 } else { status }, &msg, "server_error")
+        }
+        Err(e) => Response::error(
+            503,
+            &format!("upstream {url} недоступен: {e}"),
+            "server_error",
+        ),
+    }
+}
+
 /// Обработать HTTP-запрос фасада (без сокетов — тестируется напрямую с подделкой backend).
 pub fn handle(
     req: &crate::http::Request,
@@ -549,11 +755,30 @@ pub fn handle(
     backend: &dyn Backend,
 ) -> crate::http::Response {
     use crate::http::Response;
-    match route(&req.method, &req.path) {
+    let r = route(&req.method, &req.path);
+    if r.is_internal() {
+        return handle_internal(req, cfg, backend, r);
+    }
+    // режим `llm_server.mode: facade`: роли держит внешний процесс — проксируем как есть
+    if let Some(base) = r.role().and_then(|role| backend.upstream(role)) {
+        return proxy(req, &base, r);
+    }
+    match r {
         Route::NotFound => Response {
             status: 404,
             json: not_found_json(&req.path),
         },
+        // внутренние маршруты разобраны выше (`handle_internal`); эта ветка —
+        // страховка на случай, если `Route` расширят и забудут обработку
+        Route::InternalStatus
+        | Route::InternalLoad
+        | Route::InternalUnload
+        | Route::InternalDevices
+        | Route::InternalStop => Response::error(
+            400,
+            "внутренний маршрут не обслуживается здесь",
+            "invalid_request_error",
+        ),
         Route::Health => Response::ok(health_json()),
         Route::Models => Response::ok(models_json(&cfg.aliases, unix_now() as i64)),
         Route::Props => match props_role(cfg, backend) {
@@ -621,15 +846,15 @@ pub fn handle(
 
 /// Поднять фасад на портах ролей: поток на порт, общий обработчик.
 ///
-/// Возвращает `stop`-флаг: выставите `true`, чтобы остановить серверы (например по
-/// сигналу завершения `llm-host`).
+/// `stop` создаёт **владелец** (резидентный `llm-host`): флаг нужен не только
+/// `Host::stop`, но и маршруту `/internal/stop` — CLI просит хост завершиться
+/// через тот же фасад, без сигналов и отдельного канала.
 pub fn serve(
     cfg: &ServerConfig,
     backend: std::sync::Arc<dyn Backend>,
-) -> Result<(std::sync::Arc<std::sync::atomic::AtomicBool>, Vec<std::thread::JoinHandle<()>>)> {
-    use std::sync::atomic::AtomicBool;
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<Vec<std::thread::JoinHandle<()>>> {
     use std::sync::Arc;
-    let stop = Arc::new(AtomicBool::new(false));
     let mut handles = Vec::new();
     // порты — своя копия: поток должен владеть и конфигом, и строкой роли
     for (role, port) in cfg.ports.clone() {
@@ -655,5 +880,6 @@ pub fn serve(
             }
         }));
     }
-    Ok((stop, handles))
+    Ok(handles)
 }
+

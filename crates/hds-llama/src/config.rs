@@ -463,6 +463,29 @@ fn build_role(
         }
     }
 
+    // `llm.<role>.*` приоритетнее legacy `extra_args`: у чата большой n_batch
+    // (2048) даёт compute-буфер ≈1972 МиБ (замер §7.2), и его имеет смысл уменьшить
+    // именно конфигом, а не строкой флагов llama-server.
+    let n_batch = dig_i64(root, &format!("llm.{role}.n_batch"))
+        .map(|v| v.max(0) as i32)
+        .or(ea.n_batch);
+    let n_ubatch = dig_i64(root, &format!("llm.{role}.n_ubatch"))
+        .map(|v| v.max(0) as i32)
+        .or(ea.n_ubatch);
+    let n_threads = dig_i64(root, &format!("llm.{role}.n_threads"))
+        .map(|v| v.max(0) as i32)
+        .or(ea.n_threads);
+    if let (Some(ub), Some(b)) = (n_ubatch, n_batch) {
+        if ub > b {
+            let msg = format!(
+                "{role}: llm.{role}.n_ubatch ({ub}) больше n_batch ({b}) — движок урежет сам, \
+                 но лучше задать n_ubatch <= n_batch"
+            );
+            warnings.push(msg.clone());
+            notes.push(msg);
+        }
+    }
+
     Some(RoleConfig {
         role: role.to_string(),
         model_spec,
@@ -473,9 +496,9 @@ fn build_role(
         model_kind: kind,
         embedding,
         reranking,
-        n_batch: ea.n_batch,
-        n_ubatch: ea.n_ubatch,
-        n_threads: ea.n_threads,
+        n_batch,
+        n_ubatch,
+        n_threads,
         legacy_n_gpu_layers,
         notes,
     })
@@ -624,6 +647,40 @@ llm_server:
         assert!(
             cfg.warnings.iter().any(|w| w.contains("--cache-type-k q8_0")),
             "должно быть предупреждение про нераспознанный флаг: {:?}",
+            cfg.warnings
+        );
+    }
+
+    /// Новые ключи `llm.<role>.{n_batch,n_ubatch,n_threads}` приоритетнее legacy
+    /// `extra_args` (и предупреждают, если `n_ubatch > n_batch`).
+    #[test]
+    fn new_keys_override_legacy_batch() {
+        let yaml = r#"
+index:
+  whisper_model_path: ""
+llm_server:
+  host: "127.0.0.1"
+  parallel: 1
+  chat:
+    port: 8010
+    model: "shared:chat"
+    ctx_per_slot: 32768
+    extra_args: "--batch-size 4096 --ubatch-size 4096 -ngl 99"
+llm:
+  chat:
+    n_batch: 512
+    n_ubatch: 1024
+    n_threads: 4
+"#;
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("test.yaml"), &root);
+        let chat = cfg.role("chat").expect("chat");
+        assert_eq!(chat.n_batch, Some(512), "llm.chat.n_batch перебивает --batch-size");
+        assert_eq!(chat.n_ubatch, Some(1024));
+        assert_eq!(chat.n_threads, Some(4));
+        assert!(
+            cfg.warnings.iter().any(|w| w.contains("n_ubatch")),
+            "n_ubatch > n_batch — предупреждаем: {:?}",
             cfg.warnings
         );
     }
