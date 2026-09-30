@@ -82,6 +82,19 @@ fn unloaded_instances_are_skipped() {
     assert_eq!(names, vec!["rerank"], "GRACE ещё держит VRAM, UNLOADED — нет");
 }
 
+/// Базовый набор, но роль `role` **выгружена** (например чат вытеснила индексация):
+/// это сценарий «приходит запрос, память надо освободить под загрузку».
+///
+/// Важно: у **загруженной** роли запроса новой памяти не требуется вовсе
+/// (`plan_query` отвечает `Fits` сразу) — это отдельная ветка и отдельный тест,
+/// она появилась после живого прогона на боевых портах (§10.4 `W2_REPORT.md`).
+fn roles_without(role: &str) -> Vec<InstanceUse> {
+    all_roles()
+        .into_iter()
+        .map(|i| if i.role == role { i.with_state(state::UNLOADED) } else { i })
+        .collect()
+}
+
 /// Хватает сразу: ни паузы, ни вытеснения — ARB-3 (не трогаем индексные роли «на всякий»).
 #[test]
 fn query_fits_without_any_action() {
@@ -101,7 +114,12 @@ fn query_fits_without_any_action() {
 /// Не хватает немного — выгружаем самый низкий приоритет (whisper), ставим паузу.
 #[test]
 fn query_evicts_lowest_priority_first_and_pauses_index() {
-    let plan = plan_query(&gpu(), Some(3_000), &Demand::new("chat", 2_000), &all_roles());
+    let plan = plan_query(
+        &gpu(),
+        Some(3_000),
+        &Demand::new("chat", 2_000),
+        &roles_without("chat"),
+    );
     assert_eq!(plan.verdict, Verdict::FitsAfterEviction);
     assert!(has_pause(&plan), "при нехватке индексация обязана встать на паузу");
     assert_eq!(unload_names(&plan), vec!["whisper"], "хватает одного самого младшего");
@@ -123,7 +141,12 @@ fn query_evicts_lowest_priority_first_and_pauses_index() {
 /// Вытесняем столько, сколько нужно: хватает двух младших, embedding не трогаем.
 #[test]
 fn query_stops_evicting_when_enough() {
-    let plan = plan_query(&gpu(), Some(2_000), &Demand::new("chat", 1_400), &all_roles());
+    let plan = plan_query(
+        &gpu(),
+        Some(2_000),
+        &Demand::new("chat", 1_400),
+        &roles_without("chat"),
+    );
     assert_eq!(plan.verdict, Verdict::FitsAfterEviction);
     assert_eq!(
         unload_names(&plan),
@@ -139,7 +162,12 @@ fn query_stops_evicting_when_enough() {
 fn shortage_is_reported_without_auto_degradation() {
     let mut cfg = gpu();
     cfg.vram_budget_mb = Some(6_000); // искусственное сужение бюджета (критерий A-7)
-    let plan = plan_query(&cfg, Some(12_000), &Demand::new("chat", 11_564), &all_roles());
+    let plan = plan_query(
+        &cfg,
+        Some(12_000),
+        &Demand::new("chat", 11_564),
+        &roles_without("chat"),
+    );
 
     assert_eq!(plan.verdict, Verdict::NotEnough { short_mib: 5_088 });
     assert_eq!(plan.free_mib, Some(6_000), "cap сузил замер свободной VRAM");
@@ -161,7 +189,12 @@ fn shortage_is_reported_without_auto_degradation() {
 /// Без замера VRAM диспетчер не гадает: сообщает и не вытесняет.
 #[test]
 fn missing_vram_measurement_is_reported_not_guessed() {
-    let plan = plan_query(&gpu(), None, &Demand::new("chat", 5_000), &all_roles());
+    let plan = plan_query(
+        &gpu(),
+        None,
+        &Demand::new("chat", 5_000),
+        &roles_without("chat"),
+    );
     assert_eq!(plan.verdict, Verdict::Unknown);
     assert!(unload_names(&plan).is_empty());
     assert!(!has_pause(&plan));
@@ -177,7 +210,12 @@ fn missing_vram_measurement_is_reported_not_guessed() {
 fn manual_policy_only_reports() {
     let mut cfg = gpu();
     cfg.policy = GpuPolicy::Manual;
-    let plan = plan_query(&cfg, Some(1_000), &Demand::new("chat", 5_000), &all_roles());
+    let plan = plan_query(
+        &cfg,
+        Some(1_000),
+        &Demand::new("chat", 5_000),
+        &roles_without("chat"),
+    );
     assert_eq!(plan.verdict, Verdict::NotEnough { short_mib: 5_024 });
     assert!(unload_names(&plan).is_empty());
     assert!(!has_pause(&plan));
@@ -189,7 +227,12 @@ fn manual_policy_only_reports() {
 fn indexing_priority_protects_index_roles() {
     let mut cfg = gpu();
     cfg.policy = GpuPolicy::IndexingPriority;
-    let plan = plan_query(&cfg, Some(1_000), &Demand::new("chat", 5_000), &all_roles());
+    let plan = plan_query(
+        &cfg,
+        Some(1_000),
+        &Demand::new("chat", 5_000),
+        &roles_without("chat"),
+    );
     assert_eq!(plan.verdict, Verdict::NotEnough { short_mib: 5_024 });
     assert!(unload_names(&plan).is_empty(), "индексные роли protected");
     assert!(plan.shortage().unwrap().contains("indexing_priority"));
@@ -200,7 +243,12 @@ fn indexing_priority_protects_index_roles() {
 fn pause_can_be_disabled_explicitly() {
     let mut cfg = gpu();
     cfg.pause_index_on_query = false;
-    let plan = plan_query(&cfg, Some(2_000), &Demand::new("chat", 1_400), &all_roles());
+    let plan = plan_query(
+        &cfg,
+        Some(2_000),
+        &Demand::new("chat", 1_400),
+        &roles_without("chat"),
+    );
     assert!(!has_pause(&plan));
     assert_eq!(unload_names(&plan), vec!["whisper", "rerank"]);
     assert!(
@@ -213,12 +261,13 @@ fn pause_can_be_disabled_explicitly() {
 /// ARB-3: индексации при нехватке VRAM разрешено выгрузить чат (он вернётся сам).
 #[test]
 fn indexing_may_evict_chat_but_not_its_own_role() {
+    // просим память под whisper (он выгружен): его роль не вытесняем, embedding — тоже
+    // (он нужен индексации), поэтому освобождаем только резидента — чат
     let instances = vec![
         InstanceUse::new("chat", "chat", 7_000).keep_loaded().with_idle(30),
         InstanceUse::new("embedding", "embedding", 600),
-        InstanceUse::new("whisper", "whisper", 400),
+        InstanceUse::new("whisper", "whisper", 400).with_state(state::UNLOADED),
     ];
-    // просим память под whisper: его роль не вытесняем, embedding — тоже (он нужен индексации)
     let plan = plan_indexing(&gpu(), Some(1_000), &Demand::new("whisper", 3_000), &instances);
     assert_eq!(plan.verdict, Verdict::FitsAfterEviction);
     assert_eq!(
@@ -265,3 +314,56 @@ fn idle_fuse_can_be_disabled() {
     cfg.policy = GpuPolicy::Manual;
     assert!(idle_evictions(&cfg, &instances).is_empty(), "manual = ничего сами");
 }
+
+/// **Регресс живого прогона (боевые порты 30.09.2026, §10.4 `W2_REPORT.md`):**
+/// запрос к **уже загруженной** роли не требует новой VRAM. Без этой ветки на
+/// заполненной карте каждый запрос падал с «не хватает VRAM» (требовалось 8492 МиБ
+/// при свободных 206 — при том, что модель уже была в памяти).
+#[test]
+fn request_to_loaded_role_needs_no_new_vram() {
+    let plan = plan_query(&gpu(), Some(206), &Demand::new("chat", 8_492), &all_roles());
+    assert_eq!(plan.verdict, Verdict::Fits, "{:?}", plan.notes);
+    assert!(unload_names(&plan).is_empty(), "выгружать нечего: роль уже в памяти");
+    assert!(!has_pause(&plan), "пауза индексации не нужна");
+    assert!(
+        plan.notes.iter().any(|n| n.contains("уже загружена")),
+        "причина обязана быть в логе: {:?}",
+        plan.notes
+    );
+}
+
+/// То же для индексации: загруженная роль не «не влезает» сама в себя.
+#[test]
+fn indexing_with_loaded_role_needs_no_new_vram() {
+    let instances = vec![InstanceUse::new("embedding", "embedding", 600)];
+    let plan = plan_indexing(&gpu(), Some(100), &Demand::new("embedding", 636), &instances);
+    assert_eq!(plan.verdict, Verdict::Fits, "{:?}", plan.notes);
+    assert!(unload_names(&plan).is_empty());
+}
+
+/// Граница: **выгруженная** роль (даже `KEEP_LOADED`) стоит памяти как обычно —
+/// новая ветка её не подменяет, иначе запрос молча ломался бы (ARB-2: чат вытеснила
+/// индексация, следующий запрос обязан его вернуть).
+#[test]
+fn unloaded_role_still_needs_memory() {
+    let plan = plan_query(
+        &gpu(),
+        Some(206),
+        &Demand::new("chat", 8_492),
+        &roles_without("chat"),
+    );
+    assert!(
+        matches!(plan.verdict, Verdict::NotEnough { .. }),
+        "выгруженный чат без памяти: {:?}",
+        plan.verdict
+    );
+    assert!(
+        !plan
+            .notes
+            .iter()
+            .any(|n| n.contains("уже загружена"))
+            || !plan.verdict.is_ok(),
+        "ветка «уже загружена» здесь не должна срабатывать"
+    );
+}
+

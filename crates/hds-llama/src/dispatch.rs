@@ -223,6 +223,33 @@ pub fn plan_query(
 ) -> Plan {
     let free = gpu.effective_free_mib(free_mib);
     let mut plan = Plan::new(free, demand.need_mib, gpu.reserve_mb);
+
+    // (а0) Роль **уже загружена** — новой памяти не нужно.
+    //
+    // Без этой ветки запрос к загруженной роли на заполненной карте падал бы с
+    // «не хватает VRAM» (живой прогон 30.09.2026 на боевых портах: чат загружен,
+    // свободно 206 МиБ → 503 на каждый запрос). Проверяем до арифметики бюджета:
+    // она отвечает не на тот вопрос — «сколько нужно дозагрузить» вместо
+    // «сколько стоит роль целиком».
+    if let Some(inst) = instances
+        .iter()
+        .find(|i| i.role == demand.role && i.is_loaded())
+    {
+        plan.verdict = Verdict::Fits;
+        plan.actions.push(Action::EnsureLoaded {
+            role: demand.role.clone(),
+        });
+        plan.notes.push(format!(
+            "роль '{}' уже загружена ({}): новая VRAM не нужна (свободно {})",
+            demand.role,
+            state::name(inst.state),
+            free
+                .map(|f| format!("{f} МиБ"))
+                .unwrap_or_else(|| "неизвестно".to_string())
+        ));
+        return plan;
+    }
+
     let total = plan.total_mib();
 
     // (а) замера нет — не гадаем: движок сам решит (возможна ошибка нехватки памяти)
@@ -498,6 +525,25 @@ pub fn plan_indexing(
 ) -> Plan {
     let free = gpu.effective_free_mib(free_mib);
     let mut plan = Plan::new(free, demand.need_mib, gpu.reserve_mb);
+
+    // Роль индексации уже загружена — дозагружать нечего (та же логика, что в
+    // `plan_query`: иначе на заполненной карте индексация «не влезала» бы сама в себя).
+    if let Some(inst) = instances
+        .iter()
+        .find(|i| i.role == demand.role && i.is_loaded())
+    {
+        plan.verdict = Verdict::Fits;
+        plan.actions.push(Action::EnsureLoaded {
+            role: demand.role.clone(),
+        });
+        plan.notes.push(format!(
+            "роль '{}' уже загружена ({}): новая VRAM не нужна",
+            demand.role,
+            state::name(inst.state)
+        ));
+        return plan;
+    }
+
     let total = plan.total_mib();
 
     let Some(free_u) = free else {

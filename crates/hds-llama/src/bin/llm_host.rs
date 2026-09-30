@@ -59,7 +59,7 @@ fn usage() -> String {
      флаги: [--config FILE] [--runtime DIR] [--engine-dir DIR] [--host HOST] [--port N]\n\
      \x20      [--port-base N] [--ngl N] [--thinking off|on|auto] [--dispatcher on|off]\n\
      \x20      [--hold SEC] [--json FILE] [--local] [--no-engine] [--baseline-used-mib N]\n\
-     \x20      [--no-residency] [--no-internal]"
+     \x20      [--no-residency] [--no-log] [--no-internal]"
         .to_string()
 }
 
@@ -123,10 +123,11 @@ fn parse_args() -> std::result::Result<Args, String> {
                 )
             }
             "--no-residency" => {
+                // только pid-файл: лог — отдельная ручка (`--no-log`), иначе порядок
+                // флагов решал бы, будет ли лог (грабля, поймана `arb_scenarios.py`)
                 host.pid_file = None;
-                host.log_file = None;
             }
-            "--no-internal" => host.internal = false,
+            "--no-log" => host.log_file = None,
             "--pid" => host.pid_file = Some(PathBuf::from(take("--pid")?)),
             "--log" => host.log_file = Some(PathBuf::from(take("--log")?)),
             other => return Err(format!("неизвестный аргумент: {other}")),

@@ -581,6 +581,9 @@ fn host_off_mode_serves_status_without_engine() {
     let cfg = HostConfig {
         config: path.clone(),
         pause_dir: tmp.dir.clone(),
+        // все роли фасада уводим на высокие порты от `base`: тест не должен
+        // занимать/проверять боевые 8010–8012 (там могут стоять роли Python-версии)
+        port_base: Some(base),
         ..HostConfig::default().without_residency()
     };
     let mut host = match Host::start(cfg) {
@@ -594,8 +597,17 @@ fn host_off_mode_serves_status_without_engine() {
     assert_eq!(host.mode().as_str(), "off");
     assert!(host.engine_dir().is_none(), "в режиме off движок не грузим");
     assert!(host.ids().is_empty(), "инстансы не создаются");
-    assert_eq!(host.ports().len(), 1, "{:?}", host.ports());
-    assert_eq!(host.ports()[0], ("chat".to_string(), base));
+    assert_eq!(
+        host.ports().first().map(|(r, p)| (r.as_str(), *p)),
+        Some(("chat", base)),
+        "первый порт — чат на базовом смещении: {:?}",
+        host.ports()
+    );
+    assert!(
+        host.ports().iter().all(|(_, p)| *p >= base),
+        "боевые порты 8010–8012 тест не занимает: {:?}",
+        host.ports()
+    );
     assert_eq!(host.pid(), None, "pid-файл не занимали (without_residency)");
 
     let url = format!("http://127.0.0.1:{base}/internal/status");
@@ -608,7 +620,22 @@ fn host_off_mode_serves_status_without_engine() {
         "человеческие строки отчёта: {json}"
     );
 
-    // `/internal/stop` завершает процесс (после ответа)
+    // без движка роли всё равно недоступны — и это честная причина, а не 500
+    // (проверяем ДО `stop`: после команды остановки фасад уже не отвечает)
+    let (status, err) = client_json(
+        "GET",
+        &format!("http://127.0.0.1:{base}/internal/devices"),
+        None,
+        Duration::from_secs(15),
+    )
+    .expect("ответ есть");
+    assert_eq!(status, 501, "{err}");
+    assert!(
+        err.to_string().contains("off") || err.to_string().contains("выключен"),
+        "{err}"
+    );
+
+    // `/internal/stop` завершает процесс (после ответа фасад закрывается)
     let (status, stop) = client_json(
         "POST",
         &format!("http://127.0.0.1:{base}/internal/stop"),
@@ -618,17 +645,6 @@ fn host_off_mode_serves_status_without_engine() {
     .expect("stop доступен");
     assert_eq!(status, 200, "{stop}");
     assert_eq!(stop["stopping"], true);
-
-    // без движка роли всё равно недоступны — и это честная причина, а не 500
-    let (status, err) = client_json(
-        "GET",
-        &format!("http://127.0.0.1:{base}/internal/devices"),
-        None,
-        Duration::from_secs(15),
-    )
-    .expect("ответ есть");
-    assert_eq!(status, 501, "{err}");
-    assert!(err.to_string().contains("off") || err.to_string().contains("выключен"), "{err}");
 
     host.wait(30);
     host.stop();

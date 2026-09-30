@@ -575,6 +575,11 @@ impl ClusterBackend {
             *last = Some(plan);
         }
         if !verdict_ok {
+            // Паузу мы поставили «под запрос» (действие PauseIndex), но запрос
+            // отклонён — снимаем её здесь же: иначе неудавшийся запрос оставит
+            // индексацию стоящей навсегда (R30: «индексация встала»). Чужую паузу
+            // `resume` не трогает — только нашу.
+            let _ = self.pause.resume();
             return Err(EngineError::Other(format!(
                 "не хватает VRAM для роли '{role}': нужно {need} МиБ, свободно {}; \
                  вытеснение не помогло — авто-деградации нет (gpu.model_policy: {})",
@@ -608,6 +613,90 @@ impl ClusterBackend {
             }
         }
         v
+    }
+
+    /// Поток фонового арбитра: ARB-3 (живой прогон индексации и нехватка VRAM →
+    /// разрешено выгрузить резидента-чат) и ARB-5 (простой дольше `gpu.evict_idle_sec`).
+    ///
+    /// Зачем отдельный поток: решения «в запросе» принимает `prepare`, но эти два
+    /// сценария к запросам не привязаны — индексация идёт сама, а роль простаивает
+    /// между запросами. Такт — раз в 15 с (компромисс: не мешать движку и успевать
+    /// реагировать до того, как чужая память понадобится).
+    ///
+    /// Ничего не делает при `gpu.policy: manual` и когда `gpu.evict_idle_sec = 0`
+    /// (решения остаются за оператором) — это проверяет сама `dispatch`.
+    pub fn spawn_arbiter(self: &Arc<Self>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let interval = Duration::from_secs(15);
+            // сон мелкими кусками: остановка хоста не должна ждать такт целиком
+            // (иначе `llm-host stop` висит до 15 с — поймано тестом `host_resident`)
+            let step = Duration::from_millis(250);
+            let mut slept = Duration::ZERO;
+            while !stop.load(Ordering::Relaxed) {
+                std::thread::sleep(step);
+                slept += step;
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if slept >= interval {
+                    slept = Duration::ZERO;
+                    me.arbiter_tick();
+                }
+            }
+        })
+    }
+
+    /// Один такт арбитра (без сна — чтобы вызывать и из тестов/CLI).
+    pub fn arbiter_tick(&self) {
+        if self.cl().is_err() {
+            return; // режимы facade/off: инстансов нет
+        }
+        let heartbeat = read_heartbeat(&self.pause_dir);
+        let indexing_live = heartbeat.as_ref().map(|h| h.is_live()).unwrap_or(false);
+        let mut plans: Vec<(&str, Plan)> = Vec::new();
+
+        // ARB-5: простой роли (свой предохранитель + grace роли)
+        let uses = self.uses();
+        let idle_actions = dispatch::idle_evictions(&self.gpu, &uses);
+        if !idle_actions.is_empty() {
+            let mut plan = Plan::new(self.free_mib(), 0, self.gpu.reserve_mb);
+            plan.actions = idle_actions;
+            plans.push(("idle", plan));
+        }
+
+        // ARB-3: идёт индексация, памяти не хватает — резидент (chat) уступает ей
+        if indexing_live {
+            let need = self.needs.get("embedding").copied().unwrap_or(0);
+            if need > 0 {
+                let plan = dispatch::plan_indexing(
+                    &self.gpu,
+                    self.free_mib(),
+                    &Demand::new("embedding", need),
+                    &uses,
+                );
+                if !plan.actions.is_empty() {
+                    plans.push(("indexing", plan));
+                }
+            }
+        }
+
+        for (why, plan) in plans {
+            let log = self
+                .cl()
+                .map(|cl| cl.with(|cluster| dispatch::apply(cluster, &self.pause, &plan)))
+                .unwrap_or_default();
+            for line in plan.lines().iter().chain(log.iter()) {
+                self.log.line(&format!("[arbiter/{why}] {line}"));
+            }
+            if let Ok(mut d) = self.decisions.lock() {
+                d.push(format!("[arbiter/{why}] {}", plan.verdict.as_str()));
+                d.extend(plan.lines());
+            }
+            if let Ok(mut last) = self.last_plan.lock() {
+                *last = Some(plan);
+            }
+        }
     }
 }
 
@@ -1016,6 +1105,8 @@ pub struct Host {
     pid: Option<PidFile>,
     stop: Arc<AtomicBool>,
     handles: Vec<std::thread::JoinHandle<()>>,
+    /// Поток фонового арбитра (ARB-3/ARB-5) — присоединяется в `stop`.
+    arbiter: Option<std::thread::JoinHandle<()>>,
     backend: Option<Arc<ClusterBackend>>,
     cluster: Option<Arc<ClusterShared>>,
     engine: Option<Engine>,
@@ -1181,13 +1272,25 @@ impl Host {
                         let parallel = resolved.parallel.max(1) as i64;
                         log.line(&format!(
                             "роль {}: модель {file_mib} МиБ, KV f16 {:.0} МиБ (KV-слоёв {} из {}), \
-                             нужно {} МиБ",
+                             n_batch {} n_ubatch {}, нужно {} МиБ",
                             inst.role,
                             crate::budget::kv_cache_mib(&meta, n_ctx, parallel, KvBits::F16),
                             meta.kv_layer_count(),
                             meta.block_count,
+                            spec.n_batch.unwrap_or(2048),
+                            spec.n_ubatch.unwrap_or(2048),
                             estimate_need_mib(&meta, file_mib, n_ctx, parallel, KvBits::F16)
                         ));
+                        // Смысл предупреждения: при тесной карте compute-буфер съедает
+                        // до 2 ГиБ, а уменьшение `n_batch` — самый дешёвый рычаг
+                        // (замер 30.09.2026: 2048 → 512 даёт −1503 МиБ, §10.5).
+                        if inst.role == "chat" && spec.n_batch.is_none() {
+                            log.note(
+                                "chat: llm.chat.n_batch не задан — движок возьмёт 2048 \
+                                 (compute-буфер ≈2 ГиБ). При тесной карте задайте \
+                                 `llm.chat.n_batch: 512` (+ `n_ubatch: 512`): замер дал −1503 МиБ VRAM",
+                            );
+                        }
                     }
                     let id = cls.create_instance(&spec)?;
                     log.line(&format!("  инстанс '{}' id={id} создан", inst.role));
@@ -1273,6 +1376,13 @@ impl Host {
                 Arc::clone(&stop),
             )?
         };
+        // фоновый арбитр: ARB-3 (при живой индексации резидент уступает VRAM) и ARB-5 (простой)
+        let arbiter = backend.spawn_arbiter(Arc::clone(&stop));
+        log.line(&format!(
+            "фон: арбитр простоя и индексации (такт 15 с, gpu.evict_idle_sec = {}, policy {})",
+            resolved.gpu.evict_idle_sec,
+            resolved.gpu.policy.as_str()
+        ));
         log.line(&format!(
             "готово: {} ({})",
             if ports.is_empty() {
@@ -1313,6 +1423,7 @@ impl Host {
             pid,
             stop,
             handles,
+            arbiter: Some(arbiter),
             backend: Some(backend),
             ids,
             cluster,
@@ -1468,6 +1579,9 @@ impl Host {
         }
         self.stop.store(true, Ordering::Relaxed);
         for h in self.handles.drain(..) {
+            let _ = h.join();
+        }
+        if let Some(h) = self.arbiter.take() {
             let _ = h.join();
         }
 

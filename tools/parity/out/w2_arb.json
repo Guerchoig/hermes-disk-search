@@ -1,0 +1,201 @@
+{
+  "generated_at": "2026-09-30T20:15:19",
+  "port_base": 8070,
+  "scenarios": [
+    {
+      "scenario": "ARB-6 (thinking на одном порту)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-6: chat-think даёт reasoning_content (до 3 попыток)",
+          "detail": "длины: [484]"
+        },
+        {
+          "ok": true,
+          "what": "ARB-6: MCP-путь (enable_thinking=false) — без размышлений",
+          "detail": "0 симв."
+        },
+        {
+          "ok": true,
+          "what": "ARB-6: MCP-путь отвечает текстом",
+          "detail": "Чтобы перемножить числа **17** и **23**,"
+        }
+      ],
+      "evidence": {
+        "reasoning_sizes": [
+          484
+        ]
+      }
+    },
+    {
+      "scenario": "ARB-1 (вытеснение по приоритету + возврат роли)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-1: подготовка — индексные роли на GPU загружены",
+          "detail": "rerank=200, embedding=200"
+        },
+        {
+          "ok": true,
+          "what": "ARB-1: при нехватке VRAM поставлена пауза индексации",
+          "detail": "строка в логе"
+        },
+        {
+          "ok": true,
+          "what": "ARB-1: вытеснение по приоритету (rerank 30 → embedding 40)",
+          "detail": "позиции: rerank=218, embedding=331"
+        },
+        {
+          "ok": true,
+          "what": "ARB-1: чат (роль запроса) не вытесняется",
+          "detail": "позиция chat=-1"
+        },
+        {
+          "ok": true,
+          "what": "ARB-1: вместо деградации — отчёт с точными цифрами (бюджет сужен)",
+          "detail": "не хватает VRAM для роли 'chat': нужно 8492 МиБ, свободно 3717; вытеснение не помогло — авто-деградации нет (gpu.model_p"
+        },
+        {
+          "ok": true,
+          "what": "ARB-1/ARB-2: вытесненная индексная роль вернулась по запросу",
+          "detail": "HTTP 200"
+        }
+      ],
+      "evidence": {
+        "status_at_start": {
+          "chat": "LOADED",
+          "embedding": "UNLOADED",
+          "rerank": "UNLOADED"
+        },
+        "load_rerank_http": 200,
+        "load_embedding_http": 200,
+        "status_before_query": {
+          "chat": "UNLOADED",
+          "embedding": "LOADED",
+          "rerank": "LOADED"
+        },
+        "shortage_message": "не хватает VRAM для роли 'chat': нужно 8492 МиБ, свободно 3717; вытеснение не помогло — авто-деградации нет (gpu.model_policy: fixed)"
+      }
+    },
+    {
+      "scenario": "ARB-2 (пауза снята/сохранена)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-2: нашего index.pause после запросов нет",
+          "detail": "файл нет"
+        },
+        {
+          "ok": true,
+          "what": "ARB-2: пауза пользователя не снята",
+          "detail": "index.pause на месте"
+        },
+        {
+          "ok": true,
+          "what": "ARB-2: в логе видно, что пауза чужая",
+          "detail": "переиспользуем, не снимаем"
+        }
+      ],
+      "evidence": {
+        "emb_http": 200
+      }
+    },
+    {
+      "scenario": "ARB-3 (индексация вытесняет резидент)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-3: подготовка — chat загружен",
+          "detail": "LOADED"
+        },
+        {
+          "ok": true,
+          "what": "ARB-3: фоновый арбитр принял решение по индексации",
+          "detail": "через 15 с"
+        },
+        {
+          "ok": true,
+          "what": "ARB-3: резидент выгружен под индексацию",
+          "detail": "UNLOADED"
+        },
+        {
+          "ok": true,
+          "what": "ARB-3: пауза индексации не ставится (индексация важнее)",
+          "detail": "файла нет"
+        }
+      ],
+      "evidence": {
+        "chat_before": "LOADED",
+        "chat_after": "UNLOADED",
+        "waited_sec": 15
+      }
+    },
+    {
+      "scenario": "ARB-4 (отчёт о нехватке + ручная настройка)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-4: запрос отклонён с 503 (деградации нет)",
+          "detail": "HTTP 503"
+        },
+        {
+          "ok": true,
+          "what": "ARB-4: в отчёте сказано, чего не хватает",
+          "detail": "не хватает VRAM для роли 'chat': нужно 8492 МиБ, свободно 3717; вытеснение не помогло — авто-деградации нет (gpu.model_policy: fixed)"
+        },
+        {
+          "ok": true,
+          "what": "ARB-4: явно сказано, что деградации нет",
+          "detail": "llm.model_policy: fixed"
+        },
+        {
+          "ok": true,
+          "what": "ARB-4: точные цифры «нужно/доступно» в отчёте",
+          "detail": "числа: ['8492', '3717']"
+        },
+        {
+          "ok": true,
+          "what": "ARB-4: без сужения бюджета роль грузится и отвечает",
+          "detail": "HTTP 200, ответ: '4'"
+        }
+      ],
+      "evidence": {
+        "shortage_message": "не хватает VRAM для роли 'chat': нужно 8492 МиБ, свободно 3717; вытеснение не помогло — авто-деградации нет (gpu.model_policy: fixed)",
+        "chat_state_after_shortage": "LOADED",
+        "answer_after": "4"
+      }
+    },
+    {
+      "scenario": "ARB-5 (простой роли)",
+      "ok": true,
+      "checks": [
+        {
+          "ok": true,
+          "what": "ARB-5: подготовка — embedding загружен",
+          "detail": "HTTP 200, LOADED"
+        },
+        {
+          "ok": true,
+          "what": "ARB-5: сработал предохранитель простоя арбитра",
+          "detail": "через 15 с"
+        },
+        {
+          "ok": true,
+          "what": "ARB-5: роль выгружена",
+          "detail": "UNLOADED"
+        }
+      ],
+      "evidence": {
+        "state_before": "LOADED",
+        "state_after": "UNLOADED",
+        "waited_sec": 15
+      }
+    }
+  ],
+  "failed": []
+}
