@@ -254,21 +254,57 @@ cargo test -p hds-llama                                   # 8 проверок A
 cargo run -p hds-llama --release --bin llm_host_plan -- --json tools\parity\out\w2_a2_plan.json
 ```
 
-## 7. Состояние и следующий шаг
+## 7. A3 — адресация клиентов (кросс-процессная проверка)
+
+Вопрос: если инстанс создан в процессе A, видит ли его процесс B? От этого зависит,
+нужно ли клиентам (`index/watch`, `mcp-http`, `ui`) ходить напрямую в инстансы или
+только через наш фасад.
+
+Измерение (`bin/a3_instance_probe`, два процесса, 30.09.2026):
+
+| Процесс | Что делал | Результат |
+|---|---|---|
+| A (pid 20132) | `--hold 45`: создал и загрузил embedding-инстанс `a3_hold` (bge-m3, CUDA0) | `id=1`, `state=LOADED` (в stderr движка — загрузка на CUDA0) |
+| B (pid 45440) | `--list` (свой кластер, свой процесс) | `list_instances: 0`; `find_instance_by_name("a3_hold") → НЕ НАЙДЕН` |
+| B (pid 43376) | `--call a3_hold` | инстанс не найден → вызов невозможен |
+
+**Вывод (закрывает риск W2-2):** состояние инстансов **принадлежит процессу** —
+`list_instances`/`find_instance_by_name` видят только свои инстансы, `instance_id`
+нумеруется в пределах процесса. Кросс-процессной адресации через cluster API нет,
+и это не лечится флагом. Значит:
+
+* **гарантированный путь клиентов — фасад `llm-host`** (`:8010` chat/chat-think,
+  `:8011` embeddings, `:8012` rerank, `:health`, `/props`), как и предусмотрено
+  планом (§A5, W2-2);
+* альтернатива «клиенты ходят в чужие инстансы» отпадает — не тратить на неё время;
+* адресация внутри `llm-host` — **по имени** (`find_instance_by_name`) в границах
+  одного процесса-владельца.
+
+```powershell
+# воспроизведение (два окна или Start-Process)
+cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45
+cargo run -p hds-llama --release --bin a3_instance_probe -- --list
+cargo run -p hds-llama --release --bin a3_instance_probe -- --call a3_hold
+```
+
+## 8. Состояние и следующий шаг
 
 * Тесты: `cargo test --workspace` — **21 проверка green** (chunker 6 + chunker-parity 1
   + hash 4 + walk 2 + config 2 + registry 6), тяжёлые (паритет 50 файлов, сценарий
   `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–5): `crates/hds-index` (kinds/walk/hash/chunker),
-  `crates/hds-llama` (обвязка движка, A1-проба, `runtime`/`config`/`registry` и
-  `llm_host_plan`), `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
-  `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
-  эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
-  `w2_a1_device.json`, `w2_a2_plan.json`).
+* Артефакты W2 (шаги 1–6): `crates/hds-index` (kinds/walk/hash/chunker),
+  `crates/hds-llama` (обвязка движка, `a1_device_probe`, `runtime`/`config`/`registry`,
+  `llm_host_plan`, `a3_instance_probe`), `tools/parity/walk_parity.py`,
+  `tools/parity/hash_vectors.py`, `tools/parity/W2_REPORT.md` (этот файл); в git из
+  `out/` идут только маленькие эталоны и отчёты (`walk_parity_synthetic.json`,
+  `hash_vectors.json`, `w2_a1_device.json`, `w2_a2_plan.json`).
+* Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
+  R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
 * Следующее по графику (§6 плана W2): **A4** — диспетчер VRAM (бюджет по NVML,
-  вытеснение по `gpu.priorities`, `index.pause`), **A5** — фасад `:8010–8012`,
-  **B4** — конвейер `process_file` (фазы, атомарный коммит на файл,
-  `clip_for_embedding`, `max_chunks`, прогресс с теми же полями и heartbeat).
+  вытеснение по `gpu.priorities`, `index.pause`), **A5** — фасад `:8010–8012`
+  (формат как у llama-server: внешние клиенты не меняются), **B4** — конвейер
+  `process_file` (фазы, атомарный коммит на файл, `clip_for_embedding`, `max_chunks`,
+  прогресс с теми же полями и heartbeat).
 * Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков
   размышлений работает через cluster-инстанс (в W0 проверялось через bridge-API);
   решить судьбу `rerank`-роли на CPU (`-ngl 0` в боевом конфиге) — переносить ли
