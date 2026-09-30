@@ -186,6 +186,18 @@ embedding — bge-m3, CUDA0; rerank — `-ngl 0` → CPU-роль (как был
 
 ### A4. Диспетчер VRAM (4–5 дней) — ядро ценности W2
 
+🚧 **Шаг 1 выполнен 30.09.2026**: `crates/hds-llama/src/gguf.rs` (метаданные GGUF,
+ключи по суффиксу — у bge-m3 `bert.*`, у чата `qwen35.*`), `src/budget.rs`
+(оценка «файл + KV + 5 %», вердикт с точными цифрами, без авто-деградации),
+`bin/vram_budget`; калибровка против замера A1 (bge-m3: оценка 636 МиБ против
+фактических +636 МиБ). **Измерено по боевому конфигу:** chat при `n_ctx = 32768`
+требует 11 564 МиБ (файл 7112 + KV f16 4096 + 5 %) — не влезает в 12 ГБ даже на
+пустой карте; llama-server жил за счёт `--cache-type-k/v q8_0`, а у cluster API
+ручки типа KV нет. Решение за заказчиком: `llm.chat.n_ctx: 16384` (≈9,5 ГБ) или
+замер фактического KV движка. Детали — `tools/parity/W2_REPORT.md` §8.
+Осталось по A4: вытеснение по `gpu.priorities`, `index.pause` при нехватке,
+наблюдаемость в `hdsw llm-host status`.
+
 Бюджет:
 * источник истины — **NVML** (`nvml-wrapper`) на Windows/Linux с NVIDIA: `memory.used/free/total`;
   на macOS — **`VramProbe::Metal`** (`recommendedMaxWorkingSetSize` как total,

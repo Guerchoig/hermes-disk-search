@@ -287,24 +287,66 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --list
 cargo run -p hds-llama --release --bin a3_instance_probe -- --call a3_hold
 ```
 
-## 8. Состояние и следующий шаг
+## 8. A4 (шаг 1) — бюджет VRAM: метаданные GGUF и оценка «модель + KV»
 
-* Тесты: `cargo test --workspace` — **21 проверка green** (chunker 6 + chunker-parity 1
-  + hash 4 + walk 2 + config 2 + registry 6), тяжёлые (паритет 50 файлов, сценарий
-  `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–6): `crates/hds-index` (kinds/walk/hash/chunker),
+Диспетчеру VRAM нужно до загрузки знать потребность роли. Сделано:
+
+| Модуль | Что внутри |
+|---|---|
+| `gguf.rs` | минимальный читатель метаданных GGUF (magic/версия/KV-пары, пропуск токенизаторов через `seek`); ключи сверяются **по суффиксу**, потому что префикс — архитектура: у bge-m3 это `bert.*`, у чат-модели `qwen35.*` (первая версия искала только `llama.*` и «не находила» параметров); читаются слои, головы, головы KV, `key_length`/`value_length`, `attention.causal` |
+| `budget.rs` | `kv_cache_mib` (классическая формула llama.cpp), `estimate_need_mib` (файл + KV + 5 % оверхеда), `check_fit`/`Fit` — вердикт с **точными цифрами** «нужно/доступно/недостаёт» и без авто-деградации |
+| `bin/vram_budget` | прогон по ролям конфига: размер файла, параметры модели, KV для f16 и q8_0, потребность, свободная VRAM (NVML), вердикт; `--json` для отчёта |
+
+Калибровка (пункт честности — оценка обязана совпадать с замером):
+
+| Модель | Оценка | Факт | Комментарий |
+|---|---|---|---|
+| bge-m3 (энкодер) | файл 605 МиБ + 5 % = **636 МиБ** | замер A1: рост VRAM **+636 МиБ** | KV-кэша нет (`attention.causal = false`) — совпадение ±1 % |
+| bge-reranker-v2-m3 | 606 + 5 % = 637 МиБ | — | тоже энкодер (`causal = false`) |
+| Qwen3.5-9B-Q6_K | KV при 32768: **f16 4096 МиБ / q8_0 2176 МиБ** | требует замера (A4 шаг 2) | фиксируем вход: 32 слоя, 4 головы KV, head_dim 256 |
+
+Прогон по боевому конфигу (`out/w2_a4_budget.json`, свободно 3469 МиБ, резерв 1024 МиБ):
+
+| Роль | Файл | n_ctx | KV f16 | Нужно | Вердикт |
+|---|---|---|---|---|---|
+| chat | 7112 МиБ | 32768 | 4096 МиБ | **11564 МиБ** | **не хватает** — недостаёт 9119 МиБ |
+| embedding | 605 МиБ | 8192 | 0 | 636 МиБ | влезает |
+| rerank | 606 МиБ | 8192 | 0 | 637 МиБ | влезает |
+
+**Следствие для W2 (важное, требует решения заказчика):** чат-модель при
+`n_ctx = 32768` и **f16**-KV не влезает в 12 ГБ даже на пустой карте (11,5 ГБ +
+системный оверхед). Прежний llama-server работал потому, что его запускали с
+`--cache-type-k/v q8_0` (KV 2176 МиБ → ≈9,6 ГБ), а **cluster API ручки типа KV не
+имеет** (`kv_unified=1`, `no_kv_offload=0`, `cache-type-*` нет в `instance_params`).
+Варианты (оба — за пользователем, авто-деградации нет): измерить фактический KV
+движка при загрузке (A4 шаг 2) или задать `llm.chat.n_ctx: 16384`
+(KV f16 2048 МиБ → ≈9,5 ГБ, влезает).
+
+```powershell
+cargo test -p hds-llama                                    # включает калибровку VRAM
+cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2_a4_budget.json
+```
+
+## 9. Состояние и следующий шаг
+
+* Тесты: `cargo test --workspace` — **25 проверок green** (chunker 6 + chunker-parity 1
+  + hash 4 + walk 2 + config 2 + gguf 2 + registry 6 + VRAM-калибровка 2), тяжёлые
+  (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
+* Артефакты W2 (шаги 1–7): `crates/hds-index` (kinds/walk/hash/chunker),
   `crates/hds-llama` (обвязка движка, `a1_device_probe`, `runtime`/`config`/`registry`,
-  `llm_host_plan`, `a3_instance_probe`), `tools/parity/walk_parity.py`,
-  `tools/parity/hash_vectors.py`, `tools/parity/W2_REPORT.md` (этот файл); в git из
-  `out/` идут только маленькие эталоны и отчёты (`walk_parity_synthetic.json`,
-  `hash_vectors.json`, `w2_a1_device.json`, `w2_a2_plan.json`).
+  `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget` + `vram_budget`),
+  `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
+  `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
+  эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
+  `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`).
 * Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
   R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
-* Следующее по графику (§6 плана W2): **A4** — диспетчер VRAM (бюджет по NVML,
-  вытеснение по `gpu.priorities`, `index.pause`), **A5** — фасад `:8010–8012`
-  (формат как у llama-server: внешние клиенты не меняются), **B4** — конвейер
-  `process_file` (фазы, атомарный коммит на файл, `clip_for_embedding`, `max_chunks`,
-  прогресс с теми же полями и heartbeat).
+  Новый вопрос к заказчику: `llm.chat.n_ctx` при f16-KV (§8) — 32768 не влезает
+  в 12 ГБ, нужен либо `16384`, либо замер фактического KV движка.
+* Следующее: **A4 шаг 2** — вытеснение по `gpu.priorities`, `index.pause` при
+  нехватке VRAM, наблюдаемость в `hdsw llm-host status`; **A5** — фасад `:8010–8012`
+  (формат как у llama-server); **B4** — конвейер `process_file` (фазы, атомарный
+  коммит на файл, `clip_for_embedding`, `max_chunks`, прогресс и heartbeat).
 * Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков
   размышлений работает через cluster-инстанс (в W0 проверялось через bridge-API);
   решить судьбу `rerank`-роли на CPU (`-ngl 0` в боевом конфиге) — переносить ли

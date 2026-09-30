@@ -15,6 +15,7 @@
 //!
 //! Дальше по треку A: A3 адресация клиентов, A4 диспетчер VRAM, A5 фасад `:8010–8012`.
 
+pub mod budget;
 pub mod cluster;
 pub mod config;
 pub mod device;
@@ -22,16 +23,19 @@ pub mod engine;
 pub mod engine_dir;
 pub mod error;
 pub mod ffi;
+pub mod gguf;
 pub mod registry;
 pub mod runtime;
 pub mod vram;
 
+pub use budget::{check_fit, estimate_need_mib, kv_cache_mib, Fit};
 pub use cluster::{ChatOutcome, Cluster, Device, Instance, InstanceSpec, JsonOutcome, Metrics};
 pub use config::{GpuConfig, LlmHostConfig, Mode, RoleConfig};
 pub use device::{selection_from_config_index, DeviceSelection};
 pub use engine::{ClusterApi, Engine};
 pub use engine_dir::{find_engine_dir, ENGINE_LIB};
 pub use error::{EngineError, Result};
+pub use gguf::{read_meta, GgufMeta, KvBits};
 pub use registry::{plan, plan_strict, PlannedInstance, RolePlan};
 pub use runtime::{read_current, resolve_model, runtime_dir, RuntimePaths};
 pub use vram::{NvmlProbe, VramProbe, VramSampler, VramSnapshot, VramSource};

@@ -33,13 +33,6 @@ struct Args {
     texts: usize,
 }
 
-fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..")
-        .to_path_buf()
-}
-
 /// Абсолютный путь до переключения cwd на каталог движка (`Engine::activate`).
 fn absolutize(p: &Path) -> PathBuf {
     std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
