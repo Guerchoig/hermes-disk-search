@@ -115,6 +115,16 @@
 
 ### A2. Реестр инстансов и маппинг конфига (3–4 дня)
 
+✅ **Выполнено 30.09.2026** (часть A2): `crates/hds-llama/src/{config,runtime,registry}.rs`
++ бинарь `llm_host_plan` (сухой прогон плана без загрузки моделей).
+Проверки: `tests/registry_plan.rs` (6 тестов) — резолвинг `shared:<role>` в общем
+рантайме, приоритет новых ключей `llm.*`/`gpu.*`, `gpu.device_index = 0` → CPU,
+legacy `extra_args` (`-ngl`, `--batch-size`, предупреждения про `--cache-type-k`),
+негативный кейс «модели нет» с обоими путями. Прогон по боевому `config.yaml`:
+chat — `…\llama-runtime\models\chat\Qwen3.5-9B-Q6_K.gguf`, `n_ctx=32768`, CUDA0;
+embedding — bge-m3, CUDA0; rerank — `-ngl 0` → CPU-роль (как было в llama-server).
+Осталось по A2: `hdsw llm-host devices/status` (подкоманды CLI появятся в A6/B7).
+
 | Наш конфиг | Поле `instance_params` | Значение по умолчанию |
 |---|---|---|
 | `llm.chat.model` (`shared:chat` → `models/chat/current.json`) | `model_path`, `name="chat"`, `model_kind=TEXT` | Qwen3.5-9B-Q6_K |

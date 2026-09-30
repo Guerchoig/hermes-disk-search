@@ -83,6 +83,13 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
+/// Абсолютный путь **до** переключения текущего каталога на каталог движка
+/// (`Engine::activate()` меняет cwd — относительные пути после этого ведут внутрь
+/// каталога движка; найдено при первом прогоне A2).
+fn absolutize(p: &Path) -> PathBuf {
+    std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 fn parse_args() -> std::result::Result<Args, String> {
     let mut args = Args {
         engine_dir: None,
@@ -449,13 +456,17 @@ fn main() {
 }
 
 fn run() -> Result<()> {
-    let args = match parse_args() {
+    let mut args = match parse_args() {
         Ok(a) => a,
         Err(msg) => {
             eprintln!("{msg}");
             std::process::exit(2);
         }
     };
+    // Относительные пути — сразу в абсолютные: после `Engine::activate()` текущий
+    // каталог процесса — каталог движка (побочный эффект `EngineCwd`).
+    args.model = absolutize(&args.model);
+    args.json = absolutize(&args.json);
     if !args.model.is_file() {
         return Err(EngineError::Other(format!(
             "модель не найдена: {} (укажите --model; по умолчанию берётся \

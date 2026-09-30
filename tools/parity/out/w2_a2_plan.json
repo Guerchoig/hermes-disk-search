@@ -1,0 +1,92 @@
+{
+  "config": "C:\\Users\\Sasha\\hermes-disk-search\\crates\\hds-llama\\..\\..\\config.yaml",
+  "devices": [
+    {
+      "backend": "CUDA",
+      "bridge_device_index": 0,
+      "description": "NVIDIA GeForce RTX 3060",
+      "device_type": 1,
+      "memory_free": 11801722880,
+      "memory_total": 12884377600,
+      "name": "CUDA0"
+    },
+    {
+      "backend": "CPU",
+      "bridge_device_index": 1,
+      "description": "AMD Ryzen 7 5700G with Radeon Graphics         ",
+      "device_type": 0,
+      "memory_free": 35303329792,
+      "memory_total": 68089540608,
+      "name": "CPU"
+    }
+  ],
+  "engine_dir": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "failed": [],
+  "gpu": {
+    "device_index": 1,
+    "evict_idle_sec": 600,
+    "n_gpu_layers": -1,
+    "priorities": {
+      "chat": 100,
+      "embedding": 40,
+      "rerank": 30,
+      "whisper": 20
+    },
+    "reserve_mb": 1024
+  },
+  "instances": [
+    {
+      "allow_cpu": false,
+      "devices_csv": "0",
+      "model_kind": 0,
+      "model_path": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+      "model_spec": "shared:chat",
+      "n_ctx": 32768,
+      "n_gpu_layers": 99,
+      "notes": [
+        "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)",
+        "chat: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8010,
+      "retention": 1,
+      "role": "chat"
+    },
+    {
+      "allow_cpu": false,
+      "devices_csv": "0",
+      "model_kind": 2,
+      "model_path": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\embedding\\bge-m3-Q8_0.gguf",
+      "model_spec": "shared:embedding",
+      "n_ctx": 8192,
+      "n_gpu_layers": 99,
+      "notes": [
+        "embedding: -ngl 99 взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
+      ],
+      "port": 8011,
+      "retention": 2,
+      "role": "embedding"
+    },
+    {
+      "allow_cpu": true,
+      "devices_csv": "1",
+      "model_kind": 3,
+      "model_path": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\rerank\\bge-reranker-v2-m3-q8_0.gguf",
+      "model_spec": "shared:rerank",
+      "n_ctx": 8192,
+      "n_gpu_layers": null,
+      "notes": [
+        "rerank: -ngl 0 взят из legacy extra_args; перенесите в gpu.n_gpu_layers",
+        "rerank: n_gpu_layers = 0 → роль на CPU (как было в llama-server); чтобы перенести на GPU, уберите -ngl 0 и задайте gpu.n_gpu_layers = -1"
+      ],
+      "port": 8012,
+      "retention": 2,
+      "role": "rerank"
+    }
+  ],
+  "mode": "embedded",
+  "model_policy": "fixed",
+  "runtime_root": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime",
+  "warnings": [
+    "chat: флаги extra_args не распознаны и игнорируются: --cache-type-k q8_0, --cache-type-v q8_0 — перенесите их в llm.chat.* / gpu.* (W2)"
+  ]
+}

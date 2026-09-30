@@ -49,6 +49,7 @@
 |---|---|
 | `W2_REPORT.md` | журнал W2 с цифрами: A1 (выбор устройства, NVML, скорость), B1 (обход/лимиты), B2 (`content_hash`) и находки, которых не было в плане |
 | `crates/hds-llama` (`bin/a1_device_probe`) | A1: инстанс пятью способами (`none`, CSV-индекс, индекс+1, имя, `allow_cpu=false`), NVML-пик и скорость → `out/w2_a1_device.json` |
+| `crates/hds-llama` (`bin/llm_host_plan`) | A2: сухой прогон плана инстансов по `config.yaml` (роль → модель из общего рантайма, устройство, `n_ctx`/`ngl`/retention) → `out/w2_a2_plan.json` |
 | `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
@@ -87,6 +88,7 @@ cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 н
 .\\.venv\\Scripts\\python.exe tools\\parity\\walk_parity.py --real
 $env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --nocapture
 cargo run -p hds-llama --release --bin a1_device_probe             # устройство/VRAM/скорость (A1)
+cargo run -p hds-llama --release --bin llm_host_plan               # план инстансов по config.yaml (A2)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

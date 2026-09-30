@@ -42,6 +42,18 @@ pub enum EngineError {
     #[error("NVML недоступен: {0}")]
     Nvml(#[from] nvml_wrapper::error::NvmlError),
 
+    /// Модель роли не найдена: в сообщении обязаны быть **оба** пути — где искали
+    /// и куда положить/скачать (`SPIKES.md` §14.7: нестыковка путей ломала старт).
+    #[error(
+        "GGUF-модель роли '{role}' не найдена. Искали: {searched}. Скачайте её в общий \
+         рантайм (`installers/ensure_llama_runtime.ps1 -Models {role}`) или укажите явный \
+         путь в `llm.{role}.model` / `llm_server.{role}.model`"
+    )]
+    ModelNotFound { role: String, searched: String },
+
+    #[error("конфиг {path}: {detail}")]
+    Config { path: PathBuf, detail: String },
+
     #[error("движок вернул не-UTF-8 строку")]
     Utf8,
 

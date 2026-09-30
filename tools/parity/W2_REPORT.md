@@ -219,22 +219,59 @@ cargo test -p hds-index --test chunker_parity -- --nocapture   # 16/16, 6363 ч�
 покрывает также `\x1c`–`\x1f` и `\x85`; Rust `char::is_whitespace` их не включает.
 На 16 фикстурах расхождения нет (такие символы в документах не встречаются).
 
-## 5. Состояние и следующий шаг
+## 6. A2 — реестр инстансов и маппинг конфига
 
-* Тесты: `cargo test --workspace` — **13 проверок green** (chunker 6 + chunker-parity 1
-  + hash 4 + walk 2), тяжёлые (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–4): `crates/hds-index` (kinds/walk/hash/chunker),
-  `crates/hds-llama` (обвязка движка + A1-проба), `tools/parity/walk_parity.py`,
-  `tools/parity/hash_vectors.py`, `tools/parity/W2_REPORT.md` (этот файл);
-  сырые отчёты локально — `out/w2_a1_device.json`, `out/walk_parity*.json`,
-  `out/hash_vectors.json`, `out/hash_parity.jsonl`; в git из `out/` идут только
-  маленькие эталоны (`walk_parity_synthetic.json`, `hash_vectors.json`, `w2_a1_device.json`).
-* Следующее по графику (§6 плана W2): **A2** — реестр инстансов и маппинг
-  `llm_server.*`/`llm.*`/`gpu.*` → `instance_params` (с учётом выводов §1.2–1.4),
-  **B4** — конвейер `process_file` (фазы, атомарный коммит на файл, `clip_for_embedding`,
-  `max_chunks`, прогресс с теми же полями и heartbeat).
-* Открытые вопросы для A2: подтвердить на chat-модели, что `reasoning=off` без
-  блоков размышлений работает через cluster-инстанс (в W0 проверялось через
-  bridge-API), и нужен ли `hdsw llm-host` отдельный лог `EngineCwd`.
+Что сделано (`crates/hds-llama`):
+
+| Модуль | Что внутри |
+|---|---|
+| `runtime.rs` | порт `hds/llama_runtime.py`: `runtime_dir` (env → `%LOCALAPPDATA%\llama-runtime` → macOS/XDG), `models_dir`, `current_file`, `read_current`, `resolve_model` (`shared:<role>`, регистр в манифесте, единственный GGUF роли как активный), `RuntimePaths` |
+| `config.rs` | `config.yaml` через `serde_yaml`: `llm_server.*` (legacy) + `llm.*` + `gpu.*`; `n_ctx = parallel * ctx_per_slot` (как было у llama-server); `extra_args` разбираются (`-ngl`, `--batch-size`, `--ubatch-size`, `-t`), остальное — в `warnings` для `hdsw check`; `retention` строкой; `llm_server.mode`, `llm.model_policy` |
+| `registry.rs` | `plan()` → по роли `RolePlan::Ready/Failed` (ошибки не блокируют другие роли, как в Python), `plan_strict()`; устройство — `gpu.device_index` → **числовой** CSV; `-ngl 0` → явная CPU-роль (`allow_cpu = true`), иначе GPU-роль с `allow_cpu = false` |
+| `bin/llm_host_plan` | сухой прогон: конфиг → модель → устройство → параметры, без загрузки моделей; `--json` для приёмки |
+
+Проверки: `cargo test -p hds-llama` — 8 green (2 модульных в `config.rs` + 6 в
+`tests/registry_plan.rs`): резолвинг `shared:<role>`, приоритет новых ключей,
+`gpu.device_index = 0` → индекс CPU-устройства, legacy `-ngl 0` → CPU-роль с
+пояснением, предупреждения про `--cache-type-k`, негативный кейс «модели нет»
+(сообщение содержит путь и подсказку об установщике).
+
+Прогон по боевому `config.yaml` машины (артефакт `out/w2_a2_plan.json`):
+
+| Роль | Модель (общий рантайм) | Устройство | n_ctx | ngl | allow_cpu | retention |
+|---|---|---|---|---|---|---|
+| chat | `…\llama-runtime\models\chat\Qwen3.5-9B-Q6_K.gguf` | CUDA0 (`"0"`) | 32768 | 99 (legacy) | false | KEEP_LOADED |
+| embedding | `…\models\embedding\bge-m3-Q8_0.gguf` | CUDA0 (`"0"`) | 8192 | 99 (legacy) | false | LOAD_ON_DEMAND |
+| rerank | `…\models\rerank\bge-reranker-v2-m3-q8_0.gguf` | CPU (`"1"`) | 8192 | `-ngl 0` → CPU | true | LOAD_ON_DEMAND |
+
+Это и есть проверка дефекта `SPIKES.md` §14.7: чат-модель найдена в **общем
+рантайме** (`%LOCALAPPDATA%\llama-runtime`), а не в каталоге проекта. Предупреждения
+прогона: `--cache-type-k/--cache-type-v` не поддерживаются в W2 (перенести в
+`llm.chat.*`/`gpu.*`), `-ngl` взят из legacy — перенести в `gpu.n_gpu_layers`.
+
+```powershell
+cargo test -p hds-llama                                   # 8 проверок A2
+cargo run -p hds-llama --release --bin llm_host_plan -- --json tools\parity\out\w2_a2_plan.json
+```
+
+## 7. Состояние и следующий шаг
+
+* Тесты: `cargo test --workspace` — **21 проверка green** (chunker 6 + chunker-parity 1
+  + hash 4 + walk 2 + config 2 + registry 6), тяжёлые (паритет 50 файлов, сценарий
+  `real`) — по флагу/`#[ignore]`.
+* Артефакты W2 (шаги 1–5): `crates/hds-index` (kinds/walk/hash/chunker),
+  `crates/hds-llama` (обвязка движка, A1-проба, `runtime`/`config`/`registry` и
+  `llm_host_plan`), `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
+  `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
+  эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
+  `w2_a1_device.json`, `w2_a2_plan.json`).
+* Следующее по графику (§6 плана W2): **A4** — диспетчер VRAM (бюджет по NVML,
+  вытеснение по `gpu.priorities`, `index.pause`), **A5** — фасад `:8010–8012`,
+  **B4** — конвейер `process_file` (фазы, атомарный коммит на файл,
+  `clip_for_embedding`, `max_chunks`, прогресс с теми же полями и heartbeat).
+* Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков
+  размышлений работает через cluster-инстанс (в W0 проверялось через bridge-API);
+  решить судьбу `rerank`-роли на CPU (`-ngl 0` в боевом конфиге) — переносить ли
+  на GPU вместе с остальными ролями.
 
 

@@ -13,6 +13,7 @@ libloading.workspace = true
 directories.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 thiserror.workspace = true
 nvml-wrapper.workspace = true
 
@@ -22,3 +23,7 @@ windows-sys.workspace = true
 [[bin]]
 name = "a1_device_probe"
 path = "src/bin/a1_device_probe.rs"
+
+[[bin]]
+name = "llm_host_plan"
+path = "src/bin/llm_host_plan.rs"
