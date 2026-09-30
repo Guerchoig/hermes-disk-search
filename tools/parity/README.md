@@ -63,6 +63,7 @@
 | `crates/hds-llama/src/resident.rs` | A6: pid-файл (эксклюзивно, устаревший снимается), лог-файл, проверка живого PID |
 | `facade_smoke.ps1` | A5: живая проверка фасада одной командой (альтернативные порты, чат на CPU; `/health`, `/props`, чат, `chat-think`, эмбеддинги) |
 | `resident_smoke.ps1` | A6: живая проверка резидентности (pid+лог, отказ второму экземпляру, `/internal/*`, `stop` освобождает pid-файл) |
+| `arb_scenarios.py` | A6: ARB-1…6 на живом движке (свои порты/конфиги/сигналы) → `out/w2_arb.json` |
 | `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
@@ -174,11 +175,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 **Чек-лист на 5 минут (копипаст):**
 ```powershell
 git -C <репозиторий> log --oneline -3        # ветка w2-llm-host (15 коммитов на 30.09.2026)
-cargo test --workspace                       # должно быть 74 green (+2 #[ignore])
+cargo test --workspace                       # должно быть 77 green (+2 #[ignore])
 cargo run -p hds-llama --release --bin llm_host_status                       # состояние ролей и VRAM
 cargo run -p hds-llama --release --bin llm_host -- status --local --no-engine  # то же, но A6-путём
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.ps1 -PortBase 8030 -HoldSec 600
+.\\.venv\\Scripts\\python.exe tools\parity\arb_scenarios.py --port-base 8070     # ARB-1...6 (6/6)
 ```
 Если третья/четвёртая команда не запускаются — смотрите «Грабли» (ниже) и `W2_REPORT.md` §9.7.
 
