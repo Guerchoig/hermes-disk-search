@@ -59,17 +59,33 @@ if (-not (Test-Path $Exe)) {
 }
 
 if (-not $Force) {
-    $busy = @()
-    foreach ($p in 8010, 8011, 8012) {
-        $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
-        if ($c) { $busy += $p }
+    # If OUR resident already serves the ports (pid file + /health), this is not the
+    # Python stack: registering the task is safe (it will restart the same binary at
+    # the next logon). Otherwise check whether a foreign process holds the ports.
+    $ourPidFile = Join-Path $root "data\llm-host.pid"
+    $weOwn = $false
+    if (Test-Path $ourPidFile) {
+        try {
+            $r = Invoke-RestMethod -Uri "http://127.0.0.1:8010/health" -TimeoutSec 3
+            $weOwn = ($r.status -eq "ok")
+        } catch { $weOwn = $false }
     }
-    if ($busy.Count -gt 0) {
-        Write-Host "[!!] ports still busy: $($busy -join ', ')" -ForegroundColor Yellow
-        Write-Host "     Python roles (llama-server) must be stopped first - the resident binds"
-        Write-Host "     the same ports and will refuse to start otherwise."
-        Write-Host "     Stop the roles, then re-run this script (or use -Force to skip the check)."
-        exit 1
+    if ($weOwn) {
+        Write-Host "[ok] ports 8010-8012 are already served by llm-host (pid $(Get-Content $ourPidFile))"
+        Write-Host "     registration is safe: the same binary owns the ports"
+    } else {
+        $busy = @()
+        foreach ($p in 8010, 8011, 8012) {
+            $c = Get-NetTCPConnection -LocalPort $p -State Listen -ErrorAction SilentlyContinue
+            if ($c) { $busy += $p }
+        }
+        if ($busy.Count -gt 0) {
+            Write-Host "[!!] ports are busy with a foreign process: $($busy -join ', ')" -ForegroundColor Yellow
+            Write-Host "     Python roles (llama-server) must be stopped first - the resident binds"
+            Write-Host "     the same ports and will refuse to start otherwise."
+            Write-Host "     Stop the roles, then re-run this script (or use -Force to skip the check)."
+            exit 1
+        }
     }
 }
 
@@ -94,8 +110,22 @@ try {
         Write-Host "     start now: Start-ScheduledTask -TaskName $taskName"
     }
 } catch {
-    Write-Host "[!!] scheduler is not available ($($_.Exception.Message.Trim()))" -ForegroundColor Yellow
-    Write-Host "     register the resident manually (Task Scheduler or the Startup folder):"
-    Write-Host "     $Exe $argList   (working dir: $root)"
-    exit 1
+    Write-Host "[--] scheduler is not available ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
+    $startup = [Environment]::GetFolderPath('Startup')
+    $lnk = Join-Path $startup "$taskName.lnk"
+    $ws = New-Object -ComObject WScript.Shell
+    $sc = $ws.CreateShortcut($lnk)
+    $sc.TargetPath = $Exe
+    $sc.Arguments = $argList
+    $sc.WorkingDirectory = $root
+    $sc.Description = "hermes-disk-search: llm-host (Rust GPU owner, ports 8010-8012)"
+    $sc.Save()
+    Write-Host "[ok] startup shortcut: $lnk"
+    Write-Host "     it starts the resident at logon (no admin rights needed);"
+    Write-Host "     remove it with: Remove-Item '$lnk'"
+    if ($Start) {
+        Write-Host "     start now: $Exe $argList"
+    } else {
+        Write-Host "     start now: Start-Process -FilePath '$Exe' -ArgumentList '$argList' -WorkingDirectory '$root'"
+    }
 }

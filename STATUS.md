@@ -39,7 +39,11 @@ LM Studio выполнен в 0.9.0, локальные модели на CUDA R
   Планировщика `installers/install_llm_host_task.ps1`, живой smoke
   `tools/parity/resident_smoke.ps1`, 12 новых тестов (`tests/host_resident.rs`);
   `cargo test --workspace` — 74 green (+2 `#[ignore]`)
-- ⏳ дальше: постоянный владелец портов 8010–8012 (решение заказчика), затем B4 (конвейер)
+- ✅ **владельцем портов 8010–8012 стал `llm-host`** (30.09.2026): Python-роли остановлены,
+  автозапуск — ярлык `HermesDiskSearchLlmHost.lnk`; Python MCP/watcher оставлены и ходят в наш
+  фасад; `hds.cli ask` проходит целиком (ответ с проектами и цитатами), `llm.chat.n_batch: 512`
+  в конфиге (−1503 МиБ), реранк осознанно на CPU (иначе 12 ГБ не хватает)
+- ⏳ дальше: B4 (конвейер `process_file`), затем реранк на GPU после Rust-клиента
 - ✅ **проверено на боевых портах 8010–8012** (30.09.2026): Python-роли остановлены, резидент
   поднят из боевого конфига, Python-менеджер видит наши инстансы как `state=llama`
   (`llama_server check/status`), чат/embeddings/rerank/`chat-think` работают, `stop` убирает
