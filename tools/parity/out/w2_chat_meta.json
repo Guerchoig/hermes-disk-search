@@ -1,0 +1,253 @@
+{
+  "architecture": "qwen35",
+  "block_count": 32,
+  "causal": null,
+  "embedding_length": 4096,
+  "file_mib": 7112,
+  "has_kv_cache": true,
+  "head_count": 16,
+  "head_count_kv": 4,
+  "head_dim": 256,
+  "hybrid_markers": true,
+  "key_length": 256,
+  "kv_f16_mib": 4096.0,
+  "kv_f16_mib_at_16384": 2048.0,
+  "kv_kib_per_token_f16": 128.0,
+  "kv_q8_0_mib": 2176.0,
+  "metadata": [
+    {
+      "name": "general.architecture",
+      "type": "string",
+      "value": "\"qwen35\""
+    },
+    {
+      "name": "general.type",
+      "type": "string",
+      "value": "\"model\""
+    },
+    {
+      "name": "general.name",
+      "type": "string",
+      "value": "\"Qwen3.5-9B\""
+    },
+    {
+      "name": "general.basename",
+      "type": "string",
+      "value": "\"Qwen3.5-9B\""
+    },
+    {
+      "name": "general.quantized_by",
+      "type": "string",
+      "value": "\"Unsloth\""
+    },
+    {
+      "name": "general.size_label",
+      "type": "string",
+      "value": "\"9B\""
+    },
+    {
+      "name": "general.license",
+      "type": "string",
+      "value": "\"apache-2.0\""
+    },
+    {
+      "name": "general.license.link",
+      "type": "string",
+      "value": "\"https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/LICENSE\""
+    },
+    {
+      "name": "general.repo_url",
+      "type": "string",
+      "value": "\"https://huggingface.co/unsloth\""
+    },
+    {
+      "name": "general.base_model.count",
+      "type": "u32",
+      "value": "1"
+    },
+    {
+      "name": "general.base_model.0.name",
+      "type": "string",
+      "value": "\"Qwen3.5 9B\""
+    },
+    {
+      "name": "general.base_model.0.organization",
+      "type": "string",
+      "value": "\"Qwen\""
+    },
+    {
+      "name": "general.base_model.0.repo_url",
+      "type": "string",
+      "value": "\"https://huggingface.co/Qwen/Qwen3.5-9B\""
+    },
+    {
+      "name": "general.tags",
+      "type": "array",
+      "value": "string[2] [\"unsloth\", \"image-text-to-text\"]"
+    },
+    {
+      "name": "qwen35.block_count",
+      "type": "u32",
+      "value": "32"
+    },
+    {
+      "name": "qwen35.context_length",
+      "type": "u32",
+      "value": "262144"
+    },
+    {
+      "name": "qwen35.embedding_length",
+      "type": "u32",
+      "value": "4096"
+    },
+    {
+      "name": "qwen35.feed_forward_length",
+      "type": "u32",
+      "value": "12288"
+    },
+    {
+      "name": "qwen35.attention.head_count",
+      "type": "u32",
+      "value": "16"
+    },
+    {
+      "name": "qwen35.attention.head_count_kv",
+      "type": "u32",
+      "value": "4"
+    },
+    {
+      "name": "qwen35.rope.dimension_sections",
+      "type": "array",
+      "value": "i32[4] [11, 11, 10, 0]"
+    },
+    {
+      "name": "qwen35.rope.freq_base",
+      "type": "f32",
+      "value": "10000000"
+    },
+    {
+      "name": "qwen35.attention.layer_norm_rms_epsilon",
+      "type": "f32",
+      "value": "0.000001"
+    },
+    {
+      "name": "qwen35.attention.key_length",
+      "type": "u32",
+      "value": "256"
+    },
+    {
+      "name": "qwen35.attention.value_length",
+      "type": "u32",
+      "value": "256"
+    },
+    {
+      "name": "qwen35.ssm.conv_kernel",
+      "type": "u32",
+      "value": "4"
+    },
+    {
+      "name": "qwen35.ssm.state_size",
+      "type": "u32",
+      "value": "128"
+    },
+    {
+      "name": "qwen35.ssm.group_count",
+      "type": "u32",
+      "value": "16"
+    },
+    {
+      "name": "qwen35.ssm.time_step_rank",
+      "type": "u32",
+      "value": "32"
+    },
+    {
+      "name": "qwen35.ssm.inner_size",
+      "type": "u32",
+      "value": "4096"
+    },
+    {
+      "name": "qwen35.full_attention_interval",
+      "type": "u32",
+      "value": "4"
+    },
+    {
+      "name": "qwen35.rope.dimension_count",
+      "type": "u32",
+      "value": "64"
+    },
+    {
+      "name": "tokenizer.ggml.model",
+      "type": "string",
+      "value": "\"gpt2\""
+    },
+    {
+      "name": "tokenizer.ggml.pre",
+      "type": "string",
+      "value": "\"qwen35\""
+    },
+    {
+      "name": "tokenizer.ggml.tokens",
+      "type": "array",
+      "value": "string[248320] [\"!\", \"\\\"\", \"#\", \"$\", \"%\", \"&\", \"'\", \"(\"]"
+    },
+    {
+      "name": "tokenizer.ggml.token_type",
+      "type": "array",
+      "value": "i32[248320] [1, 1, 1, 1, 1, 1, 1, 1]"
+    },
+    {
+      "name": "tokenizer.ggml.merges",
+      "type": "array",
+      "value": "string[247587] [\"Ġ Ġ\", \"ĠĠ ĠĠ\", \"i n\", \"Ġ t\", \"ĠĠĠĠ ĠĠĠĠ\", \"e r\", \"ĠĠ Ġ\", \"o n\"]"
+    },
+    {
+      "name": "tokenizer.ggml.eos_token_id",
+      "type": "u32",
+      "value": "248046"
+    },
+    {
+      "name": "tokenizer.ggml.padding_token_id",
+      "type": "u32",
+      "value": "248055"
+    },
+    {
+      "name": "tokenizer.chat_template",
+      "type": "string",
+      "value": "\"{%- set image_count = namespace(value=0) %}\\n{%- set video_count = namespace(value=0) %}\\n{%- macr…\""
+    },
+    {
+      "name": "general.quantization_version",
+      "type": "u32",
+      "value": "2"
+    },
+    {
+      "name": "general.file_type",
+      "type": "u32",
+      "value": "18"
+    },
+    {
+      "name": "quantize.imatrix.file",
+      "type": "string",
+      "value": "\"Qwen3.5-9B-GGUF/imatrix_unsloth.gguf\""
+    },
+    {
+      "name": "quantize.imatrix.dataset",
+      "type": "string",
+      "value": "\"unsloth_calibration_Qwen3.5-9B.txt\""
+    },
+    {
+      "name": "quantize.imatrix.entries_count",
+      "type": "u32",
+      "value": "248"
+    },
+    {
+      "name": "quantize.imatrix.chunks_count",
+      "type": "u32",
+      "value": "80"
+    }
+  ],
+  "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+  "n_ctx": 32768,
+  "n_parallel": 1,
+  "value_length": 256
+}

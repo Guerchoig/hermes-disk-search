@@ -69,24 +69,42 @@ fn chat_model_metadata_and_kv_estimate() {
     assert_eq!(meta.block_count, 32);
     assert_eq!(meta.head_count_kv, 4, "GQA: 4 головы KV");
     assert_eq!(meta.head_dim(), 256, "attention.key_length = 256");
+    // Находка A4 шага 2: Qwen3.5-9B — гибридная модель (`qwen35.ssm.*`),
+    // полное внимание только в каждом 4-м слое.
+    assert_eq!(
+        meta.full_attention_interval,
+        Some(4),
+        "у Qwen3.5-9B полный KV держат 8 слоёв из 32"
+    );
+    assert_eq!(meta.kv_layer_count(), 8);
+    assert_eq!(meta.kv_layer_count_within(8), 2, "при офлоаде 8 слоёв KV держат 2");
+    assert_eq!(meta.kv_layer_count_within(4), 1);
 
     let f16 = kv_cache_mib(&meta, 32768, 1, KvBits::F16);
     let q8 = kv_cache_mib(&meta, 32768, 1, KvBits::Q8_0);
     println!(
-        "Qwen3.5-9B: KV при n_ctx = 32768 — f16 {f16:.0} МиБ, q8_0 {q8:.0} МиБ \
-         (величину подтвердить замером загрузки — A4 шаг 2)"
+        "Qwen3.5-9B (гибрид, KV только в 8 из 32 слоёв): при n_ctx = 32768 — \
+         KV f16 {f16:.0} МиБ, q8_0 {q8:.0} МиБ"
     );
-    // 32768 × 32 слоя × 4 головы × (256 + 256) × 2 байта = 4 ГиБ
-    assert!((f16 - 4096.0).abs() < 8.0, "KV f16 = {f16} МиБ");
-    assert!((q8 - 2176.0).abs() < 8.0, "KV q8_0 = {q8} МиБ");
+    // 32768 × 8 слоёв × 4 головы × (256 + 256) × 2 байта = 1024 МиБ
+    assert!((f16 - 1024.0).abs() < 4.0, "KV f16 = {f16} МиБ");
+    assert!((q8 - 544.0).abs() < 4.0, "KV q8_0 = {q8} МиБ");
 
-    // Бюджет: 7,4 ГБ модель + 4 ГБ KV (f16) + 5 % оверхеда не влезает в 12 ГБ
+    // Бюджет: 7,4 ГБ модель + 1 ГБ KV (f16) + 5 % оверхеда — на 12 ГБ влезает
+    // с резервом 1 ГБ (это и было решение по `llm.chat.n_ctx`: 32768 оставляем)
     let need = estimate_need_mib(&meta, file_mib(&p), 32768, 1, KvBits::F16);
-    let fit = check_fit(Some(12288), need, 1024);
-    assert!(!fit.is_ok(), "на 12 ГБ с резервом 1 ГБ чат не влезает: {need} МиБ");
-    let msg = fit.message();
+    let empty = check_fit(Some(12_288), need, 1024);
     assert!(
-        msg.contains(&need.to_string()) && msg.contains("12288"),
+        empty.is_ok(),
+        "на пустой 12 ГБ чат должен влезать при n_ctx 32768: {need} МиБ — {}",
+        empty.message()
+    );
+    // а на карте, занятой штатными ролями (~8,5 ГБ), — уже нет
+    let busy = check_fit(Some(3_562), need, 1024);
+    assert!(!busy.is_ok(), "при 3,5 ГБ свободных чат не влезает");
+    let msg = busy.message();
+    assert!(
+        msg.contains(&need.to_string()) && msg.contains("3562"),
         "в отчёте должны быть точные цифры «нужно/доступно»: {msg}"
     );
     println!("{msg}");

@@ -54,6 +54,8 @@
 | `crates/hds-llama` (`bin/vram_budget`) | A4 (шаг 1): бюджет VRAM по ролям — метаданные GGUF, KV f16/q8_0, вердикт «влезает/не хватает» → `out/w2_a4_budget.json` |
 | `crates/hds-llama` (`bin/llm_host_status`) | A4 (шаг 2): `hdsw llm-host status` — устройства, NVML-бюджет, роли/состояния, `index.pause`+heartbeat, **прогноз диспетчера**; `--json` (поля для UI) → `out/w2_a4_status.json` |
 | `crates/hds-llama` (`bin/llm_host_dispatch`) | A4 (шаг 2): решение диспетчера на живом движке (`--kind query|indexing`, `--budget-mb` для A-7, `--apply`: пауза → выгрузка по приоритетам → загрузка → снятие паузы) → `out/w2_a4_dispatch*.json` |
+| `crates/hds-llama` (`bin/gguf_dump`) | A4 (замер KV): полный дамп метаданных GGUF + сводка по KV (слои с полным вниманием, КиБ/токен, гибридные признаки) → `out/w2_chat_meta.json` |
+| `crates/hds-llama` (`bin/kv_probe`) | A4 (замер KV): поднимает кластерный инстанс и мерит фактический KV (NVML-дифференциал по `n_ctx` + данные движка; отказывается грузить при нехватке VRAM) → `out/w2_kv_probe.json` |
 | `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
@@ -98,6 +100,8 @@ cargo run -p hds-llama --release --bin vram_budget                 # A4-1: бю�
 cargo run -p hds-llama --release --bin llm_host_status             # A4-2: статус (роли, VRAM, пауза, прогноз)
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat            # A4-2: решение диспетчера
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --apply    # A4-2: выполнить (пауза/выгрузка/загрузка)
+cargo run -p hds-llama --release --bin gguf_dump -- --role chat                    # A4: метаданные модели (гибридные слои, KV)
+cargo run -p hds-llama --release --bin kv_probe -- --role chat --ngl 8 --n-ctx 4096,32768   # A4: фактический KV движка
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

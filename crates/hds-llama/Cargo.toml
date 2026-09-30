@@ -43,3 +43,11 @@ path = "src/bin/llm_host_status.rs"
 [[bin]]
 name = "llm_host_dispatch"
 path = "src/bin/llm_host_dispatch.rs"
+
+[[bin]]
+name = "gguf_dump"
+path = "src/bin/gguf_dump.rs"
+
+[[bin]]
+name = "kv_probe"
+path = "src/bin/kv_probe.rs"

@@ -18,16 +18,20 @@ use crate::gguf::{GgufMeta, KvBits};
 /// держат — подтверждено замером A1 (`tools/parity/out/w2_a1_device.json`:
 /// файл 605 МиБ, рост VRAM +636 МиБ, то есть весь прирост — веса). Для
 /// причинных моделей считаем классическую формулу llama.cpp:
-/// `n_ctx × n_parallel × layers × kv_heads × (key_dim + value_dim) × bytes/element`.
+/// `n_ctx × n_parallel × kv_layers × kv_heads × (key_dim + value_dim) × bytes/element`,
+/// где `kv_layers` — **не** все слои: у гибридных моделей полное внимание только
+/// в каждом `full_attention_interval`-м слое (Qwen3.5-9B: 8 из 32 — находка A4
+/// шага 2, подтверждена дампом метаданных `bin/gguf_dump`).
 pub fn kv_cache_mib(meta: &GgufMeta, n_ctx: i64, n_parallel: i64, bits: KvBits) -> f64 {
-    if !meta.has_kv_cache() {
+    let kv_layers = meta.kv_layer_count() as f64;
+    if kv_layers == 0.0 {
         return 0.0;
     }
     let head = meta.head_dim() as f64;
     let k_dim = meta.key_length.map(|k| k as f64).unwrap_or(head);
     let v_dim = meta.value_length.map(|v| v as f64).unwrap_or(head);
     let per_token = meta.head_count_kv as f64 * (k_dim + v_dim) * bits.bytes_per_element();
-    let elements = (n_ctx.max(0) * n_parallel.max(1)) as f64 * meta.block_count as f64 * per_token;
+    let elements = (n_ctx.max(0) * n_parallel.max(1)) as f64 * kv_layers * per_token;
     elements / (1024.0 * 1024.0)
 }
 

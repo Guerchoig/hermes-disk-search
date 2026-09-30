@@ -316,14 +316,15 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --call a3_hold
 | embedding | 605 МиБ | 8192 | 0 | 636 МиБ | влезает |
 | rerank | 606 МиБ | 8192 | 0 | 637 МиБ | влезает |
 
-**Следствие для W2 (важное, требует решения заказчика):** чат-модель при
-`n_ctx = 32768` и **f16**-KV не влезает в 12 ГБ даже на пустой карте (11,5 ГБ +
-системный оверхед). Прежний llama-server работал потому, что его запускали с
-`--cache-type-k/v q8_0` (KV 2176 МиБ → ≈9,6 ГБ), а **cluster API ручки типа KV не
-имеет** (`kv_unified=1`, `no_kv_offload=0`, `cache-type-*` нет в `instance_params`).
-Варианты (оба — за пользователем, авто-деградации нет): измерить фактический KV
-движка при загрузке (A4 шаг 2) или задать `llm.chat.n_ctx: 16384`
-(KV f16 2048 МиБ → ≈9,5 ГБ, влезает).
+**Следствие для W2 (важное, было решением заказчика — закрыто замером в §7.2):**
+чат-модель при `n_ctx = 32768` и **f16**-KV, по этой (завышенной) оценке, не влезала в 12 ГБ
+даже на пустой карте (11,5 ГБ + системный оверхед). Прежний llama-server работал потому, что
+его запускали с `--cache-type-k/v q8_0` (KV 2176 МиБ → ≈9,6 ГБ), а **cluster API ручки типа KV
+не имеет** (`kv_unified=1`, `no_kv_offload=0`, `cache-type-*` нет в `instance_params`).
+Варианты (оба — за пользователем, авто-деградации нет): измерить фактический KV движка или
+задать `llm.chat.n_ctx: 16384` (KV f16 2048 МиБ → ≈9,5 ГБ).
+**Итог 30.09.2026: выбран замер; он показал, что модель гибридная и KV = 1024 МиБ —
+`n_ctx: 32768` остаётся (см. §7.2).**
 
 ```powershell
 cargo test -p hds-llama                                    # включает калибровку VRAM
@@ -383,28 +384,88 @@ cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --budget
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --kind indexing --apply
 ```
 
+### 7.2. A4 — замер фактического KV движка (решение заказчика 30.09.2026 по `llm.chat.n_ctx`)
+
+**Решение заказчика:** `n_ctx: 32768` остаётся, вопрос закрывается **замером** (не переходом на 16384).
+Замер выполнен; попутно нашлась ошибка оценки — модель **гибридная**.
+
+**Находка 1 (аудит метаданных, `bin/gguf_dump`):** `Qwen3.5-9B` — не обычный трансформер:
+`qwen35.ssm.*` (state_size 128, conv_kernel 4, group_count 16, time_step_rank 32, inner_size 4096) и
+**`qwen35.full_attention_interval = 4`**. Полное внимание — только в каждом 4-м слое, значит растущий
+KV-кэш держат **8 слоёв из 32**, а не все: прежняя оценка KV (4096 МиБ) была завышена **в 4 раза**.
+llama.cpp делает так же (`llama_hparams::has_kv(il)` через `n_layer_kv_from_start`; в отчётах по
+Qwen3-Next: «only 12 of 48 layers enter the growing KV-cache calculation»).
+
+**Исправление оценки (`gguf.rs`/`budget.rs`):** читаем `*.full_attention_interval`, считаем
+`kv_layer_count() = block_count / interval` (и `kv_layer_count_within(offloaded)` — для частичного
+офлоада). Проверка: `tests/budget_calibration.rs` и юнит-тест на синтетическом GGUF.
+
+**Находка 2 (фактический KV, данные самого движка).** `bin/kv_probe` поднял кластерный инстанс
+(`n_gpu_layers = 8`, `allow_cpu`), и движок напечатал в лог собственные размеры буферов:
+
+| n_ctx | `llama_kv_cache: size` | слоёв KV | K (f16) | V (f16) | CPU KV | CUDA0 KV |
+|---|---|---|---|---|---|---|
+| 4096 | **128,00 МиБ** | 8 | 64,00 | 64,00 | 96,00 | 32,00 |
+| 32768 | **1024,00 МиБ** | 8 | 512,00 | 512,00 | 768,00 | 256,00 |
+
+Ровно совпадает с исправленной формулой (32768 × 8 слоёв × 4 головы × 512 × 2 Б = 1024 МиБ), и
+`CUDA0 KV = 256 МиБ` — доля **двух** офлоаднутых full-attention слоёв (движок ведёт KV по слоям
+устройства, как и предполагала предварительная проверка).
+
+**Находка 3 (независимый замер NVML).** Дифференциальный замер (`kv_probe --ngl 8 --n-ctx 4096,32768`):
+Δn_ctx 28672 → **ΔVRAM +224 МиБ** на 2 GPU-KV-слоях = **4,00 КиБ/токен/слой** — расхождение с
+формулой **0,0 %**. Машинная занятость при этом: 4074 → 4298 МиБ. Экстраполяция на полный офлоад:
+**KV ≈ 1024 МиБ**, всего «модель + KV + 5 %» ≈ **8492 МиБ** → в 12288 МиБ с резервом 1024 **влезает**
+(вердикт `kv_probe` и `budget_calibration`).
+
+Калибровка «веса» по тому же прогону: `ngl = 8` → рост 4074 МиБ ≈ CUDA0 model buffer 1998,52
+(8/33 слоёв + output) + KV 64 + compute ≈1972 + RS 10 — сходится.
+
+**Находка 4 (два фиксированных блока, которые оценка A4 не покрывает).** В том же логе:
+`llama_memory_recurrent: size = 50,25 МиБ (1 cells, 32 layers)` — SSM-состояние гибридных слоёв
+(**не растёт с `n_ctx`**) и `sched_reserve: CUDA0 compute buffer size = 1972,00 МиБ` при
+`n_batch/n_ubatch = 2048`. Итого полный офлоад ≈ 8492 + 50 + 1972 ≈ **10,5 ГБ** — в 12 ГБ влезает,
+но запас ~0,75 ГБ. Для A6: рассмотреть `n_batch` для чата (меньше `n_batch` → меньше compute-буфер)
+и учесть эти блоки в `hdsw check`/UI. Отдельно замечено: движок сам зовёт `llama_params_fit`
+(«fitting params to device memory»), т.е. при тесной карте может **сам** изменить офлоад — в A6 это
+надо проверить и, при необходимости, запретить (`--fit off`-эквивалент), иначе «без авто-деградации»
+нарушится со стороны движка.
+
+**Грабли замера (в журнал):** NVML на Windows даёт **машинную** занятость (per-process VRAM нет),
+поэтому при почти полной карте WDDM вытесняет чужие буферы и разница «не растёт» (первый прогон дал
+−32 МиБ). В `kv_probe` введён порог шума 64 МиБ: ниже него дифференциал не считается, а фактический
+KV берётся из данных движка (второй прогон на той же машине дал чистые +224 МиБ).
+
+```powershell
+# --- замер KV (A4): аудит метаданных и загрузка движком ---
+cargo run -p hds-llama --release --bin gguf_dump -- --role chat --json tools\parity\out\w2_chat_meta.json
+cargo run -p hds-llama --release --bin kv_probe  -- --role chat --ngl 8 --n-ctx 4096,32768 --json tools\parity\out\w2_kv_probe.json
+cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2_a4_budget.json   # chat: KV 1024, нужно 8492
+```
+
 ## 8. Состояние и следующий шаг
 
-* Тесты: `cargo test --workspace` — **47 проверок green** (arbiter 14 + pause_gate 6 + chunker 6
-  + chunker-parity 1 + hash 4 + walk 2 + config 2 + gguf 2 + registry 6 + category 2 + VRAM-калибровка 2),
+* Тесты: `cargo test --workspace` — **48 проверок green** (arbiter 14 + pause_gate 6 + registry_plan 6
+  + gguf 5 + chunker 6 + walk 4 + hash 2 + config 2 + chunker-parity 1 + VRAM-калибровка 1),
   тяжёлые (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–8): `crates/hds-index` (kinds/walk/hash/chunker),
+* Артефакты W2 (шаги 1–9): `crates/hds-index` (kinds/walk/hash/chunker),
   `crates/hds-llama` (обвязка движка, `a1_device_probe`, `runtime`/`config`/`registry`,
-  `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget`/`vram_budget`, **`pause`/`dispatch`/`status`
-  + `llm_host_status`/`llm_host_dispatch`**),
+  `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget`/`vram_budget`, `pause`/`dispatch`/`status`
+  + `llm_host_status`/`llm_host_dispatch`, **`gguf_dump`/`kv_probe`**),
   `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
   `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
   эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
   `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`, `w2_a4_status.json`,
-  `w2_a4_dispatch*.json`, `w2_a4_indexing.json`).
+  `w2_a4_dispatch*.json`, `w2_a4_indexing.json`, **`w2_chat_meta.json`, `w2_kv_probe.json`**).
 * Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
   R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
-  Новый вопрос к заказчику: `llm.chat.n_ctx` при f16-KV (§7) — 32768 не влезает
-  в 12 ГБ, нужен либо `16384`, либо замер фактического KV движка.
+  **Вопрос `llm.chat.n_ctx` закрыт замером KV** (§7.2): 32768 остаётся, KV = 1024 МиБ.
 * Следующее: **A5** — фасад `:8010–8012` (формат как у llama-server; `/health`, `/props`,
   `chat`/`chat-think`, embeddings, rerank), поверх `dispatch`+`pause`+`status` из A4 шага 2;
   затем **A6** — резидентный `llm-host` (создание инстансов по `registry::plan`, применение
-  решений `dispatch::apply`, подкоманды CLI) и **B4** — конвейер `process_file`.
+  решений `dispatch::apply`, подкоманды CLI) с двумя пунктами из §7.2: посмотреть `n_batch`
+  чата (compute-буфер ≈1972 МиБ) и поведение `llama_params_fit` (движок может сам менять
+  офлоад); затем **B4** — конвейер `process_file`.
 
 ## 9. Передача в новый чат (состояние W2 на 30.09.2026)
 
@@ -419,9 +480,10 @@ cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --k
 | `3418ade` | **A4 шаг 1** GGUF-метаданные + бюджет VRAM + `vram_budget` | калибровка bge-m3: 636 МиБ против замера +636 МиБ |
 | `ff130a8` | передача в новый чат (шапка плана, §9, README, STATUS) | — |
 | _(этот коммит)_ | **A4 шаг 2** диспетчер VRAM (`dispatch`/`pause`/`status`) + `llm_host_status`/`llm_host_dispatch` | 14 + 6 + 2 теста; живые прогоны §7.1 (в т.ч. регресс паузы пользователя найден и закрыт); хэш — `git log -1` |
+| _(этот коммит)_ | **A4: замер KV** по решению заказчика — `bin/gguf_dump` (метаданные, гибридные слои) + `bin/kv_probe` (фактический KV движка), исправление оценки в `gguf.rs`/`budget.rs` | §7.2: KV = 1024 МиБ (KV держат 8 слоёв из 32), NVML-дифференциал 4,00 КиБ/токен/слой (0,0 % к формуле), «модель+KV» 8492 МиБ → в 12 ГБ влезает |
 
-Ветка `w2-llm-host` (7 коммитов), `main` и боевой индекс **не тронуты**,
-Python-версия продолжает работать. `cargo test --workspace` — **47 проверок green**
+Ветка `w2-llm-host` (8 коммитов), `main` и боевой индекс **не тронуты**,
+Python-версия продолжает работать. `cargo test --workspace` — **48 проверок green**
 (+ `#[ignore]`-паритет 50 файлов и сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
 
 ### 9.2. Статус задач W2
@@ -431,7 +493,8 @@ Python-версия продолжает работать. `cargo test --workspa
 | A1 обвязка движка | ✅ | — |
 | A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `hdsw llm-host devices/status` (войдут с CLI, A6/B7) |
 | A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
-| A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев (`arb_scenarios.py`, после A6) |
+| A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 + замер KV | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев (`arb_scenarios.py`, после A6); `n_ctx` закрыт замером (§7.2) |
+| A4 замер KV (`llm.chat.n_ctx`) | ✅ | вопрос закрыт: 32768 остаётся, KV = 1024 МиБ (§7.2); подтверждение полного офлоада на свободной карте — вместе с A6 |
 | A5 фасад `:8010–8012` | ⏳ | `/health`, `/props`, `chat`/`chat-think` (thinking-маппинг §11.4), embeddings, rerank |
 | A6 значения по умолчанию и совместимость | ⏳ | дефолты конфига, `llm_server.mode`, миграция установки |
 | B1 обход/лимиты/exclude | ✅ | — |
@@ -466,7 +529,7 @@ Python-версия продолжает работать. `cargo test --workspa
 | `crates/hds-llama/src/pause.rs` | `IndexPause`/`PauseLease` (`index.pause`, вложенность, чужую паузу не снимаем), `read_heartbeat` |
 | `crates/hds-llama/src/dispatch.rs` | арбитр VRAM: `plan_query`/`plan_indexing`/`idle_evictions`, `Action`/`Verdict`/`Plan`, `apply` (кластер) |
 | `crates/hds-llama/src/status.rs` | `StatusReport` (роли/бюджет/пауза/прогноз, `lines` + `json`) |
-| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch` |
+| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch`, `gguf_dump`, `kv_probe` |
 | `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report` |
 | `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды) |
 
@@ -492,23 +555,32 @@ cargo run -p hds-llama --release --bin llm_host_status  -- --json tools\parity\o
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat                       # решение без действий
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role chat --budget-mb 3000      # сужение бюджета (A-7)
 cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --kind indexing --apply
+
+# --- A4: замер KV (решение по llm.chat.n_ctx) ---
+cargo run -p hds-llama --release --bin gguf_dump -- --role chat --json tools\parity\out\w2_chat_meta.json
+cargo run -p hds-llama --release --bin kv_probe  -- --role chat --ngl 8 --n-ctx 4096,32768 --json tools\parity\out\w2_kv_probe.json
 ```
 
 ### 9.5. Открытые вопросы и решения
 
-* **Ждёт заказчика:** `llm.chat.n_ctx` — при `n_ctx = 32768` и f16-KV чат требует
-  ~11,5 ГБ (не влезает в 12 ГБ), у cluster API нет ручки типа KV (§7).
+* **Закрыт 30.09.2026 (замер):** `llm.chat.n_ctx` — `32768` **остаётся**. Модель гибридная
+  (`full_attention_interval = 4`), KV держат 8 слоёв из 32 → 1024 МиБ (f16); подтверждено
+  данными движка и NVML-дифференциалом. Числа — §7.2.
 * **Решено и не переоткрывать:** без авто-деградации кванта; llama-server удаляется
   в конце W2; кросс-процессной адресации нет → фасад обязателен; устройство — числовым
   `manual_devices_csv`; cwd движка + вендорские каталоги обязательны; бюджет VRAM — по NVML.
-* **Осталось измерить (A4 шаг 2 → A6):** фактический KV чат-модели при загрузке —
-  нужен кластерный инстанс и окно со свободной VRAM (на машине занято 8,5 ГБ штатными
-  ролями Python-версии). Замер снимается `llm_host_dispatch --role chat --apply`
-  после создания инстанса в `llm-host`; до этого оценка — f16 (§7.1).
 * **Не переоткрывать после A4 шага 2:** `index.pause` снимает только тот, кто его
   поставил (`ours_created`) — чужую (пользовательскую) паузу запросы не трогают; занятые
   запросом и чужие (не наши) инстансы не вытесняются никогда; роль вне `gpu.priorities`
   получает приоритет 0; при `gpu.policy: manual` диспетчер только сообщает.
+* **Не переоткрывать после замера KV (§7.2):** KV считаем по слоям с полным вниманием
+  (`full_attention_interval`), а не по всем; NVML на Windows — машинная занятость
+  (per-process VRAM нет), при почти полной карте WDDM двигает чужие буферы → порог шума 64 МиБ;
+  у гибридных моделей есть фиксированные SSM-состояние (≈50 МиБ) и compute-буфер (≈1972 МиБ
+  при `n_batch` 2048), которые оценка «модель + KV + 5 %» не покрывает.
+* **Осталось измерить (A6):** полный офлоад чата на **свободной** карте — подтвердить суммарные
+  ≈10,5 ГБ (модель + KV + SSM + compute) и проверить, не меняет ли `llama_params_fit` офлоад
+  сам; при необходимости уменьшить `n_batch` чата.
 
 ### 9.6. Правило паритета (как проверять новые куски)
 
@@ -547,6 +619,13 @@ cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --k
 9. **Прогон с `--apply` меняет состояние машины.** Перед прогоном проверяйте `index.pause`
    и что выгружается: `llm_host_dispatch` сначала показывает решение, и только `--apply`
    его выполняет (без флага ничего не трогается).
+10. **NVML на Windows — машинная занятость, и при почти полной карте WDDM двигает чужие
+    буферы** (наблюдено: Δn_ctx 28672 дал −32 МиБ вместо +224 МиБ). Для замеров KV
+    использовать порог шума (в `kv_probe` — 64 МиБ) и/или свободную карту; фактические
+    размеры буферов движок печатает сам (`llama_kv_cache: size = …` — это и есть замер).
+11. **Гибридные модели:** KV держат не все слои (`full_attention_interval`), плюс есть
+    фиксированные SSM-состояние и compute-буфер — оценка «модель + KV + 5 %» их не видит,
+    а на решение «влезает/не влезает» они влияют (см. §7.2).
 
 
 * Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков

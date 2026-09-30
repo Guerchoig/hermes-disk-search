@@ -32,6 +32,12 @@ pub struct GgufMeta {
     /// `*.attention.causal`: `false` — энкодер без KV-кэша (bge-m3),
     /// `None` — ключа нет (декодеры по умолчанию причинные).
     pub causal: Option<bool>,
+    /// `*.full_attention_interval` — у гибридных моделей (Qwen3.5/Qwen3-Next и др.)
+    /// полный KV-кэш держит только каждый N-й слой, остальные — SSM/линейное
+    /// внимание с состоянием фиксированного размера. Находка A4 шага 2:
+    /// у Qwen3.5-9B `full_attention_interval = 4` → KV держат 8 слоёв из 32,
+    /// а не все (прежняя оценка завышала KV в 4 раза).
+    pub full_attention_interval: Option<u32>,
 }
 
 impl GgufMeta {
@@ -51,6 +57,32 @@ impl GgufMeta {
     /// подтверждено замером A1 (bge-m3: файл 605 МиБ, рост VRAM +636 МиБ).
     pub fn has_kv_cache(&self) -> bool {
         self.causal != Some(false)
+    }
+
+    /// Сколько слоёв держат **растущий** KV-кэш.
+    ///
+    /// У гибридных моделей (`full_attention_interval = N`) полное внимание только
+    /// в каждом N-м слое: llama.cpp считает такие слои через `n_layer_kv_from_start`
+    /// (`has_kv(il)`), а остальные слои — SSM/линейное внимание с состоянием
+    /// фиксированного размера (в расчёт «на токен» не входят).
+    pub fn kv_layer_count(&self) -> u32 {
+        if !self.has_kv_cache() {
+            return 0;
+        }
+        match self.full_attention_interval {
+            Some(n) if n > 1 => (self.block_count + n - 1) / n,
+            _ => self.block_count,
+        }
+    }
+
+    /// Сколько слоёв держат KV-кэш среди первых `offloaded` слоёв (для замера
+    /// с частичным офлоадом: `n_gpu_layers = offloaded`).
+    pub fn kv_layer_count_within(&self, offloaded: u32) -> u32 {
+        let layers = offloaded.min(self.block_count);
+        match self.full_attention_interval {
+            Some(n) if n > 1 => (layers + n - 1) / n,
+            _ => layers,
+        }
     }
 
     /// Оценка KV-кэша в МиБ для `n_ctx × n_parallel` (см. [`crate::budget`]).
@@ -92,34 +124,14 @@ fn is_wanted(name: &str) -> bool {
         || name.ends_with(".attention.key_length")
         || name.ends_with(".attention.value_length")
         || name.ends_with(".attention.causal")
+        || name.ends_with(".full_attention_interval")
         || name.ends_with(".embedding_length")
 }
 
 /// Прочитать метаданные модели. Ошибки чтения/формата — `EngineError::Other`
 /// с понятным текстом (файл может быть недокачан — как в реальной жизни).
 pub fn read_meta(path: &Path) -> Result<GgufMeta> {
-    let mut r = BufReader::new(File::open(path).map_err(|e| {
-        EngineError::Other(format!("GGUF {}: не читается ({e})", path.display()))
-    })?);
-    let mut magic = [0u8; 4];
-    r.read_exact(&mut magic)
-        .map_err(|e| EngineError::Other(format!("GGUF {}: {e}", path.display())))?;
-    if &magic != b"GGUF" {
-        return Err(EngineError::Other(format!(
-            "{}: это не GGUF (магия {:?})",
-            path.display(),
-            String::from_utf8_lossy(&magic)
-        )));
-    }
-    let version = read_u32(&mut r)?;
-    if version < 2 || version > 3 {
-        return Err(EngineError::Other(format!(
-            "{}: версия GGUF {version} не поддерживается (ожидается 2 или 3)",
-            path.display()
-        )));
-    }
-    let _tensor_count = read_u64(&mut r)?;
-    let kv_count = read_u64(&mut r)?;
+    let (mut r, kv_count) = open_header(path)?;
 
     let mut arch = String::new();
     let mut block_count = 0u64;
@@ -129,6 +141,7 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
     let mut key_len = 0u64;
     let mut value_len = 0u64;
     let mut causal: Option<bool> = None;
+    let mut full_attn_interval = 0u64;
     for _ in 0..kv_count {
         let name = read_string(&mut r)?;
         let vtype = read_u32(&mut r)?;
@@ -162,6 +175,8 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
                     head_kv = v;
                 } else if name.ends_with(".attention.head_count") {
                     head_count = v;
+                } else if name.ends_with(".full_attention_interval") {
+                    full_attn_interval = v;
                 } else if name.ends_with(".block_count") {
                     block_count = v;
                 } else if name.ends_with(".embedding_length") {
@@ -187,7 +202,274 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
         key_length: if key_len == 0 { None } else { Some(key_len as u32) },
         value_length: if value_len == 0 { None } else { Some(value_len as u32) },
         causal,
+        full_attention_interval: if full_attn_interval > 1 {
+            Some(full_attn_interval as u32)
+        } else {
+            None
+        },
     })
+}
+
+/// Открыть файл GGUF и прочитать заголовок: `(reader, число KV-пар)`.
+fn open_header(path: &Path) -> Result<(BufReader<File>, u64)> {
+    let mut r = BufReader::new(File::open(path).map_err(|e| {
+        EngineError::Other(format!("GGUF {}: не читается ({e})", path.display()))
+    })?);
+    let mut magic = [0u8; 4];
+    r.read_exact(&mut magic)
+        .map_err(|e| EngineError::Other(format!("GGUF {}: {e}", path.display())))?;
+    if &magic != b"GGUF" {
+        return Err(EngineError::Other(format!(
+            "{}: это не GGUF (магия {:?})",
+            path.display(),
+            String::from_utf8_lossy(&magic)
+        )));
+    }
+    let version = read_u32(&mut r)?;
+    if version < 2 || version > 3 {
+        return Err(EngineError::Other(format!(
+            "{}: версия GGUF {version} не поддерживается (ожидается 2 или 3)",
+            path.display()
+        )));
+    }
+    let _tensor_count = read_u64(&mut r)?;
+    let kv_count = read_u64(&mut r)?;
+    Ok((r, kv_count))
+}
+
+/// Тип значения GGUF — человекочитаемое имя (для `bin/gguf_dump`).
+pub fn kv_type_name(t: u32) -> &'static str {
+    match t {
+        0 => "u8",
+        1 => "i8",
+        2 => "u16",
+        3 => "i16",
+        4 => "u32",
+        5 => "i32",
+        6 => "f32",
+        7 => "bool",
+        8 => "string",
+        9 => "array",
+        10 => "u64",
+        11 => "i64",
+        12 => "f64",
+        _ => "unknown",
+    }
+}
+
+/// Значение метаданных GGUF (полный аудит файла, а не только «нужные» ключи).
+#[derive(Debug, Clone, PartialEq)]
+pub enum GgufValue {
+    U8(u8),
+    I8(i8),
+    U16(u16),
+    I16(i16),
+    U32(u32),
+    I32(i32),
+    U64(u64),
+    I64(i64),
+    F32(f32),
+    F64(f64),
+    Bool(bool),
+    Str(String),
+    /// Массив: тип элемента, длина и первые значения (превью; длинные массивы
+    /// читаются пропуском — токенизаторы весят десятки мегабайт).
+    Array {
+        elem_type: u32,
+        len: u64,
+        preview: Vec<String>,
+    },
+}
+
+impl GgufValue {
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            GgufValue::U8(_) => "u8",
+            GgufValue::I8(_) => "i8",
+            GgufValue::U16(_) => "u16",
+            GgufValue::I16(_) => "i16",
+            GgufValue::U32(_) => "u32",
+            GgufValue::I32(_) => "i32",
+            GgufValue::U64(_) => "u64",
+            GgufValue::I64(_) => "i64",
+            GgufValue::F32(_) => "f32",
+            GgufValue::F64(_) => "f64",
+            GgufValue::Bool(_) => "bool",
+            GgufValue::Str(_) => "string",
+            GgufValue::Array { .. } => "array",
+        }
+    }
+
+    /// Числовое значение (для сверки параметров модели).
+    pub fn as_i64(&self) -> Option<i64> {
+        Some(match self {
+            GgufValue::U8(v) => *v as i64,
+            GgufValue::I8(v) => *v as i64,
+            GgufValue::U16(v) => *v as i64,
+            GgufValue::I16(v) => *v as i64,
+            GgufValue::U32(v) => *v as i64,
+            GgufValue::I32(v) => *v as i64,
+            GgufValue::U64(v) => *v as i64,
+            GgufValue::I64(v) => *v,
+            GgufValue::F32(v) => *v as i64,
+            GgufValue::F64(v) => *v as i64,
+            GgufValue::Bool(v) => *v as i64,
+            _ => return None,
+        })
+    }
+
+    pub fn as_f64(&self) -> Option<f64> {
+        Some(match self {
+            GgufValue::F32(v) => *v as f64,
+            GgufValue::F64(v) => *v,
+            other => other.as_i64()? as f64,
+        })
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            GgufValue::Bool(v) => Some(*v),
+            other => other.as_i64().map(|v| v != 0),
+        }
+    }
+
+    pub fn as_str(&self) -> Option<&str> {
+        match self {
+            GgufValue::Str(s) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Короткая строка для печати/`--json`.
+    pub fn describe(&self) -> String {
+        const MAX: usize = 96;
+        let cut = |s: &str| -> String {
+            if s.chars().count() <= MAX {
+                s.to_string()
+            } else {
+                let head: String = s.chars().take(MAX).collect();
+                format!("{head}…")
+            }
+        };
+        match self {
+            GgufValue::Str(s) => format!("{:?}", cut(s)),
+            GgufValue::F32(v) => format!("{v}"),
+            GgufValue::F64(v) => format!("{v}"),
+            GgufValue::Array {
+                elem_type,
+                len,
+                preview,
+            } => {
+                let p = if preview.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", cut(&preview.join(", ")))
+                };
+                format!("{}[{len}]{p}", kv_type_name(*elem_type))
+            }
+            other => other.as_i64().map(|v| v.to_string()).unwrap_or_default(),
+        }
+    }
+}
+
+/// Одна KV-пара метаданных.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GgufKv {
+    pub name: String,
+    pub type_id: u32,
+    pub value: GgufValue,
+}
+
+/// Прочитать **все** KV-пары метаданных (аудит модели; `bin/gguf_dump`).
+pub fn read_all(path: &Path) -> Result<Vec<GgufKv>> {
+    let (mut r, kv_count) = open_header(path)?;
+    let mut out = Vec::new();
+    for _ in 0..kv_count {
+        let name = read_string(&mut r)?;
+        let vtype = read_u32(&mut r)?;
+        let value = read_value(&mut r, vtype, path)?;
+        out.push(GgufKv {
+            name,
+            type_id: vtype,
+            value,
+        });
+    }
+    Ok(out)
+}
+
+fn io_err(e: std::io::Error) -> EngineError {
+    EngineError::Other(format!("GGUF: {e}"))
+}
+
+/// Прочитать значение любого типа (длинные массивы — с превью, остальное пропуском).
+fn read_value<R: Read + std::io::Seek>(r: &mut R, vtype: u32, path: &Path) -> Result<GgufValue> {
+    const PREVIEW: usize = 8;
+    const MAX_NUMERIC: u64 = 8192;
+    match vtype {
+        0 | 1 | 7 => {
+            let mut b = [0u8; 1];
+            r.read_exact(&mut b).map_err(io_err)?;
+            Ok(match vtype {
+                0 => GgufValue::U8(b[0]),
+                1 => GgufValue::I8(b[0] as i8),
+                _ => GgufValue::Bool(b[0] != 0),
+            })
+        }
+        2 | 3 => {
+            let mut b = [0u8; 2];
+            r.read_exact(&mut b).map_err(io_err)?;
+            Ok(if vtype == 2 {
+                GgufValue::U16(u16::from_le_bytes(b))
+            } else {
+                GgufValue::I16(i16::from_le_bytes(b))
+            })
+        }
+        4 => Ok(GgufValue::U32(read_u32(r)?)),
+        5 => Ok(GgufValue::I32(read_u32(r)? as i32)),
+        6 => Ok(GgufValue::F32(f32::from_bits(read_u32(r)?))),
+        8 => Ok(GgufValue::Str(read_string(r)?)),
+        10 => Ok(GgufValue::U64(read_u64(r)?)),
+        11 => Ok(GgufValue::I64(read_u64(r)? as i64)),
+        12 => Ok(GgufValue::F64(f64::from_bits(read_u64(r)?))),
+        9 => {
+            let elem_type = read_u32(r)?;
+            let len = read_u64(r)?;
+            let mut preview: Vec<String> = Vec::new();
+            // числовой массив небольшого размера читаем целиком (например,
+            // per-layer `head_count_kv` гибридных моделей)
+            if fixed_size(elem_type).is_some() && len <= MAX_NUMERIC {
+                for i in 0..len {
+                    let v = read_value(r, elem_type, path)?;
+                    if (i as usize) < PREVIEW {
+                        preview.push(v.describe());
+                    }
+                }
+                return Ok(GgufValue::Array {
+                    elem_type,
+                    len,
+                    preview,
+                });
+            }
+            // длинный/нечисловой: превью головы, хвост — пропуском
+            let head = len.min(PREVIEW as u64);
+            for _ in 0..head {
+                let v = read_value(r, elem_type, path)?;
+                preview.push(v.describe());
+            }
+            for _ in head..len {
+                skip_value(r, elem_type, path)?;
+            }
+            Ok(GgufValue::Array {
+                elem_type,
+                len,
+                preview,
+            })
+        }
+        other => Err(EngineError::Other(format!(
+            "{}: неизвестный тип значения GGUF {other}",
+            path.display()
+        ))),
+    }
 }
 
 fn read_u32<R: Read>(r: &mut R) -> Result<u32> {
@@ -283,7 +565,7 @@ mod tests {
         b.extend_from_slice(b"GGUF");
         b.extend_from_slice(&3u32.to_le_bytes());
         b.extend_from_slice(&0u64.to_le_bytes()); // тензоров нет
-        b.extend_from_slice(&6u64.to_le_bytes()); // шесть KV
+        b.extend_from_slice(&7u64.to_le_bytes()); // семь KV-пар (см. ниже)
         kv("general.architecture", 8, &str_val("llama"), &mut b);
         kv("llama.block_count", 4, &block_count.to_le_bytes(), &mut b);
         kv("llama.attention.head_count", 4, &head_count.to_le_bytes(), &mut b);
@@ -321,6 +603,39 @@ mod tests {
         assert_eq!(meta.head_count_kv, 8);
         assert_eq!(meta.embedding_length, 4096);
         assert_eq!(meta.head_dim(), 128);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn reads_hybrid_kv_layers_from_full_attention_interval() {
+        // копия синтетики + ключ гибридности (как у Qwen3.5-9B: интервал 4)
+        let mut b = synthetic(32, 16, 4, 4096);
+        // дописываем KV-пару: имя + тип u32 + значение
+        let name = "qwen35.full_attention_interval";
+        b.extend_from_slice(&(name.len() as u64).to_le_bytes());
+        b.extend_from_slice(name.as_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes());
+        b.extend_from_slice(&4u32.to_le_bytes());
+        // и правим число KV-пар: было 7, стало 8 (наша пара — восьмая)
+        let kv_count_offset = 4 + 4 + 8;
+        b[kv_count_offset..kv_count_offset + 8].copy_from_slice(&8u64.to_le_bytes());
+
+        let p = temp_path("hybrid");
+        std::fs::write(&p, b).expect("write");
+        let all = read_all(&p).expect("all");
+        assert_eq!(
+            all.last().map(|kv| kv.name.as_str()),
+            Some("qwen35.full_attention_interval"),
+            "дампа должно быть 8 пар, последняя — наша"
+        );
+        let meta = read_meta(&p).expect("meta");
+        assert_eq!(meta.full_attention_interval, Some(4));
+        assert_eq!(meta.kv_layer_count(), 8, "32 слоя / интервал 4");
+        assert_eq!(meta.kv_layer_count_within(8), 2);
+        assert_eq!(meta.kv_layer_count_within(32), 8);
+        // KV f16 при 32768 = 32768 × 8 × 4 головы × 512 × 2 Б = 1024 МиБ
+        let kv = crate::budget::kv_cache_mib(&meta, 32768, 1, KvBits::F16);
+        assert!((kv - 1024.0).abs() < 1.0, "KV = {kv}");
         let _ = std::fs::remove_file(&p);
     }
 

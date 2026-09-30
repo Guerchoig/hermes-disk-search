@@ -51,7 +51,9 @@ llm_server:
   chat:
     port: 8010
     model: "models/chat/qwen3.5-9b-Q6_K.gguf"
-    ctx_per_slot: 32768       # 32K: если инстанс ОБЩИЙ с anonymizer_proxy (порт 8010)
+    ctx_per_slot: 32768       # 32K подтверждено замером (W2_REPORT §7.2): модель гибридная,
+                              #   KV держат 8 слоёв из 32 → 1024 МиБ при f16; «модель + KV»
+                              #   ≈ 8492 МиБ → в 12 ГБ влезает (плюс SSM ≈50 МиБ и compute-буфер)
     extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
   embedding:
     port: 8011

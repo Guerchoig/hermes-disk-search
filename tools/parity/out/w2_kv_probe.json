@@ -1,0 +1,46 @@
+{
+  "architecture": "qwen35",
+  "baseline_used_mib": 7406,
+  "block_count": 32,
+  "file_mib": 7112,
+  "fits_total_card": true,
+  "full_attention_interval": 4,
+  "head_count_kv": 4,
+  "key_length": 256,
+  "kv_full_mib_formula": 1024.0,
+  "kv_full_mib_measured": 1024.0,
+  "kv_kib_per_token_per_layer_formula": 4.0,
+  "kv_kib_per_token_per_layer_measured": 4.0,
+  "kv_layer_count": 8,
+  "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+  "n_ctx_max": 32768,
+  "need_full_mib": 8492.0,
+  "rows": [
+    {
+      "delta_mib": 4074,
+      "free_mib": 634,
+      "kv_formula_mib": 128,
+      "kv_layers": 2,
+      "n_ctx": 4096,
+      "n_gpu_layers": 8,
+      "notes": [
+        "состояние после загрузки: LOADED"
+      ],
+      "peak_mib": 11480
+    },
+    {
+      "delta_mib": 4298,
+      "free_mib": 410,
+      "kv_formula_mib": 1024,
+      "kv_layers": 2,
+      "n_ctx": 32768,
+      "n_gpu_layers": 8,
+      "notes": [
+        "состояние после загрузки: LOADED"
+      ],
+      "peak_mib": 11704
+    }
+  ],
+  "total_mib": 12288,
+  "value_length": 256
+}

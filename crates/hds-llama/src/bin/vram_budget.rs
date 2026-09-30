@@ -174,11 +174,12 @@ fn run() -> Result<()> {
             chat_ok = false;
         }
         println!(
-            "{:<9} файл {:>5} МиБ | слоёв {:>3} | голов KV {:>3} | head_dim {:>4} | n_ctx {:>6} | \
+            "{:<9} файл {:>5} МиБ | слоёв {:>3} (KV {:>2}) | голов KV {:>3} | head_dim {:>4} | n_ctx {:>6} | \
              KV f16 {:>6.0} / q8_0 {:>6.0} МиБ | нужно {:>5} МиБ -> {}",
             inst.role,
             file_mib,
             meta.block_count,
+            meta.kv_layer_count(),
             meta.head_count_kv,
             meta.head_dim(),
             n_ctx,
@@ -192,6 +193,8 @@ fn run() -> Result<()> {
             "model": inst.model_path.display().to_string(),
             "file_mib": file_mib,
             "block_count": meta.block_count,
+            "kv_layer_count": meta.kv_layer_count(),
+            "full_attention_interval": meta.full_attention_interval,
             "head_count_kv": meta.head_count_kv,
             "head_dim": meta.head_dim(),
             "n_ctx": n_ctx,
