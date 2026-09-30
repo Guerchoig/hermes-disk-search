@@ -443,29 +443,102 @@ cargo run -p hds-llama --release --bin kv_probe  -- --role chat --ngl 8 --n-ctx 
 cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2_a4_budget.json   # chat: KV 1024, нужно 8492
 ```
 
+### 7.3. A5 — фасад `:8010–8012` (OpenAI-совместимый)
+
+**Зачем фасад.** Замер A3 показал, что **кросс-процессной адресации инстансов нет**:
+инстансы видит только создавший их процесс. Значит единственный гарантированный способ
+обслуживать UI/MCP/внешних агентов — HTTP-фасад на тех же портах, что были у
+`llama-server` (`:8010` чат, `:8011` эмбеддинги, `:8012` реранк).
+
+**Разведка контракта чата (`bin/chat_probe`, артефакт `out/w2_chat_contract.json`)** —
+замер, а не догадки. Кластерный `chat_complete` принимает **готовый `prompt`**, но движок
+**сам применяет шаблон чата модели**:
+
+| Вход | Токенов на входе (движок) | Ответ |
+|---|---|---|
+| «плоский» текст (system+user+слово `assistant`) | **56** | «4» |
+| то же с маркерами ChatML (угл. скобки `im_start`) | **68** | «4» |
+| ChatML + `reasoning=on, format=none` | 66 | 48 токенов «Thinking Process: …» |
+| ChatML, `reasoning` не задан | 68 | «4» (без размышлений) |
+
+Выводы: (1) шаблон накладывается поверх нашего текста (плоский текст вырос с ~35 «сырых»
+токенов до 56), поэтому маркеры ставить **нельзя** — иначе модель видит их как обычный
+текст; (2) `reasoning=off` через кластерный инстанс даёт ответ **без** размышлений —
+это закрывает открытый вопрос §9.5 плана W2 (в W0 проверялось только через bridge-API);
+(3) `reasoning=on` + `format=none` даёт видимые размышления — на этом работает `chat-think`.
+
+**Что сделано:**
+
+| Модуль | Что внутри |
+|---|---|
+| `src/http.rs` | свой минимальный HTTP/1.1 (свой — потому что `crates.io` на машине недоступен: `Could not resolve host: index.crates.io`): `Content-Length`, `Expect: 100-continue`, keep-alive, `Connection: close`, лимит тела 32 МБ, явный `411` на chunked-тело, поток на соединение, паника обработчика не роняет сервер |
+| `src/facade.rs` | маршрутизация как у `llama-server` (`/health`, `/props`, `/v1/models`, `/v1/chat/completions`, `/v1/embeddings`, `/v1/rerank` — с `/v1` и без); сборка `prompt` из `messages` (system первым абзацем, история «Пользователь:/Ассистент:», последняя реплика как есть — для пары system+user вход совпадает с Python-RAG); режимы размышлений (`chat_template_kwargs.enable_thinking` → `reasoning` → алиас `chat-think` → конфиг); `strip_think` — порт `hds/rag.py::_strip_think`; ответы OpenAI (`choices[0].message.content`, `usage`, `reasoning_content` при включённых размышлениях); `trait Backend` + `handle()` + `serve()` |
+| `bin/llm_host_facade` | живой фасад: инстансы по `registry::plan` (A2), диспетчер `dispatch` (A4) на каждом запросе (пауза+вытеснение+`PauseLease` до конца запроса), `--port-base` (проверки на альтернативных портах), `--ngl` (экономия VRAM), `--hold`, `--json` |
+| `tools/parity/facade_smoke.ps1` | живая проверка одной командой (ASCII-only: PowerShell 5.1 читает .ps1 без BOM как ANSI и ломает кириллицу) |
+
+**Живой прогон** (`facade_smoke.ps1 -PortBase 8020 -HoldSec 20`, чат на CPU, чтобы не
+отбирать VRAM и не занимать порты 8010–8012 у Python-версии):
+
+```
+== /health ok
+== /props: total_slots=1 n_ctx=32768 model_path=…\llama-runtime\models\chat\Qwen3.5-9B-Q6_K.gguf
+== /v1/models: chat, chat-think, embedding, rerank
+== chat (thinking off): 226 ms, answer: 4        (usage: prompt=29 completion=2)
+== chat (chat-think): reasoning_content yes (103 chars)
+== embeddings: 2 vectors, dim 1024
+[dispatcher] вердикт not_enough: нужно 1660 МиБ …, свободно 303 МиБ
+[dispatcher] выгрузить 'chat' (роль chat, ≈8492 МиБ): приоритет 100 (chat), retention keep
+[dispatcher] index.pause уже стоял (пауза пользователя) — переиспользуем, снимать не будем
+инстансы сняты: 3; index.pause сейчас: стоит     ← пауза пользователя не тронута
+```
+
+То есть в одном прогоне сошлось всё: фасад отвечает как `llama-server`, диспетчер при
+нехватке VRAM выгружает роль по приоритету, `index.pause` пользователя **не** снимается,
+а после прогона инстансы и пауза в исходном состоянии (`out/w2_facade.json`).
+
+**Находка (грабля Windows, поймана тестом `tests/facade_http.rs`):** `accept()` от
+**неблокирующего** слушателя отдаёт неблокирующий сокет, поэтому вторую строку запроса
+читать было нельзя — соединение закрывалось сразу после первого ответа (keep-alive
+не работал). Исправлено `set_nonblocking(false)` в обработчике соединения + закрытие
+соединения по таймауту простоя. Тест оставлен как страж (`http_transport_handles_keep_alive_continue_and_chunked`).
+
+**Ограничения A5 (осознанные, задокументированы в коде):** `stream=true` не поддерживается
+(cluster API отдаёт ответ целиком) → честная 400; chunked-тело → `411 Length Required`;
+TLS нет (фасад слушает только localhost); `/props` отдаёт `total_slots`/`model_path`/`n_ctx`
+именно в той форме, по которой Python-версия (`hds/llama_server.py::probe`) считает
+инстанс «своим», а UI показывает фактический контекст.
+
+```powershell
+# --- A5: фасад ---
+cargo test -p hds-llama --test facade_core --test facade_http   # 10 + 3 (1 #[ignore] — ручная диагностика)
+cargo run -p hds-llama --release --bin chat_probe -- --json tools\parity\out\w2_chat_contract.json
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
+```
+
 ## 8. Состояние и следующий шаг
 
-* Тесты: `cargo test --workspace` — **48 проверок green** (arbiter 14 + pause_gate 6 + registry_plan 6
-  + gguf 5 + chunker 6 + walk 4 + hash 2 + config 2 + chunker-parity 1 + VRAM-калибровка 1),
-  тяжёлые (паритет 50 файлов, сценарий `real`) — по флагу/`#[ignore]`.
-* Артефакты W2 (шаги 1–9): `crates/hds-index` (kinds/walk/hash/chunker),
+* Тесты: `cargo test --workspace` — **61 проверка green** (facade_core 10 + facade_http 3 + arbiter 14
+  + pause_gate 6 + registry_plan 6 + gguf 5 + chunker 6 + walk 4 + hash 2 + config 2
+  + status_report 2 + VRAM-калибровка 2 + chunker-parity 1), тяжёлые (паритет 50 файлов,
+  сценарий `real`) и ручная диагностика keep-alive — `#[ignore]`.
+* Артефакты W2 (шаги 1–10): `crates/hds-index` (kinds/walk/hash/chunker),
   `crates/hds-llama` (обвязка движка, `a1_device_probe`, `runtime`/`config`/`registry`,
   `llm_host_plan`, `a3_instance_probe`, `gguf`/`budget`/`vram_budget`, `pause`/`dispatch`/`status`
-  + `llm_host_status`/`llm_host_dispatch`, **`gguf_dump`/`kv_probe`**),
-  `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`,
+  + `llm_host_status`/`llm_host_dispatch`, `gguf_dump`/`kv_probe`/`chat_probe`,
+  **`http`/`facade`/`llm_host_facade`**),
+  `tools/parity/walk_parity.py`, `tools/parity/hash_vectors.py`, `tools/parity/facade_smoke.ps1`,
   `tools/parity/W2_REPORT.md` (этот файл); в git из `out/` идут только маленькие
   эталоны и отчёты (`walk_parity_synthetic.json`, `hash_vectors.json`,
   `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`, `w2_a4_status.json`,
-  `w2_a4_dispatch*.json`, `w2_a4_indexing.json`, **`w2_chat_meta.json`, `w2_kv_probe.json`**).
-* Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
-  R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
-  **Вопрос `llm.chat.n_ctx` закрыт замером KV** (§7.2): 32768 остаётся, KV = 1024 МиБ.
-* Следующее: **A5** — фасад `:8010–8012` (формат как у llama-server; `/health`, `/props`,
-  `chat`/`chat-think`, embeddings, rerank), поверх `dispatch`+`pause`+`status` из A4 шага 2;
-  затем **A6** — резидентный `llm-host` (создание инстансов по `registry::plan`, применение
-  решений `dispatch::apply`, подкоманды CLI) с двумя пунктами из §7.2: посмотреть `n_batch`
-  чата (compute-буфер ≈1972 МиБ) и поведение `llama_params_fit` (движок может сам менять
-  офлоад); затем **B4** — конвейер `process_file`.
+  `w2_a4_dispatch*.json`, `w2_a4_indexing.json`, `w2_chat_meta.json`, `w2_kv_probe.json`,
+  **`w2_chat_contract.json`, `w2_facade.json`**).
+* Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен и уже готов);
+  R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50;
+  вопрос `llm.chat.n_ctx` закрыт замером KV (§7.2).
+* Следующее: **A6** — резидентный `llm-host` (автозапуск, `data/llm-host.pid`, `data/logs/llm-host.log`,
+  подкоманды CLI `status/load/unload/devices`, перевод портов на «боевые» 8010–8012 при выключенной
+  Python-версии) + два пункта из §7.2 (`n_batch` чата и поведение `llama_params_fit`);
+  затем **ARB-сценарии** автоматизацией (`arb_scenarios.py`) и **B4** — конвейер `process_file`.
 
 ## 9. Передача в новый чат (состояние W2 на 30.09.2026)
 
@@ -481,10 +554,11 @@ cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2
 | `ff130a8` | передача в новый чат (шапка плана, §9, README, STATUS) | — |
 | _(этот коммит)_ | **A4 шаг 2** диспетчер VRAM (`dispatch`/`pause`/`status`) + `llm_host_status`/`llm_host_dispatch` | 14 + 6 + 2 теста; живые прогоны §7.1 (в т.ч. регресс паузы пользователя найден и закрыт); хэш — `git log -1` |
 | _(этот коммит)_ | **A4: замер KV** по решению заказчика — `bin/gguf_dump` (метаданные, гибридные слои) + `bin/kv_probe` (фактический KV движка), исправление оценки в `gguf.rs`/`budget.rs` | §7.2: KV = 1024 МиБ (KV держат 8 слоёв из 32), NVML-дифференциал 4,00 КиБ/токен/слой (0,0 % к формуле), «модель+KV» 8492 МиБ → в 12 ГБ влезает |
+| _(этот коммит)_ | **A5 фасад** — `http` (свой мини-HTTP), `facade` (маршрутизация/prompt/thinking/ответы), `bin/llm_host_facade`, `bin/chat_probe`, `facade_smoke.ps1` | `facade_core` 10 + `facade_http` 3 теста, живой прогон §7.3 (чат «4» за 226 мс, `chat-think` с размышлениями, эмбеддинги 1024, диспетчер не снял чужую паузу) |
 
-Ветка `w2-llm-host` (8 коммитов), `main` и боевой индекс **не тронуты**,
-Python-версия продолжает работать. `cargo test --workspace` — **48 проверок green**
-(+ `#[ignore]`-паритет 50 файлов и сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
+Ветка `w2-llm-host` (10 коммитов), `main` и боевой индекс **не тронуты**,
+Python-версия продолжает работать. `cargo test --workspace` — **61 проверка green**
+(+ `#[ignore]`-паритет 50 файлов, сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
 
 ### 9.2. Статус задач W2
 
@@ -495,7 +569,7 @@ Python-версия продолжает работать. `cargo test --workspa
 | A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
 | A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 + замер KV | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев (`arb_scenarios.py`, после A6); `n_ctx` закрыт замером (§7.2) |
 | A4 замер KV (`llm.chat.n_ctx`) | ✅ | вопрос закрыт: 32768 остаётся, KV = 1024 МиБ (§7.2); подтверждение полного офлоада на свободной карте — вместе с A6 |
-| A5 фасад `:8010–8012` | ⏳ | `/health`, `/props`, `chat`/`chat-think` (thinking-маппинг §11.4), embeddings, rerank |
+| A5 фасад `:8010–8012` | ✅ | готов и проверен живьём (§7.3); перенос портов на боевые 8010–8012 — вместе с A6, когда Python-роли выключат |
 | A6 значения по умолчанию и совместимость | ⏳ | дефолты конфига, `llm_server.mode`, миграция установки |
 | B1 обход/лимиты/exclude | ✅ | — |
 | B2 `content_hash` | ✅ | — |
@@ -529,8 +603,11 @@ Python-версия продолжает работать. `cargo test --workspa
 | `crates/hds-llama/src/pause.rs` | `IndexPause`/`PauseLease` (`index.pause`, вложенность, чужую паузу не снимаем), `read_heartbeat` |
 | `crates/hds-llama/src/dispatch.rs` | арбитр VRAM: `plan_query`/`plan_indexing`/`idle_evictions`, `Action`/`Verdict`/`Plan`, `apply` (кластер) |
 | `crates/hds-llama/src/status.rs` | `StatusReport` (роли/бюджет/пауза/прогноз, `lines` + `json`) |
-| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch`, `gguf_dump`, `kv_probe` |
-| `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report` |
+| `crates/hds-llama/src/http.rs` | минимальный HTTP/1.1 (свой: crates.io недоступен): keep-alive, `100-continue`, лимиты, `411` на chunked |
+| `crates/hds-llama/src/facade.rs` | маршрутизация `llama-server`, сборка prompt, thinking-режимы, ответы OpenAI, `Backend`/`handle`/`serve` |
+| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch`, `gguf_dump`, `kv_probe`, `chat_probe`, `llm_host_facade` |
+| `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report`, `facade_core`, `facade_http` |
+| `tools/parity/facade_smoke.ps1` | живая проверка фасада (альтернативные порты, чат на CPU) |
 | `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды) |
 
 ### 9.4. Команды проверки (copy-paste, из корня репозитория)
@@ -559,10 +636,17 @@ cargo run -p hds-llama --release --bin llm_host_dispatch -- --role embedding --k
 # --- A4: замер KV (решение по llm.chat.n_ctx) ---
 cargo run -p hds-llama --release --bin gguf_dump -- --role chat --json tools\parity\out\w2_chat_meta.json
 cargo run -p hds-llama --release --bin kv_probe  -- --role chat --ngl 8 --n-ctx 4096,32768 --json tools\parity\out\w2_kv_probe.json
+
+# --- A5: контракт чата и живой фасад ---
+cargo test -p hds-llama --test facade_core --test facade_http
+cargo run -p hds-llama --release --bin chat_probe -- --json tools\parity\out\w2_chat_contract.json
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
 ```
 
 ### 9.5. Открытые вопросы и решения
 
+* **Закрыт 30.09.2026 (замер §7.3):** `reasoning = off` через **кластерный** инстанс даёт ответ
+  без блоков размышлений (в W0 проверялось только bridge-API) — фасад на этом и построен.
 * **Закрыт 30.09.2026 (замер):** `llm.chat.n_ctx` — `32768` **остаётся**. Модель гибридная
   (`full_attention_interval = 4`), KV держат 8 слоёв из 32 → 1024 МиБ (f16); подтверждено
   данными движка и NVML-дифференциалом. Числа — §7.2.

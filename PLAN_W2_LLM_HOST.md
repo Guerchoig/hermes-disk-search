@@ -226,6 +226,30 @@ SSM-состояние ≈50 МиБ (не зависит от `n_ctx`) и comput
 → полный офлоад ≈10,5 ГБ с запасом ~0,75 ГБ (для A6: посмотреть `n_batch` чата и
 поведение `llama_params_fit`, который при тесной карте может сам менять офлоад).
 
+### A5. Фасад OpenAI-совместимого HTTP (`:8010–8012`) — сделан 30.09.2026
+
+✅ Реализовано и проверено живьём (`W2_REPORT.md` §7.3): `src/http.rs` (свой мини-HTTP/1.1 —
+`crates.io` на машине недоступен, внешних зависимостей не добавляем), `src/facade.rs`
+(маршрутизация как у `llama-server`, сборка prompt из `messages`, режимы размышлений по §11.4,
+ответы OpenAI-формы, `trait Backend`), `bin/llm_host_facade` (инстансы по `registry::plan` +
+диспетчер A4 + фасад), `tools/parity/facade_smoke.ps1`.
+**Замер контракта чата (`bin/chat_probe`):** движок сам применяет шаблон чата к нашему `prompt`
+(плоский текст → +20 токенов шаблона), поэтому маркеры ставить нельзя; `reasoning = off`
+через кластерный инстанс размышлений не даёт, `on + format=none` — даёт видимые.
+Живой прогон: `/props` (`total_slots`, `model_path`, `n_ctx`) отвечает так, что Python-версия
+считает инстанс «своим»; чат «4» за 226 мс; `chat-think` с `reasoning_content`; эмбеддинги 1024.
+Осталось (A6): перенести порты на боевые 8010–8012 (когда выключат Python-роли) и подключить
+фасад к резидентному процессу.
+
+### A6. Что осталось по треку A
+
+* резидентный `llm-host`: автозапуск (`install_autostart.ps1` → задача), `data/llm-host.pid`,
+  `data/logs/llm-host.log`, подкоманды `hdsw llm-host status|load|unload|devices`;
+* два пункта из §7.2: `n_batch` чата (compute-буфер ≈1972 МиБ) и поведение `llama_params_fit`
+  (движок умеет сам менять офлоад — проверить и, при необходимости, запретить);
+* автоматизация ARB-сценариев (`arb_scenarios.py`) на живом `llm-host`;
+* перенос портов 8010–8012 и удаление llama-server (решение заказчика: в конце W2).
+
 Бюджет:
 * источник истины — **NVML** (`nvml-wrapper`) на Windows/Linux с NVIDIA: `memory.used/free/total`;
   на macOS — **`VramProbe::Metal`** (`recommendedMaxWorkingSetSize` как total,

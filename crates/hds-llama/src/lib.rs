@@ -23,8 +23,10 @@ pub mod dispatch;
 pub mod engine;
 pub mod engine_dir;
 pub mod error;
+pub mod facade;
 pub mod ffi;
 pub mod gguf;
+pub mod http;
 pub mod pause;
 pub mod registry;
 pub mod runtime;
@@ -39,6 +41,7 @@ pub use dispatch::{plan_indexing, plan_query, Action, Demand, InstanceUse, Plan,
 pub use engine::{ClusterApi, Engine};
 pub use engine_dir::{find_engine_dir, ENGINE_LIB};
 pub use error::{EngineError, Result};
+pub use facade::{route, ChatRequest, Route, Thinking, Usage};
 pub use gguf::{read_meta, GgufMeta, KvBits};
 pub use pause::{read_heartbeat, IndexPause, PauseLease};
 pub use registry::{plan, plan_strict, PlannedInstance, RolePlan};

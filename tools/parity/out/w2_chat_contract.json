@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "case": "flat/reasoning=off",
+      "decoded_tokens": 2,
+      "prompt_kind": "flat",
+      "prompt_tokens": 56,
+      "reasoning": "off",
+      "text": "4",
+      "total_ms": 130.5238
+    },
+    {
+      "case": "chatml/reasoning=off",
+      "decoded_tokens": 2,
+      "prompt_kind": "chatml",
+      "prompt_tokens": 68,
+      "reasoning": "off",
+      "text": "4",
+      "total_ms": 161.4721
+    },
+    {
+      "case": "chatml/reasoning=on+none",
+      "decoded_tokens": 48,
+      "prompt_kind": "chatml",
+      "prompt_tokens": 66,
+      "reasoning": "on+none",
+      "text": "Thinking Process:\n\n1.  **Analyze the Request:**\n    *   Role: File search assistant (though the task is a simple math question).\n    *   Constraint: Answer briefly (кратко).\n    *",
+      "total_ms": 1618.1187
+    },
+    {
+      "case": "chatml/reasoning=не задан",
+      "decoded_tokens": 2,
+      "prompt_kind": "chatml",
+      "prompt_tokens": 68,
+      "reasoning": "не задан",
+      "text": "4",
+      "total_ms": 152.9765
+    }
+  ],
+  "chatml_has_answer": true,
+  "chatml_prompt_answer": "4",
+  "flat_prompt_answer": "4",
+  "model": "C:\\Users\\Sasha\\AppData\\Local\\llama-runtime\\models\\chat\\Qwen3.5-9B-Q6_K.gguf",
+  "n_ctx": 4096,
+  "n_gpu_layers": 0,
+  "reasoning_off_has_thinking": false,
+  "role": "chat"
+}

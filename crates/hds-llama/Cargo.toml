@@ -51,3 +51,11 @@ path = "src/bin/gguf_dump.rs"
 [[bin]]
 name = "kv_probe"
 path = "src/bin/kv_probe.rs"
+
+[[bin]]
+name = "chat_probe"
+path = "src/bin/chat_probe.rs"
+
+[[bin]]
+name = "llm_host_facade"
+path = "src/bin/llm_host_facade.rs"
