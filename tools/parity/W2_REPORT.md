@@ -11,7 +11,7 @@
 > **A4 шаг 1** (бюджет VRAM) и **B1, B2, B3** (обход/лимиты, `content_hash`, чанкер).
 > Дальше — A4 шаг 2 (вытеснение/`index.pause`), A5 (фасад), B4 (конвейер), B6 (sidecar).
 > **Новому чату: §9 «Передача в новый чат»** (состояние, коммиты, карта кода, команды,
-> открытые вопросы, грабли).
+> открытые вопросы, грабли); отчёт по A6 — **§10**.
 
 ## 1. A1 — обвязка движка и первый тест выбора устройства
 
@@ -588,10 +588,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | A1 обвязка движка | ✅ | — |
 | A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `hdsw llm-host devices/status` (войдут с CLI, A6/B7) |
 | A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
-| A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 + замер KV | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев (`arb_scenarios.py`, после A6); `n_ctx` закрыт замером (§7.2) |
-| A4 замер KV (`llm.chat.n_ctx`) | ✅ | вопрос закрыт: 32768 остаётся, KV = 1024 МиБ (§7.2); подтверждение полного офлоада на свободной карте — вместе с A6 |
-| A5 фасад `:8010–8012` | ✅ | готов и проверен живьём (§7.3); перенос портов на боевые 8010–8012 — вместе с A6, когда Python-роли выключат |
-| A6 значения по умолчанию и совместимость | ⏳ | дефолты конфига, `llm_server.mode`, миграция установки |
+| A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 + замер KV | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев; `n_ctx` закрыт замером (§7.2) |
+| A4 замер KV (`llm.chat.n_ctx`) | ✅ | вопрос закрыт: 32768 остаётся, KV = 1024 МиБ (§7.2); подтверждение полного офлоада на свободной карте — остаётся (см. §9.10) |
+| A5 фасад `:8010–8012` | ✅ | готов и проверен живьём (§7.3); **перенос портов на боевые 8010–8012 не сделан** — нужен шаг «остановить Python-роли» (§9.10) |
+| A6 резидентный `llm-host` | ✅ | `Host` в библиотеке, pid/лог, CLI `run/status/load/unload/devices/stop`, `/internal/*`, `llm_server.mode` (embedded/facade/off), задача Планировщика, живой smoke; остаток — ARB-сценарии и боевые порты (§9.10) |
 | B1 обход/лимиты/exclude | ✅ | — |
 | B2 `content_hash` | ✅ | — |
 | B3 чанкер | ✅ | — |
@@ -625,17 +625,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `crates/hds-llama/src/dispatch.rs` | арбитр VRAM: `plan_query`/`plan_indexing`/`idle_evictions`, `Action`/`Verdict`/`Plan`, `apply` (кластер) |
 | `crates/hds-llama/src/status.rs` | `StatusReport` (роли/бюджет/пауза/прогноз, `lines` + `json`) |
 | `crates/hds-llama/src/http.rs` | минимальный HTTP/1.1 (свой: crates.io недоступен): keep-alive, `100-continue`, лимиты, `411` на chunked |
-| `crates/hds-llama/src/facade.rs` | маршрутизация `llama-server`, сборка prompt, thinking-режимы, ответы OpenAI, `Backend`/`handle`/`serve` |
-| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch`, `gguf_dump`, `kv_probe`, `chat_probe`, `llm_host_facade` |
-| `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report`, `facade_core`, `facade_http` |
+| `crates/hds-llama/src/facade.rs` | маршрутизация `llama-server`, сборка prompt, thinking-режимы, ответы OpenAI, `Backend`/`handle`/`serve`, **внутренний API `/internal/*`** (A6) и проксирование режима `facade` |
+| `crates/hds-llama/src/host.rs` | A6: резидентный хост — сборка машины (`Host::start`), режимы, уборка, `role_needs`/`port_roles`/`local_status` |
+| `crates/hds-llama/src/resident.rs` | A6: `PidFile` (защита от второго экземпляра) и `Log` (консоль + файл) |
+| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget`, `llm_host_status`, `llm_host_dispatch`, `gguf_dump`, `kv_probe`, `chat_probe`, `llm_host_facade`, **`llm_host`** (CLI резидента) |
+| `crates/hds-llama/tests/*` | `registry_plan`, `budget_calibration`, `arbiter`, `pause_gate`, `status_report`, `facade_core`, `facade_http`, **`host_resident`** |
 | `tools/parity/facade_smoke.ps1` | живая проверка фасада (альтернативные порты, чат на CPU) |
-| `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды) |
+| `tools/parity/resident_smoke.ps1` | A6: живая проверка резидентности (pid/лог, второй экземпляр, `/internal/*`, `stop`) |
+| `installers/install_llm_host_task.ps1` | A6: задача Планировщика `HermesDiskSearchLlmHost` (после остановки Python-ролей) |
+| `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды; §10 — отчёт A6) |
 
 ### 9.4. Команды проверки (copy-paste, из корня репозитория)
 
 ```powershell
 # --- базовые проверки ---
-cargo test --workspace                                # 47 проверок (быстрые)
+cargo test --workspace                                # 74 проверки (быстрые, +2 #[ignore])
 cargo test -p hds-index --test chunker_parity -- --nocapture   # golden 16/16, 6363 чанка
 .\.venv\Scripts\python.exe tools\parity\spike2_hash.py
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 (переснимите эталон)
@@ -662,6 +666,14 @@ cargo run -p hds-llama --release --bin kv_probe  -- --role chat --ngl 8 --n-ctx 
 cargo test -p hds-llama --test facade_core --test facade_http
 cargo run -p hds-llama --release --bin chat_probe -- --json tools\parity\out\w2_chat_contract.json
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
+
+# --- A6: резидентный llm-host (проверки без VRAM, порты 8030-8032) ---
+cargo test -p hds-llama --test host_resident            # 12 тестов: pid/лог/внутренний API/прокси/off
+cargo run -p hds-llama --release --bin llm_host -- status --local --no-engine   # локальный отчёт
+cargo run -p hds-llama --release --bin llm_host -- run --port-base 8030 --ngl 0 --no-residency --hold 60
+cargo run -p hds-llama --release --bin llm_host -- status --port 8030            # отчёт резидента
+cargo run -p hds-llama --release --bin llm_host -- stop --port 8030
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.ps1 -PortBase 8030 -HoldSec 600
 ```
 
 ### 9.5. Открытые вопросы и решения
@@ -745,9 +757,22 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
     новые зависимости не добавить, поэтому HTTP-сервер фасада свой (`src/http.rs`).
     Проверять доступность сети до попытки `cargo add`, а не после.
 14. **PowerShell 5.1 читает `.ps1` без BOM как ANSI** и ломает кириллицу в комментариях/строках
-    (скрипт «падает» на парсинге). Скрипты harness держим **ASCII-only** (`facade_smoke.ps1`).
+    (скрипт «падает» на парсинге). Скрипты harness держим **ASCII-only** (`facade_smoke.ps1`,
+    `resident_smoke.ps1`, `installers/install_llm_host_task.ps1`).
+15. **PS 5.1 + `$ErrorActionPreference='Stop'` + stderr нативной программы** = падение скрипта:
+    строки stderr становятся `ErrorRecord` и терминальной ошибкой (`NativeCommandError`),
+    даже если процесс просто напечатал предупреждение. В `resident_smoke.ps1` обёртка
+    `Run` временно ставит `Continue` вокруг вызова `llm_host.exe`.
+16. **`"$var: текст"` в строке PS** читает `$var:` как имя диска → `ParserError`
+    «Variable reference is not valid». Писать `${var}` (поймано в `resident_smoke.ps1`).
+17. **`--ngl 0` не уводит роль с GPU** (A6, §10.3): движок вызывает `llama_params_fit` и
+    может офлоаднуть модель обратно, если **устройство** — CUDA. Держать роль на CPU нужно
+    устройством (`manual_devices_csv` = bridge-индекс CPU), а не нулём слоёв.
+18. **Ошибка движка при нехватке VRAM невнятная** (`llama_model_load: error loading model:
+    invalid vector subscript`): грузить роль в обход диспетчера нельзя — сначала
+    `prepare`/`plan_query`, потом `load_instance` (сделано в `/internal/load`).
 
-### 9.8. План следующего шага (A6) — по файлам, чтобы новый чат стартовал без разгона
+### 9.8. План шага A6 — по файлам (выполнен 30.09.2026, отчёт — §9.10)
 
 **A6 (трек A, следующий шаг).** Основа есть: `bin/llm_host_facade` умеет всё, кроме
 резидентности, — его и доделываем. Порядок:
@@ -781,16 +806,25 @@ extract → commit, атомарность на файл, `clip_for_embedding`, 
 
 ### 9.9. Что НЕ проверено и ограничения (честно)
 
-* Фасад не проверялся на боевых портах 8010–8012 (там сейчас Python-роли) — это A6.
+* Фасад не проверялся на боевых портах 8010–8012: там сейчас Python-роли
+  (`llama-server`), а резидент обязан их дождаться (шаг «остановить роли» —
+  в §9.10; запуск задачи `installers/install_llm_host_task.ps1` это проверяет).
 * `stream=true` не поддержан (400), chunked-тело — 411, TLS нет (фасад только localhost).
-* Полный офлоад чата на свободной карте не подтверждён (решение заказчика: в A6);
-  оценка: «модель + KV + 5 %» 8492 МиБ + SSM ≈50 + compute ≈1972 ≈ 10,5 ГБ.
+* Полный офлоад чата на свободной карте не подтверждён; оценка: «модель + KV + 5 %»
+  8492 МиБ + SSM ≈50 + compute ≈1972 ≈ 10,5 ГБ. Прогон §9.10 шёл на **занятой**
+  карте (чат оказался на GPU: `CUDA0 model buffer 6306 МиБ` + KV 1024 + compute 2004),
+  то есть цифру 10,5 ГБ живой замер пока не подтверждал.
+* Автоматизация ARB-1…6 (`arb_scenarios.py`) не сделана: сценарии выполнялись
+  вручную (`llm_host_dispatch --apply`, §7.1) и через `/internal/*` (§9.10).
+* `--ngl N` (проверочный режим) — не боевой переключатель: он правит **план**
+  инстансов, а не конфиг; при `N = 0` роль уходит на CPU-устройство (`§9.10`, находка 1).
 * macOS-часть (Metal-бюджет, dylib, LaunchAgent) — только код-заделы, исполнением не
   проверялись (§10.0 основного плана, R34; чек-лист `MAC_CHECKLIST.md`).
 * Python-версия — источник истины по поведению: расхождения Rust сначала фиксируем
   паритет-замером, потом правим (правило §9.6).
 * `rerank`-роль в боевом конфиге идёт с legacy `-ngl 0` (CPU) — решение «переносить ли на GPU»
-  остаётся за заказчиком (открытый вопрос с A2).
+  остаётся за заказчиком (открытый вопрос с A2). С A6 такая роль честно считается
+  «нужно 0 МиБ» и не попадает в вытеснение (`role_needs`, §9.10 находка 3).
 
 
 * Открытые вопросы: ~~подтвердить на chat-модели, что `reasoning=off` без блоков размышлений
@@ -798,4 +832,115 @@ extract → commit, атомарность на файл, `clip_for_embedding`, 
   `reasoning=off` даёт ответ без размышлений, `on + format=none` — видимые. Остаётся решение
   заказчика по `rerank`-роли на CPU (legacy `-ngl 0`): переносить ли на GPU вместе с остальными.
 
+## 10. A6 — резидентный `llm-host` (отчёт, 30.09.2026)
+
+### 10.1. Что сделано (по файлам)
+
+| Путь | Что |
+|---|---|
+| `crates/hds-llama/src/host.rs` | `Host` (старт/остановка/ожидание/статус) + `HostConfig` + `ClusterBackend` + `ClusterShared`; тело `run()` из бинаря A5 переехало сюда; `role_needs`/`instance_uses`/`port_roles`/`client_ports`/`dig*`; `local_status` (общий с `llm_host_status`); режимы `embedded`/`facade`/`off`; `apply_ngl_override` (проверочный `--ngl`) |
+| `crates/hds-llama/src/resident.rs` | `PidFile` (эксклюзивный `create_new`, снятие устаревшего файла, проверка живого PID через kernel32/`kill -0`), `Log` (консоль + файл), пути `data/llm-host.pid` и `data/logs/llm-host.log` |
+| `crates/hds-llama/src/facade.rs` | внутренние маршруты `/internal/{status,devices,load,unload,stop}` (+`/v1/…`), `ServerConfig.internal`, методы `Backend` с дефолтами (501/409), `proxy` для режима `facade`, `serve(cfg, backend, stop)` |
+| `crates/hds-llama/src/http.rs` | мини-HTTP-клиент `client_json` (без зависимостей) + новые тексты статусов (403/409/501/502) |
+| `crates/hds-llama/src/bin/llm_host.rs` | **новый CLI**: `run` (резидент), `status` (резидент → иначе локальный отчёт), `load`/`unload`/`devices`/`stop` — через `/internal/*` |
+| `crates/hds-llama/src/bin/llm_host_facade.rs` | стал тонким: разбор argv → `Host` (разовый прогон: pid-файл не занимает, `--residency` включает) |
+| `crates/hds-llama/src/bin/llm_host_status.rs` | стал тонким: `host::local_status` (тот же отчёт, что у `llm_host status --local`) |
+| `crates/hds-llama/src/config.rs` | новые ключи `llm.<role>.{n_batch,n_ubatch,n_threads}` (приоритет над legacy `extra_args`, предупреждение при `n_ubatch > n_batch`) — для уменьшения compute-буфера чата (§7.2) |
+| `crates/hds-llama/tests/host_resident.rs` | 12 тестов: pid-файл/устаревший pid/лог/умолчания путей/`/internal/*` (403, вызовы, 501, «не тот маршрут»)/прокси-режим (ответ апстрима как есть, `/props` от апстрима)/мини-клиент/`port_roles`/`role_needs`/режим `off` без движка (живой сокет) |
+| `installers/install_llm_host_task.ps1` | задача Планировщика `HermesDiskSearchLlmHost` (ASCII-only): проверка свободных портов 8010–8012, `-Status`/`-Remove`/`-Force` |
+| `tools/parity/resident_smoke.ps1` | живая проверка резидентности одной командой (ASCII-only) |
+
+Итого: `cargo test --workspace` — **74 green** (+2 `#[ignore]`); предупреждений сборки нет.
+
+
+
+### 10.2. Живой прогон (`resident_smoke.ps1 -PortBase 8030`, чат на CPU)
+
+```
+== pid file: 48864 (expected 48864)
+== second instance refused (exit 1) - ok          ← защита от второго владельца GPU
+== llm_host status --port 8030                    ← отчёт резидента через /internal/status
+  наша занятость (NVML − baseline 2396 МиБ): 93 МиБ
+  chat port=8010 state=LOADED retention=keep n_ctx=32768 devices=1 ngl=0 нужно 0 МиБ
+== llm_host devices --port 8030
+  index=0 backend=CUDA name=CUDA0 free=11255 МиБ; index=1 backend=CPU name=CPU free=19395 МиБ
+== llm_host load embedding --port 8030 → состояние роли: LOADED
+== llm_host unload embedding --port 8030 → состояние роли: UNLOADED
+== llm_host stop --port 8030
+  [internal] роль 'embedding': выгружена (UNLOADED), id=2
+  [internal] получена команда stop
+  инстансы сняты: 3 (chat/embedding/rerank: remove_instance -> Ok(()))
+  index.pause сейчас: стоит (не наша — не снимаем)   ← пауза пользователя цела
+  pid-файл C:\...\llm-host-smoke.pid: освобождён
+  остановлен (проработал 10 с)
+== pid file released - ok
+```
+
+Артефакт: `tools/parity/out/w2_resident.json` (6,5 КБ) — отчёт `status --json` от резидента.
+
+### 10.3. Находки (важные, не были в плане)
+
+1. **`--ngl 0` не уводит роль с GPU.** Первый прогон (до правки) показал в логе движка
+   `offloaded 33/33 layers to GPU`, `CUDA0 model buffer 6306,63 МиБ` + KV 1024 + compute 2004 —
+   при `n_gpu_layers = 0`, потому что **устройство оставалось CUDA0**, а движок зовёт
+   `llama_params_fit` («fitting params to device memory»). Итог: «наша занятость» 9459 МиБ
+   вместо нуля. Правка: `--ngl 0` переводит роль на **CPU-устройство**
+   (`manual_devices_csv` = bridge-индекс CPU) — после неё занятость **93 МиБ** (контекст CUDA),
+   `devices=1 ngl=0`. То же правило применено к ролям конфига с legacy `-ngl 0`.
+2. **Движок действительно сам пересобирает офлоад** — подтверждение риска из §7.2 (находка 4):
+   «без авто-деградации» со стороны движка не гарантировано. Надёжный способ держать роль
+   на CPU — задавать **устройство** (находка A1), а не только `n_gpu_layers`.
+3. **Роль на CPU нельзя считать «нужна N МиБ».** Раньше `role_needs` считала реранкеру
+   (legacy `-ngl 0`) 637 МиБ, и диспетчер мог «вытеснять» роль, которая VRAM не держит.
+   Теперь такие роли — «нужно 0 МиБ» и в вытеснение не попадают.
+4. **`--ngl` должен править план, а не копию спеки.** Иначе `status` показывал значения
+   конфига (`ngl=99`, `devices=0`), а работало другое — теперь правка идёт в `planned`,
+   и отчёт показывает применённое.
+5. **Ошибка движка при нехватке VRAM невнятная:** `llama_model_load: error loading model:
+   invalid vector subscript` (embedding, свободно 305 МиБ, нужно 636 МиБ). Поэтому
+   `/internal/load` теперь **сначала спрашивает диспетчер** (`prepare`: пауза + вытеснение
+   по приоритетам + отчёт `NotEnough`), и только потом грузит роль.
+6. **PowerShell 5.1 + `ErrorActionPreference=Stop` + stderr нативной команды = падение
+   скрипта** (ErrorRecord от `llm_host.exe run` в pipeline): вызовы обёрнуты временным
+   `Continue`. Плюс `"$code: $what"` в строке PS читает `$code:` как имя диска — нужно
+   `${code}`. Обе грабли — в `resident_smoke.ps1` (и в журнал §9.7 при следующей правке).
+
+
+### 10.4. Что осталось по A6 (по шагам §9.8)
+
+1. **Боевые порты 8010–8012**: остановить Python-роли (`llama-server`: `chat`/`embedding`/`rerank`),
+   запустить `installers/install_llm_host_task.ps1 -Start` и проверить клиентов (UI, MCP,
+   Hermes, `hds.cli ask`). `llama-server` остаётся установленным до конца W2 (откат).
+2. **ARB-1…6 автоматизацией** (`arb_scenarios.py`): сейчас сценарии воспроизводимы вручную
+   (`llm_host_dispatch --apply`, §7.1) и через `/internal/*` (§10.2); автоматика — следующий шаг.
+3. **Полный офлоад на свободной карте** (§7.2): подтвердить ≈10,5 ГБ и поведение
+   `llama_params_fit` при почти полном офлоаде (нужна свободная карта — сейчас занято
+   ~2,4 ГБ рабочим столом, «наша» половина в прогоне нулевая).
+4. **`n_batch` чата**: ключи `llm.chat.n_batch`/`n_ubatch` уже читаются (A6) — остался замер
+   «compute-буфер и VRAM» до/после (в боевом конфиге `--batch-size` для чата не задан).
+5. **`llm_server.mode: facade`** реализован и покрыт тестами (проксирование «как есть»,
+   `/props` от апстрима), но живьём не гонялся: нужен внешний владелец GPU.
+6. **Журнал граблей** §9.7 стоит дополнить двумя пунктами из §10.3.6 (PS 5.1: stderr нативной
+   команды при `Stop`, `$var:` в строке) — сделаю вместе с ближайшей правкой harness.
+
+### 10.5. Команды
+
+```powershell
+# боевой резидент (после остановки Python-ролей)
+cargo run -p hds-llama --release --bin llm_host -- run
+# управление (тот же процесс, ничего не запускает)
+cargo run -p hds-llama --release --bin llm_host -- status
+cargo run -p hds-llama --release --bin llm_host -- status --local --no-engine   # без резидента
+cargo run -p hds-llama --release --bin llm_host -- devices
+cargo run -p hds-llama --release --bin llm_host -- load rerank
+cargo run -p hds-llama --release --bin llm_host -- unload rerank
+cargo run -p hds-llama --release --bin llm_host -- stop
+# проверочный прогон без VRAM (все роли на CPU-устройстве) и живой smoke
+cargo run -p hds-llama --release --bin llm_host -- run --port-base 8030 --ngl 0 --no-residency --hold 60
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.ps1 -PortBase 8030 -HoldSec 600
+# задача Планировщика: регистрация, состояние, удаление
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_task.ps1 -Start
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_task.ps1 -Status
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_task.ps1 -Remove
+```
 

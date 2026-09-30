@@ -57,8 +57,12 @@
 | `crates/hds-llama` (`bin/gguf_dump`) | A4 (замер KV): полный дамп метаданных GGUF + сводка по KV (слои с полным вниманием, КиБ/токен, гибридные признаки) → `out/w2_chat_meta.json` |
 | `crates/hds-llama` (`bin/kv_probe`) | A4 (замер KV): поднимает кластерный инстанс и мерит фактический KV (NVML-дифференциал по `n_ctx` + данные движка; отказывается грузить при нехватке VRAM) → `out/w2_kv_probe.json` |
 | `crates/hds-llama` (`bin/chat_probe`) | A5: разведка контракта чата — применяет ли движок шаблон сам, работает ли `reasoning=off` через кластер, видны ли размышления при `on+format=none` → `out/w2_chat_contract.json` |
-| `crates/hds-llama` (`bin/llm_host_facade`) | A5: живой фасад `:8010–8012` (инстансы по конфигу + диспетчер A4 + HTTP), `--port-base`/`--ngl`/`--hold`/`--json` → `out/w2_facade.json` |
+| `crates/hds-llama` (`bin/llm_host_facade`) | A5: живой фасад `:8010–8012` (инстансы по конфигу + диспетчер A4 + HTTP), `--port-base`/`--ngl`/`--hold`/`--json` → `out/w2_facade.json`; **с A6 — тонкий бинарь** над `host::Host` (разовый прогон) |
+| `crates/hds-llama` (`bin/llm_host`) | A6: резидентный владелец GPU + CLI (`run`/`status`/`load`/`unload`/`devices`/`stop`) через внутренний API фасада; pid `data/llm-host.pid`, лог `data/logs/llm-host.log` |
+| `crates/hds-llama/src/host.rs` | A6: сборка живой машины (движок → инстансы → фасад → диспетчер), режимы `embedded`/`facade`/`off`, уборка инстансов и своей паузы |
+| `crates/hds-llama/src/resident.rs` | A6: pid-файл (эксклюзивно, устаревший снимается), лог-файл, проверка живого PID |
 | `facade_smoke.ps1` | A5: живая проверка фасада одной командой (альтернативные порты, чат на CPU; `/health`, `/props`, чат, `chat-think`, эмбеддинги) |
+| `resident_smoke.ps1` | A6: живая проверка резидентности (pid+лог, отказ второму экземпляру, `/internal/*`, `stop` освобождает pid-файл) |
 | `crates/hds-index` (`tests/hash_parity`, `tests/walk_parity`, `tests/chunker_parity`) | B1/B2/B3: фиксированные векторы хэша, 50 реальных файлов, обход/исключения/лимиты против Python-дампа, чанкер против golden (16 фикстур / 6 363 чанка) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
@@ -155,28 +159,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 13. **`crates.io` на машине заказчика недоступен** (`index.crates.io` не резолвится) — новые
     зависимости не добавить; поэтому HTTP-фасада сервер свой (`crates/hds-llama/src/http.rs`).
 14. **`.ps1` держим ASCII-only**: PowerShell 5.1 читает скрипт без BOM как ANSI и ломается
-    на кириллице (пример — `facade_smoke.ps1`).
+    на кириллице (пример — `facade_smoke.ps1`, `resident_smoke.ps1`,
+    `installers/install_llm_host_task.ps1`). Смежное (поймано A6): при
+    `$ErrorActionPreference='Stop'` **stderr нативной программы в pipeline — терминальная
+    ошибка** (`NativeCommandError`); в строках писать `${var}`, а не `$var:` (`$var:` = имя
+    диска). Живой пример — обёртка `Run` в `resident_smoke.ps1`.
+15. **`--ngl 0` ≠ «на CPU»** (A6, `W2_REPORT.md` §10.3): движок зовёт `llama_params_fit` и
+    может офлоаднуть модель обратно, если **устройство** — CUDA (`offloaded 33/33 layers`
+    при `n_gpu_layers = 0`). Роль держит на CPU только устройство (`manual_devices_csv`),
+    и `role_needs` для такой роли — 0 МиБ.
 
 ## 4. Что читать первым в новом чате
 
 **Чек-лист на 5 минут (копипаст):**
 ```powershell
 git -C <репозиторий> log --oneline -3        # ветка w2-llm-host (12 коммитов на 30.09.2026)
-cargo test --workspace                       # должно быть 61 green (+2 #[ignore])
+cargo test --workspace                       # должно быть 74 green (+2 #[ignore])
 cargo run -p hds-llama --release --bin llm_host_status                       # состояние ролей и VRAM
+cargo run -p hds-llama --release --bin llm_host -- status --local --no-engine  # то же, но A6-путём
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.ps1 -PortBase 8030 -HoldSec 600
 ```
 Если третья/четвёртая команда не запускаются — смотрите «Грабли» (ниже) и `W2_REPORT.md` §9.7.
 
 1. `SPIKES.md` — журнал W0: замеры (§1, §14), спайки (§3–§10), риски/находки (§11, §14.7),
    go/no-go (§12), остаток (§13).
 2. `W2_REPORT.md` — журнал W2: **§9 «Передача в новый чат»** (состояние, коммиты,
-   карта кода, команды, открытые вопросы, грабли; **§9.8 — план A6 по файлам, §9.9 — что
-   не проверено**), затем A1 (устройство/VRAM/скорость + находки про cwd движка и вендорские
-   DLL), B1 (паритет обхода 96 318 файлов), B2 (`content_hash`), B3 (чанкер), A2 (реестр
-   инстансов), A3 (кросс-процессная адресация — её нет), **A4 §7/§7.1** (бюджет VRAM и
-   диспетчер), **§7.2** (замер KV: модель гибридная, KV = 1024 МиБ), **§7.3** (фасад A5:
-   контракт чата, «один инстанс — два режима», живой прогон).
+   карта кода, команды, открытые вопросы, грабли; **§9.8 — план A6 по файлам,
+   §9.9 — что не проверено**) и **§10 «A6 — отчёт»** (что сделано по файлам, живой
+   прогон резидентно процесса, находки: `--ngl 0` и `llama_params_fit`, «роль на CPU
+   = 0 МиБ», остаток A6). Затем A1 (устройство/VRAM/скорость + находки про cwd движка и
+   вендорские DLL), B1 (паритет обхода 96 318 файлов), B2 (`content_hash`), B3 (чанкер),
+   A2 (реестр инстансов), A3 (кросс-процессная адресация — её нет), **A4 §7/§7.1**
+   (бюджет VRAM и диспетчер), **§7.2** (замер KV: модель гибридная, KV = 1024 МиБ),
+   **§7.3** (фасад A5: контракт чата, «один инстанс — два режима», живой прогон).
 3. `../PLAN_W2_LLM_HOST.md` — план W2: треки A/B, критерии приёмки, график, DoD, приложение
    с точными структурами движка (§11).
 4. `../MIGRATION_PLAN_RUST.MD` — §10.0 (статус платформ), §8.6 (диспетчер VRAM), §12–§13

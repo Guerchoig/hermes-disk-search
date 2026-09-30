@@ -4,12 +4,16 @@
 > GitHub: Guerchoig/hermes-disk-search (private), ветка main
 > Версия: v0.3.0 (релиз выпущен через GitHub Actions, run 34935328484 — success)
 >
-> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, 12 коммитов, `main` не тронут).**
-> Закрыты A1, A2, A3, A4 (шаги 1–2 + замер KV) и **A5 (фасад `:8010–8012`)**, B1–B3;
-> `cargo test --workspace` — 61 green. Следующий шаг — A6 (резидентный `llm-host`).
+> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, `main` не тронут).**
+> Закрыты A1, A2, A3, A4 (шаги 1–2 + замер KV), **A5 (фасад `:8010–8012`)** и
+> **A6 (резидентный `llm-host`: pid/лог, CLI, `/internal/*`, режимы `embedded|facade|off`,
+> задача Планировщика, живой smoke)**, B1–B3; `cargo test --workspace` — 74 green.
+> Следующий шаг — ARB-сценарии автоматизацией и перенос портов 8010–8012
+> (после остановки Python-ролей).
 > **Передача контекста:** `tools/parity/README.md` §4 (чек-лист на 5 минут + что читать) →
 > `tools/parity/W2_REPORT.md` §9 (состояние, коммиты, карта кода, команды, грабли, §9.8 —
-> план A6 по файлам) → `PLAN_W2_LLM_HOST.md` (§A4–§A6 с цифрами) → `MIGRATION_PLAN_RUST.md`
+> план A6 по файлам) и **§10 (отчёт A6: что сделано, живой прогон, находки)** →
+> `PLAN_W2_LLM_HOST.md` (§A4–§A6 с цифрами) → `MIGRATION_PLAN_RUST.md`
 > (шапка: факты замера W2 и «не переоткрывать»). Ниже — состояние Python-версии
 > (боевой путь, работает).
 
@@ -25,6 +29,18 @@ LM Studio выполнен в 0.9.0, локальные модели на CUDA R
 видео с транскрипцией, картинки с OCR).
 
 ## 2. ПЛАН ДЕЙСТВИЙ (текущий спринт)
+
+### Рефакторинг W2 (ветка `w2-llm-host`, Rust; журнал — `tools/parity/W2_REPORT.md`)
+- ✅ A1–A4 (устройство/VRAM/бюджет/диспетчер + замер KV), A5 (фасад `:8010–8012`), B1–B3
+- ✅ **A6 (30.09.2026) — резидентный `llm-host`**: `Host` в библиотеке (`src/host.rs`),
+  pid-файл `data/llm-host.pid` + лог `data/logs/llm-host.log` (защита от второго
+  владельца GPU), CLI `llm_host run|status|load|unload|devices|stop` через внутренний
+  API фасада `/internal/*`, режимы `llm_server.mode: embedded|facade|off`, задача
+  Планировщика `installers/install_llm_host_task.ps1`, живой smoke
+  `tools/parity/resident_smoke.ps1`, 12 новых тестов (`tests/host_resident.rs`);
+  `cargo test --workspace` — 74 green (+2 `#[ignore]`)
+- ⏳ дальше: ARB-сценарии автоматизацией, перенос портов 8010–8012 на фасад
+  (после остановки Python-ролей), затем B4 (конвейер `process_file`)
 
 ### Выполнено:
 - ✅ Полная система: индексатор, watcher, поиск, RAG, MCP для Hermes, UI
