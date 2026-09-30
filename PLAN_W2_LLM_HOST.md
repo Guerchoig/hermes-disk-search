@@ -153,7 +153,11 @@
 ### A4. Диспетчер VRAM (4–5 дней) — ядро ценности W2
 
 Бюджет:
-* источник истины — **NVML** (`nvml-wrapper`): `memory.used/free/total`;
+* источник истины — **NVML** (`nvml-wrapper`) на Windows/Linux с NVIDIA: `memory.used/free/total`;
+  на macOS — **`VramProbe::Metal`** (`recommendedMaxWorkingSetSize` как total,
+  `currentAllocatedSize` как своя занятость, дельта `ioreg` как чужая) — **реализуется как задел,
+  но не исполняется** до появления Apple Silicon машины (§10.0 основного плана, R34);
+  в DoD W2 входит только NVML + фолбэк;
 * `gpu.reserve_mb` (по умолчанию 1024) не выедаем;
 * `memory_free` движка — только sanity-check: если NVML free < потребности, а движок
   сообщает «свободно», доверяем NVML (R29).
@@ -248,13 +252,17 @@ active_request_count/queued_request_count/last_error/занимаемая VRAM (
 
 ## 7. Критерии приёмки (измеримые, переиспользуют harness W0)
 
-**Трек A (llm-host).**
-1. **A-1 Устройство**: `hdsw llm-host status --json` показывает `devices: ["CUDA0"]` и
+**Трек A (llm-host).** Все критерии ниже — **windows-x64 и проверяются в W2**; mac-варианты
+помечены отдельно и помечены «не проверено» (§10.0 основного плана).
+1. **A-1 Устройство (Windows)**: `hdsw llm-host status --json` показывает `devices: ["CUDA0"]` и
    `n_gpu_layers: 99`; во время работы инстанса NVML подтверждает рост занятой VRAM
    (chat +4,9 ГБ, whisper +2,0 ГБ — эталоны W0, SPIKES §14.3). Отсутствие роста = провал (R32).
-2. **A-2 Дев-скрипт паритета**: `tools/parity/spike6_parity.py` переключается на фасад/инстансы
-   → embeddings `cos_min ≥ 0,999` на 200 чанках (эталон W0: 0,999597); rerank: топ-1 совпадает,
-   Kendall τ ≥ 0,9 на парах с разницей скоров > 0,05.
+   *A-1-mac (не проверяется):* то же через `VramProbe::Metal` — рост `currentAllocatedSize`;
+   входит в `tools/parity/MAC_CHECKLIST.md`.
+2. **A-2 Дев-скрипт паритета (Windows)**: `tools/parity/spike6_parity.py` переключается на
+   фасад/инстансы → embeddings `cos_min ≥ 0,999` на 200 чанках (эталон W0: 0,999597); rerank:
+   топ-1 совпадает, Kendall τ ≥ 0,9 на парах с разницей скоров > 0,05.
+   *A-2-mac (не проверяется):* паритет на tiny-модели вместо bge-m3 — в mac-чек-листе.
 3. **A-3 Thinking**: `model: "chat"` → ответ без блоков размышлений; `model: "chat-think"` →
    размышления присутствуют; проверка одновременно двумя клиентами (как ARB-6).
 4. **A-4 Совместимость фасада**: `curl :8010/v1/models`, `/health`, `/props` — формат как у
@@ -284,6 +292,7 @@ active_request_count/queued_request_count/last_error/занимаемая VRAM (
 
 | # | Риск | Вероятность/влияние | Мера |
 |---|---|---|---|
+| W2-7 | **macOS: нет NVML, бюджет VRAM — только через Metal API**, чужая GPU-память видна лишь системно (`ioreg`) | высокая / среднее | реализовать `VramProbe::Metal` за trait-абстракцией; в DoD W2 входят только NVML и фолбэк `list_devices`; критерий для mac — «рост `currentAllocatedSize` + ускорение против CPU» — **в постпроектном чек-листе (§10.0 основного плана)** |
 | W2-1 | ~~Структуры cluster API недоступны~~ | **закрыт (29.09.2026)**: SDK движка открыт (`github.com/openresearchtools/engine`, `bridge/llama_server_cluster.h`), структуры и enum'ы выписаны в §11 | — |
 | W2-2 | Кросс-процессная адресация не работает без локального RPC | средняя / среднее | вариант «клиенты → наш фасад `:8010–8012`» как гарантированный путь; RPC — оптимизация |
 | W2-3 | Оверкоммит VRAM (WDDM): движок «влезает», но работает в разы медленнее (наблюдалось в W0) | средняя / высокое | жёсткий контроль NVML + `gpu.reserve_mb`; запрет частичного офлоада без явного согласия (`n_gpu_layers` не уменьшаем молча) |
@@ -319,6 +328,9 @@ active_request_count/queued_request_count/last_error/занимаемая VRAM (
   с цифрами по каждому критерию приёмки, обновлённый `STATUS.md` и запись об удалении
   llama-server;
 * риски R29/R32/R33 либо закрыты, либо имеют зафиксированное решение и место в бэклоге.
+* **macOS в DoD W2 не входит** (§10.0 основного плана): `VramProbe::Metal`, имена `lib*.dylib`
+  и mac-ветки установщика реализуются «с заделкой», но критерии по ним помечены «не проверено»
+  и выполняются в постпроектной фазе по `tools/parity/MAC_CHECKLIST.md` (риск R34/W2-7).
 
 
 ## 11. Приложение. Точные контракты движка (из открытого SDK)
@@ -421,4 +433,23 @@ struct llama_server_cluster_instance_info {
    `WHISPER` и убедиться, что он попадает на GPU.
 4. **Ошибки**: `rc == 0` означает лишь успешный путь вызова — у bridge-результатов проверять
    `out.ok == 1` и `out.error_json`; у кластера — `last_error` в `instance_info`.
+
+
+### 11.6. macOS-отличия (справочник для постпроектной фазы, §10.0 основного плана)
+
+| Аспект | Windows (проверяется) | macOS arm64 (не проверяется до появления Mac) |
+|---|---|---|
+| Бэкенд движка | `cuda` или `vulkan` (выбор в установщике) | **только `metal`** (сборка `engine-macos-arm64-metal`), Intel Mac не поддерживается |
+| Файлы рантайма | `multi-node-server.dll`, `llama-server-bridge.dll`, `llama-server-audio.dll` | `libmulti-node-server.dylib`, `libllama-server-bridge.dylib`, `libllama-server-audio.dylib` — держать имена в одной константе, а не в строках по коду |
+| Загрузка библиотеки | `SetDllDirectoryW(<engine dir>)` обязателен, иначе `LoadLibraryExW failed` | зависимости разрешаются через `@loader_path/@rpath` (в CI движка ctypes-тест проходит без `DYLD_LIBRARY_PATH`), `libloading::Library::new(<abs path>)` достаточен |
+| Дефолт устройства | **`gpu` не задан ⇒ CPU-only** (R32; это ловили в спайке 6в) | **`gpu` не задан ⇒ первый доступный GPU**; устройство всё равно задаём явно для предсказуемости |
+| Бюджет VRAM | NVML (`memory.used/free/total`) — источник истины | **NVML нет**; бюджет = `MTLDevice.recommendedMaxWorkingSetSize` (~65–75 % RAM, поднимается `sysctl iogpu.wired_limit_mb`), своя занятость = `currentAllocatedSize`, чужая — по дельте `ioreg` (`IOAccelerator`) |
+| Память в целом | дискретная VRAM | **унифицированная память**: превышение бюджета ⇒ свопинг и резкое падение скорости (аналог WDDM-оверкоммита из W0, но по другому лимиту) |
+| ASR/VLM | CUDA/Vulkan | Metal |
+| Установка | `setup.ps1`, Планировщик задач | `install_macos.command`, LaunchAgent, снятие `com.apple.quarantine`, ad-hoc подпись; **прогон только в постпроектной фазе** |
+
+Источник фактов: открытый SDK движка (`github.com/openresearchtools/engine`) —
+`docs/common-runtime-and-devices.md` (правила устройств), `docs/manual.md` («Metal — обычный
+путь на macOS»), `.github/workflows/macos-arm64.yml` (единственный backend `metal`, smoke-тест
+`list-devices` + ctypes-загрузка dylib), релизные ассеты `…-macos-arm64-metal.zip`/`…dmg`.
 

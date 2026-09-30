@@ -145,6 +145,9 @@ venv, winget/brew для ffmpeg и Tesseract, Java для `.mpp`, три наб�
 **Лог решений заказчика (29.09.2026), учтённых в плане:**
 
 1. Целевые платформы — `windows-x64` и `macos-arm64`; Linux и Intel Mac вне плана (§10.1).
+   **Уточнение 29.09.2026 (§10.0):** mac-часть пишется в объёме v1.0, но **не проверяется на
+   исполнении** (нет Mac и macOS-раннеров) — её критерии помечены «не проверено до появления Mac»
+   и не блокируют DoD волн; постпроектная проверка — по `tools/parity/MAC_CHECKLIST.md`.
 2. Идём **волнами** с ранним эффектом: W1 = резидентный слой (§4.2).
 3. Подпись не покупаем — «zip + `setup.cmd` + `Unblock-File`» + ad-hoc подпись на macOS
    (§10.5).
@@ -687,10 +690,12 @@ RSS/VRAM не хуже текущих.
 #### W4. Упаковка, установка, CI (3–4 недели)
 
 Полностью описана в §10–§11. Ключевые артефакты: `hds-<ver>-windows-x64.zip`,
-`hds-<ver>-macos-arm64.zip`, воркер `hds-extract` в составе архива, `setup.ps1` и
-`install_macos.command` без venv.
-**Критерий приёмки**: чистая установка на «голых» Windows и macOS с нуля до работающего
+`hds-<ver>-macos-arm64.zip` (**не проверяется на исполнении**, см. §10.0), воркер `hds-extract`
+в составе архива, `setup.ps1` и `install_macos.command` без venv.
+**Критерий приёмки**: чистая установка на «голых» **Windows** с нуля до работающего
 поиска; обновление поверх старой версии с сохранением БД, настроек и интеграций.
+Для macOS критерий формулируется как «собрано и упаковано», а **прогон установки — в
+постпроектной mac-фазе** по `tools/parity/MAC_CHECKLIST.md` (R34).
 
 #### W5. Переключение и очистка (1–2 недели)
 
@@ -1201,12 +1206,31 @@ llm:
 
 ## 10. Релизы, артефакты, установка (Windows и macOS)
 
+### 10.0. Статус платформ (решение заказчика 29.09.2026)
+
+| Платформа | Входит в v1.0 | Проверяется на исполнении | Как это трактуется |
+|---|---|---|---|
+| `windows-x64` | да | **да** — W2/W3/W4 на рабочей станции (RTX 3060) | обязательные критерии приёмки; сюда направлены все замеры W0 (SPIKES.md) |
+| `macos-arm64` (Apple Silicon) | **да, код и артефакты в объёме v1.0** | **нет** — Mac отсутствует, macOS-раннеры не выделяются | критерии по mac **помечены «не проверено до появления Mac»** и **не блокируют DoD волн W1–W5**; проверка — отдельная постпроектная фаза по `tools/parity/MAC_CHECKLIST.md` |
+| Linux, Intel Mac | нет | — | вне плана (как и раньше) |
+
+**Правила, вытекающие из решения:**
+1. Mac-часть пишется с заделом (`VramProbe::Metal`, имена `lib*.dylib`, `install_macos.command`,
+   LaunchAgent), но её критерии не входят в DoD W2/W4 — они собираются в разделе
+   «Постпроектная проверка macOS».
+2. В README и `RELEASE_NOTES_*.md` для mac-артефакта обязательно указывается, что он
+   **не проверен на реальной машине** (риск R34).
+3. Mac-артефакт публикуется только при явном намерении (например, как experimental);
+   по умолчанию релиз v1.0 — windows-x64.
+4. Как только появится Apple Silicon машина (после проекта) — mac-фаза выполняется по
+   чек-листу, и только тогда критерии снимаются с пометки «не проверено».
+
 ### 10.1. Артефакты релиза
 
 | Платформа | Артефакт | Содержимое |
 |---|---|---|
 | Windows x64 | `hds-<ver>-windows-x64.zip` | `bin\hds.exe`, `bin\hdsw.exe`, `sidecar\` (CPython + site-packages + `run.py` + `mpxj.jar`), `assets\` (иконки, `ui.html`), `installers\setup.ps1`, `NOTICE.md` (атрибуция движка и лицензии CUDA/FFmpeg/pdfium), `config.example.yaml`, `README.md`; **ASR-рантайм движка** — скачивается установщиком по `engine-manifest.json` (или кладётся в архив как опция `-BundleRuntime`) |
-| macOS arm64 (Apple Silicon) | `hds-<ver>-macos-arm64.zip` | `bin/hds`, `bin/hdsw`, `sidecar/` (arm64), `assets/`, `installers/install_macos.command`, `shortcuts/macos/…` |
+| macOS arm64 (Apple Silicon) | `hds-<ver>-macos-arm64.zip` **(не проверено — публикуется по отдельному решению, см. §10.0)** | `bin/hds`, `bin/hdsw`, `sidecar/` (arm64), `assets/`, `installers/install_macos.command`, `shortcuts/macos/…` |
 | опционально | `hds-extract-pyinstaller-<ver>.zip` | вариант B воркера (§5.3) |
 
 **Решение заказчика (см. §16): только `windows-x64` и `macos-arm64`.** Linux и Intel Mac
@@ -1275,7 +1299,11 @@ Intel Mac продолжают работать на Python-версии v0.12.0
 6. Задачи/ярлыки/скрипты — переписать (§10.2, шаги 7–9).
 7. Проверка: `hds.exe check` и `python -m hds.cli check` показывают одинаковое состояние.
 
-### 10.4. macOS: установка (`installers/install_macos.command`)
+### 10.4. macOS: установка (`installers/install_macos.command`) — **не проверено (§10.0)**
+
+> Все шаги ниже **реализуются, но не проверяются** до появления Apple Silicon машины
+> (после проекта). Прогон — по `tools/parity/MAC_CHECKLIST.md`; до этого в README и
+> release notes для mac-артефакта указывается «не проверено на реальной машине».
 
 1. Снятие карантина: `xattr -dr com.apple.quarantine "$ROOT"` (как сейчас) — обязательный
    шаг, архив скачан браузером.
@@ -1340,13 +1368,15 @@ Intel Mac продолжают работать на Python-версии v0.12.0
 | `lint-rust` | `ubuntu-latest` | `cargo fmt --check`, `clippy -D warnings`, `cargo test` | быстро, без GPU |
 | `build-windows` | `windows-latest` | `hds.exe` + `hdsw.exe` (один вариант, без whisper-сборки) | VC++ runtime: `static_vcruntime`/`+crt-static` (§14); whisper-бэкенды даёт скачиваемый рантайм движка |
 | `fetch-engine-runtime` | `windows-latest` | **обязательно**: скачивание zip по `engine-manifest.json` (cuda+vulkan) с проверкой `sha256`, упаковка в артефакт релиза | рантайм теперь обслуживает и LLM-хост (`llm-host`), и ASR — llama.cpp не собирается и не ставится; кэш по `tag`+`sha256` |
-| `build-macos` | `macos-15` (arm64) | `hds`/`hdsw` + скачивание Metal-рантайма движка | ad-hoc подпись артефакта; **единственная macOS-цель** (Intel Mac и Linux вне плана) |
-| `build-sidecar` | `windows-latest`, `macos-15` | воркер: CPython из python-build-standalone + `uv pip install --target` | колеса должны существовать для `win_amd64` и `macosx_arm64` (`pymupdf`, `Pillow`, `pytesseract` — есть; `pymorphy3` — чистый Python) |
+| `build-macos` | `macos-15` (arm64) | `hds`/`hdsw` + скачивание Metal-рантайма движка | ad-hoc подпись артефакта; **единственная macOS-цель**. ⚠️ **Не выполняется: бюджет macOS-раннеров не выделен (§10.0)**; джоба описана и включается одной строкой, когда появится Mac или решение платить за раннеры |
+| `build-sidecar` | `windows-latest` (macos-15 — ⚠️ не выполняется, §10.0) | воркер: CPython из python-build-standalone + `uv pip install --target` | колеса должны существовать для `win_amd64` и `macosx_arm64` (`pymupdf`, `Pillow`, `pytesseract` — есть; `pymorphy3` — чистый Python) |
 | `package` | соответствующие ОС | zip-архивы + `sha256` | содержимое по §10.1; проверка «распаковали на чистом раннере → `hds check` работает» |
 | `release` | `windows-latest` | `gh release create` с бинарными ассетами | как сейчас + `RELEASE_NOTES_*.md` |
 
-Отдельно: GPU-пути (Windows+NVIDIA CUDA, Windows+AMD/Vulkan, macOS Metal) проверяются
-**вручную** по чек-листу W3 — в CI GPU нет. Кэш: `Swatinem/rust-cache`, кэш рантайма
+Отдельно: GPU-пути (Windows+NVIDIA CUDA, Windows+AMD/Vulkan — **проверяются вручную** по
+чек-листу W3, в CI GPU нет) и **macOS Metal — не проверяется** (нет Mac и macOS-раннеров,
+§10.0; чек-лист `tools/parity/MAC_CHECKLIST.md` выполняется в постпроектной фазе).
+Кэш: `Swatinem/rust-cache`, кэш рантайма
 движка (по `tag`+`sha256`), `sccache`. Сборка C++ из исходников (Vulkan SDK, CUDA Toolkit,
 `cmake`) **из матрицы исключена** — это следствие решения по whisper (§8.1). Ожидаемое
 время полного релиза — 15–25 минут (против ~5 сейчас); отражается в `releasing.md`.
@@ -1482,6 +1512,10 @@ Intel Mac продолжают работать на Python-версии v0.12.0
 * **на момент W0 остались непройденными (2) и (3)**: их блокирует фоновая индекс-сессия
   (свежий `index.heartbeat.json` → `index_running() == True`, см. SPIKES §11), плюс дефицит
   VRAM. Запуск после решения по сессии (`python -m hds.cli stop`) и окна свободной VRAM.
+* **macOS-замеры отложены** (§10.0): `tools/measure_rss.sh` и Metal-проба
+  (`recommendedMaxWorkingSetSize`/`currentAllocatedSize`) реализуются, но не исполняются до
+  появления Apple Silicon машины; критерий «рост GPU-аллокации при загрузке инстанса» входит
+  в постпроектный чек-лист, а не в DoD волны.
 
 ### 13.2. Ожидания (уточняются замерами W0)
 
@@ -1536,6 +1570,7 @@ Intel Mac продолжают работать на Python-версии v0.12.0
 | R31 | **Commit-память питоновских процессов аномальна** (UI 5,66 ГБ, MCP 4,0 ГБ при резидентных 212/44 МБ) → давление на pagefile, риск отказов при пиковой нагрузке | средняя / среднее | профилировать арену при индексации (torch/CLIP/mmap), в W2 проверить коммит после переноса MCP/UI |
 | R32 | **Движок без явного `devices`/`--whisper-gpu-device` считает на CPU** (`llama_params_fit_impl: no devices with dedicated memory found`) — регрессия производительности ×8–16, VRAM при этом не используется | **высокая / высокое** | `llm-host` (§8.6) обязан передавать `devices: "CUDA0"` (chat/embed/rerank) и `--whisper-gpu-device 0` (ASR); контрольный тест на load/unload + проверка роста VRAM в W2 |
 | R33 | **Падение при завершении с CUDA-whisper**: `hds.cli index` на медиа завершает работу успешно, но процесс падает после `[done]` с `0xC0000409` (на CPU — exit=0) → ненулевой код возврата при успешной работе ломает автоматизацию (Планировщик, `run_index.ps1`, watcher, UI) | средняя / среднее | воспроизводится детерминированно (SPIKES §14.4); закрыть в W3: явная разборка CTranslate2/CUDA до выхода либо корректный exit-код; добавить в тесты «транскрипция → код возврата 0» |
+| R34 | **macOS-часть v1.0 не проверяется на исполнении** (нет Apple Silicon машины; macOS-раннеры не выделяются — §10.0): Metal-проба VRAM (`recommendedMaxWorkingSetSize`/`currentAllocatedSize`), имена `lib*.dylib`, `install_macos.command`, LaunchAgent, Gatekeeper/TCC, dmg/ad-hoc подпись остаются «написаны, но не запускались» → риск ложной кроссплатформенности (первый же прогон может выявить мелочи: `@rpath`, подпись, пути, диалоги доступа) | высокая / среднее | (1) в README и `RELEASE_NOTES_*.md` для mac-артефакта прямо писать «не проверено на реальной машине»; (2) mac-артефакт публикуется только по отдельному решению (по умолчанию релиз — windows-x64); (3) постпроектная mac-фаза по `tools/parity/MAC_CHECKLIST.md`; (4) задел в коде: `VramProbe` trait и единая константа имён платформенных файлов, чтобы правки не расползались по коду |
 
 ---
 
@@ -2058,3 +2093,10 @@ model_kind:      TEXT | VISION | EMBEDDINGS | RERANK | WHISPER | REALTIME_AUDIO 
   поправлены §1.2 п.12, §8.6.2, задачи W2 п.7, критерий ARB-4, конфиг `gpu`/`llm`);
   llama-server удаляется в конце W2; `gpu.evict_idle_sec: 600` и приоритеты ролей приняты.
   Арбитр приоритетов переведён с `memory_free` на NVML.
+* 1.11 (29.09.2026) — **статус macOS зафиксирован (§10.0)**: mac-часть (код и артефакты) в
+  объёме v1.0, но **на исполнении не проверяется** — нет Apple Silicon машины, а macOS-раннеры
+  по решению заказчика не выделяются; mac-критерии помечены «не проверено до появления Mac»
+  и вынесены из DoD волн (W4: «собрано и упаковано», прогон — в постпроектной фазе). Добавлен
+  риск **R34** и чек-лист `tools/parity/MAC_CHECKLIST.md`; в §11 помечены невыполняемые
+  macOS-джобы, в §10.1/§10.4 — пометки «не проверено», в §13.1 — отложенные mac-замеры
+  (Metal-проба VRAM вместо NVML).
