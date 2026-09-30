@@ -6,9 +6,12 @@
 > Правило волны: Python-версия — источник истины по поведению, паритет проверяется
 > скриптами и тестами, а не «на глаз».
 >
-> **Статус на 30.09.2026:** закрыты **A1** (обвязка движка + выбор устройства) и
-> **B1/B2** (обход/лимиты/exclude + `content_hash`). Дальше — A2 (реестр инстансов
-> и маппинг конфига), B3 (чанкер).
+> **Статус на 30.09.2026:** закрыты **A1** (обвязка движка + выбор устройства),
+> **A2** (реестр инстансов и маппинг конфига), **A3** (адресация клиентов — замером),
+> **A4 шаг 1** (бюджет VRAM) и **B1, B2, B3** (обход/лимиты, `content_hash`, чанкер).
+> Дальше — A4 шаг 2 (вытеснение/`index.pause`), A5 (фасад), B4 (конвейер), B6 (sidecar).
+> **Новому чату: §9 «Передача в новый чат»** (состояние, коммиты, карта кода, команды,
+> открытые вопросы, грабли).
 
 ## 1. A1 — обвязка движка и первый тест выбора устройства
 
@@ -219,7 +222,7 @@ cargo test -p hds-index --test chunker_parity -- --nocapture   # 16/16, 6363 ч�
 покрывает также `\x1c`–`\x1f` и `\x85`; Rust `char::is_whitespace` их не включает.
 На 16 фикстурах расхождения нет (такие символы в документах не встречаются).
 
-## 6. A2 — реестр инстансов и маппинг конфига
+## 5. A2 — реестр инстансов и маппинг конфига
 
 Что сделано (`crates/hds-llama`):
 
@@ -254,7 +257,7 @@ cargo test -p hds-llama                                   # 8 проверок A
 cargo run -p hds-llama --release --bin llm_host_plan -- --json tools\parity\out\w2_a2_plan.json
 ```
 
-## 7. A3 — адресация клиентов (кросс-процессная проверка)
+## 6. A3 — адресация клиентов (кросс-процессная проверка)
 
 Вопрос: если инстанс создан в процессе A, видит ли его процесс B? От этого зависит,
 нужно ли клиентам (`index/watch`, `mcp-http`, `ui`) ходить напрямую в инстансы или
@@ -287,7 +290,7 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --list
 cargo run -p hds-llama --release --bin a3_instance_probe -- --call a3_hold
 ```
 
-## 8. A4 (шаг 1) — бюджет VRAM: метаданные GGUF и оценка «модель + KV»
+## 7. A4 (шаг 1) — бюджет VRAM: метаданные GGUF и оценка «модель + KV»
 
 Диспетчеру VRAM нужно до загрузки знать потребность роли. Сделано:
 
@@ -327,7 +330,7 @@ cargo test -p hds-llama                                    # включает к
 cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2_a4_budget.json
 ```
 
-## 9. Состояние и следующий шаг
+## 8. Состояние и следующий шаг
 
 * Тесты: `cargo test --workspace` — **25 проверок green** (chunker 6 + chunker-parity 1
   + hash 4 + walk 2 + config 2 + gguf 2 + registry 6 + VRAM-калибровка 2), тяжёлые
@@ -341,12 +344,131 @@ cargo run -p hds-llama --release --bin vram_budget -- --json tools\parity\out\w2
   `w2_a1_device.json`, `w2_a2_plan.json`, `w2_a4_budget.json`).
 * Риски: **W2-2 закрыт замером** (кросс-процессной адресации нет → фасад обязателен);
   R29/R32 подтверждены повторно (§1.2–1.3); R28 (хэш) закрыт паритетом 50/50.
-  Новый вопрос к заказчику: `llm.chat.n_ctx` при f16-KV (§8) — 32768 не влезает
+  Новый вопрос к заказчику: `llm.chat.n_ctx` при f16-KV (§7) — 32768 не влезает
   в 12 ГБ, нужен либо `16384`, либо замер фактического KV движка.
 * Следующее: **A4 шаг 2** — вытеснение по `gpu.priorities`, `index.pause` при
   нехватке VRAM, наблюдаемость в `hdsw llm-host status`; **A5** — фасад `:8010–8012`
   (формат как у llama-server); **B4** — конвейер `process_file` (фазы, атомарный
   коммит на файл, `clip_for_embedding`, `max_chunks`, прогресс и heartbeat).
+
+## 9. Передача в новый чат (состояние W2 на 30.09.2026)
+
+### 9.1. Где мы
+
+| Коммит | Что сделано | Проверки |
+|---|---|---|
+| `154c298` | **A1** обвязка движка (`libloading`, путь поиска DLL, `EngineCwd`, cluster-обёртка) + проба `a1_device_probe`; **B1** обход/исключения/лимиты; **B2** `content_hash` | 14/14 синтетика, 96 318/96 318 боевой `D:\`, 9 векторов + 50/50 хэш |
+| `7b32b14` | **B3** чанкер (дословный порт) | 16/16 фикстур, 6 363 чанка golden |
+| `7b8c36e` | **A2** `runtime`/`config`/`registry` + `llm_host_plan` | 8 тестов + прогон по боевому `config.yaml` |
+| `efe1168` | **A3** проба кросс-процессной адресации | замер: адресации нет → фасад обязателен (W2-2 закрыт) |
+| `3418ade` | **A4 шаг 1** GGUF-метаданные + бюджет VRAM + `vram_budget` | калибровка bge-m3: 636 МиБ против замера +636 МиБ |
+
+Ветка `w2-llm-host` (5 коммитов), `main` и боевой индекс **не тронуты**,
+Python-версия продолжает работать. `cargo test --workspace` — **25 проверок green**
+(+ `#[ignore]`-паритет 50 файлов и сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
+
+### 9.2. Статус задач W2
+
+| Задача | Статус | Остаток |
+|---|---|---|
+| A1 обвязка движка | ✅ | — |
+| A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `hdsw llm-host devices/status` (войдут с CLI, A6/B7) |
+| A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
+| A4 диспетчер VRAM | 🚧 шаг 1/3 | вытеснение по `gpu.priorities`, `index.pause` при нехватке, наблюдаемость/статус |
+| A5 фасад `:8010–8012` | ⏳ | `/health`, `/props`, `chat`/`chat-think` (thinking-маппинг §11.4), embeddings, rerank |
+| A6 значения по умолчанию и совместимость | ⏳ | дефолты конфига, `llm_server.mode`, миграция установки |
+| B1 обход/лимиты/exclude | ✅ | — |
+| B2 `content_hash` | ✅ | — |
+| B3 чанкер | ✅ | — |
+| B4 конвейер `process_file` | ⏳ | фазы, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat |
+| B5 watcher (`notify`) | ⏳ | debounce, `watch.lock`, reconcile, rename/удаление |
+| B6 sidecar-клиент + Python-воркер | ⏳ | контракт из спайка 3 (§5 основного плана) |
+| B7 `db-move` и подкоманды CLI | ⏳ | `check/reindex/reindex-fts/forget/stop/clip-index/status` |
+
+### 9.3. Карта кода W2
+
+| Путь | Что |
+|---|---|
+| `Cargo.toml` | воркспейс: `members = crates/*`, `exclude = tools/parity/spikes` (спайки W0 живут отдельно) |
+| `crates/hds-index/src/kinds.rs` | таблицы расширений → вид файла, `ext_of` как `os.path.splitext`, `~$`-локи |
+| `crates/hds-index/src/walk.rs` | `walk_files` (порт `iter_files`), `Excludes` (`_norm_path`), `IndexLimits`, `FileFilter::precheck` |
+| `crates/hds-index/src/hash.rs` | `content_hash` (Blake2b-16), `hash_of_parts` |
+| `crates/hds-index/src/chunker.rs` | `make_chunks` (порт `hds/chunker.py`), `Segment`/`Chunk` |
+| `crates/hds-index/tests/*` | `hash_parity`, `walk_parity` (паритет с Python), `chunker_parity` (golden) |
+| `crates/hds-llama/src/engine_dir.rs` | поиск каталога движка, `dll_search_dirs` (вендорские каталоги), имя библиотеки |
+| `crates/hds-llama/src/engine.rs` | `ClusterApi::load` (`libloading` + `AddDllDirectory`), `EngineCwd`, `diagnose_load` |
+| `crates/hds-llama/src/ffi.rs` | структуры/enum'ы cluster API (по SDK движка) |
+| `crates/hds-llama/src/cluster.rs` | `Cluster`: devices/instances/create/load/unload/embeddings/rerank/chat |
+| `crates/hds-llama/src/device.rs` | `gpu.device_index` → `manual_devices_csv` (числовой!), `cpu_device` |
+| `crates/hds-llama/src/vram.rs` | NVML-проба, `VramSampler`, фолбэк по `list_devices` |
+| `crates/hds-llama/src/runtime.rs` | общий llama-рантайм: пути, `current.json`, `shared:<role>` |
+| `crates/hds-llama/src/config.rs` | `config.yaml` → роли/GpuConfig/warnings (`extra_args` разбираются) |
+| `crates/hds-llama/src/registry.rs` | `plan`/`plan_strict`, `RolePlan::Ready/Failed`, `PlannedInstance` |
+| `crates/hds-llama/src/gguf.rs` | метаданные GGUF (ключи по суффиксу: `bert.*`, `qwen35.*`) |
+| `crates/hds-llama/src/budget.rs` | `kv_cache_mib`, `estimate_need_mib`, `check_fit`/`Fit` |
+| `crates/hds-llama/src/bin/*` | `a1_device_probe`, `llm_host_plan`, `a3_instance_probe`, `vram_budget` |
+| `tools/parity/W2_REPORT.md` | **этот журнал** (числа, находки, команды) |
+
+### 9.4. Команды проверки (copy-paste, из корня репозитория)
+
+```powershell
+# --- базовые проверки ---
+cargo test --workspace                                # 25 проверок (быстрые)
+cargo test -p hds-index --test chunker_parity -- --nocapture   # golden 16/16, 6363 чанка
+.\.venv\Scripts\python.exe tools\parity\spike2_hash.py
+cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 (переснимите эталон)
+.\.venv\Scripts\python.exe tools\parity\walk_parity.py --real
+$env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --nocapture
+
+# --- трек A (движок; нужен движок в %APPDATA% и модели в общем рантайме) ---
+cargo run -p hds-llama --release --bin llm_host_plan -- --json tools\parity\out\w2_a2_plan.json
+cargo run -p hds-llama --release --bin vram_budget   -- --json tools\parity\out\w2_a4_budget.json
+cargo run -p hds-llama --release --bin a1_device_probe            # 5 вариантов устройства, ~2 мин
+cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # второй процесс: --list
+```
+
+### 9.5. Открытые вопросы и решения
+
+* **Ждёт заказчика:** `llm.chat.n_ctx` — при `n_ctx = 32768` и f16-KV чат требует
+  ~11,5 ГБ (не влезает в 12 ГБ), у cluster API нет ручки типа KV (§7).
+* **Решено и не переоткрывать:** без авто-деградации кванта; llama-server удаляется
+  в конце W2; кросс-процессной адресации нет → фасад обязателен; устройство — числовым
+  `manual_devices_csv`; cwd движка + вендорские каталоги обязательны; бюджет VRAM — по NVML.
+* **Осталось измерить (A4 шаг 2):** фактический KV чат-модели при загрузке (нужно окно
+  со свободной VRAM) — сравнить с оценкой `vram_budget`.
+
+### 9.6. Правило паритета (как проверять новые куски)
+
+1. Python-версия — источник истины. Для новой части сначала снять эталон
+   Python-скриптом в `tools/parity/` (по образцу `walk_parity.py`, `hash_vectors.py`,
+   `golden.py`) → `tools/parity/out/*.json`.
+2. В Rust-тесте сравнивать **строго** (пополе/множествами), а не «похоже»: golden-файлы
+   для чанкера, дампы для обхода, фиксированные векторы для хэшей.
+3. Волатильные файлы (логи, `index.heartbeat.json`) исключать или переснимать эталон
+   прямо перед прогоном (иначе 48/50 вместо 50/50 — грабля W0 §4).
+4. Найденные расхождения — либо баг порта (исправить), либо осознанное отличие
+   (задокументировать в `W2_REPORT.md`, как длинные пути > 260 и `\s`-класс).
+5. Осознанные отличия помечать в коде комментарием и в `W2_REPORT.md` рядом с цифрами.
+
+### 9.7. Грабли W2 (повторяющиеся)
+
+1. `Engine::activate()` меняет текущий каталог процесса: **относительные пути в
+   аргументах бинарей приводить к абсолютным до активации** (`absolutize`), иначе файл
+   отчёта уедет в каталог движка (поймано в A2).
+2. Движок грузит ggml-бэкенды относительно cwd; без этого `list_devices` пуст и всё
+   молча уходит на CPU при `n_gpu_layers = -1` (это и был «R32»).
+3. Каталог движка не самодостаточен: `Engine\vendor\ffmpeg\bin` обязателен в пути
+   поиска DLL, иначе `LoadLibraryExW` даёт код 126 (`diagnose_load` печатает режимы).
+4. Устройство — **число** (`manual_devices_csv`), имя (`"CUDA0"`) движок отвергает.
+5. Длинные пути (> 260 символов) Python не статит, Rust умеет — в паритете это
+   осознанное расхождение, а не дефект (3 файла на боевом `D:\`).
+6. `out/` в git: маленькие эталоны и отчёты коммитятся (`w2_*.json`,
+   `walk_parity_synthetic.json`, `hash_vectors.json`), тяжёлое (боевой обход, `.gz`,
+   бинарные векторы) — нет (см. `tools/parity/.gitignore`).
+7. Тесты, которым нужны модели/диск, обязаны **пропускаться** без них (печатать
+   `пропуск: …`), иначе `cargo test` ломается на чужой машине.
+
+
 * Открытые вопросы: подтвердить на chat-модели, что `reasoning=off` без блоков
   размышлений работает через cluster-инстанс (в W0 проверялось через bridge-API);
   решить судьбу `rerank`-роли на CPU (`-ngl 0` в боевом конфиге) — переносить ли

@@ -91,7 +91,7 @@ cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 н
 $env:HDS_WALK_PARITY_REAL='1'; cargo test -p hds-index --test walk_parity -- --nocapture
 cargo run -p hds-llama --release --bin a1_device_probe             # устройство/VRAM/скорость (A1)
 cargo run -p hds-llama --release --bin llm_host_plan               # план инстансов по config.yaml (A2)
-cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # A3: два процесса (см. W2_REPORT §7)
+cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # A3: два процесса (см. W2_REPORT §6)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
@@ -140,8 +140,10 @@ cargo run -p hds-llama --release --bin a3_instance_probe -- --hold 45   # A3: д
 
 1. `SPIKES.md` — журнал W0: замеры (§1, §14), спайки (§3–§10), риски/находки (§11, §14.7),
    go/no-go (§12), остаток (§13).
-2. `W2_REPORT.md` — журнал W2: A1 (устройство/VRAM/скорость + находки про cwd движка и
-   вендорские DLL), B1 (паритет обхода 96 318 файлов), B2 (`content_hash` 9 векторов + 50/50).
+2. `W2_REPORT.md` — журнал W2: **§9 «Передача в новый чат»** (состояние, коммиты,
+   карта кода, команды, открытые вопросы, грабли), затем A1 (устройство/VRAM/скорость +
+   находки про cwd движка и вендорские DLL), B1 (паритет обхода 96 318 файлов),
+   B2 (`content_hash`), B3 (чанкер), A2/A3/A4-1.
 3. `../PLAN_W2_LLM_HOST.md` — план W2: треки A/B, критерии приёмки, график, DoD, приложение
    с точными структурами движка (§11).
 4. `../MIGRATION_PLAN_RUST.MD` — §10.0 (статус платформ), §8.6 (диспетчер VRAM), §12–§13

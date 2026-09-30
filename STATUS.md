@@ -3,6 +3,11 @@
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search`
 > GitHub: Guerchoig/hermes-disk-search (private), ветка main
 > Версия: v0.3.0 (релиз выпущен через GitHub Actions, run 34935328484 — success)
+>
+> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, `main` не тронут).**
+> Состояние и передача в новый чат — `tools/parity/W2_REPORT.md` §9, план —
+> `PLAN_W2_LLM_HOST.md`, шапка `MIGRATION_PLAN_RUST.md`. Ниже — состояние
+> Python-версии (боевой путь, работает).
 
 ## 1. ЗАДАЧА
 
