@@ -575,10 +575,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `f4215c9` | перенос подтверждения полного офлоада в A6 (решение заказчика) | — |
 | `8343153` | **A5 фасад** — `http` (свой мини-HTTP), `facade` (маршрутизация/prompt/thinking/ответы), `bin/llm_host_facade`, `bin/chat_probe`, `facade_smoke.ps1` | `facade_core` 10 + `facade_http` 3 теста; живой прогон §7.3 (чат «4» за 226 мс, `chat-think` с размышлениями, эмбеддинги 1024, диспетчер не снял чужую паузу) |
 | `13e176e` | **A5: тест-страж** «один инстанс — два режима» (агент thinking ON, MCP thinking OFF) | §7.3: журнал режимов `[off, on, off]` на одном порту |
+| `ddb37e8` | **A6 резидентный `llm-host`** — `src/host.rs` (`Host`/`HostConfig`/`ClusterBackend`), `src/resident.rs` (pid/лог), `/internal/*` + прокси режима `facade`, мини-клиент `http::client_json`, `bin/llm_host` (CLI), тонкие `llm_host_facade`/`llm_host_status`, `llm.<role>.n_batch`, `installers/install_llm_host_task.ps1`, `resident_smoke.ps1` | `host_resident` 12 тестов, всего 74 green; живой прогон §10.2 (второй экземпляр отказ, `/internal/*`, `stop` освобождает pid, пауза пользователя цела); находки §10.3 (`--ngl 0` ≠ CPU, `llama_params_fit`, роль на CPU = 0 МиБ) |
+| `ee6ddf2` | **эта передача** (README §4 чек-лист, §10 отчёт A6, §9.7 +4 грабли, шапки планов, STATUS) | — |
 
-Ветка `w2-llm-host` (**12 коммитов**, включая этот документационный), `main` (`9ed8452`)
+Ветка `w2-llm-host` (**15 коммитов**, включая этот документационный), `main` (`9ed8452`)
 и боевой индекс **не тронуты**, Python-версия продолжает работать.
-`cargo test --workspace` — **61 проверка green**
+`cargo test --workspace` — **74 проверки green**
 (+ `#[ignore]`-паритет 50 файлов, сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
 
 ### 9.2. Статус задач W2
@@ -586,7 +588,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | Задача | Статус | Остаток |
 |---|---|---|
 | A1 обвязка движка | ✅ | — |
-| A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `hdsw llm-host devices/status` (войдут с CLI, A6/B7) |
+| A2 реестр инстансов и маппинг конфига | ✅ | подкоманды `llm_host devices/status` — в A6 (`/internal/*`, §10); `hdsw`-обёртка — B7 |
 | A3 кросс-процессная адресация | ✅ | — (вывод: фасад обязателен) |
 | A4 диспетчер VRAM | 🚧 шаги 1–2 из 3 + замер KV | остаток: ретраи/`FAILED` без бесконечного цикла (§8.6.2) и автоматизация ARB-сценариев; `n_ctx` закрыт замером (§7.2) |
 | A4 замер KV (`llm.chat.n_ctx`) | ✅ | вопрос закрыт: 32768 остаётся, KV = 1024 МиБ (§7.2); подтверждение полного офлоада на свободной карте — остаётся (см. §9.10) |

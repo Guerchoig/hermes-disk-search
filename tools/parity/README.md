@@ -173,7 +173,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 
 **Чек-лист на 5 минут (копипаст):**
 ```powershell
-git -C <репозиторий> log --oneline -3        # ветка w2-llm-host (12 коммитов на 30.09.2026)
+git -C <репозиторий> log --oneline -3        # ветка w2-llm-host (15 коммитов на 30.09.2026)
 cargo test --workspace                       # должно быть 74 green (+2 #[ignore])
 cargo run -p hds-llama --release --bin llm_host_status                       # состояние ролей и VRAM
 cargo run -p hds-llama --release --bin llm_host -- status --local --no-engine  # то же, но A6-путём
