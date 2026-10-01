@@ -1555,4 +1555,37 @@ target\debug\hds.exe index --quiet                            # HDS_CONFIG=<rust
 .\.venv\Scripts\python.exe tools\parity\pilot_parity.py compare <py.db> <rust.db>
 ```
 
+## 16. B-4 — замеры памяти (01.10.2026)
+
+### 16.1. Методика
+
+* Метрики и сценарии — как в W0 (§13.1): `WorkingSet64` (ws) и `PrivateMemorySize64`
+  (commit) **по дереву процесса** (`tools/parity/sample_tree.ps1`), изолированные
+  конфиг/БД в `tools/parity/out/`, один bench из 500 файлов (текст + копии
+  docx/xlsx/pptx/pdf). Драйвер — `tools/parity/measure_tree.py` (гнёт сценарии A/B
+  **и для Python, и для Rust** на одной машине/bench — честное сравнение).
+* Перед прогоном останавливается боевой watcher (иначе держит `watch.lock` и
+  heartbeat блокирует Python-индекс); `index.pause` скрипт убирает и возвращает сам.
+
+### 16.2. Результат
+
+| Сценарий | Python (сейчас) | Rust (`hds`) | Эталон W0 | Итог |
+|---|---|---|---|---|
+| индексация 500 файлов | 48,3 с, ws **124**, commit **595** | 50,8 с, ws **137,9**, commit **601** | 48,2 с, ws 122, commit 597 | время **+5,2 %**, ws **+13 %**, commit **+0,7 %** — в допуске +20 % |
+| простой (watch) | ws **50,7**, commit **518** | ws **54**, commit **37,7** | ws 46, commit 518 | ws **+17 %**, commit **−93 %** — в допуске |
+
+Числа сходимы с B-2 (§15: +7,1 % по времени). В простое Rust-дерево включает
+**заранее запущенный sidecar-воркер**, но commit в разы ниже, чем у Python-процесса
+(в Rust-владельце нет torch/pymorphy3 — они в лёгком воркере). Результаты —
+`tools/parity/out/measure_tree_results.json`.
+
+### 16.3. Воспроизведение
+
+```powershell
+# остановить боевой watcher (иначе watch.lock/heartbeat мешают), затем:
+.\.venv\Scripts\python.exe tools\parity\measure_tree.py   # index.pause вернёт сам
+# после — поднять watcher обратно
+```
+
+
 

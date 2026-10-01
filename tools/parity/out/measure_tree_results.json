@@ -1,0 +1,12 @@
+{
+ "method": "sample_tree.ps1: WorkingSet64 (ws_mb) + PrivateMemorySize64 (commit_mb) по дереву процесса; изолированные конфиг/БД; bench 500 файлов; сценарии A/B для Python и Rust (W2_REPORT.md §16)",
+ "reference_w0": {
+  "index_500": {"sec": 48.2, "ws_mb": 122, "commit_mb": 597},
+  "idle_watch": {"ws_mb": 46, "commit_mb": 518},
+  "tolerance": "+20%"
+ },
+ "py_index_500": {"sec": 48.3, "rc": 0, "ws_peak_mb": 124, "commit_peak_mb": 595.4, "samples": 18},
+ "py_idle_watch": {"ws_peak_mb": 50.7, "commit_peak_mb": 518, "samples": 24, "hold_sec": 60},
+ "rust_index_500": {"sec": 50.8, "rc": 0, "ws_peak_mb": 137.9, "commit_peak_mb": 601, "samples": 19},
+ "rust_idle_watch": {"ws_peak_mb": 54, "commit_peak_mb": 37.7, "samples": 24, "hold_sec": 60}
+}
