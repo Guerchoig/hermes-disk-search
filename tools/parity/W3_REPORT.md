@@ -125,6 +125,20 @@ omitted» — bridge создаётся **без модели**, а whisper-мо
 Реализовано: `Whisper::transcribe_file(path, mode, custom) -> Transcript{json, segments}`
 (+ `parse_srt`, ASCII-стейджинг внутри); `WhisperSegment{text,t_start,t_end}`.
 
+### 1.4. Интеграция в владельца (шаг 2, начато)
+
+* `crates/hds-llama/src/bridge_audio.rs`: `BridgeAudio::create(model,gpu,ngl) -> Bridge`
+  — **постоянный** handle (`Bridge::transcribe_raw`, `Drop`→destroy); модель whisper больше
+  не пересоздаётся на каждый файл;
+* `crates/hds-llama/src/whisper.rs`: `Whisper` держит постоянный `Bridge`;
+* **фасад `/internal/transcribe`**: `Route::InternalTranscribe` + `Backend::internal_transcribe`;
+  в `ClusterBackend` — ленивый `Whisper` (создаётся при первом запросе), тело
+  `{path,mode,custom,gpu,model}`, ответ `{segments:[{text,t_start,t_end}],stats}`.
+  Маршрут покрыт тестом (`tests/facade_core.rs`).
+
+**Осталось по шагу 2:** медиа-ветка `hds-index` (зовёт фасад вместо Python-воркера),
+`whisper-check`, ключи `index.whisper_*`, приёмка на 3 реальных медиа.
+
 ## 2. План W3 (по файлам, черновик — уточняется)
 
 1. **`crates/hds-whisper`** — FFI к аудио-API (batch): `default_audio_raw_request` +

@@ -57,6 +57,8 @@ pub enum Route {
     InternalUnload,
     InternalDevices,
     InternalStop,
+    /// W3: транскрибация через владельца GPU (роль whisper).
+    InternalTranscribe,
     /// Не нашли — 404 с понятным текстом.
     NotFound,
 }
@@ -81,6 +83,7 @@ impl Route {
                 | Route::Rerank
                 | Route::InternalLoad
                 | Route::InternalUnload
+                | Route::InternalTranscribe
         )
     }
 
@@ -97,6 +100,7 @@ impl Route {
                 | Route::InternalUnload
                 | Route::InternalDevices
                 | Route::InternalStop
+                | Route::InternalTranscribe
         )
     }
 
@@ -129,6 +133,9 @@ pub fn route(method: &str, path: &str) -> Route {
         ("POST", "/internal/load") | ("POST", "/v1/internal/load") => Route::InternalLoad,
         ("POST", "/internal/unload") | ("POST", "/v1/internal/unload") => Route::InternalUnload,
         ("POST", "/internal/stop") | ("POST", "/v1/internal/stop") => Route::InternalStop,
+        ("POST", "/internal/transcribe") | ("POST", "/v1/internal/transcribe") => {
+            Route::InternalTranscribe
+        }
         _ => Route::NotFound,
     }
 }
@@ -569,6 +576,17 @@ pub trait Backend: Send + Sync {
         ))
     }
 
+    /// W3: транскрибация аудио/видео через владельца GPU (`/internal/transcribe`).
+    ///
+    /// Тело: `{"path": "...", "mode": "subtitle|speech", "custom": "4.5", "gpu": 0}`.
+    /// Ответ: `{"segments":[{"text,t_start,t_end}], "stats": …}`.
+    fn internal_transcribe(&self, body: &Value) -> Result<Value> {
+        let _ = body;
+        Err(crate::error::EngineError::Other(
+            "внутренняя транскрибация недоступна: владелец не умеет whisper".to_string(),
+        ))
+    }
+
     /// Базовый URL внешнего владельца для режима `llm_server.mode: facade`
     /// (`http://host:port/v1`). `None` — режим `embedded` (работаем через кластер).
     ///
@@ -693,6 +711,16 @@ fn handle_internal(
                 Err(e) => Response::error(409, &e.to_string(), "server_error"),
             }
         }
+        Route::InternalTranscribe => {
+            let body = match crate::http::parse_body(req) {
+                Ok(v) => v,
+                Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
+            };
+            match backend.internal_transcribe(&body) {
+                Ok(v) => Response::ok(v),
+                Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
+            }
+        }
         _ => Response::error(400, "маршрут не является внутренним", "invalid_request_error"),
     }
 }
@@ -774,7 +802,8 @@ pub fn handle(
         | Route::InternalLoad
         | Route::InternalUnload
         | Route::InternalDevices
-        | Route::InternalStop => Response::error(
+        | Route::InternalStop
+        | Route::InternalTranscribe => Response::error(
             400,
             "внутренний маршрут не обслуживается здесь",
             "invalid_request_error",

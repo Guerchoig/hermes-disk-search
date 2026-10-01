@@ -450,8 +450,45 @@ pub struct ClusterBackend {
     mode: Mode,
     /// Базовые URL внешнего владельца по ролям (режим `facade`).
     upstream: BTreeMap<String, String>,
+    /// W3: ленивый транскрибатор whisper (роль whisper, bridge-API движка).
+    whisper: Mutex<Option<WhisperCell>>,
 }
 
+
+/// Ленивый транскрибатор whisper под `Mutex` (raw-указатели bridge ⇒ `!Send/!Sync`;
+/// доступ строго под `Mutex`, поэтому `Send+Sync` помечаем вручную — как
+/// [`ClusterShared`]).
+struct WhisperCell(Mutex<crate::whisper::Whisper>);
+unsafe impl Send for WhisperCell {}
+unsafe impl Sync for WhisperCell {}
+
+/// whisper-модель из общего каталога движка: `*.bin`/`*.gguf` в каталоге `*whisper*`.
+fn default_whisper_model() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    let root = base.config_dir().join("OpenResearchTools").join("models");
+    for e in std::fs::read_dir(&root).ok()?.flatten() {
+        let dir = e.path();
+        let is_whisper = dir
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase().contains("whisper"))
+            .unwrap_or(false);
+        if !dir.is_dir() || !is_whisper {
+            continue;
+        }
+        for f in std::fs::read_dir(&dir).ok()?.flatten() {
+            let p = f.path();
+            let ok = p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("bin") || x.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false);
+            if ok {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
 
 impl ClusterBackend {
     /// Кластер движка или объяснение, почему его нет (режим `llm_server.mode`).
@@ -920,6 +957,66 @@ impl Backend for ClusterBackend {
             .line("[internal] получена команда stop: завершаюсь после ответа");
         Ok(json!({ "stopping": true, "pid": self.pid }))
     }
+
+    /// W3: транскрибация аудио/видео через bridge-API движка (роль `whisper`).
+    ///
+    /// Тело: `{"path": ..., "mode": "subtitle|speech", "custom": "4.5", "gpu": 0,
+    /// "model": ...}`. Транскрибатор создаётся лениво и переиспользуется.
+    fn internal_transcribe(&self, body: &Value) -> Result<Value> {
+        let engine_dir = self.engine_dir.as_ref().ok_or_else(|| {
+            EngineError::Other("движок не загружен — транскрибация недоступна".to_string())
+        })?;
+        let path = body
+            .get("path")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| EngineError::Other("нет поля path".to_string()))?;
+        let mode = body
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("subtitle");
+        let custom = body
+            .get("custom")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| "4.5".to_string());
+        let gpu = body.get("gpu").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let model = body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .map(PathBuf::from)
+            .or_else(default_whisper_model)
+            .ok_or_else(|| {
+                EngineError::Other("не найдена whisper-модель (index.whisper_model)".to_string())
+            })?;
+
+        let mut slot = self.whisper.lock().unwrap();
+        if slot.is_none() {
+            self.log.line(&format!(
+                "[whisper] создаю транскрибатор: модель {} (gpu {gpu})",
+                model.display()
+            ));
+            let api = crate::bridge_audio::BridgeAudio::load(engine_dir)?;
+            let w = crate::whisper::Whisper::new(api, &model, gpu, -1)?;
+            *slot = Some(WhisperCell(Mutex::new(w)));
+        }
+        let w = slot.as_ref().unwrap().0.lock().unwrap();
+        let tr = w.transcribe_file(Path::new(path), mode, &custom)?;
+        let segments: Vec<Value> = tr
+            .segments
+            .iter()
+            .map(|s| {
+                json!({ "text": s.text, "t_start": s.t_start, "t_end": s.t_end })
+            })
+            .collect();
+        Ok(json!({
+            "path": path,
+            "mode": mode,
+            "custom": custom,
+            "segments": segments,
+            "stats": tr.json.get("stats").cloned().unwrap_or(Value::Null),
+        }))
+    }
 }
 
 /// Записать JSON-отчёт (каталог создаётся) — для бинарей `--json`.
@@ -1361,6 +1458,7 @@ impl Host {
             log_path: cfg.log_path(),
             mode,
             upstream,
+            whisper: Mutex::new(None),
         });
 
         let handles = if ports.is_empty() {

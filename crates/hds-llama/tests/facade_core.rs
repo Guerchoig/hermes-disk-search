@@ -34,6 +34,11 @@ fn routing_matches_llama_server_paths() {
     assert_eq!(route("POST", "/v1/rerank"), Route::Rerank);
     assert_eq!(route("GET", "/v1/chat/completions"), Route::NotFound, "нужен POST");
     assert_eq!(route("POST", "/v1/unknown"), Route::NotFound);
+    // W3: внутренняя транскрибация через владельца
+    assert_eq!(route("POST", "/internal/transcribe"), Route::InternalTranscribe);
+    assert_eq!(route("POST", "/v1/internal/transcribe"), Route::InternalTranscribe);
+    assert!(Route::InternalTranscribe.is_internal());
+    assert!(Route::InternalTranscribe.needs_body());
     assert_eq!(Route::Chat.role(), Some("chat"));
     assert_eq!(Route::Embeddings.role(), Some("embedding"));
     assert_eq!(Route::Rerank.role(), Some("rerank"));
