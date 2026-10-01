@@ -586,10 +586,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `bdeb29f` | **боевые порты + ARB-1…6** (`arb_scenarios.py`), фон арбитра (ARB-3/ARB-5) и **три живых бага**: запрос к загруженной роли (ветка + 3 регресс-теста), «висящая» пауза после отказа, `--no-residency` затирал `--log` | 77 green; ARB **6/6** (`out/w2_arb.json`); на 8010–8012: чат «4» за 388 мс, `chat-think` 162 симв., embeddings 2×1024, rerank; `stop` убирает инстансы и не снимает паузу пользователя (§10.2a) |
 | `57dce3e`, `e3a02df` | документация по A6: офлоад **9384 МиБ**, `n_batch` −1503 МиБ, §9.7 +3 грабли, состояние машины | — |
 | `f8895da` | **перенос портов навсегда**: владелец `llm-host`, `n_batch: 512` в конфиге, установщик понимает «нашего» владельца и падает в Автозагрузку | `hds.cli ask` проходит целиком (§10.2b) |
+| `65a4338` | **B4 конвейер `process_file`**: новый крейт `crates/hds-core` (`config`/`db`/`http`), `hds-index` (`pipeline`/`progress`/`heartbeat`/`embed`/`sidecar`), Python-мост для паритета | 92 green; паритет golden **16/16 (6363 чанка)**, инкремент на копии боевой БД, Python читает Rust-БД — §11 |
+| `67686e4` | **B5 watcher**: свой backend `ReadDirectoryChangesW` (FFI, `notify` нет в кэше offline), `watch.lock`, `wait_stable`, `handle_event`, `run_watch` | 100 green; 7 детерминированных + **6 сценариев live** — §12 |
+| `0144f25` | **B6 sidecar**: автономный `sidecar/hds_extract/worker.py` + крейт `hds-extract` (JSON-RPC 2.0), `hds-index::sidecar` — адаптер | 108 green; старт 0,17 с, RSS 32,6→61,3 МБ, EOF 0,07 с; паритет B4 сохранён — §13 |
 
-Ветка `w2-llm-host` — **20 коммитов**, `main` (`9ed8452`) и боевой индекс **не тронуты**.
-`cargo test --workspace` — **92 проверок green** (+6 `#[ignore]`: паритет 50 файлов,
-сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
+Ветка `w2-llm-host` — **23 коммита**, `main` (`9ed8452`) и боевой индекс **не тронуты**.
+`cargo test --workspace` — **108 проверок green** (+6 `#[ignore]`: паритет 50 файлов,
+сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`, паритет/инкремент B4, боевая БД).
 **Владельцем портов 8010–8012 стал `llm-host`** (§10.2a; Python-роли остановлены,
 откат — `python -m hds.llama_server start all`).
 
@@ -881,6 +884,44 @@ extract → commit, атомарность на файл, `clip_for_embedding`, 
 * ~~`rerank` на CPU~~ — **решено**: остаётся на CPU, пока Python-клиент тянет torch
   (перенести на GPU после Rust-клиента, тогда перепроверить `ask`).
 * ~~Владелец портов~~ — **решено**: `llm-host` (§10.2a).
+
+### 9.9. План шага B7 — по файлам (следующий чат)
+
+**Цель.** `db-move` и подкоманды CLI (`check/reindex/reindex-fts/forget/stop/clip-index/
+status`); схема БД и `PRAGMA` — **1:1** с Python, `sqlite-vec` через
+`sqlite3_auto_extension` (спайк 1). Ветка та же (`w2-llm-host`), коммит — после тестов.
+
+**Python — источник истины:**
+
+| Python | Что портируем |
+|---|---|
+| `hds/cli.py` | `cmd_status`, `cmd_reindex` (`reindex_path` уже есть), `cmd_reindex_fts` (перестроить `chunks_fts` через лемматизатор, `busy_timeout=600000`, `meta.fts_normalized`), `cmd_forget` (`remove_path`), `cmd_clip_index` (W3), `cmd_index` (обёртка над `run_index`), `cmd_stop`/`cmd_serve`/`cmd_watch` |
+| `hds/dbops.py` | `move_db`: остановить watcher/index, перенести `index.db` (+`-wal`/`-shm`), правка `db_path` в `config.yaml` **текстовой подстановкой** (комментарии сохраняются, `serde_yaml` не подходит — §3.2 плана) |
+| `hds/diag.py` | `check`: компоненты (движок/модели/роли/БД/FTS/OCR/whisper), `fts-norm` — контентная проверка (сравнение сэмплов с `chunks_fts`) |
+
+**Файлы (предложение).**
+* новый крейт **`crates/hds-cli`**: `[[bin]] hds` со подкомандами (`clap` недоступен
+  offline → свой разбор argv, как в `hds-llama::bin`), `hdsw` (windows subsystem) — позже;
+* `src/cmd/status.rs`, `check.rs`, `reindex.rs`, `reindex_fts.rs`, `forget.rs`,
+  `db_move.rs`, `index.rs` (обёртка `pipeline::run_index` + `hds-extract` worker +
+  `embed::Embedder`), `cmd/stop.rs` (снятие `index.pause`/`watch.lock`/`index.stop` —
+  сверять с Python);
+* переиспользовать: `hds_core::{config,db}`, `hds_index::pipeline`, `hds_extract::Worker`,
+  `hds_llama` — только по HTTP (фасад), не как библиотеку.
+
+**Приёмка B7.**
+1. `check` — вывод совпадает по смыслу с `python -m hds.cli check` (компоненты/предупреждения);
+2. `status` — `db::stats` теми же полями (kind/status/chunks/last_indexed_at/errors);
+3. `reindex-fts` — перестраивает FTS и ставит `meta.fts_normalized='1'`; прогон по копии
+   боевой БД, Python читает результат;
+4. `db-move` — БД (+WAL/SHM) переносится, `config.yaml` сохраняет комментарии;
+5. `forget` — удаляет запись+чанки (проверка `db::remove_path`);
+6. `sqlite-vec` — через `sqlite3_auto_extension` (без `load_extension`), vec0 0.1.9.
+
+**Грабли/рамки.** `crates.io` недоступен → `clap`/`tokio` не добавлять (свой argv);
+лемматизация — только через `hds-extract` воркер; в `reindex-fts` — `busy_timeout`
+600 с (watcher может держать write-lock); `db-move` обязан остановить watcher/index.
+
 
 ## 10. A6 — резидентный `llm-host` (отчёт, 30.09.2026)
 
