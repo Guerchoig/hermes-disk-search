@@ -76,6 +76,7 @@
 | `crates/hds-extract/tests/{protocol,mock_worker,worker_live}.rs` | B6: протокол, mock-воркер (stdlib-only), реальный воркер (hello/extract/normalize/ошибка/перезапуск/shutdown) |
 | `crates/hds-cli` (bin `hds`) | B7: db-move и подкоманды CLI — `status`/`check`/`reindex`/`reindex-fts`/`forget`/`stop`/`clip-index`/`index`/`watch`/`db-move` (свой разбор argv, фасад только по HTTP) |
 | `crates/hds-cli/tests/{db_move,reindex_fts,forget_status,check_core,support}.rs` | B7: db-move (комментарии config, `.moved-*`), reindex-fts (перестройка FTS + `meta.fts_normalized`), forget/status, check (db/roots), support (roots/kinds/`resolve_model`) |
+| `pilot_parity.py` | B-2: генератор пилота (10 000 текст. файлов) и дифф двух БД индексации (файлы/чанки/тексты/FTS) → паритет Python↔Rust 10 000 файлов / 58 450 чанков, +7,1 % по времени |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
 
