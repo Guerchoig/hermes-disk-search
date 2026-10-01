@@ -6,15 +6,16 @@
 > Правило волны: Python-версия — источник истины по поведению, паритет проверяется
 > скриптами и тестами, а не «на глаз».
 >
-> **Статус на 30.09.2026 (после A6):** закрыты **A1–A6** (обвязка движка и устройство,
+> **Статус на 01.10.2026 (после B4):** закрыты **A1–A6** (обвязка движка и устройство,
 > реестр инстансов, адресация — замером, бюджет VRAM, диспетчер и замер KV, фасад
-> `:8010–8012`, резидентный `llm-host`) и **B1, B2, B3** (обход/лимиты, `content_hash`,
-> чанкер). Ветка `w2-llm-host` — 20 коммитов, `cargo test --workspace` — 77 green.
+> `:8010–8012`, резидентный `llm-host`) и **B1–B4** (обход/лимиты, `content_hash`,
+> чанкер, конвейер `process_file`). Ветка `w2-llm-host`, `cargo test --workspace` —
+> **92 green (+6 `#[ignore]`)**; паритет B4 с golden — **16/16 файлов, 6363 чанка** (§11).
 > **Владельцем портов 8010–8012 стал `llm-host`** (§10.2a), Python-роли остановлены.
-> Дальше по плану — **B4** (конвейер `process_file`), затем B5 (watcher), B6 (sidecar),
-> B7 (CLI) и W3 (whisper/CLIP).
+> Дальше по плану — B5 (watcher), B6 (sidecar), B7 (CLI) и W3 (whisper/CLIP).
 > **Новому чату:** §9 «Передача в новый чат» (состояние, карта кода, команды, грабли) →
-> **§10 «A6 — отчёт»**, особенно **§10.6 (живая машина)** и **§10.7 (грабли окружения)**.
+> **§10 «A6 — отчёт»** (особенно §10.6 живая машина, §10.7 грабли окружения) →
+> **§11 «B4 — отчёт»** (конвейер и паритет).
 
 ## 1. A1 — обвязка движка и первый тест выбора устройства
 
@@ -585,7 +586,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `f8895da` | **перенос портов навсегда**: владелец `llm-host`, `n_batch: 512` в конфиге, установщик понимает «нашего» владельца и падает в Автозагрузку | `hds.cli ask` проходит целиком (§10.2b) |
 
 Ветка `w2-llm-host` — **20 коммитов**, `main` (`9ed8452`) и боевой индекс **не тронуты**.
-`cargo test --workspace` — **77 проверок green** (+2 `#[ignore]`: паритет 50 файлов,
+`cargo test --workspace` — **92 проверок green** (+6 `#[ignore]`: паритет 50 файлов,
 сценарий `real` по флагу `HDS_WALK_PARITY_REAL=1`).
 **Владельцем портов 8010–8012 стал `llm-host`** (§10.2a; Python-роли остановлены,
 откат — `python -m hds.llama_server start all`).
@@ -604,7 +605,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | B1 обход/лимиты/exclude | ✅ | — |
 | B2 `content_hash` | ✅ | — |
 | B3 чанкер | ✅ | — |
-| B4 конвейер `process_file` | ⏳ | фазы, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat |
+| B4 конвейер `process_file` | ✅ | фазы extract/commit, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat, R30; паритет golden 16/16 (6363 чанка) — **§11** |
 | B5 watcher (`notify`) | ⏳ | debounce, `watch.lock`, reconcile, rename/удаление |
 | B6 sidecar-клиент + Python-воркер | ⏳ | контракт из спайка 3 (§5 основного плана) |
 | B7 `db-move` и подкоманды CLI | ⏳ | `check/reindex/reindex-fts/forget/stop/clip-index/status` |
@@ -618,7 +619,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `crates/hds-index/src/walk.rs` | `walk_files` (порт `iter_files`), `Excludes` (`_norm_path`), `IndexLimits`, `FileFilter::precheck` |
 | `crates/hds-index/src/hash.rs` | `content_hash` (Blake2b-16), `hash_of_parts` |
 | `crates/hds-index/src/chunker.rs` | `make_chunks` (порт `hds/chunker.py`), `Segment`/`Chunk` |
-| `crates/hds-index/tests/*` | `hash_parity`, `walk_parity` (паритет с Python), `chunker_parity` (golden) |
+| `crates/hds-index/tests/*` | `hash_parity`, `walk_parity` (паритет с Python), `chunker_parity` (golden); **B4**: `pipeline_core`, `heartbeat_progress`, `pipeline_parity` (`#[ignore]`, golden), `pipeline_incremental` (`#[ignore]`, копия боевой БД) |
+| `crates/hds-core/*` | **B4**: общий слой ядра (§2.4) — `config` (порт `hds/config.py`: `PROJECT_ROOT`, `load`, `dig`, `db_abs_path`, `replace_file`), `db` (схема `index.db` 1:1, `PRAGMA`, vec0 через `sqlite3_auto_extension`, `meta.vec_dim`, бэкфилл `indexed_at`, CRUD), `http` (свой мини-HTTP) |
+| `crates/hds-index/src/pipeline.rs` | **B4**: `process_file` (фазы `extract_file`/`commit_file`), `clip_for_embedding`, `run_index` (пауза/стоп, heartbeat, прогресс, prune), `reindex_path` |
+| `crates/hds-index/src/progress.rs` | **B4**: `ProgressReporter` (порт `hds/progress.py`, поля `heartbeat_data`, рендер в отдельном потоке — вывод не зависит от читателя stdout) |
+| `crates/hds-index/src/heartbeat.rs` | **B4**: `index.heartbeat.json` (атомарная запись, рефреш 5 с), `SessionState`/`index_running` — R30 |
+| `crates/hds-index/src/embed.rs` | **B4**: клиент эмбеддингов через фасад `:8011` (порт `hds/embedder.py`: батчи, ретраи, хинты) |
+| `crates/hds-index/src/sidecar.rs` | **B4**: клиент Python-воркера (прототип B6) — трейты `Extractor`/`Lemmatizer`, JSON-lines |
+| `hds/extract_sidecar.py` | **B4**: тонкий Python-мост (`hds.extractors` + `hds.lemmatizer`) для паритета `segments`/`fts` |
 | `crates/hds-llama/src/engine_dir.rs` | поиск каталога движка, `dll_search_dirs` (вендорские каталоги), имя библиотеки |
 | `crates/hds-llama/src/engine.rs` | `ClusterApi::load` (`libloading` + `AddDllDirectory`), `EngineCwd`, `diagnose_load` |
 | `crates/hds-llama/src/ffi.rs` | структуры/enum'ы cluster API (по SDK движка) |
@@ -651,7 +659,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 
 ```powershell
 # --- базовые проверки ---
-cargo test --workspace                                # 74 проверки (быстрые, +2 #[ignore])
+cargo test --workspace                                # 92 проверки (быстрые, +6 #[ignore])
 cargo test -p hds-index --test chunker_parity -- --nocapture   # golden 16/16, 6363 чанка
 .\.venv\Scripts\python.exe tools\parity\spike2_hash.py
 cargo test -p hds-index --test hash_parity -- --ignored --nocapture   # 50/50 (переснимите эталон)
@@ -689,6 +697,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.
 
 # --- A6: ARB-1...6 на живом движке (свои порты/конфиги/сигналы, боевые не трогает) ---
 .\.venv\Scripts\python.exe tools\parity\arb_scenarios.py --port-base 8070   # 6/6 green, out/w2_arb.json
+# --- B4: конвейер process_file (ядро) ---
+cargo test -p hds-core                                              # схема/PRAGMA/CRUD/vec0
+cargo test -p hds-index --test pipeline_core --test heartbeat_progress   # инкремент/ошибки/R30
+cargo test -p hds-core --test db_schema -- --ignored --nocapture    # Python читает Rust-БД; Rust читает боевую
+cargo test -p hds-index --test pipeline_parity -- --ignored --nocapture      # golden 16/16, 6363 чанка (.venv + фасад :8011)
+cargo test -p hds-index --test pipeline_incremental -- --ignored --nocapture # копия боевой БД: unchanged, чанки совпали
 ```
 
 ### 9.5. Открытые вопросы и решения
@@ -1155,3 +1169,79 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_task.ps1 -Remove
 ```
 
+## 11. B4 — отчёт (конвейер `process_file`, 01.10.2026)
+
+### 11.1. Что сделано (по файлам)
+
+* **новый крейт `crates/hds-core`** (§2.4): `config` (порт `hds/config.py`:
+  `PROJECT_ROOT`, `APP_NAME`, `EMB_CONTEXT`, `config_path`/`HDS_CONFIG`, `load`,
+  `dig`, `db_abs_path`, `replace_file` с ретраями), `db` (схема `index.db`
+  **байт-в-байт**, `PRAGMA` WAL/NORMAL/FK/busy_timeout, vec0 через
+  `sqlite3_auto_extension`, `meta.vec_dim` с пробой `SAVEPOINT`/`ROLLBACK`,
+  бэкфилл `indexed_at`, CRUD `files`/`chunks`/`chunks_fts`/`chunks_vec`/`images_vec`),
+  `http` (свой мини-HTTP — `crates.io` недоступен);
+* **`crates/hds-index`**: `pipeline.rs` (`process_file` = фазы `extract_file` +
+  `commit_file`, `clip_for_embedding`, `run_index` с паузой/стопом/heartbeat/
+  прогрессом/prune, `reindex_path`), `progress.rs` (`ProgressReporter` —
+  все поля `heartbeat_data`), `heartbeat.rs` (`index.heartbeat.json` + `SessionState`),
+  `embed.rs` (клиент фасада `:8011`), `sidecar.rs` (трейты `Extractor`/`Lemmatizer`,
+  клиент Python-воркера — прототип B6);
+* **`hds/extract_sidecar.py`** — тонкий Python-мост (JSON-lines: `hello`/`extract`/
+  `normalize`/`shutdown`), использует существующие `hds.extractors` и `hds.lemmatizer`
+  (лемматизация — вариант A из `SPIKES.md` §10);
+* воркспейс: `rusqlite 0.37` + `sqlite-vec 0.1.9` (из локального кэша cargo,
+  `cargo --offline`), профиль `[profile.dev.package.sqlite-vec] opt-level = 2`.
+
+### 11.2. Поведение (дословный порт `hds/indexer.py`)
+
+Разделение фаз сохранено; `unchanged` (size + |Δmtime| < 2 + `status=indexed`),
+`moved` (по `content_hash`, только если старый путь исчез), `force/full`,
+`skipped_type`/`skipped_big`/`skipped_excluded`/`stat_error`, обрезка `max_chunks`
+с предупреждением, `clip_for_embedding` (`(EMB_CONTEXT−256)·2.4`), батчи
+эмбеддингов (`embedding.batch_size`, в `_commit_file` дефолт 32), запись
+`chunks` + `chunks_fts` (лемматизированный) + `chunks_vec`, `finish_file`,
+`prune` с блокировкой >20 %, `index.stop`/`index.pause`.
+
+### 11.3. Осознанные отличия от Python
+
+1. **R30**: `SessionState` (`Live`/`Paused`/`Stale`) — паузная/зависшая сессия
+   **не блокирует** новый прогон (в Python свежий heartbeat на паузе блокировал всё).
+2. **Вывод прогресса не зависит от читателя stdout** (грабля W0): рендер живёт в
+   отдельном потоке, поэтому переполненный pipe не тормозит конвейер.
+3. **Heartbeat пишется атомарно** (временный файл + `rename`) — UI не увидит частичный JSON.
+4. `_clip_store` — **задел** (CLIP переезжает в Rust на ONNX в W3); в B4 CLIP-векторы не создаются.
+5. `chunker` оставлен в `hds-index` (задача B3 принята) — перенос в `hds-core` (§2.4) отдельной задачей.
+6. Поиск (`search_*.json`) в B4 не проверяется — порт поиска в W1.
+
+### 11.4. Паритет и приёмка (числа)
+
+| Проверка | Команда | Результат |
+|---|---|---|
+| Весь воркспейс | `cargo test --workspace` | **92 passed / 6 ignored / 0 failed**, предупреждений нет |
+| Схема/БД | `cargo test -p hds-core` | `PRAGMA`, объекты схемы, vec0 0.1.9, `meta.vec_dim`, CRUD round-trip |
+| Python↔Rust БД | `cargo test -p hds-core --test db_schema -- --ignored` | Python пишет чанк+FTS+vec в Rust-БД (`PY_OK 1 0.1.9`); Rust читает боевую |
+| Конвейер (без сети) | `cargo test -p hds-index --test pipeline_core` | `skipped_*`, `unchanged`/`force`, `moved`, `error` изолирован, `indexed(0 чанков)`, `prune` >20 % |
+| R30/прогресс | `cargo test -p hds-index --test heartbeat_progress` | `Live`/`Paused`/`Stale`, поля `heartbeat_data`, ETA/счётчики |
+| **Паритет golden** | `cargo test -p hds-index --test pipeline_parity -- --ignored` | **16/16 файлов, 6363 чанка, 0 несовпадений** (segments/chunks/fts/hash строго) |
+| Инкремент на копии | `cargo test -p hds-index --test pipeline_incremental -- --ignored` | копия боевой БД 4,9 ГБ: 3 файла `unchanged`, чанки совпали, Python читает (`612 220` чанков, vec 0.1.9) |
+
+### 11.5. Грабли B4 (новые, стоило времени)
+
+1. **Python на Windows читает stdin в ANSI-кодировке** — кириллические имена файлов
+   приходят мозаикой; воркер принудительно переводит stdin в UTF-8.
+2. **Библиотеки и ffmpeg пишут в `fd 1` напрямую** (не через `sys.stdout`) — воркер
+   дублирует `fd 1`, уводит `fd 1` в stderr, а протокол пишет в дубликат (иначе
+   «stream did not contain valid UTF-8» на `.mp4`/`.mpp`).
+3. **Боевой `exclude_dirs` содержит `hermes-disk-search`** — фикстуры внутри проекта
+   исключались (`skipped_excluded`); для паритета исключения сняты (golden.py их и
+   так обходит, вызывая `extractors.extract` напрямую).
+4. **Волатильность golden**: `видео_заставка_2сек` содержит **имя временного wav**
+   (`tmpXXXX.wav`) в тексте ошибки транскрипции — сравнение нормализует `tmpXXXX`.
+5. **`crates.io` недоступен** → `rusqlite`/`sqlite-vec` берутся из локального кэша
+   cargo: сборка и тесты идут с `--offline`.
+
+### 11.6. Что осталось на B4 (по желанию, не блокирует приёмку)
+
+* замер памяти индексации 500 файлов против эталона W0 (`measure_run.py`) — после B5/B6;
+* `keep-alive` HTTP-клиента эмбеддингов (сейчас `Connection: close`) — оптимизация;
+* унификация `hds-core::http` с `hds-llama::http` — после W1.

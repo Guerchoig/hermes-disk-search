@@ -13,13 +13,23 @@
 //!   `~$`-файлы Office, предварительные проверки файла (`FileFilter`).
 
 pub mod chunker;
+pub mod embed;
 pub mod hash;
+pub mod heartbeat;
 pub mod kinds;
+pub mod pipeline;
+pub mod progress;
+pub mod sidecar;
 pub mod walk;
 
 pub use chunker::{make_chunks, Chunk, Segment, DEFAULT_OVERLAP, DEFAULT_SIZE};
+pub use embed::{vector_blob, Embedder};
 pub use hash::{content_hash, hash_of_parts, HASH_WINDOW};
+pub use heartbeat::{index_running, session_state, HeartbeatFile, SessionState};
 pub use kinds::{kind_of, Kind, MEDIA_KINDS};
+pub use pipeline::{process_file, run_index, RunIndexArgs};
+pub use progress::ProgressReporter;
+pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
 pub use walk::{
     walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions,
 };

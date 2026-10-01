@@ -4,13 +4,14 @@
 > GitHub: Guerchoig/hermes-disk-search (private), ветка main
 > Версия: v0.3.0 (релиз выпущен через GitHub Actions, run 34935328484 — success)
 >
-> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, 20 коммитов, `main` не тронут).**
+> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, `main` не тронут).**
 > Закрыты A1–A6 (устройство/VRAM/диспетчер/замер KV, фасад `:8010–8012`, резидентный
-> `llm-host`) и B1–B3; **порты 8010–8012 переведены на `llm-host`** — Python-роли
-> `llama-server` остановлены, автозапуск через ярлык `HermesDiskSearchLlmHost.lnk`,
-> Python MCP/watcher продолжают работать через наш фасад. `cargo test --workspace` — 77 green;
-> ARB-1…6 автоматизированы (6/6); `hds.cli ask` проходит целиком.
-> Следующий шаг — **B4** (конвейер `process_file` на Rust), затем B5/B6/B7.
+> `llm-host`) и B1–B4 (обход/хэш/чанкер, конвейер `process_file`); **порты 8010–8012
+> переведены на `llm-host`** — Python-роли `llama-server` остановлены, автозапуск через
+> ярлык `HermesDiskSearchLlmHost.lnk`, Python MCP/watcher продолжают работать через наш
+> фасад. `cargo test --workspace` — **92 green (+6 `#[ignore]`)**; паритет B4 с golden —
+> **16/16 файлов, 6363 чанка**; ARB-1…6 автоматизированы (6/6); `hds.cli ask` проходит целиком.
+> Следующий шаг — **B5** (watcher на `notify`), затем B6/B7.
 > **Передача контекста:** `tools/parity/README.md` §4 (чек-лист на 5 минут + что читать) →
 > `tools/parity/W2_REPORT.md` §9 (состояние, карта кода, команды, грабли) и **§10 (отчёт A6:
 > боевые порты, офлоад 9384 МиБ, `n_batch` −1503 МиБ, ARB 6/6; §10.6 — живая машина,

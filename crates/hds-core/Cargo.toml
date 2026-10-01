@@ -1,0 +1,22 @@
+# hds-core — общий слой трека B (MIGRATION_PLAN_RUST.md §2.4): config.yaml,
+# схема/подключение index.db (rusqlite + sqlite-vec + FTS5), пути проекта.
+# Крейт лежит в цепочке hds-core ← hds-index ← hds-cli (§2.4); зависимостей
+# на hds-llama НЕТ (фасад — только по HTTP).
+[package]
+name = "hds-core"
+description = "Общий слой ядра: config.yaml, index.db (rusqlite + sqlite-vec + FTS5), пути"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+rusqlite.workspace = true
+sqlite-vec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+# OpenFlags/Connection для тестов паритета (боевая БД, read-only)
+rusqlite.workspace = true
