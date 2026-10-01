@@ -13,12 +13,17 @@ index:
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)
   ocr_lang: "rus+eng"
   ocr_tesseract_cmd: ""     # путь к tesseract(.exe), если не в PATH
-  transcribe: true          # транскрипция аудио/видео (нужен faster-whisper)
+  transcribe: true          # транскрипция аудио/видео (движок openresearchtools, владелец — llm-host)
   whisper_model: small
   whisper_device: auto      # auto | cuda | vulkan | cpu | metal
   whisper_load_timeout: 180 # сек; зависание CUDA-загрузки — fallback на CPU
   whisper_batch: 8          # батчевая транскрипция (0 = отключить)
   whisper_language: ""      # "" = авто-детекция; "ru" — фиксировать русский
+  # W3: медиа-ветка ядра на Rust (ASR-движок openresearchtools; владелец GPU — llm-host)
+  whisper_mode: subtitle    # subtitle (таймкоды, .srt) | speech (сплошной текст)
+  whisper_custom: "4.5"     # окно субтитров, сек (subtitle); "default"/"auto"/число
+  whisper_gpu: 0            # индекс GPU движка (или -1 — CPU)
+  transcribe_url: "http://127.0.0.1:8010"  # владелец GPU (POST /internal/transcribe)
   clip: true                # CLIP-поиск картинок по содержанию
   max_chunks: 3000          # максимум чанков на файл (0 = без лимита)
 

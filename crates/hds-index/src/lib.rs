@@ -20,6 +20,7 @@ pub mod kinds;
 pub mod pipeline;
 pub mod progress;
 pub mod sidecar;
+pub mod transcribe;
 pub mod walk;
 pub mod watch;
 
@@ -31,6 +32,9 @@ pub use kinds::{kind_of, Kind, MEDIA_KINDS};
 pub use pipeline::{process_file, run_index, RunIndexArgs};
 pub use progress::ProgressReporter;
 pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
+pub use transcribe::{
+    resolve_whisper_model, MediaRouter, TranscribeClient, TranscribeConfig, DEFAULT_TRANSCRIBE_URL,
+};
 pub use walk::{
     walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions,
 };

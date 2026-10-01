@@ -26,11 +26,12 @@
   ленивый `Whisper` в `ClusterBackend` (`host.rs`), маршрут покрыт тестом.
 
 **Что дальше (шаг 2 → 3):**
-1. **медиа-ветка `hds-index`**: для аудио/видео вместо Python-воркера звать `/internal/transcribe`
-   (проксировать сегменты в конвейер) + ключи `index.whisper_*` (`model`,`mode`,`custom`,`gpu`);
-2. `whisper-check` (CLI);
+1. ✅ **медиа-ветка `hds-index`** — сделано (§1.5): для аудио/видео вместо Python-воркера
+   зовётся `/internal/transcribe`, сегменты проксируются в конвейер; ключи
+   `index.whisper_*` (`model`,`mode`,`custom`,`gpu`) + `index.transcribe_url`;
+2. ✅ `whisper-check` (CLI) — сделано (§1.5);
 3. **live-приёмка**: 3 реальных медиа (вкл. русское имя в русском каталоге), ASCII-стейджинг
-   на боевом пути, замеры;
+   на боевом пути, замеры — следующий шаг;
 4. **CLIP** через `ort` (vision→`images_vec` dim 512, text резидентный; препроцессинг как
    `CLIPImageProcessor`), `clip-index`.
 
@@ -186,8 +187,30 @@ omitted» — bridge создаётся **без модели**, а whisper-мо
   `{path,mode,custom,gpu,model}`, ответ `{segments:[{text,t_start,t_end}],stats}`.
   Маршрут покрыт тестом (`tests/facade_core.rs`).
 
-**Осталось по шагу 2:** медиа-ветка `hds-index` (зовёт фасад вместо Python-воркера),
-`whisper-check`, ключи `index.whisper_*`, приёмка на 3 реальных медиа.
+**Осталось по шагу 2:** приёмка на 3 реальных медиа (шаг 3).
+
+### 1.5. Медиа-ветка `hds-index` + `whisper-check` (шаг 2 — готово)
+
+Боевой путь `hds index`/`watch` теперь отправляет аудио/видео **владельцу GPU**
+(`llm-host`, `POST /internal/transcribe`), а не в Python-воркер; прочие виды — как
+раньше через sidecar (`hds/extract_av.py`/faster-whisper больше не нужен для медиа).
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-index/src/transcribe.rs` | `TranscribeConfig::from_config`; `TranscribeClient::transcribe` (POST `/internal/transcribe`, разбор `segments[{text,t_start,t_end}]`); `resolve_whisper_model` (конфиг → каталог движка `%APPDATA%\OpenResearchTools\models\*whisper*`); `lead_segment` / `ffprobe_meta` (порт `extract_media`); `MediaRouter<E: Extractor>` — `media` → владелец, прочее → `inner` |
+| `crates/hds-index/src/sidecar.rs` | blanket-impl `&T: Extractor` (передать `&Sidecar` в `MediaRouter` без клона) |
+| `crates/hds-cli/src/support.rs` | `build_media_extractor(cfg, &sidecar)` |
+| `crates/hds-cli/src/cmd/{index,watch}.rs` | конвейер получает `MediaRouter`, лемматизация — прежний `Sidecar` |
+| `crates/hds-cli/src/cmd/whisper_check.rs` | `hds whisper-check [--file <медиа>] [--json]`: движок/модель + живой прогон через владельца |
+| `crates/hds-index/tests/transcribe_media.rs` | 7 тестов: маршрутизация, деградация без владельца, `transcribe:false`, разбор конфига/JSON (стаб-владелец на loopback) |
+| `crates/hds-cli/tests/whisper_check.rs` | 3 теста: стаб-владелец ok/JSON, недоступный владелец → 1 |
+
+**Паритет сохранён:** `tests/pipeline_parity.rs` по-прежнему зовёт чистый `Sidecar`
+(golden снят Python faster-whisper) — расхождение ASR-двигателей проверяется отдельно
+(приёмка шага 3), а не golden B4. `cargo test --workspace` — **135 passed / 0 failed (+6 ignored)**.
+
+**Не переоткрывать:** медиа не падает на сбое владельца (сегмент-сообщение, как в Python);
+`index.transcribe:false` → только ведущий сегмент; `subtitle`-режим по умолчанию (таймкоды).
 
 ## 2. План W3 (по файлам, черновик — уточняется)
 

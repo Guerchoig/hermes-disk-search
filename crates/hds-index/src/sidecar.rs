@@ -24,6 +24,14 @@ pub trait Extractor: Send + Sync {
     fn extract(&self, path: &Path) -> Result<(String, Vec<Segment>)>;
 }
 
+/// Extractor для ссылок: позволяет передавать `&Sidecar` внутрь `MediaRouter`
+/// (`crates/hds-index/src/transcribe.rs`) без клонирования воркера.
+impl<T: Extractor + ?Sized> Extractor for &T {
+    fn extract(&self, path: &Path) -> Result<(String, Vec<Segment>)> {
+        (**self).extract(path)
+    }
+}
+
 /// Трейт лемматизации: тексты чанков → текст для `chunks_fts`.
 pub trait Lemmatizer: Send + Sync {
     fn normalize_many(&self, texts: &[String]) -> Result<Vec<String>>;

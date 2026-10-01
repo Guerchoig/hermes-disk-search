@@ -18,6 +18,7 @@ fn usage() -> String {
      \x20 forget       <path>\n\
      \x20 stop\n\
      \x20 clip-index\n\
+     \x20 whisper-check [--file <медиа>] [--json]\n\
      \x20 db-move      --to <path> [--force]\n\
      \x20 watch        [--roots a;b]"
         .to_string()
@@ -68,6 +69,9 @@ fn run(args: &[String]) -> i32 {
         },
         "stop" => cmd::stop::cmd_stop(),
         "clip-index" => cmd::clip_index::cmd_clip_index(),
+        "whisper-check" => {
+            cmd::whisper_check::cmd_whisper_check(flag_val(rest, "--file"), has(rest, "--json"))
+        }
         "db-move" => match flag_val(rest, "--to") {
             Some(to) => cmd::db_move::cmd_db_move(&to, has(rest, "--force")),
             None => {

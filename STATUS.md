@@ -19,7 +19,11 @@
 > Пилот B-2 — 10 000 файлов, полный паритет (+7,1 % по времени); память B-4 — в норме
 > (индексация ws +13 %, простой commit −93 %) — `W2_REPORT.md` §15–§16.
 > Следующий шаг — **W3** (whisper/CLIP); **начат**: ASR из Rust работает (bridge audio-only
-> + whisper-модель в metadata, `mode: subtitle` → сегменты), `/internal/transcribe` в фасаде.
+> + whisper-модель в metadata, `mode: subtitle` → сегменты), `/internal/transcribe` в фасаде;
+> **шаг 2 сделан** — медиа-ветка `hds-index` (`MediaRouter`: аудио/видео → владелец GPU,
+> прочее → sidecar) + CLI `hds whisper-check`; ключи `index.whisper_{model,mode,custom,gpu}`,
+> `index.transcribe_url`. `cargo test --workspace` — **135 green (+6 `#[ignore]`)**
+> (детали — `tools/parity/W3_REPORT.md` §1.5). Дальше: live-приёмка 3 медиа (шаг 3), CLIP (шаг 4).
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и
