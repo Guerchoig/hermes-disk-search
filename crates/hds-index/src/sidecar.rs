@@ -13,6 +13,7 @@
 
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use hds_core::error::Result;
 
@@ -74,8 +75,19 @@ pub struct Sidecar {
 impl Sidecar {
     /// Запуск воркера (`sidecar/hds_extract/worker.py`) указанным интерпретатором.
     pub fn spawn(py: &Path, cwd: &Path, parity: bool) -> Result<Self> {
+        Self::spawn_with(py, cwd, parity, Duration::from_secs(60))
+    }
+
+    /// Как [`Sidecar::spawn`], но с явным `idle_timeout` воркера.
+    ///
+    /// Нужно CLI (`reindex-fts`/`index`): между запросами идёт долгая работа на
+    /// стороне родителя (например `DELETE FROM chunks_fts` на сотнях тысяч строк),
+    /// за неё воркер успевает выйти по idle-timeout (60 с) и следующий запрос
+    /// падает на закрытом stdin. Batch-операциям задаём большой таймаут.
+    pub fn spawn_with(py: &Path, cwd: &Path, parity: bool, idle_timeout: Duration) -> Result<Self> {
         let mut cfg = hds_extract::WorkerConfig::new(py, cwd);
         cfg.parity = parity;
+        cfg.idle_timeout = idle_timeout;
         let worker = hds_extract::Worker::spawn(cfg)?;
         Ok(Sidecar {
             worker: Mutex::new(worker),

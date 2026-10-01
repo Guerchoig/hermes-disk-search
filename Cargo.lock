@@ -216,6 +216,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hds-cli"
+version = "0.1.0"
+dependencies = [
+ "hds-core",
+ "hds-extract",
+ "hds-index",
+ "rusqlite",
+ "serde_json",
+]
+
+[[package]]
 name = "hds-core"
 version = "0.1.0"
 dependencies = [

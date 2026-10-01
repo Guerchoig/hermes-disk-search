@@ -613,7 +613,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | B4 конвейер `process_file` | ✅ | фазы extract/commit, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat, R30; паритет golden 16/16 (6363 чанка) — **§11** |
 | B5 watcher (`notify`) | ✅ | свой backend `ReadDirectoryChangesW` (крейта `notify` нет в кэше offline); debounce, `watch.lock`, reconcile, rename/удаление/корзина — **§12** |
 | B6 sidecar-клиент + Python-воркер | ✅ | автономный воркер `sidecar/hds_extract/worker.py` + крейт `hds-extract` (JSON-RPC 2.0, idle/restart/EOF); старт 0,17 с, RSS 32,6→61,3 МБ — **§13** |
-| B7 `db-move` и подкоманды CLI | ⏳ | `check/reindex/reindex-fts/forget/stop/clip-index/status` |
+| B7 `db-move` и подкоманды CLI | ✅ | новый крейт `crates/hds-cli` (бинарь `hds`): `status`/`check`/`reindex`/`reindex-fts`/`forget`/`stop`/`clip-index`/`index`/`watch`/`db-move`; `check`/`status` совпадают с Python, `reindex-fts` на копии боевой БД (10 000 чанков, Python 500/500), `db-move` (комментарии `config.yaml` целы), `forget`; 125 green — **§14** |
 
 ### 9.3. Карта кода W2
 
@@ -1404,3 +1404,105 @@ cargo (есть лишь его транзитивные `filetime`/`mio`/`same-
 * `mpp` (Java) и `ffmpeg/whisper` внутри воркера работают через штатные
   `hds.extract_static`/`hds.extract_av` — отдельная изоляция (ASCII-стейджинг
   whisper, спайк 5) остаётся в W3.
+
+## 14. B7 — отчёт (db-move и подкоманды CLI, 01.10.2026)
+
+### 14.1. Что сделано (по файлам)
+
+* **новый крейт `crates/hds-cli`** — библиотека `hds_cli` + тонкий `[[bin]] hds`
+  (свой разбор argv: `clap` недоступен offline). Зависимости: `hds-core`,
+  `hds-index`, `hds-extract`, `rusqlite`, `serde_json`; **на `hds-llama` зависимости
+  нет** — фасад `:8010–8012` только по HTTP;
+  * `src/main.rs` — диспетчер подкоманд (`exit`-коды как у Python; неизвестная
+    подкоманда → 2);
+  * `src/support.rs` — `open_conn`/`build_embedder`/`build_sidecar`,
+    `parse_roots`/`parse_kinds`, `resolve_model` (порт `llama_runtime.resolve_model`
+    + `_abs_model`, вкл. фолбэк на единственный `*.gguf`), `probe_role`
+    (порт `llama_server.probe`), `props_context`, `tesseract_ready`, `which`,
+    `fmt_local_datetime` (локально через `GetLocalTime`, с микросекундами как Python);
+  * `src/cmd/{status,check,reindex,reindex_fts,forget,stop,clip_index,index,watch,db_move}.rs`;
+* **`crates/hds-index/src/sidecar.rs`** — добавлен `Sidecar::spawn_with(py,cwd,parity,
+  idle_timeout)` (аддитивно; `spawn` делегирует с 60 с);
+* **`crates/hds-extract/src/worker.rs`** — `start_process` передаёт воркеру
+  `--idle-timeout <sec>` (из `WorkerConfig`);
+* **`sidecar/hds_extract/worker.py`** — `--idle-timeout` от клиента приоритетнее
+  `extract.idle_timeout` из конфига.
+
+### 14.2. Поведение (дословный порт Python)
+
+* `status` — `db::stats`, те же поля (`by_kind/by_status/chunks/last_indexed_at/
+  errors`), `--json` и человекочитаемый вид; дата — локальная, с микросекундами;
+* `check` — компоненты db/roots/chat/emb/embctx/ocr/ffmpeg/lemmatizer/rerank,
+  формат `[ok]/[--]/[!!]` + `-> fix`, итог и код возврата (порт `diag.run_checks`
+  «по смыслу»);
+* `reindex` — `pipeline::reindex_path` + воркер/эмбеддер, печать статусов;
+* `reindex-fts` — `busy_timeout=600000`, `DELETE FROM chunks_fts` (3 попытки),
+  батчи по 500 через воркер, `meta.fts_normalized='1'`;
+* `forget` — `db::remove_path(conn, abspath)`; `stop` — создаёт `index.stop`;
+* `index` — обёртка `pipeline::run_index`; `watch` — `hds_index::run_watch`
+  (нужен и `db-move` для перезапуска);
+* `db-move` — стоп watcher/index, копия, сверка счётчиков, **текстовая** правка
+  `db_path` (комментарии целы), `.moved-<stamp>`, перезапуск watcher.
+
+### 14.3. Осознанные отличия от Python (в `W2_REPORT`/док-комментариях)
+
+1. **`db-move`: остановка процессов** без psutil — watcher по PID из `watch.lock`
+   (`TerminateProcess`), индексация кооперативно (`index.stop` + ожидание).
+2. **`db-move`: копия** — `VACUUM INTO` (у `rusqlite` фича `backup` не подключена);
+   результат — консистентная копия, как `Connection::backup`.
+3. **`db-move`: guard** — если исходной БД нет, понятная ошибка (Python создавал
+   пустой файл и падал на «no such table»).
+4. **`db-move`: перезапуск watcher** — наш `hds watch` (а не `pythonw -m hds.cli
+   watch`); stdio фонового процесса отвязан (`null`) — иначе он держит пайпы
+   вызывающего.
+5. **`clip-index`** — заглушка (CLIP в Rust — W3); **`index --rechunk`** — «не
+   поддерживается» (`run_rechunk` вне B7).
+6. **`check`** не проверяет whisper/mpxj/Vulkan (нет возможности в воркере) —
+   одна поясняющая заметка; эти пункты остаются в Python-версии до W5.
+7. **Воркер в CLI** держится с `idle_timeout=3600` (batch; см. граблю 14.5.1).
+
+### 14.4. Приёмка (числа)
+
+| Проверка | Команда | Результат |
+|---|---|---|
+| Весь воркспейс | `cargo test --workspace` | **125 passed / 5 ignored / 0 failed**, предупреждений нет |
+| Новые тесты B7 | `cargo test -p hds-cli` | 17 passed (db_move 4, reindex_fts 2, forget_status 2, check_core 4, support 5) |
+| `status` vs Python | `hds status` / `python -m hds.cli status` (боевой конфиг, чтение) | поля совпадают (docx=2278 … indexed=71026, чанков 612220, дата `2026-10-01 08:35:22.569434`) |
+| `check` vs Python | `hds check` / `python -m hds.cli check` | совпадает по смыслу (db/roots/chat/emb/ocr/ffmpeg/lemmatizer ok, rerank warn, итог «готовы») |
+| **`reindex-fts`** | копия боевой БД (10 000 чанков) → `hds reindex-fts` → Python | `chunks_fts` перестроен (612 220 «мусорных» → 10 000), `meta.fts_normalized='1'`; Python: **500/500** сэмплов `chunks_fts == lemmatizer.normalize(chunks.text)`; время **131,8 с** |
+| **`db-move`** | копия → `hds db-move --to …\moved\index.db` | БД перенесена, счётчики сошлись (71 993 файла / 9 999 чанков), **комментарий сохранён**, `db_path` обновлён, старый → `index.db.moved-20261001-130550`; Python читает новую БД |
+| **`forget`** | `hds forget "<боевой путь>"` на копии | rc=0 «Удалено из индекса»; файлов 71 994→71 993, чанков 10 000→9 999 (у файла 1 чанк) |
+| `sqlite-vec` 0.1.9 | `db::connect` | через `sqlite3_auto_extension` (без `load_extension`) — как в B4 |
+
+### 14.5. Грабли B7 (новые, стоило времени)
+
+1. **Idle-timeout воркера vs долгие операции родителя.** `reindex-fts` падал
+   «воркер: запись: Идёт закрытие канала (os error 232)»: `DELETE FROM chunks_fts`
+   на 612 220 старых строк занимал > 60 с, а воркер всё это время не получал
+   запросов и **выходил по idle-timeout**. Причём таймаут задаёт **сам воркер**
+   (`extract.idle_timeout`, по умолчанию 60 с, из проектного `config.yaml` — не из
+   `HDS_CONFIG` и не из `WorkerConfig`). Решение: клиент передаёт `--idle-timeout`
+   (worker.py его читает и он приоритетнее конфига), CLI ставит 3600 с.
+   Тот же риск был и в `index` (долгая транскрипция между `normalize`) — закрыт тем же.
+2. **Отсоединённый watcher наследует stdio родителя.** `db-move` перезапускал
+   `hds watch` через `Command::spawn` без редиректа — фоновый процесс держал пайпы
+   вызывающего, и команда «не завершалась». Решение: `stdin/stdout/stderr → null`.
+3. **`VACUUM INTO` вместо backup API** — у `rusqlite` фича `backup` не подключена
+   (`Cargo.toml`: `bundled`+`load_extension`), а включать новую фичу offline
+   рискованно; `VACUUM INTO` даёт тот же результат без изменений зависимостей.
+4. **Кириллица в argv через PowerShell** искажается (проверка `forget` на боевом
+   пути) — приёмку гоняли Python-драйвером (`data/_b7_live.py`), где argv передаётся
+   wide-API Windows; `std::env::args()` в Rust читает Unicode корректно.
+5. **`resolve_model` для `shared:<role>`** без `current.json`: Python берёт
+   **единственный** `*.gguf` каталога (иначе каталог) — без этого фолбэка `check`
+   ложно называл живую embedding-роль «посторонним сервисом».
+
+### 14.6. Что осталось на B7 (не блокирует)
+
+* `index --kinds` (фильтр видов в `run_index` B4 не портирован) и `index --rechunk`
+  (`run_rechunk`) — отдельные задачи; ключи принимаются с понятным сообщением;
+* `clip-index` — W3 (CLIP на ONNX);
+* `serve`/`ui`/`mcp-http`/`whisper-check`/`vulkan-setup` — вне B7 (MCP/UI — W1, медиа — W3);
+* полноразмерный `reindex-fts` по всей боевой БД (612k чанков, ~30–90 мин) — на
+  приёмку заказчика; код-путь проверен на подмножестве из тех же реальных чанков.
+

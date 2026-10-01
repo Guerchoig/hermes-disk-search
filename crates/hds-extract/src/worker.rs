@@ -305,6 +305,8 @@ fn start_process(cfg: &WorkerConfig) -> Result<(Child, ChildStdin, Receiver<Stri
     cmd.arg(&cfg.script)
         .arg("--root")
         .arg(&cfg.root)
+        .arg("--idle-timeout")
+        .arg(cfg.idle_timeout.as_secs().to_string())
         .current_dir(&cfg.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());

@@ -74,6 +74,8 @@
 | `crates/hds-extract` | B6: клиент воркера — `protocol` (JSON-RPC 2.0 NDJSON), `worker` (интерпретатор, `hello`, `extract`/`normalize`/`clip_image`, перезапуск/таймаут/EOF, `shutdown`) |
 | `sidecar/hds_extract/worker.py`, `requirements.lock`, `sidecar/README.md` | B6: автономный Python-воркер извлечения/лемматизации, зависимости (вариант A), контракт §5 |
 | `crates/hds-extract/tests/{protocol,mock_worker,worker_live}.rs` | B6: протокол, mock-воркер (stdlib-only), реальный воркер (hello/extract/normalize/ошибка/перезапуск/shutdown) |
+| `crates/hds-cli` (bin `hds`) | B7: db-move и подкоманды CLI — `status`/`check`/`reindex`/`reindex-fts`/`forget`/`stop`/`clip-index`/`index`/`watch`/`db-move` (свой разбор argv, фасад только по HTTP) |
+| `crates/hds-cli/tests/{db_move,reindex_fts,forget_status,check_core,support}.rs` | B7: db-move (комментарии config, `.moved-*`), reindex-fts (перестройка FTS + `meta.fts_normalized`), forget/status, check (db/roots), support (roots/kinds/`resolve_model`) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
 

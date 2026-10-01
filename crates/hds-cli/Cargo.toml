@@ -1,0 +1,22 @@
+# hds-cli — CLI ядра индексации (MIGRATION_PLAN_RUST.md §2.4, §3.3; задача B7):
+# db-move и подкоманды check/reindex/reindex-fts/forget/stop/clip-index/status/index.
+# Крейт — библиотека + тонкий [[bin]] `hds` (свой разбор argv: `clap` недоступен
+# offline, tools/parity/README.md §3 п. 13). Зависимостей на hds-llama НЕТ —
+# фасад `:8010–8012` используется только по HTTP (hds_core::http).
+[package]
+name = "hds-cli"
+description = "CLI ядра: db-move, status, check, reindex, reindex-fts, forget, stop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+hds-index = { path = "../hds-index" }
+hds-extract = { path = "../hds-extract" }
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "hds"
+path = "src/main.rs"

@@ -199,6 +199,15 @@ def main():
         idle_timeout = float(_config(False).get("extract", {}).get("idle_timeout", 60))
     except Exception:  # noqa: BLE001
         pass
+    # Явный аргумент от клиента (`hds-extract::WorkerConfig.idle_timeout`) важнее
+    # конфига: batch-операции (`reindex-fts`/`index`) между запросами делают долгую
+    # работу родителя (FTS-DELETE, эмбеддинги) и не должны терять воркер по простою.
+    arg_idle = _arg("--idle-timeout")
+    if arg_idle is not None:
+        try:
+            idle_timeout = float(arg_idle)
+        except Exception:  # noqa: BLE001
+            pass
 
     lines = queue.Queue()
 
