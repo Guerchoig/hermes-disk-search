@@ -9,6 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 hds-core = { path = "../hds-core" }
+hds-extract = { path = "../hds-extract" }
 rusqlite.workspace = true
 blake2.workspace = true
 hex.workspace = true

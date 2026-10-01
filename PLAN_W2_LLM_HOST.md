@@ -353,6 +353,7 @@ active_request_count/queued_request_count/last_error/занимаемая VRAM (
 | B5 | Watcher на `notify`: debounce, очередь, `watch.lock`, reconcile, rename/удаление/корзина | Ловушка W0: роли — пары launcher→worker; lock должен корректно освобождаться при убийстве дерева | 5 дней |
 | ~~B5~~ | ✅ **выполнено 01.10.2026**: свой backend `ReadDirectoryChangesW` (крейта `notify` нет в кэше offline) — `crates/hds-index/src/watch.rs`; 6 сценариев на реальных событиях ОС, `watch.lock` снимается как устаревший при убийстве — отчёт `W2_REPORT.md` §12 | — | — |
 | B6 | Sidecar-клиент + Python-воркер `hds-extract` | Контракт подтверждён спайком 3: старт 0,22 с, RSS 34,5→72,7 МБ, извлечение 87–456 мс, выход по EOF 0,08 с; **библиотеки печатают в stdout — уводить в stderr**; мерить память по дереву процессов | 5 дней |
+| ~~B6~~ | ✅ **выполнено 01.10.2026**: `sidecar/hds_extract/worker.py` + `crates/hds-extract` (JSON-RPC 2.0, idle/restart/EOF), `hds-index::sidecar` — адаптер; живьём: старт 0,17 с, RSS 32,6→61,3 МБ, EOF 0,07 с; паритет B4 сохранён — отчёт `W2_REPORT.md` §13 | — | — |
 | B7 | `db-move`, подкоманды `check/reindex/reindex-fts/forget/stop/clip-index/status` | схему БД и PRAGMA сохраняем 1:1; подключение sqlite-vec — через `sqlite3_auto_extension` (спайк 1) | 4 дня |
 
 **Тесты трека B** (используют уже готовый harness):

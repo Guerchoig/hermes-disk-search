@@ -228,12 +228,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "hds-extract"
+version = "0.1.0"
+dependencies = [
+ "hds-core",
+ "serde_json",
+]
+
+[[package]]
 name = "hds-index"
 version = "0.1.0"
 dependencies = [
  "blake2",
  "flate2",
  "hds-core",
+ "hds-extract",
  "hex",
  "rusqlite",
  "serde",

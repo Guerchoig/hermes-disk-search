@@ -1,0 +1,13 @@
+# hds-extract — клиент Python-воркера извлечения/нормализации (sidecar,
+# MIGRATION_PLAN_RUST.md §5, задача B6). Зависимостей на движок/индекс нет:
+# только JSON-RPC по stdio и общий слой hds-core.
+[package]
+name = "hds-extract"
+description = "Клиент sidecar-воркера: извлечение сегментов и лемматизация (JSON-RPC 2.0 stdio)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+serde_json.workspace = true

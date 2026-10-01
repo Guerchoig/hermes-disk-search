@@ -6,17 +6,18 @@
 > Правило волны: Python-версия — источник истины по поведению, паритет проверяется
 > скриптами и тестами, а не «на глаз».
 >
-> **Статус на 01.10.2026 (после B5):** закрыты **A1–A6** (обвязка движка и устройство,
+> **Статус на 01.10.2026 (после B6):** закрыты **A1–A6** (обвязка движка и устройство,
 > реестр инстансов, адресация — замером, бюджет VRAM, диспетчер и замер KV, фасад
-> `:8010–8012`, резидентный `llm-host`) и **B1–B5** (обход/лимиты, `content_hash`,
-> чанкер, конвейер `process_file`, watcher). Ветка `w2-llm-host`, `cargo test --workspace` —
-> **100 green (+6 `#[ignore]`)**; паритет B4 с golden — **16/16 файлов, 6363 чанка** (§11);
-> watcher — 6 сценариев на реальных событиях ОС (§12).
+> `:8010–8012`, резидентный `llm-host`) и **B1–B6** (обход/лимиты, `content_hash`,
+> чанкер, конвейер `process_file`, watcher, sidecar-воркер). Ветка `w2-llm-host`,
+> `cargo test --workspace` — **108 green (+6 `#[ignore]`)**; паритет B4 с golden —
+> **16/16 файлов, 6363 чанка** (§11, перепроверен на воркере B6); watcher — 6 сценариев
+> на реальных событиях ОС (§12); sidecar — контракт §5 на автономном воркере (§13).
 > **Владельцем портов 8010–8012 стал `llm-host`** (§10.2a), Python-роли остановлены.
-> Дальше по плану — B6 (sidecar), B7 (CLI) и W3 (whisper/CLIP).
+> Дальше по плану — B7 (db-move и CLI) и W3 (whisper/CLIP).
 > **Новому чату:** §9 «Передача в новый чат» (состояние, карта кода, команды, грабли) →
-> **§10 «A6 — отчёт»** (особенно §10.6 живая машина, §10.7 грабли окружения) →
-> **§11 «B4 — отчёт»** (конвейер и паритет) → **§12 «B5 — отчёт»** (watcher).
+> **§10 «A6»** (§10.6 живая машина, §10.7 грабли) → **§11 «B4»** → **§12 «B5»** →
+> **§13 «B6»**.
 
 ## 1. A1 — обвязка движка и первый тест выбора устройства
 
@@ -608,7 +609,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | B3 чанкер | ✅ | — |
 | B4 конвейер `process_file` | ✅ | фазы extract/commit, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat, R30; паритет golden 16/16 (6363 чанка) — **§11** |
 | B5 watcher (`notify`) | ✅ | свой backend `ReadDirectoryChangesW` (крейта `notify` нет в кэше offline); debounce, `watch.lock`, reconcile, rename/удаление/корзина — **§12** |
-| B6 sidecar-клиент + Python-воркер | ⏳ | контракт из спайка 3 (§5 основного плана) |
+| B6 sidecar-клиент + Python-воркер | ✅ | автономный воркер `sidecar/hds_extract/worker.py` + крейт `hds-extract` (JSON-RPC 2.0, idle/restart/EOF); старт 0,17 с, RSS 32,6→61,3 МБ — **§13** |
 | B7 `db-move` и подкоманды CLI | ⏳ | `check/reindex/reindex-fts/forget/stop/clip-index/status` |
 
 ### 9.3. Карта кода W2
@@ -626,10 +627,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `crates/hds-index/src/progress.rs` | **B4**: `ProgressReporter` (порт `hds/progress.py`, поля `heartbeat_data`, рендер в отдельном потоке — вывод не зависит от читателя stdout) |
 | `crates/hds-index/src/heartbeat.rs` | **B4**: `index.heartbeat.json` (атомарная запись, рефреш 5 с), `SessionState`/`index_running` — R30 |
 | `crates/hds-index/src/embed.rs` | **B4**: клиент эмбеддингов через фасад `:8011` (порт `hds/embedder.py`: батчи, ретраи, хинты) |
-| `crates/hds-index/src/sidecar.rs` | **B4**: клиент Python-воркера (прототип B6) — трейты `Extractor`/`Lemmatizer`, JSON-lines |
+| `crates/hds-index/src/sidecar.rs` | **B6**: адаптер `hds-extract` к трейтам конвейера (`Extractor`/`Lemmatizer`) |
+| `crates/hds-extract/*` | **B6**: клиент воркера — `protocol` (JSON-RPC 2.0 NDJSON), `worker` (`Worker`: интерпретатор, `hello`, `extract`/`normalize`/`clip_image`, перезапуск/таймаут/EOF, `shutdown`); тесты `protocol`, `mock_worker`, `worker_live` |
 | `crates/hds-index/src/watch.rs` | **B5**: watcher — свой backend `ReadDirectoryChangesW` (FFI), разбор `FILE_NOTIFY_INFORMATION`, `watch.lock` (атомарный + устаревший), `wait_stable`, `handle_event`, `run_watch`, reconcile |
 | `crates/hds-index/tests/watch_core.rs`, `tests/watch_live.rs` | **B5**: разбор событий/`watch.lock`/`wait_stable`/`handle_event` (детерминированные) и 6 сценариев на реальных событиях ОС |
-| `hds/extract_sidecar.py` | **B4**: тонкий Python-мост (`hds.extractors` + `hds.lemmatizer`) для паритета `segments`/`fts` |
+| `sidecar/hds_extract/worker.py`, `requirements.lock`, `sidecar/README.md` | **B6**: автономный Python-воркер (извлечение+лемматизация), зависимости, документация контракта §5 |
 | `crates/hds-llama/src/engine_dir.rs` | поиск каталога движка, `dll_search_dirs` (вендорские каталоги), имя библиотеки |
 | `crates/hds-llama/src/engine.rs` | `ClusterApi::load` (`libloading` + `AddDllDirectory`), `EngineCwd`, `diagnose_load` |
 | `crates/hds-llama/src/ffi.rs` | структуры/enum'ы cluster API (по SDK движка) |
@@ -710,6 +712,10 @@ cargo test -p hds-index --test pipeline_incremental -- --ignored --nocapture # �
 # --- B5: watcher (наблюдатель ФС) ---
 cargo test -p hds-index --test watch_core                                  # разбор событий/watch.lock/wait_stable/handle_event
 cargo test -p hds-index --test watch_live -- --nocapture                   # 6 сценариев на реальных событиях ReadDirectoryChangesW
+
+# --- B6: sidecar-воркер извлечения/лемматизации ---
+cargo test -p hds-extract                                                  # протокол/mock/реальный воркер (idle, restart, EOF)
+'{"jsonrpc":"2.0","id":1,"method":"hello"}' | .\.venv\Scripts\python.exe sidecar\hds_extract\worker.py --root .
 ```
 
 ### 9.5. Открытые вопросы и решения
@@ -1193,9 +1199,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_
   все поля `heartbeat_data`), `heartbeat.rs` (`index.heartbeat.json` + `SessionState`),
   `embed.rs` (клиент фасада `:8011`), `sidecar.rs` (трейты `Extractor`/`Lemmatizer`,
   клиент Python-воркера — прототип B6);
-* **`hds/extract_sidecar.py`** — тонкий Python-мост (JSON-lines: `hello`/`extract`/
-  `normalize`/`shutdown`), использует существующие `hds.extractors` и `hds.lemmatizer`
-  (лемматизация — вариант A из `SPIKES.md` §10);
+* **`hds/extract_sidecar.py`** — в B4 был тонкий Python-мост для паритета; **в B6
+  заменён** автономным воркером `sidecar/hds_extract/worker.py` + клиентом
+  `crates/hds-extract` (см. §13);
 * воркспейс: `rusqlite 0.37` + `sqlite-vec 0.1.9` (из локального кэша cargo,
   `cargo --offline`), профиль `[profile.dev.package.sqlite-vec] opt-level = 2`.
 
@@ -1298,3 +1304,62 @@ cargo (есть лишь его транзитивные `filetime`/`mio`/`same-
 
 * `watch.lock` на не-Windows (сейчас общий путь — тот же код, проверено на Windows);
 * reconcile-прогресс в heartbeat (сейчас `quiet`) — при переносе UI в W1.
+## 13. B6 — отчёт (sidecar-воркер и client, 01.10.2026)
+
+### 13.1. Что сделано (по файлам)
+
+* **`sidecar/hds_extract/worker.py`** — автономный Python-воркер (извлечение +
+  лемматизация) по контракту §5: JSON-RPC 2.0/NDJSON, методы `hello`/`extract`/
+  `normalize`/`clip_image`/`shutdown`, idle-timeout (`extract.idle_timeout`, 60 с),
+  структурированные ошибки `{code, message, hint}`;
+* **`sidecar/hds_extract/requirements.lock`** — зависимости воркера (вариант A,
+  сняты с рантайма спайка 3: pymupdf 1.28.2, python-docx 1.2.0, openpyxl 3.1.5,
+  python-pptx 1.0.2, pillow 12.3.0, pymorphy3 2.0.6 + dicts, PyYAML 6.0.3, lxml,
+  pytesseract); **`sidecar/README.md`** — контракт и установка (A/C);
+* **`crates/hds-extract`** — клиент: `protocol` (кадрирование/разбор, `Capabilities`,
+  `ExtractResult`, `RpcError`), `worker` (`WorkerConfig`, `discover_python`,
+  `Worker`: запуск + `hello`, `extract`/`normalize`/`clip_image`, перезапуск после
+  N запросов / таймаута, поток-читатель с `recv_timeout`, `shutdown` через EOF,
+  `pid` для замера RSS);
+* **`crates/hds-index/src/sidecar.rs`** — стал тонким адаптером `hds-extract` к
+  трейтам конвейера (`Extractor`/`Lemmatizer`); **`hds/extract_sidecar.py`** (B4-мост)
+  удалён — заменён воркером B6.
+
+### 13.2. Приёмка (числа)
+
+| Проверка | Команда | Результат |
+|---|---|---|
+| Протокол (без процесса) | `cargo test -p hds-extract --test protocol` | 5 passed (кадрирование, id, ошибка+hint, разбор capabilities/extract/lemmas) |
+| Клиент на mock-воркере | `cargo test -p hds-extract --test mock_worker` | 1 passed (hello/normalize/extract/ошибка/shutdown), 0,10 с |
+| Реальный воркер | `cargo test -p hds-extract --test worker_live` | 2 passed (hello+extract+normalize+error+shutdown; перезапуск при `max_requests=1`), 0,6 с |
+| Весь воркспейс | `cargo test --workspace` | **108 passed / 6 ignored / 0 failed**, предупреждений нет |
+| Паритет B4 на воркере B6 | `cargo test -p hds-index --test pipeline_parity -- --ignored` | **16/16 файлов, 6363 чанка** — не сломался |
+| Контракт §5 живьём (замер) | `data/_measure.py` (proc_tree) | старт `hello` **0,17 с**, RSS **32,6 → 61,3 МБ**, извлечение md 0,01 с / pdf 0,18 с, выход по EOF **0,07 с** (rc=0) |
+
+Замер совпадает со спайком 3 (0,22 с / 34,5→72,7 МБ / 0,08 с) — контракт подтверждён
+на автономном воркере, а не на пробном скрипте.
+
+### 13.3. Грабли B6 (новые, стоило времени)
+
+1. **Протокольный stdin наследуется подпроцессами.** `extract pdf` вешался на 120 с:
+   `extract_pdf` зовёт `_tesseract_ready` → `pytesseract.get_tesseract_version()` →
+   `tesseract.exe`, который наследует stdin-пайп воркера и **блокируется на чтении**.
+   Решение в воркере: протокол читаем с **дубликата fd 0**, а сам fd 0 уводим в
+   `os.devnull` — тогда любой подпроцесс (tesseract/ffmpeg/java) получает nul, а не
+   канал протокола.
+2. **`sys.stdin.reconfigure(encoding=...)` на Windows-pipe** ломает построчное
+   чтение (строка доходила только после EOF) — читаем бинарно и декодируем UTF-8 сами.
+3. **`hello` не должен запускать tesseract**: проверка OCR-возможности сделана
+   дешёвой (`ocr_tesseract_cmd` или `shutil.which`), а не `get_tesseract_version()`.
+4. Тест-клиент обязан давать воркеру таймаут и перезапуск: при ошибке тест «падал»
+   на 120 с ожидания — теперь `request_timeout` ограничен, а регресс закрыт тестами.
+
+### 13.4. Что осталось на B6 (не блокирует)
+
+* вариант A (портативный python-build-standalone) ставит установщик — в dev
+  используется `.venv`; поиск интерпретатора уже учитывает `sidecar/python` и
+  `HDS_EXTRACT_PYTHON`;
+* `clip_image` воркером не поддерживается по решению §7 (CLIP — в Rust на ONNX);
+* `mpp` (Java) и `ffmpeg/whisper` внутри воркера работают через штатные
+  `hds.extract_static`/`hds.extract_av` — отдельная изоляция (ASCII-стейджинг
+  whisper, спайк 5) остаётся в W3.

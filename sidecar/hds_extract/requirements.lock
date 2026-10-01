@@ -1,0 +1,24 @@
+# hds_extract — зависимости Python-воркера (B6, MIGRATION_PLAN_RUST.md §5.3, вариант A).
+#
+# Сняты с рантайма спайка 3 (tools/parity/out/sidecar_a/venv, python-build-standalone
+# 3.12.14). Обновление — только вместе с перезамером паритета B4 (сегменты/FTS).
+#
+# Установка (вариант A — портативный, без системного Python):
+#   uv python install 3.12 --install-dir sidecar/python
+#   uv venv --python sidecar/python/<cpython-3.12.x>/python.exe sidecar/venv
+#   uv pip install --python sidecar/venv/Scripts/python.exe -r sidecar/hds_extract/requirements.lock
+#
+# Вариант C (fallback — системный Python 3.10+): создать venv и поставить тот же список.
+DAWG2-Python==0.9.0
+et_xmlfile==2.0.0
+lxml==6.1.3
+openpyxl==3.1.5
+pillow==12.3.0
+pymorphy3==2.0.6
+pymorphy3-dicts-ru==2.4.417150.4580142
+pymupdf==1.28.2
+pytesseract==0.3.13
+python-docx==1.2.0
+python-pptx==1.0.2
+PyYAML==6.0.3
+xlsxwriter==3.2.9

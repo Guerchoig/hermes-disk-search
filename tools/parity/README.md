@@ -71,6 +71,9 @@
 | `crates/hds-index` (`tests/pipeline_parity`, `tests/pipeline_incremental`, `tests/pipeline_core`, `tests/heartbeat_progress`) | B4: паритет golden 16/16 (6363 чанка), инкремент на копии боевой БД, инкремент/ошибки без сети, R30 — `#[ignore]` для внешних зависимостей |
 | `crates/hds-index/src/watch.rs` | B5: watcher — свой backend `ReadDirectoryChangesW` (FFI, `notify` недоступен offline), `watch.lock` (атомарный + устаревший), `wait_stable`, `handle_event`, `run_watch`, reconcile |
 | `crates/hds-index/tests/watch_core.rs`, `tests/watch_live.rs` | B5: разбор событий/`watch.lock`/`handle_event` + 6 сценариев на реальных событиях ОС (create/modify/rename/delete/mass-write/корзина) |
+| `crates/hds-extract` | B6: клиент воркера — `protocol` (JSON-RPC 2.0 NDJSON), `worker` (интерпретатор, `hello`, `extract`/`normalize`/`clip_image`, перезапуск/таймаут/EOF, `shutdown`) |
+| `sidecar/hds_extract/worker.py`, `requirements.lock`, `sidecar/README.md` | B6: автономный Python-воркер извлечения/лемматизации, зависимости (вариант A), контракт §5 |
+| `crates/hds-extract/tests/{protocol,mock_worker,worker_live}.rs` | B6: протокол, mock-воркер (stdlib-only), реальный воркер (hello/extract/normalize/ошибка/перезапуск/shutdown) |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
 
@@ -186,7 +189,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 **Чек-лист на 5 минут (копипаст):**
 ```powershell
 git --no-pager -C <репозиторий> log --oneline -3   # ветка w2-llm-host (20 коммитов, 30.09.2026)
-cargo test --workspace                       # должно быть 100 green (+6 #[ignore])
+cargo test --workspace                       # должно быть 108 green (+6 #[ignore])
 cargo run -p hds-llama --release --bin llm_host_status                       # состояние ролей и VRAM
 cargo run -p hds-llama --release --bin llm_host -- status                    # отчёт РЕЗИДЕНТА (владелец портов)
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
