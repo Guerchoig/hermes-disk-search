@@ -78,6 +78,8 @@
 | `crates/hds-cli/tests/{db_move,reindex_fts,forget_status,check_core,support}.rs` | B7: db-move (комментарии config, `.moved-*`), reindex-fts (перестройка FTS + `meta.fts_normalized`), forget/status, check (db/roots), support (roots/kinds/`resolve_model`) |
 | `pilot_parity.py` | B-2: генератор пилота (10 000 текст. файлов) и дифф двух БД индексации (файлы/чанки/тексты/FTS) → паритет Python↔Rust 10 000 файлов / 58 450 чанков, +7,1 % по времени |
 | `measure_tree.py` + `sample_tree.ps1` | B-4: замеры памяти по дереву процесса (`WorkingSet64`/`PrivateMemorySize64`) сценариев index-500 и idle-watch для Python и Rust → `out/measure_tree_results.json` |
+| `W3_REPORT.md` | журнал волны W3 (медиа): разведка аудио-API движка и рантайма `ort`, план по файлам |
+| `pe_exports.py` | список экспортов PE-файла (разведка C-API движка): `pe_exports.py <dll> [подстрока]` |
 | `hash_vectors.py` | фиксированные векторы `content_hash` (Python-эталон) → `out/hash_vectors.json` |
 | `walk_parity.py` | эталон обхода/`precheck`: синтетическое дерево (все ветки исключений/лимитов) + опционально боевые корни (`--real`) → `out/walk_parity.json` |
 
