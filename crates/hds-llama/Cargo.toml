@@ -63,3 +63,7 @@ path = "src/bin/llm_host_facade.rs"
 [[bin]]
 name = "llm_host"
 path = "src/bin/llm_host.rs"
+
+[[bin]]
+name = "audio_probe"
+path = "src/bin/audio_probe.rs"

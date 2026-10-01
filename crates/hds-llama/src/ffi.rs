@@ -171,6 +171,20 @@ pub struct RerankRequestRaw {
     pub body_json: *const c_char,
 }
 
+/// `struct llama_server_cluster_audio_raw_request` (batch-транскрибация, §8.3).
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub struct AudioRawRequestRaw {
+    pub instance_id: InstanceId,
+    pub audio_bytes: *const u8,
+    pub audio_bytes_len: usize,
+    pub audio_format: *const c_char,
+    pub metadata_json: *const c_char,
+    pub ffmpeg_convert: i32,
+    pub enable_diarization: i32,
+    pub diarization_model_path: *const c_char,
+}
+
 /// `struct llama_server_cluster_json_result` (embeddings/rerank/audio).
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]

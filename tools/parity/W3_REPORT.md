@@ -75,6 +75,31 @@ void    llama_server_bridge_json_result_free(out*);
 Вывод ответа — JSON (тот же формат `/v1/audio/transcriptions`), парсим в сегменты
 `{text,t_start,t_end}`. Есть и потоковое API (`..._audio_session_*`) — для индексации не нужно.
 
+### 1.3. Probe транскрибации — первый прогон (01.10.2026)
+
+Реализованы: FFI `AudioRawRequestRaw` + символы `llama_server_cluster_default_audio_raw_request`
+/ `llama_server_cluster_audio_transcriptions_raw` (`crates/hds-llama/src/engine.rs`,
+`ffi.rs`), метод `Cluster::transcribe_audio_raw` (`cluster.rs`), бинарь
+`crates/hds-llama/src/bin/audio_probe.rs`. Прогон на `test_data/jfk.wav`:
+
+* движок загружен, устройства: **CUDA0** (`bridge_index=0`, accel) и CPU (`1`);
+* роль `whisper` (`model_kind=4`, `LOAD_ON_DEMAND`, gpu=0) создана (instance id=1);
+* вызов вернул `rc=-1 ok=false status=500`: **`unknown execution_group_id for native
+  transcription: cluster:manual`**; движок также ругнулся `invalid magic 'lmgg',
+  expected 'GGUF'`.
+
+**Выводы и следующие шаги (до рабочей транскрибации):**
+
+1. **`execution_group_id`.** Нативный путь транскрибации требует execution-group; инстанс
+   создан через `manual_devices_csv` (группа не задана) → движок дефолтит на несуществующий
+   `cluster:manual`. Варианты: (а) задавать `execution_group_id` (получить список через
+   `llama_server_cluster_list_execution_groups[_with_rpc]`), (б) идти через bridge-API
+   (`llama_server_bridge_audio_transcriptions_raw`, без кластера). Разобрать по
+   `bridge/llama_server_cluster.cpp` (в открытом SDK).
+2. **Формат модели whisper.** Нужна **GGUF**-модель: установленная
+   `whisper-large-v3-turbo-GGML.bin` — legacy **GGML**, движок ждёт GGUF. Проверить/скачать
+   GGUF (whisper large-v3-turbo) в общий каталог движка.
+
 ## 2. План W3 (по файлам, черновик — уточняется)
 
 1. **`crates/hds-whisper`** — FFI к аудио-API (batch): `default_audio_raw_request` +

@@ -16,8 +16,9 @@ use libloading::Library;
 use crate::engine_dir;
 use crate::error::{EngineError, Result};
 use crate::ffi::{
-    ChatRequestRaw, ChatResultRaw, ClusterRaw, DeviceInfoRaw, EmbeddingsRequestRaw, InstanceId,
-    InstanceInfoRaw, InstanceParamsRaw, JsonResultRaw, RerankRequestRaw,
+    AudioRawRequestRaw, ChatRequestRaw, ChatResultRaw, ClusterRaw, DeviceInfoRaw,
+    EmbeddingsRequestRaw, InstanceId, InstanceInfoRaw, InstanceParamsRaw, JsonResultRaw,
+    RerankRequestRaw,
 };
 
 /// Указатели на экспорты cluster API + библиотека, которая держит их живыми.
@@ -51,6 +52,12 @@ pub struct ClusterApi {
     pub rerank: unsafe extern "C" fn(
         *mut ClusterRaw,
         *const RerankRequestRaw,
+        *mut JsonResultRaw,
+    ) -> i32,
+    pub default_audio_raw_request: unsafe extern "C" fn() -> AudioRawRequestRaw,
+    pub audio_transcriptions_raw: unsafe extern "C" fn(
+        *mut ClusterRaw,
+        *const AudioRawRequestRaw,
         *mut JsonResultRaw,
     ) -> i32,
     pub empty_json_result: unsafe extern "C" fn() -> JsonResultRaw,
@@ -126,6 +133,16 @@ impl ClusterApi {
                 "llama_server_cluster_default_rerank_request",
             )?,
             rerank: resolve(&lib, n, "llama_server_cluster_rerank")?,
+            default_audio_raw_request: resolve(
+                &lib,
+                n,
+                "llama_server_cluster_default_audio_raw_request",
+            )?,
+            audio_transcriptions_raw: resolve(
+                &lib,
+                n,
+                "llama_server_cluster_audio_transcriptions_raw",
+            )?,
             empty_json_result: resolve(&lib, n, "llama_server_cluster_empty_json_result")?,
             json_result_free: resolve(&lib, n, "llama_server_cluster_json_result_free")?,
             default_chat_request: resolve(&lib, n, "llama_server_cluster_default_chat_request")?,

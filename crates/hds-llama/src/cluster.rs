@@ -451,6 +451,34 @@ impl Cluster {
         Ok(self.take_json(rc, &mut out))
     }
 
+    /// Транскрибация аудио (batch) через роль `whisper` (model_kind = 4).
+    ///
+    /// `audio_bytes` — содержимое файла как есть, `audio_format` — расширение
+    /// (wav/mp3/…), `metadata_json` — тело запроса без аудио (`mode`/`custom`/
+    /// `whisper_model`/`whisper_gpu_device`/…), `ffmpeg_convert` — конвертация во
+    /// внутренний WAV 16 кГц mono в RAM. Ответ — JSON (`/v1/audio/transcriptions`).
+    pub fn transcribe_audio_raw(
+        &self,
+        id: InstanceId,
+        audio_bytes: &[u8],
+        audio_format: &str,
+        metadata_json: &str,
+        ffmpeg_convert: bool,
+    ) -> Result<JsonOutcome> {
+        let fmt = json_cstr(audio_format)?;
+        let meta = json_cstr(metadata_json)?;
+        let mut req = unsafe { (self.api.default_audio_raw_request)() };
+        req.instance_id = id;
+        req.audio_bytes = audio_bytes.as_ptr();
+        req.audio_bytes_len = audio_bytes.len();
+        req.audio_format = fmt.as_ptr();
+        req.metadata_json = meta.as_ptr();
+        req.ffmpeg_convert = ffmpeg_convert as i32;
+        let mut out = unsafe { (self.api.empty_json_result)() };
+        let rc = unsafe { (self.api.audio_transcriptions_raw)(self.raw, &req, &mut out) };
+        Ok(self.take_json(rc, &mut out))
+    }
+
     /// Чат. `reasoning`: `(mode, budget, format)` — семантика §11.4; маппинг
     /// «chat/chat-think» живёт в фасаде (A5), здесь только тонкий слой.
     pub fn chat_complete(
