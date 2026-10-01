@@ -114,6 +114,17 @@ omitted» — bridge создаётся **без модели**, а whisper-мо
 Диаризация выключена (`mode: speech`).
 Итог: **ASR-путь движка из Rust работает; модель GGML (GGUF не нужен)**.
 
+**Сегменты с таймкодами (шаг 1 — готов).** `mode: subtitle` (окно задаётся `custom`, сек)
+пишет `.srt`; `crates/hds-llama/src/whisper.rs` парсит его в `{text,t_start,t_end}`.
+Прогон `audio_probe` (jfk.wav) → **3 сегмента**:
+```
+[0.83  ->  5.02] And so, my fellow Americans, ask not
+[5.71  -> 10.09] what your country can do for you, ask what you can
+[10.09 -> 11.13] do for your country.
+```
+Реализовано: `Whisper::transcribe_file(path, mode, custom) -> Transcript{json, segments}`
+(+ `parse_srt`, ASCII-стейджинг внутри); `WhisperSegment{text,t_start,t_end}`.
+
 ## 2. План W3 (по файлам, черновик — уточняется)
 
 1. **`crates/hds-whisper`** — FFI к аудио-API (batch): `default_audio_raw_request` +

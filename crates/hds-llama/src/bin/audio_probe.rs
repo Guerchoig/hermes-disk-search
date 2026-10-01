@@ -1,19 +1,14 @@
-//! W3: probe транскрибации через bridge-API движка (direct-model, plan §8.3).
-//!
-//! `llama-server-bridge.dll` → `llama_server_bridge_create` (модель напрямую) →
-//! `llama_server_bridge_audio_transcriptions_raw`. ASCII-стейджинг путей обязателен.
-//! (Кластерный путь упирается в execution_group — см. W3_REPORT §1.3.)
+//! W3: probe транскрибации (bridge-API движка, `mode: subtitle` → сегменты с таймкодами).
 //!
 //! Запуск:
 //! `cargo run -p hds-llama --release --bin audio_probe -- [<audio>] [<whisper.bin>] [<gpu_index>]`
+//! Переменные: `HDS_WHISPER_MODE` (по умолчанию `subtitle`), `HDS_WHISPER_CUSTOM` (`4.5`).
 
 use std::path::{Path, PathBuf};
 
-use serde_json::json;
-
-use hds_llama::bridge_audio::BridgeAudio;
 use hds_llama::error::{EngineError, Result};
-use hds_llama::Engine;
+use hds_llama::whisper::Whisper;
+use hds_llama::{BridgeAudio, Engine};
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -22,7 +17,7 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// whisper-модель из общего каталога движка: `*.bin`/`*.gguf` в каталоге turbo-модели.
+/// whisper-модель из общего каталога движка (`*.bin`/`*.gguf` в каталоге turbo-модели).
 fn default_whisper_model() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
     let dir = base
@@ -57,7 +52,6 @@ fn main() -> Result<()> {
         .ok_or_else(|| EngineError::Other("не найдена whisper-модель (*.bin/*.gguf)".into()))?;
     let gpu: i32 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
 
-    // Движок: готовит путь поиска DLL и делает каталог движка текущим (A1/R32).
     let engine = Engine::open(None)?;
     let _cwd = engine.activate()?;
     println!("engine: {}", engine.dir().display());
@@ -66,45 +60,26 @@ fn main() -> Result<()> {
     println!("gpu(bridge index): {gpu}");
 
     let bridge = BridgeAudio::load(engine.dir())?;
+    let whisper = Whisper::new(bridge, &model, gpu, -1);
 
-    // ASCII-стейджинг (грабля спайка 5).
-    let ascii_dir = std::env::temp_dir().join("hds_audio_probe");
-    std::fs::create_dir_all(&ascii_dir)
-        .map_err(|e| EngineError::Other(format!("{ascii_dir:?}: {e}")))?;
-    let staged = ascii_dir.join("audio_input.wav");
-    std::fs::copy(&audio, &staged)
-        .map_err(|e| EngineError::Other(format!("стейджинг {:?}: {e}", audio)))?;
-    let bytes = std::fs::read(&staged).map_err(|e| EngineError::Other(format!("{staged:?}: {e}")))?;
-
-    let meta = json!({
-        "mode": "speech",
-        "custom": "default",
-        "whisper_model": model.to_string_lossy(),
-        "whisper_gpu_device": gpu,
-        "output_dir": ascii_dir.to_string_lossy(),
-        "audio_source_path": staged.to_string_lossy(),
-    });
+    let mode = std::env::var("HDS_WHISPER_MODE").unwrap_or_else(|_| "subtitle".to_string());
+    let custom = std::env::var("HDS_WHISPER_CUSTOM").unwrap_or_else(|_| "4.5".to_string());
 
     let t0 = std::time::Instant::now();
-    // audio-only: bridge без модели; whisper-модель — в metadata.whisper_model
-    let out = bridge.transcribe_raw(None, Some(gpu), -1, &bytes, "wav", &meta.to_string(), true)?;
+    let tr = whisper.transcribe_file(&audio, &mode, &custom)?;
     println!(
-        "bridge: ok={} status={} rc_ok ({:.1} с)",
-        out.ok,
-        out.status,
+        "whisper: mode={mode} custom={custom} ({:.1} с)",
         t0.elapsed().as_secs_f64()
     );
-    if !out.error.is_empty() {
-        println!("--- error ---\n{}", out.error);
+    println!("json: {}", tr.json);
+    println!("сегментов: {}", tr.segments.len());
+    for s in &tr.segments {
+        println!("[{:>7.2} -> {:>7.2}] {}", s.t_start, s.t_end, s.text);
     }
-    let preview: String = out.json.chars().take(2000).collect();
-    println!("--- json (первые 2000) ---\n{preview}");
-    if !out.ok {
-        return Err(EngineError::Other(format!(
-            "движок вернул ok=0 (status={}): {}",
-            out.status,
-            if out.error.is_empty() { "без текста ошибки" } else { &out.error }
-        )));
+    if tr.segments.is_empty() {
+        return Err(EngineError::Other(
+            "нет сегментов (проверьте mode/модель)".into(),
+        ));
     }
     Ok(())
 }

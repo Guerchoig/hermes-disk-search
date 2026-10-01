@@ -44,6 +44,7 @@ pub mod resident;
 pub mod runtime;
 pub mod status;
 pub mod vram;
+pub mod whisper;
 
 pub use bridge_audio::{BridgeAudio, BridgeOutcome};
 pub use budget::{check_fit, estimate_need_mib, kv_cache_mib, Fit};
@@ -64,3 +65,4 @@ pub use resident::{Log, PidFile};
 pub use runtime::{read_current, resolve_model, runtime_dir, RuntimePaths};
 pub use status::StatusReport;
 pub use vram::{NvmlProbe, VramProbe, VramSampler, VramSnapshot, VramSource};
+pub use whisper::{parse_srt, Transcript, Whisper, WhisperSegment};
