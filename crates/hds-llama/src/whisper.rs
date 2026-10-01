@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use serde_json::{json, Value};
 
-use crate::bridge_audio::BridgeAudio;
+use crate::bridge_audio::{Bridge, BridgeAudio};
 use crate::error::{EngineError, Result};
 
 /// Сегмент транскрипта с таймкодами (секунды).
@@ -90,23 +90,22 @@ fn stage_ascii(src: &Path, ascii_dir: &Path) -> Result<PathBuf> {
     Ok(dst)
 }
 
-/// Транскрибатор: bridge + модель whisper + устройство.
+/// Транскрибатор: постоянный bridge (audio-only) + модель whisper.
 pub struct Whisper {
-    bridge: BridgeAudio,
+    bridge: Bridge,
     model: PathBuf,
     gpu: i32,
-    n_gpu_layers: i32,
 }
 
 impl Whisper {
-    /// Собрать транскрибатор (bridge — из [`BridgeAudio::load`]).
-    pub fn new(bridge: BridgeAudio, model: &Path, gpu: i32, n_gpu_layers: i32) -> Self {
-        Whisper {
+    /// Собрать транскрибатор: создаёт **постоянный** bridge (audio-only) для роли whisper.
+    pub fn new(bridge_audio: BridgeAudio, model: &Path, gpu: i32, n_gpu_layers: i32) -> Result<Self> {
+        let bridge = bridge_audio.create(None, Some(gpu), n_gpu_layers)?;
+        Ok(Whisper {
             bridge,
             model: model.to_path_buf(),
             gpu,
-            n_gpu_layers,
-        }
+        })
     }
 
     /// Путь к модели whisper.
@@ -137,15 +136,9 @@ impl Whisper {
             "output_dir": ascii_dir.to_string_lossy(),
             "audio_source_path": staged.to_string_lossy(),
         });
-        let out = self.bridge.transcribe_raw(
-            None,
-            Some(self.gpu),
-            self.n_gpu_layers,
-            &bytes,
-            &ext,
-            &meta.to_string(),
-            true,
-        )?;
+        let out = self
+            .bridge
+            .transcribe_raw(&bytes, &ext, &meta.to_string(), true)?;
         if !out.ok {
             return Err(EngineError::Other(format!(
                 "whisper вернул ok=0 (status={}): {}",

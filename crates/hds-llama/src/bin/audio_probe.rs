@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     println!("gpu(bridge index): {gpu}");
 
     let bridge = BridgeAudio::load(engine.dir())?;
-    let whisper = Whisper::new(bridge, &model, gpu, -1);
+    let whisper = Whisper::new(bridge, &model, gpu, -1)?;
 
     let mode = std::env::var("HDS_WHISPER_MODE").unwrap_or_else(|_| "subtitle".to_string());
     let custom = std::env::var("HDS_WHISPER_CUSTOM").unwrap_or_else(|_| "4.5".to_string());

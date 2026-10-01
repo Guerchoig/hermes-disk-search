@@ -149,6 +149,41 @@ impl BridgeAudio {
         Ok(api)
     }
 
+    /// Создать **постоянный** bridge (для роли whisper — один на владельца).
+    ///
+    /// Audio-only: `model` = `None` («For audio-only use, `model_path` may be omitted»,
+    /// `docs/bridge-audio-dll.md`); модель whisper задаётся в `metadata_json.whisper_model`.
+    pub fn create(&self, model: Option<&Path>, gpu: Option<i32>, n_gpu_layers: i32) -> Result<Bridge> {
+        let mut keep: Vec<CString> = Vec::new();
+        let model_ptr = match model {
+            Some(m) => {
+                let c = CString::new(m.to_string_lossy().as_bytes())
+                    .map_err(|_| EngineError::Other("NUL в пути модели".into()))?;
+                keep.push(c);
+                keep.last().unwrap().as_ptr()
+            }
+            None => std::ptr::null(),
+        };
+        let mut p = unsafe { (self.default_params)() };
+        p.model_path = model_ptr;
+        p.gpu = gpu.unwrap_or(-1);
+        p.n_gpu_layers = n_gpu_layers;
+        let handle = unsafe { (self.create)(&p) };
+        if handle.is_null() {
+            return Err(EngineError::Other("bridge_create вернул NULL".into()));
+        }
+        Ok(Bridge {
+            handle,
+            destroy: self.destroy,
+            audio_raw: self.audio_raw,
+            default_audio_raw: self.default_audio_raw,
+            json_free: self.json_free,
+            last_error: self.last_error,
+            _lib: Arc::clone(&self._lib),
+            _keep: keep,
+        })
+    }
+
     /// Создать bridge под модель, выполнить raw-транскрибацию, освободить ресурсы.
     ///
     /// Для **audio-only** `model` = `None` (официальный пример `docs/bridge-audio-dll.md`:
@@ -227,5 +262,80 @@ impl BridgeAudio {
             });
         }
         Ok(outcome)
+    }
+}
+
+/// Постоянный bridge движка: создаётся один раз (роль `whisper`), переиспользуется
+/// между запросами; уничтожается в [`Drop`].
+pub struct Bridge {
+    handle: *mut std::ffi::c_void,
+    destroy: unsafe extern "C" fn(*mut std::ffi::c_void),
+    audio_raw: unsafe extern "C" fn(
+        *mut std::ffi::c_void,
+        *const BridgeAudioRawRequestRaw,
+        *mut BridgeJsonResultRaw,
+    ) -> i32,
+    default_audio_raw: unsafe extern "C" fn() -> BridgeAudioRawRequestRaw,
+    json_free: unsafe extern "C" fn(*mut BridgeJsonResultRaw),
+    last_error: unsafe extern "C" fn(*const std::ffi::c_void) -> *const c_char,
+    _lib: Arc<Library>,
+    _keep: Vec<CString>,
+}
+
+impl Bridge {
+    /// Raw-транскрибация через уже созданный bridge (модель — из `metadata_json`).
+    pub fn transcribe_raw(
+        &self,
+        bytes: &[u8],
+        audio_format: &str,
+        metadata_json: &str,
+        ffmpeg_convert: bool,
+    ) -> Result<BridgeOutcome> {
+        let fmt_c = CString::new(audio_format.as_bytes())
+            .map_err(|_| EngineError::Other("NUL в audio_format".into()))?;
+        let meta_c = CString::new(metadata_json.as_bytes())
+            .map_err(|_| EngineError::Other("NUL в metadata_json".into()))?;
+        let mut req = unsafe { (self.default_audio_raw)() };
+        req.audio_bytes = bytes.as_ptr();
+        req.audio_bytes_len = bytes.len();
+        req.audio_format = fmt_c.as_ptr();
+        req.metadata_json = meta_c.as_ptr();
+        req.ffmpeg_convert = ffmpeg_convert as i32;
+        let mut out = BridgeJsonResultRaw {
+            ok: 0,
+            status: 0,
+            json: std::ptr::null_mut(),
+            error_json: std::ptr::null_mut(),
+        };
+        let rc = unsafe { (self.audio_raw)(self.handle, &req, &mut out) };
+        let last = cstr_or_empty(unsafe { (self.last_error)(self.handle) });
+        let outcome = BridgeOutcome {
+            ok: out.ok == 1,
+            status: out.status,
+            json: cstr_or_empty(out.json),
+            error: if !out.error_json.is_null() {
+                cstr_or_empty(out.error_json)
+            } else {
+                last
+            },
+        };
+        unsafe {
+            (self.json_free)(&mut out);
+        }
+        if rc != 0 && outcome.error.is_empty() {
+            return Err(EngineError::Call {
+                rc,
+                last_error: format!("bridge rc={rc}"),
+            });
+        }
+        Ok(outcome)
+    }
+}
+
+impl Drop for Bridge {
+    fn drop(&mut self) {
+        if !self.handle.is_null() {
+            unsafe { (self.destroy)(self.handle) };
+        }
     }
 }
