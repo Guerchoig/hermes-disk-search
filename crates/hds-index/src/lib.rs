@@ -21,6 +21,7 @@ pub mod pipeline;
 pub mod progress;
 pub mod sidecar;
 pub mod walk;
+pub mod watch;
 
 pub use chunker::{make_chunks, Chunk, Segment, DEFAULT_OVERLAP, DEFAULT_SIZE};
 pub use embed::{vector_blob, Embedder};
@@ -33,3 +34,4 @@ pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
 pub use walk::{
     walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions,
 };
+pub use watch::{run_watch, WatchEvent, WatchLock, WatchState};

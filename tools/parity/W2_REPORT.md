@@ -6,16 +6,17 @@
 > Правило волны: Python-версия — источник истины по поведению, паритет проверяется
 > скриптами и тестами, а не «на глаз».
 >
-> **Статус на 01.10.2026 (после B4):** закрыты **A1–A6** (обвязка движка и устройство,
+> **Статус на 01.10.2026 (после B5):** закрыты **A1–A6** (обвязка движка и устройство,
 > реестр инстансов, адресация — замером, бюджет VRAM, диспетчер и замер KV, фасад
-> `:8010–8012`, резидентный `llm-host`) и **B1–B4** (обход/лимиты, `content_hash`,
-> чанкер, конвейер `process_file`). Ветка `w2-llm-host`, `cargo test --workspace` —
-> **92 green (+6 `#[ignore]`)**; паритет B4 с golden — **16/16 файлов, 6363 чанка** (§11).
+> `:8010–8012`, резидентный `llm-host`) и **B1–B5** (обход/лимиты, `content_hash`,
+> чанкер, конвейер `process_file`, watcher). Ветка `w2-llm-host`, `cargo test --workspace` —
+> **100 green (+6 `#[ignore]`)**; паритет B4 с golden — **16/16 файлов, 6363 чанка** (§11);
+> watcher — 6 сценариев на реальных событиях ОС (§12).
 > **Владельцем портов 8010–8012 стал `llm-host`** (§10.2a), Python-роли остановлены.
-> Дальше по плану — B5 (watcher), B6 (sidecar), B7 (CLI) и W3 (whisper/CLIP).
+> Дальше по плану — B6 (sidecar), B7 (CLI) и W3 (whisper/CLIP).
 > **Новому чату:** §9 «Передача в новый чат» (состояние, карта кода, команды, грабли) →
 > **§10 «A6 — отчёт»** (особенно §10.6 живая машина, §10.7 грабли окружения) →
-> **§11 «B4 — отчёт»** (конвейер и паритет).
+> **§11 «B4 — отчёт»** (конвейер и паритет) → **§12 «B5 — отчёт»** (watcher).
 
 ## 1. A1 — обвязка движка и первый тест выбора устройства
 
@@ -606,7 +607,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | B2 `content_hash` | ✅ | — |
 | B3 чанкер | ✅ | — |
 | B4 конвейер `process_file` | ✅ | фазы extract/commit, атомарный коммит, `clip_for_embedding`, `max_chunks`, прогресс+heartbeat, R30; паритет golden 16/16 (6363 чанка) — **§11** |
-| B5 watcher (`notify`) | ⏳ | debounce, `watch.lock`, reconcile, rename/удаление |
+| B5 watcher (`notify`) | ✅ | свой backend `ReadDirectoryChangesW` (крейта `notify` нет в кэше offline); debounce, `watch.lock`, reconcile, rename/удаление/корзина — **§12** |
 | B6 sidecar-клиент + Python-воркер | ⏳ | контракт из спайка 3 (§5 основного плана) |
 | B7 `db-move` и подкоманды CLI | ⏳ | `check/reindex/reindex-fts/forget/stop/clip-index/status` |
 
@@ -626,6 +627,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps
 | `crates/hds-index/src/heartbeat.rs` | **B4**: `index.heartbeat.json` (атомарная запись, рефреш 5 с), `SessionState`/`index_running` — R30 |
 | `crates/hds-index/src/embed.rs` | **B4**: клиент эмбеддингов через фасад `:8011` (порт `hds/embedder.py`: батчи, ретраи, хинты) |
 | `crates/hds-index/src/sidecar.rs` | **B4**: клиент Python-воркера (прототип B6) — трейты `Extractor`/`Lemmatizer`, JSON-lines |
+| `crates/hds-index/src/watch.rs` | **B5**: watcher — свой backend `ReadDirectoryChangesW` (FFI), разбор `FILE_NOTIFY_INFORMATION`, `watch.lock` (атомарный + устаревший), `wait_stable`, `handle_event`, `run_watch`, reconcile |
+| `crates/hds-index/tests/watch_core.rs`, `tests/watch_live.rs` | **B5**: разбор событий/`watch.lock`/`wait_stable`/`handle_event` (детерминированные) и 6 сценариев на реальных событиях ОС |
 | `hds/extract_sidecar.py` | **B4**: тонкий Python-мост (`hds.extractors` + `hds.lemmatizer`) для паритета `segments`/`fts` |
 | `crates/hds-llama/src/engine_dir.rs` | поиск каталога движка, `dll_search_dirs` (вендорские каталоги), имя библиотеки |
 | `crates/hds-llama/src/engine.rs` | `ClusterApi::load` (`libloading` + `AddDllDirectory`), `EngineCwd`, `diagnose_load` |
@@ -703,6 +706,10 @@ cargo test -p hds-index --test pipeline_core --test heartbeat_progress   # ин�
 cargo test -p hds-core --test db_schema -- --ignored --nocapture    # Python читает Rust-БД; Rust читает боевую
 cargo test -p hds-index --test pipeline_parity -- --ignored --nocapture      # golden 16/16, 6363 чанка (.venv + фасад :8011)
 cargo test -p hds-index --test pipeline_incremental -- --ignored --nocapture # копия боевой БД: unchanged, чанки совпали
+
+# --- B5: watcher (наблюдатель ФС) ---
+cargo test -p hds-index --test watch_core                                  # разбор событий/watch.lock/wait_stable/handle_event
+cargo test -p hds-index --test watch_live -- --nocapture                   # 6 сценариев на реальных событиях ReadDirectoryChangesW
 ```
 
 ### 9.5. Открытые вопросы и решения
@@ -1245,3 +1252,49 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_llm_host_
 * замер памяти индексации 500 файлов против эталона W0 (`measure_run.py`) — после B5/B6;
 * `keep-alive` HTTP-клиента эмбеддингов (сейчас `Connection: close`) — оптимизация;
 * унификация `hds-core::http` с `hds-llama::http` — после W1.
+## 12. B5 — отчёт (watcher, 01.10.2026)
+
+### 12.1. Что сделано (по файлам)
+
+* **`crates/hds-index/src/watch.rs`** — порт `hds/watcher.py`:
+  * события ОС — **свой backend `ReadDirectoryChangesW`** (минимальный FFI
+    `kernel32`, как проверка PID в `hds-llama::resident`), разбор
+    `FILE_NOTIFY_INFORMATION` (ADDED/MODIFIED → `Modified`, REMOVED → `Deleted`,
+    RENAMED_OLD+NEW → `Moved`); на не-Windows — опрос (macOS вне DoD W2);
+  * `watch.lock` — **атомарный** (`create_new`) + снятие устаревшего (`lock_is_stale`);
+  * `wait_stable` (debounce по размеру), `handle_event` (порт `_worker`),
+    `run_watch` (наблюдатель → reconcile → цикл), `is_excluded`, `WatchState`;
+* **тесты**: `tests/watch_core.rs` (разбор, lock, `wait_stable`, `handle_event` —
+  без реальных событий), `tests/watch_live.rs` (**6 сценариев** на реальных событиях).
+
+### 12.2. Почему свой backend, а не `notify`
+
+`PLAN_W2_LLM_HOST.md` §2.4 предполагал `notify 8.x`, но на машине заказчика
+**`crates.io` недоступен** (§9.7 п.13), а крейта `notify` **нет в локальном кэше**
+cargo (есть лишь его транзитивные `filetime`/`mio`/`same-file`/`winapi-util`).
+`watchdog`/`notify` на Windows и есть обёртка над `ReadDirectoryChangesW` —
+реализовали её напрямую, без новых зависимостей.
+
+### 12.3. Приёмка (числа)
+
+| Проверка | Команда | Результат |
+|---|---|---|
+| Детерминированные | `cargo test -p hds-index --test watch_core` | **7 passed**: разбор ADDED/MODIFIED/REMOVED/RENAMED, атомарный lock + устаревший, `wait_stable`, `handle_event` (indexed/`.tmp`/корзина/rename/delete/ошибка) |
+| Live (реальные события ОС) | `cargo test -p hds-index --test watch_live` | **6 сценариев**: create, modify, rename, delete, mass-write (10 файлов), корзина — 50,8 с |
+| Весь воркспейс | `cargo test --workspace` | **100 passed / 6 ignored / 0 failed**, предупреждений нет |
+
+### 12.4. Осознанные отличия от Python
+
+1. Остановка — файл `index.stop` (как у индексатора) либо завершение процесса;
+   `watch.lock` при жёстком убийстве снимается следующим стартом как устаревший
+   (проверено тестом `stale_lock_is_reclaimed`).
+2. `_lock_pid_is_watcher` (имя/командная строка процесса через `psutil`) не
+   воспроизводим без новых зависимостей: живой PID считаем владельцем —
+   **пессимистично**, как Python без `psutil`.
+3. `status()` (глобальный `_state`) — пока библиотечный `WatchState::snapshot`;
+   общий процесс-«модуль» появится в W1 вместе с MCP/UI.
+
+### 12.5. Что осталось на B5 (по желанию)
+
+* `watch.lock` на не-Windows (сейчас общий путь — тот же код, проверено на Windows);
+* reconcile-прогресс в heartbeat (сейчас `quiet`) — при переносе UI в W1.
