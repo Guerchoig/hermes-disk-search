@@ -79,13 +79,15 @@ fn main() -> Result<()> {
     let meta = json!({
         "mode": "speech",
         "custom": "default",
+        "whisper_model": model.to_string_lossy(),
+        "whisper_gpu_device": gpu,
         "output_dir": ascii_dir.to_string_lossy(),
         "audio_source_path": staged.to_string_lossy(),
-        "transport": "audio_raw_bytes",
     });
 
     let t0 = std::time::Instant::now();
-    let out = bridge.transcribe_raw(&model, Some(gpu), -1, &bytes, "wav", &meta.to_string(), true)?;
+    // audio-only: bridge без модели; whisper-модель — в metadata.whisper_model
+    let out = bridge.transcribe_raw(None, Some(gpu), -1, &bytes, "wav", &meta.to_string(), true)?;
     println!(
         "bridge: ok={} status={} rc_ok ({:.1} с)",
         out.ok,

@@ -150,10 +150,15 @@ impl BridgeAudio {
     }
 
     /// Создать bridge под модель, выполнить raw-транскрибацию, освободить ресурсы.
+    ///
+    /// Для **audio-only** `model` = `None` (официальный пример `docs/bridge-audio-dll.md`:
+    /// «For audio-only use, `model_path` may be omitted»); модель whisper задаётся в
+    /// `metadata_json` ключом `whisper_model` (путь к `.bin` GGML — маршрут whisper.cpp,
+    /// не llama.cpp GGUF).
     #[allow(clippy::too_many_arguments)]
     pub fn transcribe_raw(
         &self,
-        model: &Path,
+        model: Option<&Path>,
         gpu: Option<i32>,
         n_gpu_layers: i32,
         bytes: &[u8],
@@ -161,15 +166,23 @@ impl BridgeAudio {
         metadata_json: &str,
         ffmpeg_convert: bool,
     ) -> Result<BridgeOutcome> {
-        let model_c = CString::new(model.to_string_lossy().as_bytes())
-            .map_err(|_| EngineError::Other("NUL в пути модели".into()))?;
+        let model_c = match model {
+            Some(m) => Some(
+                CString::new(m.to_string_lossy().as_bytes())
+                    .map_err(|_| EngineError::Other("NUL в пути модели".into()))?,
+            ),
+            None => None,
+        };
         let fmt_c = CString::new(audio_format.as_bytes())
             .map_err(|_| EngineError::Other("NUL в audio_format".into()))?;
         let meta_c = CString::new(metadata_json.as_bytes())
             .map_err(|_| EngineError::Other("NUL в metadata_json".into()))?;
 
         let mut p = unsafe { (self.default_params)() };
-        p.model_path = model_c.as_ptr();
+        p.model_path = model_c
+            .as_ref()
+            .map(|c| c.as_ptr())
+            .unwrap_or(std::ptr::null());
         p.gpu = gpu.unwrap_or(-1);
         p.n_gpu_layers = n_gpu_layers;
 

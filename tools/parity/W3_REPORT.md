@@ -96,20 +96,23 @@ void    llama_server_bridge_json_result_free(out*);
    `llama_server_cluster_list_execution_groups[_with_rpc]`), (б) идти через bridge-API
    (`llama_server_bridge_audio_transcriptions_raw`, без кластера). Разобрать по
    `bridge/llama_server_cluster.cpp` (в открытом SDK).
-2. **Формат модели whisper.** Нужна **GGUF**-модель: установленная
-   `whisper-large-v3-turbo-GGML.bin` — legacy **GGML**, движок ждёт GGUF. Проверить/скачать
-   GGUF (whisper large-v3-turbo) в общий каталог движка.
+2. ~~**Формат модели whisper**~~ — ✅ **решено**: GGML корректен, ошибка была в способе передачи.
 
-**Bridge-путь — реализован и проверен.** Добавлен `crates/hds-llama/src/bridge_audio.rs`
-(`BridgeAudio::load` → `llama_server_bridge_create` → `llama_server_bridge_audio_transcriptions_raw`,
-структуры из SDK), `engine_dir::BRIDGE_LIB`, probe переведён на bridge. Прогон `audio_probe`:
-bridge загружен, `bridge_create` **дошёл до загрузки модели** и упал ровно на формате —
-лог движка `gguf_init_from_file_impl: invalid magic 'lmgg', expected 'GGUF'`. Значит
-**API bridge корректен** (cluster-only execution_group обходится), а блокер — **только
-формат модели**: нужна **GGUF**-модель whisper. Локально её нет (в `%APPDATA%\…\models`
-только `whisper-large-v3-turbo-GGML.bin`; `runtime-manifests/engine-manifest*.json`
-в SDK — пустой шаблон). Нужно **получить GGUF-модель** (whisper large-v3-turbo) или
-уточнить у авторов движка корректный формат/версию модели.
+**Bridge-путь — реализован, проверен, РАБОТАЕТ (01.10.2026).** Ответ найден в самом
+репозитории движка (`docs/bridge-audio-dll.md`): «For audio-only use, `model_path` may be
+omitted» — bridge создаётся **без модели**, а whisper-модель задаётся в `metadata_json`
+ключом **`whisper_model`** (пример из доков: `"./models/whisper.bin"` ⇒ это **GGML `.bin`**
+через маршрут whisper.cpp, а не llama.cpp GGUF). Реализовано в
+`crates/hds-llama/src/bridge_audio.rs` (`BridgeAudio::load` → `create` →
+`audio_transcriptions_raw`; `model: Option<&Path>` — для audio-only `None`).
+
+Прогон `audio_probe` (jfk.wav 11,13 с, whisper-large-v3-turbo, GPU):
+`bridge: ok=true status=200`, **транскрипт получен**:
+`And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.`
+(`stats: num_words=22, num_segments=3`; timings whisper **1,94 с**, всего 2,0 с).
+Ответ — JSON, а сам текст пишется в `output.path` (`.md`) — его и надо читать.
+Диаризация выключена (`mode: speech`).
+Итог: **ASR-путь движка из Rust работает; модель GGML (GGUF не нужен)**.
 
 ## 2. План W3 (по файлам, черновик — уточняется)
 
