@@ -12,8 +12,9 @@
 > паритет** (тексты/FTS/хэши; +7,1 % по времени, §15); память B-4 в норме
 > (индексация +5,2 %/ws +13 %, простой commit −93 %, §16) (журнал — `tools/parity/W2_REPORT.md`:
 > §9 — передача в новый чат, §10 — A6, §11 — B4, §12 — B5, §13 — B6, **§14 — B7, §15 — B-2, §16 — B-4, §17 — crates.io**).
-> Решение go/no-go: **GO**. Дальше — **W3** (whisper/CLIP); начат: разведка аудио-API
-> движка и рантайма `ort` — `tools/parity/W3_REPORT.md` §1.
+> Решение go/no-go: **GO**. Дальше — **W3** (whisper/CLIP); **начат**: ASR из Rust работает
+> (bridge audio-only + whisper-модель в metadata; `mode: subtitle` → сегменты), `/internal/transcribe`
+> в фасаде. Контекст нового чата — **`tools/parity/W3_REPORT.md` §0** (передача).
 >
 > **Как продолжить в новом чате (краткая шпаргалка).**
 > 1. Прочитать: `tools/parity/README.md` (карта harness + команды) → `tools/parity/W2_REPORT.md`

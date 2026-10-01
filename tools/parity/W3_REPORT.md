@@ -5,6 +5,56 @@
 > План W3 — `MIGRATION_PLAN_RUST.md` §4.2 (W3) и §7 (CLIP), §8.3 (вызов движка).
 > Правило: Python-версия — источник истины; паритет проверяется скриптами/тестами.
 
+## 0. Передача в новый чат (01.10.2026)
+
+**Где мы.** Ветка `w2-llm-host`, HEAD **`39762b7`**, 37 коммитов впереди `main` (`main` не тронут).
+`cargo test --workspace` — **125 passed / 0 failed (+6 ignored)**. Живая машина: владелец портов
+8010–8012 — `llm-host` (Rust); Python-watcher запущен (`watch.lock=8028`), `index.pause`
+заказчика стоит — **не снимать**.
+
+**W2 закрыт:** A1–A6, B1–B7, B-2 (пилот 10 000 файлов, полный паритет ±7 %), B-4 (память) —
+`W2_REPORT.md` §9–§17. Подробности W2 читать в `W2_REPORT.md` §9 (передача) и §10–§17.
+
+**W3 (медиа) — сделано (коммиты `3b8ffd9`…`39762b7`):**
+* crates.io **доступен** (перепроверено); крейт **`ort`** собирается и создаёт сессию
+  (`W2_REPORT` §17, `W3_REPORT` §1.1);
+* найдены **экспорты аудио-API** движка и **точные C-структуры** из открытого SDK;
+* **ASR из Rust РАБОТАЕТ**: `llama-server-bridge` создаётся **audio-only** (без `model_path`),
+  whisper-модель — в `metadata_json.whisper_model` (**GGML `.bin`**, GGUF не нужен);
+  `mode: subtitle` → `.srt` → сегменты `{text,t_start,t_end}` (`crates/hds-llama/src/whisper.rs`);
+* постоянный `Bridge` (`bridge_audio.rs`) + **`/internal/transcribe`** в фасаде +
+  ленивый `Whisper` в `ClusterBackend` (`host.rs`), маршрут покрыт тестом.
+
+**Что дальше (шаг 2 → 3):**
+1. **медиа-ветка `hds-index`**: для аудио/видео вместо Python-воркера звать `/internal/transcribe`
+   (проксировать сегменты в конвейер) + ключи `index.whisper_*` (`model`,`mode`,`custom`,`gpu`);
+2. `whisper-check` (CLI);
+3. **live-приёмка**: 3 реальных медиа (вкл. русское имя в русском каталоге), ASCII-стейджинг
+   на боевом пути, замеры;
+4. **CLIP** через `ort` (vision→`images_vec` dim 512, text резидентный; препроцессинг как
+   `CLIPImageProcessor`), `clip-index`.
+
+**Не переоткрывать (факты W3):**
+* bridge для audio создаётся **без модели** («For audio-only use, `model_path` may be omitted»,
+  `docs/bridge-audio-dll.md`); whisper — через `metadata_json.whisper_model`;
+* модель whisper — **GGML `.bin`** (маршрут whisper.cpp), **не** llama.cpp GGUF;
+* `mode: subtitle` (+`custom`=сек) → `.srt` с таймкодами; `speech` → `.md` (сплошной текст);
+* кластерный аудио-путь требует **execution group** (single-node manual-инстанс даёт
+  `unknown execution_group_id: cluster:manual`) → для ASR используем **bridge**, не cluster;
+* текст движок пишет в `output.path` (читаем файл), JSON — метаданные/статистика;
+* ASCII-стейджинг обязателен (спайк 5);
+* секреты эндпоинтов фасада: `/internal/*` только при `ServerConfig.internal=true`.
+
+**Грабли окружения (нового чата):** `git` — всегда `--no-pager`; PowerShell иногда искажает
+первый токен команды (повторить / короткая пара команд); `curl -o` — только в act-режиме;
+кириллица в `Select-String` не ищется (ASCII-шаблон или чтение файла). `HDS_CONFIG` в сессии
+PowerShell персистентна — если поднять watcher/python, убедиться, что она **не** указывает
+на удалённый temp-файл.
+
+**Артефакты/команды:** прогон ASR — `cargo run -p hds-llama --bin audio_probe -- [<audio>] [<whisper.bin>] [<gpu>]`;
+справочник SDK (`docs/bridge-audio-dll.md`, `bridge/*.h`, `README.md`) — клон
+`github.com/openresearchtools/engine` (в `%TEMP%\engine_sdk`).
+
 ## 1. Разведка W3 (факты, 01.10.2026)
 
 ### 1.1. crates.io и ONNX Runtime (`ort`) — доступны
