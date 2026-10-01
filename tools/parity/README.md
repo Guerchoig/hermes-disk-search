@@ -135,6 +135,11 @@ cargo run -p hds-cli   --bin hds -- whisper-check [--file <медиа>] [--json]
 #   target\debug\llm_host.exe run --port-base 8020 --ngl 0 --no-residency --no-log `
 #     --pause-dir tools\parity\out\w3_host_pause --hold 1800     # см. W3_REPORT.md §4
 
+# --- W3: CLIP на ONNX Runtime (модели спайка 4: out/clip_onnx/) ---
+.\.venv\Scripts\python.exe tools\parity\clip_onnx_w3.py        # экспорт text-ONNX (pooling+Dense) + golden out/clip_parity.json
+cargo test -p hds-clip --test clip_parity -- --ignored --nocapture   # паритет vision+text: cos >= 0,999
+.\.venv\Scripts\python.exe tools\parity\w3_clip_smoke.py setup # живая проверка hds clip-index (W3_REPORT.md §5)
+
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
 .\.venv\Scripts\python.exe tools\parity\spike6_parity.py         # embeddings/rerank/chat

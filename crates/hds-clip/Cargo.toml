@@ -1,0 +1,17 @@
+[package]
+name = "hds-clip"
+description = "W3/§7: CLIP (ONNX Runtime) — vision-энкодер при индексации, text-энкодер для поиска"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+ort = "2.0.0-rc.10"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "tiff", "webp", "gif"] }
+tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
+serde_json.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_yaml.workspace = true

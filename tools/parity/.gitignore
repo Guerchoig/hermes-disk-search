@@ -22,3 +22,6 @@ out/walk_parity.json
 out/walk_parity_real.json
 out/walk_tree/
 out/hash_vectors/
+# W3: CLIP live-проверка (временная БД) и throwaway-владелец
+out/w3_clip.db*
+out/w3_host_pause/

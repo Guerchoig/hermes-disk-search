@@ -25,7 +25,10 @@
 > `index.transcribe_url`. `cargo test --workspace` — **135 green (+6 `#[ignore]`)**
 > (детали — `tools/parity/W3_REPORT.md` §1.5). **Шаг 3 сделан** — live-приёмка 3 реальных
 > медиа через боевой `/internal/transcribe` (вкл. русское имя в русском каталоге;
-> ASCII-стейджинг подтверждён) — `W3_REPORT.md` §4. Дальше: CLIP (шаг 4).
+> ASCII-стейджинг подтверждён) — `W3_REPORT.md` §4. **Шаг 4 (CLIP) сделан** — крейт
+> `crates/hds-clip` на `ort` (vision→`images_vec` dim 512, text резидентный, препроцессинг
+> как `CLIPImageProcessor`), боевой `clip_store` + `hds clip-index`; паритет cos_min 0,999950
+> ≥ 0,999 — `W3_REPORT.md` §5. `cargo test --workspace` — **141 green (+7 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

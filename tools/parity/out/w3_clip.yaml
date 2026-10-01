@@ -1,0 +1,5 @@
+db_path: 'C:\Users\Sasha\hermes-disk-search\tools\parity\out\w3_clip.db'
+index:
+  clip: true
+embedding:
+  dim: 1024

@@ -32,8 +32,8 @@
 2. ✅ `whisper-check` (CLI) — сделано (§1.5);
 3. ✅ **live-приёмка** — сделано (§4): 3 реальных медиа (вкл. русское имя в русском
    каталоге) через боевой `/internal/transcribe`, ASCII-стейджинг на боевом пути, замеры;
-4. **CLIP** через `ort` (vision→`images_vec` dim 512, text резидентный; препроцессинг как
-   `CLIPImageProcessor`), `clip-index`.
+4. ✅ **CLIP** через `ort` (vision→`images_vec` dim 512, text резидентный; препроцессинг как
+   `CLIPImageProcessor`), `clip-index` — сделано (§5).
 
 **Не переоткрывать (факты W3):**
 * bridge для audio создаётся **без модели** («For audio-only use, `model_path` may be omitted»,
@@ -294,4 +294,40 @@ target\debug\hds.exe whisper-check --file 'tools\parity\out\приёмка W3\р
 владелец портов 8010–8012; фактически на момент приёмки там Python-роли, а `llm-host`
 остановлен. Перед боевым включением медиа-ветки на **штатных** портах нужно решить,
 возвращаемся ли на `llm-host` (остановив Python-роли) — это решение заказчика.
+
+
+## 5. CLIP на ONNX Runtime (шаг 4, 01.10.2026)
+
+**Что сделано.** Оба энкодера CLIP переехали в Rust на `ort` (ONNX Runtime, крейт
+`2.0.0-rc.13`); `sentence-transformers`/`torch` для CLIP больше не нужны.
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-clip/src/preprocess.rs` | препроцессинг строго как `CLIPImageProcessor` (`openai/clip-vit-base-patch32`): resize по короткой стороне до 224 (bicubic, `int(size*long/short)` как в HF), center-crop 224, `rescale=1/255`, CLIP mean/std, CHW |
+| `crates/hds-clip/src/vision.rs` | `VisionEncoder` (`clip_vision.onnx`, `pixel_values` → `image_embeds` 512), L2-нормализация |
+| `crates/hds-clip/src/text.rs` | `TextEncoder` (`clip_text_dense.onnx` c **pooling+Dense внутри графа** → `text_embeds` 512; токенайзер `tokenizers` из `tokenizer.json`, truncation 128) |
+| `crates/hds-clip/src/config.rs` | пути из конфига (`index.clip*`) → `tools/parity/out/clip_onnx/…`, `models_present`, деградация |
+| `crates/hds-clip/src/lib.rs` | `Clip`, процессно-общий `shared(cfg)` (ленивая загрузка), `CLIP_DIM=512` |
+| `crates/hds-index/src/pipeline.rs` | `clip_store` — боевой (был заглушкой): `kind=image` && `indexed` && `index.clip` → vision-вектор в `images_vec` |
+| `crates/hds-core/src/db.rs` | `add_image_vector` (DELETE+INSERT, конфликт vec0 глотается), `images_without_vector` |
+| `crates/hds-cli/src/cmd/clip_index.rs` | `hds clip-index` — дозаполнение векторов (был заглушкой) |
+| `tools/parity/clip_onnx_w3.py` | экспорт text-ONNX c pooling+Dense + golden `out/clip_parity.json` |
+| `tools/parity/w3_clip_smoke.py` | живая проверка `clip-index` на временной БД |
+
+
+**Числа.**
+* **Паритет энкодеров (golden vs sentence-transformers):** vision `cos = 0,999976`
+  и `0,999950`; text `cos = 1,000000` по 10 запросам → **cos_min 0,999950 ≥ 0,999**
+  (`cargo test -p hds-clip --test clip_parity -- --ignored`). Ключ к паритету vision —
+  точный расчёт целевого размера resize (усечение, как HF; с округлением было 0,994).
+* **Живой `hds clip-index`:** временная БД, 2 картинки → `images_vec` 0 → **2 за 0,4 с**.
+* `cargo test --workspace` — **141 passed / 0 failed (+7 ignored)**.
+
+**Модели** (`tools/parity/out/clip_onnx/`, в git не коммитятся — `tools/parity/.gitignore`):
+`vision/clip_vision.onnx` 335 МБ, `text/clip_text_dense.onnx` 515 МБ, `text/tokenizer.json` 1,9 МБ.
+Ключи конфига: `index.clip`, `index.clip_vision_model`, `index.clip_text_model`, `index.clip_tokenizer`.
+
+**Остаток CLIP (вне DoD этого шага):** text-энкодер в поисковую ветку (`hds/search.py`)
+подключится вместе с портом поиска (W1) — `Clip::embed_text` уже готов; деградация без
+моделей (`index.clip: false` или нет `.onnx`) подтверждена тестом `clip_core::missing_models_degrade`.
 

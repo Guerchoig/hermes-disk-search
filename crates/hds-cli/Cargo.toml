@@ -14,6 +14,7 @@ rust-version.workspace = true
 hds-core = { path = "../hds-core" }
 hds-index = { path = "../hds-index" }
 hds-extract = { path = "../hds-extract" }
+hds-clip = { path = "../hds-clip" }
 rusqlite.workspace = true
 serde_json.workspace = true
 

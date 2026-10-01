@@ -356,6 +356,29 @@ pub fn add_vector(conn: &Connection, chunk_id: i64, vector_blob: &[u8]) -> Resul
     Ok(())
 }
 
+/// Порт `clip_index.add_image_vector`: удалить старый CLIP-вектор и вставить новый.
+///
+/// `vec0` не поддерживает `INSERT OR REPLACE` (конфликт с параллельным watcher
+/// глотаем — картинка просто останется без нового вектора, но не сломает прогон).
+pub fn add_image_vector(conn: &Connection, file_id: i64, blob: &[u8]) -> Result<()> {
+    conn.execute("DELETE FROM images_vec WHERE rowid=?1", [file_id])?;
+    let _ = conn.execute(
+        "INSERT INTO images_vec(rowid, embedding) VALUES(?1,?2)",
+        rusqlite::params![file_id, blob],
+    );
+    Ok(())
+}
+
+/// Порт SQL `cli.cmd_clip_index`: проиндексированные картинки без CLIP-вектора.
+pub fn images_without_vector(conn: &Connection) -> Result<Vec<(i64, String)>> {
+    let mut st = conn.prepare(
+        "SELECT f.id, f.path FROM files f WHERE f.kind='image' AND f.status='indexed' \
+         AND f.id NOT IN (SELECT rowid FROM images_vec)",
+    )?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
 /// Порт `db.finish_file`: `indexed` пишет `indexed_at`/`chunk_count`, иначе статус+ошибку.
 ///
 /// `indexed_at` передаётся вызывающим (`time.time()` в Python) — так проще тестировать.

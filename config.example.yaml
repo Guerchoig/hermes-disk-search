@@ -25,6 +25,10 @@ index:
   whisper_gpu: 0            # индекс GPU движка (или -1 — CPU)
   transcribe_url: "http://127.0.0.1:8010"  # владелец GPU (POST /internal/transcribe)
   clip: true                # CLIP-поиск картинок по содержанию
+  # W3: пути к ONNX-моделям CLIP (по умолчанию tools/parity/out/clip_onnx/…)
+  # clip_vision_model: "…/clip_vision.onnx"
+  # clip_text_model:   "…/clip_text_dense.onnx"
+  # clip_tokenizer:    "…/tokenizer.json"
   max_chunks: 3000          # максимум чанков на файл (0 = без лимита)
 
 # путь к индексной БД; относительный путь считается от корня проекта

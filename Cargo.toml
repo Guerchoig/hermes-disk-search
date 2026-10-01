@@ -5,7 +5,7 @@
 # Cargo.lock, свои версии крейтов и они не должны тянуть зависимости продукта.
 [workspace]
 resolver = "2"
-members = ["crates/hds-core", "crates/hds-extract", "crates/hds-index", "crates/hds-llama", "crates/hds-cli"]
+members = ["crates/hds-core", "crates/hds-extract", "crates/hds-index", "crates/hds-llama", "crates/hds-cli", "crates/hds-clip"]
 exclude = ["tools/parity/spikes"]
 
 [workspace.package]

@@ -370,21 +370,37 @@ pub fn process_file(
     Ok((status, Some(kind)))
 }
 
-/// Порт `_clip_store` — **задел** B4: CLIP переезжает в Rust на ONNX в W3 (§7).
+/// Порт `_clip_store` — CLIP-вектор картинки (контентный поиск «найди изображения …»).
 ///
-/// Пока ничего не делает (как если бы `index.clip: false`): CLIP-векторы в B4
-/// не создаются, паритет по ним не проверяется. Сохранена сигнатура и условие,
-/// чтобы в W3 подключить ONNX-энкодер без переделки конвейера.
+/// Вызывается из [`process_file`], поэтому вектор создаётся для **любой** точки
+/// входа индексации (watcher, `reindex_path`), а не только полного прогона.
+/// Ошибки глотаются: индексация текста не должна зависеть от CLIP (§7 плана).
+/// Модели грузятся лениво, один раз на процесс ([`hds_clip::shared`]).
 pub fn clip_store(
-    _conn: &rusqlite::Connection,
-    _cfg: &Config,
-    _fid: i64,
-    _path: &Path,
-    _kind: &str,
-    _status: &str,
+    conn: &rusqlite::Connection,
+    cfg: &Config,
+    fid: i64,
+    path: &Path,
+    kind: &str,
+    status: &str,
 ) {
-    // W3: kind == "image" && status.startswith("indexed") && index.clip
-    //     → clip_index.store_for_file(...) на ONNX Runtime (ort).
+    if kind != "image" || !status.starts_with("indexed") {
+        return;
+    }
+    if !dig(cfg, "index.clip").and_then(|v| v.as_bool()).unwrap_or(true) {
+        return;
+    }
+    let Some(clip) = hds_clip::shared(cfg) else {
+        return; // модели недоступны — деградация без предупреждения на каждый файл
+    };
+    match clip.embed_image(path) {
+        Ok(v) => {
+            if let Err(e) = db::add_image_vector(conn, fid, &vector_blob(&v)) {
+                eprintln!("[clip] {}: {}", path.display(), e.message());
+            }
+        }
+        Err(e) => eprintln!("[clip] {}: {}", path.display(), e.message()),
+    }
 }
 
 /// `chunk_count` из статус-строки (`indexed(N чанков)` → `N`), иначе 0.
