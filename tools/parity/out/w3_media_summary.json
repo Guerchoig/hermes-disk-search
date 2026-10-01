@@ -1,0 +1,23 @@
+﻿[
+    {
+        "file":  "╤А╤Г╤Б╤Б╨║╨░╤П ╤А╨╡╤З╤М 60 ╤Б╨╡╨║.wav",
+        "ok":  true,
+        "segments":  14,
+        "elapsed_sec":  4.7355838,
+        "first":  "╨┤╤А╤Г╨│╤Г╤О ╨╝╨╛╨┤╨╡╨╗╤М, ╨┐╨╡╤А╨╡╤И╨╡╨╗ ╨╜╨░ ╨╝╨╛╨┤╨╡╨╗╤М ╨▒╨╛╨╗╨╡╨╡ ╨┤╨╛╨╗╨│╨╕╤Е ╨┤╨╡╨╜╨╡╨│, ╨┐╤Г╤Б╨║╨░╨╣ ╨╜╨╡ ╤В╨░╨║╨╕╤Е ╨▒╤Л╤Б╤В╤А╤Л╤Е"
+    },
+    {
+        "file":  "╤А╨╡╤З╤М ╨┤╨╢╤Д╨║.wav",
+        "ok":  true,
+        "segments":  1,
+        "elapsed_sec":  2.4279979,
+        "first":  "And so, my fellow Americans, ask"
+    },
+    {
+        "file":  "╤Г╤А╨╛╨║ ╨░╨╜╨│╨╗╨╕╨╣╤Б╨║╨╛╨│╨╛.mp3",
+        "ok":  true,
+        "segments":  2,
+        "elapsed_sec":  2.4621843,
+        "first":  "70th lesson. Revision and notes. No recording"
+    }
+]

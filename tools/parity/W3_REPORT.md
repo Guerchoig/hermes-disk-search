@@ -30,8 +30,8 @@
    зовётся `/internal/transcribe`, сегменты проксируются в конвейер; ключи
    `index.whisper_*` (`model`,`mode`,`custom`,`gpu`) + `index.transcribe_url`;
 2. ✅ `whisper-check` (CLI) — сделано (§1.5);
-3. **live-приёмка**: 3 реальных медиа (вкл. русское имя в русском каталоге), ASCII-стейджинг
-   на боевом пути, замеры — следующий шаг;
+3. ✅ **live-приёмка** — сделано (§4): 3 реальных медиа (вкл. русское имя в русском
+   каталоге) через боевой `/internal/transcribe`, ASCII-стейджинг на боевом пути, замеры;
 4. **CLIP** через `ort` (vision→`images_vec` dim 512, text резидентный; препроцессинг как
    `CLIPImageProcessor`), `clip-index`.
 
@@ -187,7 +187,7 @@ omitted» — bridge создаётся **без модели**, а whisper-мо
   `{path,mode,custom,gpu,model}`, ответ `{segments:[{text,t_start,t_end}],stats}`.
   Маршрут покрыт тестом (`tests/facade_core.rs`).
 
-**Осталось по шагу 2:** приёмка на 3 реальных медиа (шаг 3).
+**Осталось по шагу 2:** — (приёмка шага 3 выполнена, §4).
 
 ### 1.5. Медиа-ветка `hds-index` + `whisper-check` (шаг 2 — готово)
 
@@ -242,3 +242,56 @@ omitted» — bridge создаётся **без модели**, а whisper-мо
 * **ASCII-стейджинг** — обязателен (спайк 5: не-ASCII путь → испорченное имя результата).
 * Устройство инференса ASR (`whisper_gpu_device`/`whisper_no_gpu`) — явно, иначе рантайм
   может выбрать недоступный бэкенд (R32).
+
+## 4. Live-приёмка медиа-ветки (шаг 3, 01.10.2026)
+
+**Метод.** Боевой путь `hds whisper-check`/`hds index` → `MediaRouter` → `POST
+/internal/transcribe` → владелец GPU → `whisper.rs` (ASCII-стейджинг) → сегменты.
+На момент приёмки машина была в **Python-ролевом** состоянии: `llm-host` не запущен
+(нет `data/llm-host.pid`), порты 8010–8012 держит Python-`llama-server`. Чтобы не
+трогать роли заказчика и **его `index.pause`**, поднят **throwaway-владелец** на
+альтернативных портах: `llm_host run --port-base 8020 --ngl 0 --no-residency --no-log
+--pause-dir tools\parity\out\w3_host_pause` (одна лёгкая роль ради фасада; whisper
+грузится лениво; `index.transcribe_url: http://127.0.0.1:8020` в `out/w3_accept.yaml`).
+После приёмки владелец остановлен через `/internal/stop`; 8020 свободен, 8010 —
+по-прежнему Python-`llama-server` (pid 22460), `index.pause` на месте.
+
+**Результат (3 реальных медиафайла с речью, русские имена в русском каталоге
+`tools\parity\out\приёмка W3`):**
+
+| Файл | ok | Сегментов | Время, с | Первый сегмент |
+|---|---|---|---|---|
+| `русская речь 60 сек.wav` | да | 14 | 4,74 | «…другую модель, перешёл на модель более долгих денег…» |
+| `речь джфк.wav` | да | 1 | 2,43 | «And so, my fellow Americans, ask not» |
+| `урок английского.mp3` (реальный mp3 с диска `D:\НИНА\…`) | да | 2 | 2,46 | «70th lesson. Revision and notes…» |
+
+* модель — `whisper-large-v3-turbo-GGML.bin` (движок `openresearchtools`), GPU (CUDA0),
+  режим `subtitle`; VRAM свободно 11 255 МиБ, baseline used 7 513 МиБ;
+* **ASCII-стейджинг на боевом пути подтверждён**: не-ASCII путь/имя не ломают вывод —
+  владелец стейджит в `%TEMP%\hds_whisper\input.<ext>`, сегменты возвращаются целиком
+  (мозаики имён нет, спайк 5 закрыт);
+* **видео без аудиодорожки** (`заставка видео.mp4`): владелец отвечает `ok=0:
+  ffmpeg: no audio stream found` → `whisper-check` код 1; в конвейере `MediaRouter`
+  это **не фатально** (ведущий сегмент + сообщение, файл не помечается ошибкой) —
+  совпадает с поведением Python-golden для этого файла.
+
+**Артефакты:** `out/w3_media_1.json` (русская речь), `out/w3_media_2.json` (mp3),
+`out/w3_media_3.json` (JFK), `out/w3_media_summary.json`; харнесс-конфиги
+`out/w3_host.yaml`/`out/w3_accept.yaml`. Входные медиа: фикстуры `tools/parity/fixtures/`
++ реальный mp3 с `D:\НИНА\…` (копии в git не хранятся).
+
+**Команды приёмки:**
+```powershell
+# владелец (альт-порты, без резидентности и паузы заказчика)
+target\debug\llm_host.exe run --port-base 8020 --ngl 0 --no-residency --no-log `
+  --pause-dir tools\parity\out\w3_host_pause --hold 1800
+# приёмка (HDS_CONFIG — временный конфиг с transcribe_url=8020)
+$env:HDS_CONFIG='tools\parity\out\w3_accept.yaml'
+target\debug\hds.exe whisper-check --file 'tools\parity\out\приёмка W3\русская речь 60 сек.wav' --json
+```
+
+**Открытый вопрос (состояние машины).** W3_REPORT §0 предполагал, что `llm-host` —
+владелец портов 8010–8012; фактически на момент приёмки там Python-роли, а `llm-host`
+остановлен. Перед боевым включением медиа-ветки на **штатных** портах нужно решить,
+возвращаемся ли на `llm-host` (остановив Python-роли) — это решение заказчика.
+

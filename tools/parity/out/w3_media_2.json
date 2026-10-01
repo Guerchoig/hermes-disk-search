@@ -1,0 +1,19 @@
+﻿{
+  "elapsed_sec": 2.4621843,
+  "engine": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "file": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\out\\╨┐╤А╨╕╤С╨╝╨║╨░ W3\\╤Г╤А╨╛╨║ ╨░╨╜╨│╨╗╨╕╨╣╤Б╨║╨╛╨│╨╛.mp3",
+  "model": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__whisper-large-v3-turbo-GGML\\whisper-large-v3-turbo-GGML.bin",
+  "ok": true,
+  "segments": [
+    {
+      "t_end": 5.61,
+      "t_start": 1.12,
+      "text": "70th lesson. Revision and notes. No recording"
+    },
+    {
+      "t_end": 7.63,
+      "t_start": 6.0,
+      "text": "for this lesson."
+    }
+  ]
+}

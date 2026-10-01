@@ -23,7 +23,9 @@
 > **шаг 2 сделан** — медиа-ветка `hds-index` (`MediaRouter`: аудио/видео → владелец GPU,
 > прочее → sidecar) + CLI `hds whisper-check`; ключи `index.whisper_{model,mode,custom,gpu}`,
 > `index.transcribe_url`. `cargo test --workspace` — **135 green (+6 `#[ignore]`)**
-> (детали — `tools/parity/W3_REPORT.md` §1.5). Дальше: live-приёмка 3 медиа (шаг 3), CLIP (шаг 4).
+> (детали — `tools/parity/W3_REPORT.md` §1.5). **Шаг 3 сделан** — live-приёмка 3 реальных
+> медиа через боевой `/internal/transcribe` (вкл. русское имя в русском каталоге;
+> ASCII-стейджинг подтверждён) — `W3_REPORT.md` §4. Дальше: CLIP (шаг 4).
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

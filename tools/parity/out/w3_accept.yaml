@@ -1,0 +1,5 @@
+index:
+  transcribe_url: "http://127.0.0.1:8020"
+  whisper_gpu: 0
+  whisper_mode: subtitle
+  whisper_custom: "4.5"

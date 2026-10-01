@@ -128,6 +128,13 @@ cargo run -p hds-llama --release --bin kv_probe -- --role chat --ngl 8 --n-ctx 4
 cargo run -p hds-llama --release --bin chat_probe -- --json tools\parity\out\w2_chat_contract.json   # A5: контракт чата
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020     # A5: живой фасад
 
+# --- W3: медиа-ветка (ASR движком openresearchtools; владелец GPU — llm-host) ---
+cargo run -p hds-llama --bin audio_probe -- <audio> [<whisper.bin>] [<gpu>]   # прямой прогон whisper.rs
+cargo run -p hds-cli   --bin hds -- whisper-check [--file <медиа>] [--json]   # движок+модель (+ живой /internal/transcribe)
+# throwaway-владелец на альт-портах для приёмки, не трогая боевые роли/паузу:
+#   target\debug\llm_host.exe run --port-base 8020 --ngl 0 --no-residency --no-log `
+#     --pause-dir tools\parity\out\w3_host_pause --hold 1800     # см. W3_REPORT.md §4
+
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
 .\.venv\Scripts\python.exe tools\parity\spike6_parity.py         # embeddings/rerank/chat

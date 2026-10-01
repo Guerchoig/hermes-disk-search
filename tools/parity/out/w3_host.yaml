@@ -1,0 +1,14 @@
+# W3 live-приёмка: throwaway-владелец GPU для /internal/transcribe.
+# НЕ боевой конфиг: одна лёгкая роль (embedding, ~600 МБ) ради поднятия фасада;
+# whisper грузится лениво при первом запросе. Python-роли 8010-8012 не трогаем.
+index:
+  transcribe: true
+  whisper_mode: subtitle
+  whisper_custom: "4.5"
+  whisper_gpu: 0
+llm_server:
+  host: "127.0.0.1"
+  embedding:
+    port: 8020
+    model: "shared:embedding"
+    ctx_per_slot: 8192
