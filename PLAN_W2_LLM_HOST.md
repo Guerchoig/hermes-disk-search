@@ -232,7 +232,8 @@ SSM-состояние ≈50 МиБ (не зависит от `n_ctx`) и comput
 ### A5. Фасад OpenAI-совместимого HTTP (`:8010–8012`) — сделан 30.09.2026
 
 ✅ Реализовано и проверено живьём (`W2_REPORT.md` §7.3): `src/http.rs` (свой мини-HTTP/1.1 —
-`crates.io` на машине недоступен, внешних зависимостей не добавляем), `src/facade.rs`
+`crates.io` тогда считался недоступным, внешних зависимостей не добавляли; **01.10.2026
+перепроверено: crates.io доступен, `W2_REPORT.md` §17**), `src/facade.rs`
 (маршрутизация как у `llama-server`, сборка prompt из `messages`, режимы размышлений по §11.4,
 ответы OpenAI-формы, `trait Backend`), `bin/llm_host_facade` (инстансы по `registry::plan` +
 диспетчер A4 + фасад), `tools/parity/facade_smoke.ps1`.
