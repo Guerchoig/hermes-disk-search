@@ -100,6 +100,17 @@ void    llama_server_bridge_json_result_free(out*);
    `whisper-large-v3-turbo-GGML.bin` — legacy **GGML**, движок ждёт GGUF. Проверить/скачать
    GGUF (whisper large-v3-turbo) в общий каталог движка.
 
+**Bridge-путь — реализован и проверен.** Добавлен `crates/hds-llama/src/bridge_audio.rs`
+(`BridgeAudio::load` → `llama_server_bridge_create` → `llama_server_bridge_audio_transcriptions_raw`,
+структуры из SDK), `engine_dir::BRIDGE_LIB`, probe переведён на bridge. Прогон `audio_probe`:
+bridge загружен, `bridge_create` **дошёл до загрузки модели** и упал ровно на формате —
+лог движка `gguf_init_from_file_impl: invalid magic 'lmgg', expected 'GGUF'`. Значит
+**API bridge корректен** (cluster-only execution_group обходится), а блокер — **только
+формат модели**: нужна **GGUF**-модель whisper. Локально её нет (в `%APPDATA%\…\models`
+только `whisper-large-v3-turbo-GGML.bin`; `runtime-manifests/engine-manifest*.json`
+в SDK — пустой шаблон). Нужно **получить GGUF-модель** (whisper large-v3-turbo) или
+уточнить у авторов движка корректный формат/версию модели.
+
 ## 2. План W3 (по файлам, черновик — уточняется)
 
 1. **`crates/hds-whisper`** — FFI к аудио-API (batch): `default_audio_raw_request` +

@@ -24,6 +24,7 @@
 //! Запуск (из корня репозитория): `cargo run -p hds-llama --release --bin llm_host -- run`
 //! (подробности — `tools/parity/W2_REPORT.md` §9.10).
 
+pub mod bridge_audio;
 pub mod budget;
 pub mod cluster;
 pub mod config;
@@ -44,6 +45,7 @@ pub mod runtime;
 pub mod status;
 pub mod vram;
 
+pub use bridge_audio::{BridgeAudio, BridgeOutcome};
 pub use budget::{check_fit, estimate_need_mib, kv_cache_mib, Fit};
 pub use cluster::{ChatOutcome, Cluster, Device, Instance, InstanceSpec, JsonOutcome, Metrics};
 pub use config::{GpuConfig, GpuPolicy, LlmHostConfig, Mode, RoleConfig};

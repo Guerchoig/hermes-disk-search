@@ -22,6 +22,21 @@ pub const ENGINE_LIB: &str = "libmulti-node-server.dylib";
 #[cfg(all(unix, not(target_os = "macos")))]
 pub const ENGINE_LIB: &str = "libmulti-node-server.so";
 
+/// Библиотека с bridge API (direct-model путь: chat/vlm/embeddings/rerank/audio).
+#[cfg(windows)]
+pub const BRIDGE_LIB: &str = "llama-server-bridge.dll";
+/// Библиотека с bridge API (macOS; не проверяется до появления Mac).
+#[cfg(target_os = "macos")]
+pub const BRIDGE_LIB: &str = "libllama-server-bridge.dylib";
+/// Библиотека с bridge API (Linux).
+#[cfg(all(unix, not(target_os = "macos")))]
+pub const BRIDGE_LIB: &str = "libllama-server-bridge.so";
+
+/// Путь к библиотеке bridge API внутри каталога движка.
+pub fn bridge_lib_path(dir: &Path) -> PathBuf {
+    dir.join(BRIDGE_LIB)
+}
+
 /// Переменная окружения для переопределения каталога движка (тесты, ярлыки,
 /// установщик) — включается в тот же порядок поиска, что и конфиг.
 pub const ENGINE_DIR_ENV: &str = "HDS_ENGINE_DIR";
