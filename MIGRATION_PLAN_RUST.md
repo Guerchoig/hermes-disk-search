@@ -27,16 +27,18 @@
 >    §9 «Передача в новый чат» (что сделано, где лежит, что дальше, грабли) →
 >    `PLAN_W2_LLM_HOST.md` (план W2: треки A/B, критерии, DoD, структуры движка) →
 >    при необходимости `tools/parity/SPIKES.md` (журнал W0).
-> 2. Состояние на 01.10.2026: закрыты **A1–A6, B1–B7 и W3** (медиа/CLIP); вся работа — в ветке
+> 2. Состояние на **02.10.2026**: закрыты **A1–A6, B1–B7, W3** (медиа/CLIP), **W1**
+>    (резидентный слой: поиск/RAG/MCP/UI) и начат **W4** (упаковка/CI); вся работа — в ветке
 >    `w2-llm-host` (`main` = `9ed8452` не тронут), `cargo test --workspace` —
->    **145 passed (+7 `#[ignore]`)**; боевой индекс не изменён, индексация заказчика на паузе
->    (`index.pause`). Владелец портов 8010–8012 — на момент приёмки Python-`llama-server`,
->    `llm-host` остановлен (см. `W3_REPORT.md` §4); замеры — `W2_REPORT.md` §11–§14,
->    `W3_REPORT.md` §4–§6.
-> 3. Ближайшие задачи: **W1** (резидентный слой). Перенесены **поиск** (`hds-search`,
->    паритет golden 10/10), **RAG** (`ask`+реранк, `hds ask`), **MCP** stdio (`hds-mcp`,
->    `hds mcp`) и **streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http`) —
->    `W1_REPORT.md` §1–§4. Далее: `hds-ui`. **W4** — упаковка/CI.
+>    **170 passed (+9 `#[ignore]`)**; боевой индекс не изменён, `index.pause` заказчика стоит.
+>    **Владелец портов 8010–8012 — `llm-host`** (release-резидент), Python-роли остановлены;
+>    тюнинг KV (`llm_server.chat.ctx_per_slot: 16384`) и `rerank.url: 127.0.0.1` — `W1_REPORT.md` §5.
+> 3. **W1 — сделан** (`W1_REPORT.md` §1–§7): поиск (`hds-search`, golden 10/10 + боевая БД),
+>    RAG (`rag::ask`+реранк, `hds ask`), MCP stdio (`hds-mcp`, `hds mcp`), streamable-http +
+>    менеджер (`hds mcp --http`, `hds mcp-http`), веб-интерфейс (`hds-ui`, `hds ui`).
+>    **W4 — начат** (`W4_REPORT.md` §1: CI `rust.yml`, `installers/build_rust_release.ps1`);
+>    дальше: `setup.ps1` под Rust-бинарники + автозапуск `llm-host`, доставка рантайма ASR и
+>    ONNX-моделей CLIP, `package`/`release`. **W5** — clippy/fmt (61 предупреждение), `-D warnings`.
 > 4. Решения заказчика — `PLAN_W2_LLM_HOST.md` §9 (в т.ч. **без авто-деградации кванта**,
 >    llama-server удаляется в конце W2, `anonymizer_proxy` — ждём переезда). **Вопрос
 >    `llm.chat.n_ctx` закрыт 30.09.2026 решением «замер фактического KV»**: замер сделан —

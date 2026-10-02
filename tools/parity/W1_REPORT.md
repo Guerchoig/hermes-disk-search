@@ -4,6 +4,64 @@
 > `MIGRATION_PLAN_RUST.md` §4.1 (W1). Правило волны: Python-версия — источник
 > истины, паритет проверяется golden/тестами.
 
+## 0. Передача в новый чат (02.10.2026)
+
+**Где мы.** Ветка `w2-llm-host`, HEAD **`4710aaa`**, **54 коммита** впереди `main`
+(`main` = `9ed8452`, не тронут). `cargo test --workspace` — **170 passed / 0 failed
+(+9 `#[ignore]`)**. Рабочая станция: Windows, RTX 3060 12 ГБ, rustc/cargo 1.97.1.
+
+**Живая машина.** Порты **8010–8012 держит `llm-host`** (release-резидент,
+`target\release\llm_host.exe run`); Python-роли `llama-server` остановлены; Python
+watcher/MCP продолжают работать через наш фасад. `index.pause` заказчика **стоит — не
+снимать без его решения**. Тюнинг боевого `config.yaml` (обратимый): `llm_server.chat.ctx_per_slot:
+32768 → 16384` (KV гибридной модели вдвое меньше → чат уживается с embedding на 12 ГБ;
+cluster API **не даёт** тип KV — факт W2) и `rerank.url: localhost → 127.0.0.1` (IPv6-промах);
+бэкап — `data/config.yaml.bak-20261001`.
+
+**W1 (резидентный слой) — сделан:**
+1. **Поиск** `hds/search.py` → `crates/hds-search` (FTS5+`chunks_vec`+CLIP, RRF) +
+   CLI `hds search`; паритет golden — 10/10 топ-20 (§1), на боевой БД — оба контрольных
+   запроса точно (§6);
+2. **RAG** `hds/rag.py` → `hds-search::rag` (+реранк) + `hds ask` (§2);
+3. **MCP stdio** → `crates/hds-mcp` (6 инструментов, JSON-RPC 2.0), `hds mcp`/`hds_mcp` (§3);
+4. **MCP streamable-http + менеджер** `hds mcp --http`, `hds mcp-http check|start|stop|status|restart|run` (§4);
+5. **Перевод портов 8010–8012 на `llm-host`** (§5);
+6. **Веб-интерфейс** `crates/hds-ui` (`hds ui`): статус/поиск/ask/управление индексацией,
+   `/api/tree` (по БД, 0 с; `?walk=1` — обход диска с бюджетом), `/api/diagnostics`,
+   CSRF, правка `config.yaml` (roots/exclude_paths, комментарии сохраняются) (§7).
+
+**Карта кода (crates/).** `hds-core` (config/db/http), `hds-extract` (sidecar-клиент),
+`hds-index` (walk/hash/chunker/pipeline/watch/sidecar/transcribe), `hds-llama`
+(движок: engine/cluster/ffi/registry/dispatch/facade/host/bridge_audio/whisper),
+`hds-clip` (ONNX vision+text), `hds-search` (fts/snippet/rerank/rag), `hds-mcp`
+(tools/schema/server/http), `hds-ui` (server/page/tree/config_edit), `hds-cli` (бинарь `hds`).
+
+**Команды (кр. репозитория).**
+```powershell
+cargo test --workspace                                   # 170 green (+9 ignored)
+cargo run -p hds-cli --bin hds -- search "запрос" --limit 8
+cargo run -p hds-cli --bin hds -- ask "вопрос"           # RAG через чат-роль
+cargo run -p hds-cli --bin hds -- ui --port 8765         # веб-интерфейс
+target\release\llm_host.exe run                          # резидент (владелец 8010–8012)
+```
+Паритет поиска на фикстурах: `cargo test -p hds-search --test search_parity -- --ignored --nocapture`
+(нужны `.venv` + фасад `:8011` + `tools/parity/out/index.db` + `golden/`).
+
+**Грабли окружения (стоили времени).** `git` — всегда `--no-pager`; PowerShell иногда
+портит **первый токен** команды (префикс `с` → «команда не найдена») — повторить или
+начать с пробела; кириллица в `Select-String` молча не ищется (ASCII-шаблон или чтение
+файла инструментом); **запущенный резидент блокирует свой exe** — релизная сборка и
+`cargo test` (debug) падают `os error 5`, если файл занят (держим резидента из
+`target\release`, тогда debug-сборки разблокированы); `HDS_CONFIG` в сессии персистентна.
+
+**Дальше.** **W4** (упаковка/установка/CI): `setup.ps1`/`installers\install_windows.ps1`
+под Rust-бинарники + **автозапуск `llm-host`**; доставка рантайма ASR
+(`engine-manifest.json` + sha256) и ONNX-моделей CLIP; `package`/`release` с бинарными
+ассетами. По UI: автозапуск, кэш дерева, полный `hds check`. Плюс **W5** — clippy/fmt
+(61 предупреждение) и `-D warnings` в CI. Журналы: `W2_REPORT.md`, `W3_REPORT.md`,
+`W4_REPORT.md`, `SPIKES.md` (W0).
+
+
 ## 1. Порт поиска `hds/search.py` → `crates/hds-search` (01.10.2026)
 
 **Что сделано.** Гибридный поиск (FTS5 BM25 + `chunks_vec` + CLIP, слияние RRF)
