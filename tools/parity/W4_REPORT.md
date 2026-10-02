@@ -133,3 +133,30 @@ release-тег `clip-onnx-v1` ещё **не создан** — перед пуб
 
 **Дальше:** UI-дополнения (полный `hds check` в `/api/diagnostics`, кэш дерева, автозапуск UI)
 и W5 (clippy/fmt, `-D warnings`).
+
+## 5. UI-дополнения: полный `hds check`, кэш дерева, автозапуск UI (02.10.2026)
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `crates\hds-cli\src\cmd\check.rs`, `main.rs` | `hds check [--json]`: машинный вывод `{"ok":…, "checks":[{id,status,title,msg,fix}]}` (нужен UI). Сами проверки — прежний `run_checks`. |
+| `crates\hds-ui\src\lib.rs` | `/api/diagnostics` → **полный** `hds check` + отдельный пункт `llm_host`. Проверки выполняет `<рядом>\hds.exe check --json`: вынести в общий модуль нельзя — `hds-cli` **уже зависит** от `hds-ui` (подкоманда `hds ui`), получился бы цикл пакетов (проверено: `cyclic package dependency`). |
+| `crates\hds-ui\src\tree.rs` | Кэш `/api/tree` (`Mutex`, TTL 30 с), `?refresh=1` обходит кэш. |
+| `installers\install_ui_task.ps1` | **новый**: задача `HermesDiskSearchUi` → `bin\hds.exe ui --port 8765` (`-Status`/`-Remove`, фолбэк на Startup). ASCII-only. |
+| `setup.ps1` | опциональный вопрос «Start the web UI automatically at logon?» → `install_ui_task.ps1`. |
+
+**Живой прогон (боевое не тронуто; резидент `llm_host` pid владеет 8010–8012).**
+```
+target\debug\hds.exe check --json
+# json-ok ok=false checks=9: db:ok roots:ok chat:warn emb:fail ocr:ok ffmpeg:ok
+#                              lemmatizer:ok rerank:ok python-only:warn
+# UI на :8799 (тот же бинарь рядом):
+GET /api/diagnostics -> checks=10 (9 из CLI + llm_host), config=…\config.yaml
+GET /api/tree        -> dirs=7797; повторный (кэш) -> dirs=7797
+```
+`chat:warn`/`emb:fail` при живом резиденте — это поведение **самого** `hds check` (сверка роли
+по `/props`), не связано с UI; паритет CLI↔UI — цель шага. `cargo test --workspace` — **170/0
+(+9 ignored)**.
+
+**Дальше:** W5 — `cargo fmt` + clippy (сейчас 61 предупреждение), `-D warnings` в CI.

@@ -162,74 +162,57 @@ fn csrf_ok(h: &ReqHeaders) -> bool {
     origin_ok && (ctype_ok || marker_ok)
 }
 
-/// `/api/diagnostics`: облегчённая диагностика (без полного `hds check`):
-/// конфиг, БД, корни, роли-роли фасада (embedding/chat/llm-host).
+/// `/api/diagnostics`: **полный** `hds check` плюс состояние резидентного `llm-host`.
+///
+/// Проверки выполняет тот же бинарь (`<рядом>\hds.exe check --json`): так логика одна
+/// на CLI и UI. Вынести её в общий модуль нельзя — `hds-cli` уже зависит от `hds-ui`
+/// (подкоманда `hds ui`), получился бы цикл пакетов.
 pub fn diagnostics_json() -> Value {
-    let mut checks: Vec<Value> = Vec::new();
-    let cfg = match load() {
-        Ok(c) => c,
-        Err(e) => {
-            checks.push(json!({ "id": "config", "status": "fail", "title": "config.yaml",
-                                "msg": e.message() }));
-            return json!({ "checks": checks, "ok": false });
-        }
+    let mut checks: Vec<Value> = match run_cli_check() {
+        Ok(v) => v,
+        Err(msg) => vec![json!({ "id": "check", "status": "warn", "title": "hds check", "msg": msg })],
     };
-    checks.push(json!({ "id": "config", "status": "ok", "title": "config.yaml",
-                        "msg": crate::config_path_str() }));
 
-    match connect(&cfg) {
-        Ok(conn) => match db::stats(&conn) {
-            Ok(st) => checks.push(json!({ "id": "db", "status": "ok", "title": "База данных",
-                "msg": format!("чанков {}, файлов с ошибкой {}", st.chunks, st.errors.len()) })),
-            Err(e) => checks.push(json!({ "id": "db", "status": "fail", "title": "База данных",
-                "msg": e.message() })),
-        },
-        Err(e) => checks.push(json!({ "id": "db", "status": "fail", "title": "База данных", "msg": e })),
+    if let Ok(cfg) = load() {
+        let lh = llm_host_status(&cfg);
+        checks.push(json!({
+            "id": "llm_host",
+            "status": if lh["up"].as_bool() == Some(true) { "ok" } else { "warn" },
+            "title": "llm-host",
+            "msg": if lh["up"].as_bool() == Some(true) { format!("up (pid {})", lh["pid"]) } else { "не отвечает".to_string() }
+        }));
     }
-
-    let roots: Vec<String> = dig(&cfg, "index.roots")
-        .and_then(|v| v.as_sequence())
-        .map(|s| s.iter().filter_map(|x| x.as_str()).map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-    let missing: Vec<String> = roots
-        .iter()
-        .filter(|r| !std::path::Path::new(r).exists())
-        .cloned()
-        .collect();
-    checks.push(json!({ "id": "roots", "status": if missing.is_empty() { "ok" } else { "fail" },
-        "title": "Корни индексации",
-        "msg": if missing.is_empty() { format!("{} корней доступны", roots.len()) }
-               else { format!("недоступны: {}", missing.join(", ")) } }));
-
-    checks.push(role_check(&cfg, "embedding", "Роль embedding"));
-    checks.push(role_check(&cfg, "chat", "Роль chat"));
-
-    let lh = llm_host_status(&cfg);
-    checks.push(json!({ "id": "llm_host", "status": if lh["up"].as_bool() == Some(true) { "ok" } else { "warn" },
-        "title": "llm-host",
-        "msg": if lh["up"].as_bool() == Some(true) { format!("up (pid {})", lh["pid"]) } else { "не отвечает".to_string() } }));
 
     let ok = checks.iter().all(|c| c["status"] != "fail");
-    json!({ "checks": checks, "ok": ok })
+    json!({ "checks": checks, "ok": ok, "config": config_path_str() })
 }
 
-/// Проверка роли фасада (`/props` на её порту).
-fn role_check(cfg: &hds_core::config::Config, role: &str, title: &str) -> Value {
-    let key = format!("{role}.base_url");
-    let base = dig(cfg, &key).and_then(|v| v.as_str()).unwrap_or("");
-    let (host, port, _) = match hds_index::embed::split_base(base) {
-        Ok(x) => x,
-        Err(_) => return json!({ "id": role, "status": "warn", "title": title, "msg": "нет base_url" }),
-    };
-    match http::request(&host, port, "GET", "/props", &[], None, std::time::Duration::from_secs(3)) {
-        Ok(r) if r.status == 200 => {
-            let v = r.json().unwrap_or_else(|_| json!({}));
-            let model = v.get("model_path").and_then(|m| m.as_str()).unwrap_or("");
-            json!({ "id": role, "status": "ok", "title": title,
-                    "msg": if model.is_empty() { "доступна".to_string() } else { model.to_string() } })
-        }
-        _ => json!({ "id": role, "status": "warn", "title": title, "msg": "не отвечает" }),
+/// `hds.exe check --json` рядом с текущим исполняемым файлом → список проверок.
+fn run_cli_check() -> Result<Vec<Value>, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let dir = exe
+        .parent()
+        .ok_or_else(|| "нет каталога у исполняемого файла".to_string())?;
+    let name = if cfg!(windows) { "hds.exe" } else { "hds" };
+    let cand = dir.join(name);
+    if !cand.is_file() {
+        return Err(format!("{} не найден рядом с {}", name, exe.display()));
     }
+    let out = std::process::Command::new(&cand)
+        .arg("check")
+        .arg("--json")
+        .output()
+        .map_err(|e| format!("запуск {}: {e}", cand.display()))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let v: Value = serde_json::from_str(text.trim())
+        .map_err(|e| format!("разбор `check --json`: {e}"))?;
+    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+        return Ok(vec![json!({ "id": "config", "status": "fail", "title": "config.yaml", "msg": err })]);
+    }
+    Ok(v.get("checks")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default())
 }
 
 /// Путь конфига (для диагностики).
@@ -405,7 +388,7 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             (200, "text/html; charset=utf-8", page::PAGE.to_string())
         }
         ("GET", "/api/status") => json_ok(status_json()),
-        ("GET", "/api/tree") => json_ok(tree::tree_json(qp(query, "walk").is_some())),
+        ("GET", "/api/tree") => json_ok(tree::tree_json(qp(query, "walk").is_some(), qp(query, "refresh").is_some())),
         ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
         ("GET", "/api/config") => json_ok(config_edit::get_config()),
         ("GET", "/api/search") => {

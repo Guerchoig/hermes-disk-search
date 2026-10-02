@@ -253,9 +253,34 @@ fn build_root(root: &Path, st: &HashMap<PathBuf, (String, i64, i64)>) -> Option<
     Some(node)
 }
 
+/// Кэш дерева: `/api/tree` по БД дёшево, но обход (`?walk=1`) дорог — результат
+/// переиспользуется `TREE_TTL` секунд; `?refresh=1` обходит кэш.
+static TREE_CACHE: std::sync::Mutex<Option<(std::time::Instant, Value)>> =
+    std::sync::Mutex::new(None);
+const TREE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// `/api/tree`. `walk` — обходить диск (медленно на огромных корнях; по умолчанию
-/// дерево строится по БД — быстро и достаточно для навигации).
-pub fn tree_json(walk: bool) -> Value {
+/// дерево строится по БД — быстро и достаточно для навигации). `refresh` — игнорировать
+/// кэш (иначе результат переиспользуется `TREE_TTL` секунд).
+pub fn tree_json(walk: bool, refresh: bool) -> Value {
+    if !refresh {
+        if let Ok(g) = TREE_CACHE.lock() {
+            if let Some((at, v)) = g.as_ref() {
+                if at.elapsed() < TREE_TTL {
+                    return v.clone();
+                }
+            }
+        }
+    }
+    let v = build_tree(walk);
+    if let Ok(mut g) = TREE_CACHE.lock() {
+        *g = Some((std::time::Instant::now(), v.clone()));
+    }
+    v
+}
+
+/// Построение дерева без кэша.
+fn build_tree(walk: bool) -> Value {
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => {

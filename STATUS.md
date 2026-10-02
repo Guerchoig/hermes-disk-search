@@ -60,6 +60,10 @@
 > `dist\hds-<ver>-windows-x64\` + zip + sha256); `release.yml` переписан (test-rust, build-windows
 > + smoke, `fetch-engine-runtime`, `release` с бинарными ассетами; Python-джобы оставлены до W5);
 > `releasing.md` обновлён — `W4_REPORT.md` §4.
+> **W4 шаг 4 (02.10.2026):** UI-дополнения — `/api/diagnostics` = полный `hds check`
+> (`hds check --json`; общий модуль невозможен из-за цикла hds-cli→hds-ui), кэш `/api/tree`
+> (TTL 30 с, `?refresh=1`), `installers\install_ui_task.ps1` (+ опция автозапуска UI в setup.ps1)
+> — `W4_REPORT.md` §5. Тесты — 170/0 (+9 ignored). Дальше — W5 (fmt/clippy, `-D warnings`).
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

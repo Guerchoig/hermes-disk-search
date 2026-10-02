@@ -68,7 +68,7 @@ fn run(args: &[String]) -> i32 {
                 2
             }
         },
-        "check" => cmd::check::cmd_check(),
+        "check" => cmd::check::cmd_check(has(rest, "--json")),
         "ask" => match rest.first() {
             Some(q) if !q.starts_with("--") => cmd::ask::cmd_ask(
                 q.clone(),

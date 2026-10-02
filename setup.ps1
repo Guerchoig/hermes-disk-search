@@ -248,6 +248,14 @@ if (-not $NoAutostart) {
         try {
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "install_autostart.ps1")
         } catch { Warn "watcher/MCP tasks: $_" }
+        $ansUi = Read-Host "[?] Start the web UI automatically at logon (port 8765)? [y/N]"
+        if ($ansUi -match '^[Yy]') {
+            try {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\install_ui_task.ps1")
+            } catch { Warn "UI task: $_" }
+        } else {
+            Warn "skipped: the desktop shortcut still starts the UI on demand."
+        }
     } else {
         Warn "skipped: start the resident manually with bin\llm_host.exe run"
     }

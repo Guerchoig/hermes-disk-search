@@ -99,18 +99,43 @@ pub fn check_roots(cfg: &Config) -> Check {
     }
 }
 
-/// `cmd_check`: печать проверок и итог; 1 — есть `fail`.
-pub fn cmd_check() -> i32 {
-    println!("== hermes-disk-search: проверка окружения ==");
+/// `cmd_check`: печать проверок и итог; 1 — есть `fail`. `json` — машинный вывод
+/// (`{"ok":…, "checks":[…]}`), его использует веб-интерфейс (`/api/diagnostics`),
+/// чтобы не дублировать логику проверок.
+pub fn cmd_check(json: bool) -> i32 {
     let cfg = match hds_core::config::load() {
         Ok(c) => c,
         Err(e) => {
-            println!("[!!] config.yaml недоступен: {}", e.message());
-            println!("Итог: есть критические проблемы");
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({ "ok": false, "error": e.message() })
+                );
+            } else {
+                println!("== hermes-disk-search: проверка окружения ==");
+                println!("[!!] config.yaml недоступен: {}", e.message());
+                println!("Итог: есть критические проблемы");
+            }
             return 1;
         }
     };
     let checks = run_checks(&cfg);
+    let ok = !checks.iter().any(|c| c.status == "fail");
+
+    if json {
+        let items: Vec<serde_json::Value> = checks
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id, "status": c.status, "title": c.title, "msg": c.msg, "fix": c.fix
+                })
+            })
+            .collect();
+        println!("{}", serde_json::json!({ "ok": ok, "checks": items }));
+        return if ok { 0 } else { 1 };
+    }
+
+    println!("== hermes-disk-search: проверка окружения ==");
     for c in &checks {
         if c.status == "ok" {
             println!("[ok] {}", c.title);
@@ -128,7 +153,6 @@ pub fn cmd_check() -> i32 {
             println!("     -> {}", c.fix);
         }
     }
-    let ok = !checks.iter().any(|c| c.status == "fail");
     println!(
         "Итог: {}",
         if ok {
