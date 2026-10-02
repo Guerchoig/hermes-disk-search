@@ -33,9 +33,10 @@
 >    (`index.pause`). Владелец портов 8010–8012 — на момент приёмки Python-`llama-server`,
 >    `llm-host` остановлен (см. `W3_REPORT.md` §4); замеры — `W2_REPORT.md` §11–§14,
 >    `W3_REPORT.md` §4–§6.
-> 3. Ближайшие задачи: **W1** (резидентный слой). **Поиск перенесён**: `crates/hds-search`
->    (FTS+vec+CLIP, RRF) + `hds search`; паритет golden `search_*.json` — 10/10 топ-20
->    (`W1_REPORT.md` §1). Далее по W1: `hds-mcp`/`hds-ui`, RAG (`ask`). **W4** — упаковка/CI.
+> 3. Ближайшие задачи: **W1** (резидентный слой). Перенесены **поиск** (`hds-search`,
+>    паритет golden 10/10), **RAG** (`ask`+реранк, `hds ask`) и **MCP** (stdio, `hds-mcp`,
+>    `hds mcp`) — `W1_REPORT.md` §1–§3. Далее: `mcp_http` (streamable-http) и `hds-ui`.
+>    **W4** — упаковка/CI.
 > 4. Решения заказчика — `PLAN_W2_LLM_HOST.md` §9 (в т.ч. **без авто-деградации кванта**,
 >    llama-server удаляется в конце W2, `anonymizer_proxy` — ждём переезда). **Вопрос
 >    `llm.chat.n_ctx` закрыт 30.09.2026 решением «замер фактического KV»**: замер сделан —

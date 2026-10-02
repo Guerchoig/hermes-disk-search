@@ -66,3 +66,32 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture   # Q01..
 
 **Далее по W1:** `hds-mcp`/`hds-ui` (MCP/UI через `hds-search` + `rag::ask`).
 
+
+## 3. MCP-сервер (stdio) — `crates/hds-mcp` (01.10.2026)
+
+**Что сделано.** Инструменты `hds/mcp_server.py` и stdio-транспорт перенесены в Rust:
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-mcp/src/tools.rs` | `search_local_files`, `ask_my_files`, `index_status`, `start_indexing`, `stop_indexing`, `reindex_path` — те же строки результата, что в Python |
+| `crates/hds-mcp/src/schema.rs` | `tools/list` (те же имена/описания/`inputSchema`) и диспетчер `tools/call` |
+| `crates/hds-mcp/src/server.rs` | stdio NDJSON JSON-RPC 2.0: `initialize`, `tools/list`, `tools/call`, `ping`, notifications |
+| `crates/hds-mcp/src/bin/hds_mcp.rs`, `crates/hds-cli/src/cmd/mcp.rs` | запуск: `hds_mcp` или `hds mcp` (эквивалент `python -m hds.mcp_server`) |
+
+**Ключевые решения.**
+* Инструменты — тонкие обёртки: поиск/`ask` через `hds-search`, индексация через
+  `hds_index::pipeline::run_index` (+ `MediaRouter`), лемматизация — Python-воркер.
+* `index_status` — из `db::stats` + `index.heartbeat.json` (в Python прогресс шёл из
+  in-process reporter; отдельный процесс читает heartbeat — семантика та же, R30).
+* `initialize` → `serverInfo.name = "disk-search"`, `protocolVersion = 2024-11-05`.
+
+**Живой прогон** (stdio): `initialize` + `tools/list` (6 инструментов, описания/схемы
+корректны) + `tools/call search_local_files` → «Найдено 2 фрагментов…» с источниками
+и сниппетами.
+
+**Тесты:** `tests/protocol.rs` — 6 (initialize, tools/list, валидация аргумента,
+неизвестный метод -32601, ping, notification). Итого `cargo test --workspace` —
+**160 passed / 0 failed (+8 ignored)**.
+
+**Далее по W1:** `mcp_http`-менеджер (streamable-http, ОДИН инстанс на машину) и `hds-ui`.
+

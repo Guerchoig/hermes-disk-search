@@ -22,7 +22,8 @@ fn usage() -> String {
      \x20 clip-index\n\
      \x20 whisper-check [--file <медиа>] [--json]\n\
      \x20 db-move      --to <path> [--force]\n\
-     \x20 watch        [--roots a;b]"
+     \x20 watch        [--roots a;b]\n\
+     \x20 mcp          (stdio MCP-сервер)"
         .to_string()
 }
 
@@ -105,6 +106,7 @@ fn run(args: &[String]) -> i32 {
             }
         },
         "watch" => cmd::watch::cmd_watch(flag_val(rest, "--roots")),
+        "mcp" => cmd::mcp::cmd_mcp(),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0

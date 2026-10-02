@@ -16,6 +16,7 @@ hds-index = { path = "../hds-index" }
 hds-extract = { path = "../hds-extract" }
 hds-clip = { path = "../hds-clip" }
 hds-search = { path = "../hds-search" }
+hds-mcp = { path = "../hds-mcp" }
 rusqlite.workspace = true
 serde_json.workspace = true
 

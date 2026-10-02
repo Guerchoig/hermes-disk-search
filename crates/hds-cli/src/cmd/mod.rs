@@ -7,6 +7,7 @@ pub mod clip_index;
 pub mod db_move;
 pub mod forget;
 pub mod index;
+pub mod mcp;
 pub mod reindex;
 pub mod reindex_fts;
 pub mod search;

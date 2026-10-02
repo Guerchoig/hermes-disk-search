@@ -1,0 +1,19 @@
+[package]
+name = "hds-mcp"
+description = "W1: MCP-сервер disk-search (stdio, JSON-RPC 2.0) — инструменты поиска/RAG/индексации"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+hds-index = { path = "../hds-index" }
+hds-search = { path = "../hds-search" }
+hds-extract = { path = "../hds-extract" }
+rusqlite.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+
+[[bin]]
+name = "hds_mcp"
+path = "src/bin/hds_mcp.rs"

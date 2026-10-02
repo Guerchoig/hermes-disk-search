@@ -146,6 +146,9 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture  # пар
 # target\debug\hds.exe search 'запрос' --limit 8   (HDS_CONFIG=out/w1_search.yaml, БД фикстур)
 # target\debug\hds.exe ask 'вопрос'  --limit 8    (тот же конфиг; чат-роль :8010)
 
+# --- W1: MCP-сервер (stdio) ---
+target\debug\hds.exe mcp      # эквивалент `hds_mcp`; клиенты (Cline/Hermes) общаются по JSON-RPC 2.0
+
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
 .\.venv\Scripts\python.exe tools\parity\spike6_parity.py         # embeddings/rerank/chat
