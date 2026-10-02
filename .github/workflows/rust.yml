@@ -1,10 +1,10 @@
 name: Rust CI
 
-# Сборка и тесты Rust-воркспейса. Python-регрессия остаётся в ci.yml (пока Python
-# есть); по мере миграции эта матрица становится основной (W4/W5 плана).
-#
-# W5: clippy и `cargo fmt` теперь **блокирующие** (`-D warnings`, `fmt --check`) —
-# предупреждения вычищены (61 -> 0). Тесты и релизная сборка — тоже блокирующие.
+# Rust-first workspace: fmt/clippy/tests are blocking. Python core is gone
+# (only the `sidecar/` worker remains and it is built in Release). Windows is
+# the primary target; macOS compiles but is not verified yet
+# (MIGRATION_PLAN_RUST.md section 10.0) - the macOS job is best-effort
+# (continue-on-error) and does not block the run.
 
 on:
   push:
@@ -24,16 +24,30 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Форматирование (cargo fmt --check)
+      - name: Format (cargo fmt --check)
         run: cargo fmt --all -- --check
 
-      - name: clippy (блокирующий, -D warnings)
+      - name: clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Тесты Rust
+      - name: Rust tests
+        run: cargo test --workspace
+
+  test-rust-macos:
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust tests (macOS, best-effort - not verified yet)
         run: cargo test --workspace
 
   build-windows:
+    needs: [test-rust]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -42,10 +56,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Сборка релиза (hds, hds_mcp, llm_host)
+      - name: Release build (hds, hds_mcp, llm_host)
         run: cargo build --release -p hds-cli -p hds-mcp -p hds-llama
 
-      - name: Артефакты (Windows x64)
+      - name: Artifacts (Windows x64)
         uses: actions/upload-artifact@v5
         with:
           name: hds-rust-windows-x64
@@ -53,4 +67,28 @@ jobs:
             target/release/hds.exe
             target/release/hds_mcp.exe
             target/release/llm_host.exe
+          if-no-files-found: error
+
+  build-macos:
+    needs: [test-rust]
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Release build (macOS arm64, best-effort)
+        run: cargo build --release -p hds-cli -p hds-mcp -p hds-llama
+
+      - name: Artifacts (macOS arm64)
+        uses: actions/upload-artifact@v5
+        with:
+          name: hds-rust-macos-arm64
+          path: |
+            target/release/hds
+            target/release/hds_mcp
+            target/release/llm_host
           if-no-files-found: error

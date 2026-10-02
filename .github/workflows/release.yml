@@ -1,18 +1,25 @@
 name: Release
 
-# Релиз hermes-disk-search: бинарные ассеты Rust (Windows) + портативный sidecar +
-# рантайм движка. Python-ядро удалено (W5) - Python-джобов в релизе нет.
+# Rust-first release. Windows is the primary target and is blocking; macOS is
+# best-effort (not verified yet - MIGRATION_PLAN_RUST.md section 10.0): the mac
+# jobs are non-blocking and their assets are attached only when they succeed.
+# Python core is gone; only the `sidecar/` worker is packaged.
+#
+# Trigger: manual (workflow_dispatch with a version input) or a version tag push
+# (`git push origin vX.Y.Z`).
 on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Версия релиза (например v0.2.0)'
+        description: 'Release version (e.g. v0.13.0)'
         required: true
         type: string
       notes_file:
-        description: 'Файл с заметками релиза (опционально)'
+        description: 'Release notes file (optional)'
         required: false
         default: ''
+  push:
+    tags: ['v*']
 
 permissions:
   contents: write
@@ -30,17 +37,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Форматирование (cargo fmt --check)
+      - name: Format (cargo fmt --check)
         run: cargo fmt --all -- --check
 
-      - name: clippy (блокирующий, -D warnings)
+      - name: clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Тесты Rust
+      - name: Rust tests
         run: cargo test --workspace
 
-  # ---------- Python sidecar: portable CPython + worker + extractor modules ----------
-  build-sidecar:
+  # ---------- Windows sidecar: portable CPython + worker + extractor modules ----------
+  build-sidecar-windows:
     needs: [test-rust]
     runs-on: windows-latest
     steps:
@@ -48,7 +55,7 @@ jobs:
 
       - uses: astral-sh/setup-uv@v5
 
-      - name: Сборка самодостаточного sidecar (python + deps + модули извлечения)
+      - name: Build self-contained sidecar
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
@@ -59,9 +66,28 @@ jobs:
           path: dist/sidecar/**
           if-no-files-found: error
 
+  # ---------- macOS sidecar (best-effort) ----------
+  build-sidecar-macos:
+    needs: [test-rust]
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Build self-contained sidecar (macOS)
+        run: bash installers/build_sidecar_macos.sh dist/sidecar
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-sidecar-macos
+          path: dist/sidecar/**
+          if-no-files-found: error
+
   # ---------- Rust: Windows binaries + package (zip + sha256) ----------
   build-windows:
-    needs: [test-rust, build-sidecar]
+    needs: [test-rust, build-sidecar-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -70,24 +96,24 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Скачать sidecar
+      - name: Download sidecar
         uses: actions/download-artifact@v5
         with:
           name: hds-sidecar-windows
           path: sidecar_runtime
 
-      - name: Сборка релиза и упаковка (bin + sidecar + sha256 + zip)
+      - name: Build release and package (bin + sidecar + sha256 + zip)
         shell: pwsh
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           $ver = "$env:VERSION" -replace '^v', ''
           powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version $ver -SidecarDir sidecar_runtime
 
-      - name: "Smoke: распакованный архив - hds запускается"
+      - name: "Smoke: unpacked archive - hds starts"
         shell: pwsh
         run: |
-          $ver = "${{ inputs.version }}" -replace '^v', ''
+          $ver = "${{ inputs.version || github.ref_name }}" -replace '^v', ''
           Expand-Archive -Path "dist\hds-$ver-windows-x64.zip" -DestinationPath dist\check
           dist\check\bin\hds.exe --help
 
@@ -99,19 +125,52 @@ jobs:
             dist/hds-*-windows-x64.zip.sha256.txt
           if-no-files-found: error
 
+  # ---------- Rust: macOS binaries + package (best-effort) ----------
+  build-macos:
+    needs: [test-rust, build-sidecar-macos]
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Download sidecar (macOS)
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-sidecar-macos
+          path: sidecar_runtime
+
+      - name: Build release and package (bin + sidecar + sha256 + zip)
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          ver="${VERSION#v}"
+          bash installers/build_rust_release_macos.sh "$ver" sidecar_runtime
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-rust-macos-arm64
+          path: |
+            dist/hds-*-macos-arm64.zip
+            dist/hds-*-macos-arm64.zip.sha256.txt
+          if-no-files-found: error
+
   # ---------- Engine runtime (llm-host + ASR) as a release asset (offline installs) ----------
-  fetch-engine-runtime:
+  fetch-engine-runtime-windows:
     needs: [test-rust]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Скачать рантайм движка по манифесту (sha256)
+      - name: Download engine runtime by manifest (sha256)
         shell: pwsh
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File installers\fetch_engine_runtime.ps1 -EngineDir dist\engine-runtime
 
-      - name: Упаковать рантайм движка
+      - name: Package engine runtime
         shell: pwsh
         run: |
           Compress-Archive -Path dist\engine-runtime\* -DestinationPath dist\hds-engine-runtime-windows-x64-cuda.zip -Force
@@ -122,57 +181,101 @@ jobs:
           path: dist/hds-engine-runtime-windows-x64-cuda.zip
           if-no-files-found: error
 
-  # ---------- Release with binary assets ----------
+  # ---------- Engine runtime for macOS (best-effort) ----------
+  fetch-engine-runtime-macos:
+    needs: [test-rust]
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download engine runtime by manifest (sha256)
+        shell: pwsh
+        run: |
+          pwsh -NoProfile -File installers/fetch_engine_runtime.ps1 -EngineDir dist/engine-runtime
+
+      - name: Package engine runtime
+        run: |
+          cd dist/engine-runtime
+          zip -r ../hds-engine-runtime-macos-arm64-metal.zip .
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-engine-runtime-macos-arm64
+          path: dist/hds-engine-runtime-macos-arm64-metal.zip
+          if-no-files-found: error
+
+  # ---------- Release with binary assets (Windows blocking, macOS best-effort) ----------
   release:
-    needs: [build-windows, fetch-engine-runtime]
+    needs: [build-windows, fetch-engine-runtime-windows, build-macos, fetch-engine-runtime-macos]
+    # Run once the blocking Windows jobs succeeded; missing/failed macOS jobs
+    # (best-effort) simply do not contribute assets.
+    if: ${{ always() && needs.build-windows.result == 'success' && needs.fetch-engine-runtime-windows.result == 'success' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Скачать бинарные ассеты (Windows)
+      - name: Download Windows package
         uses: actions/download-artifact@v5
         with:
           name: hds-rust-windows-x64
           path: dist
 
-      - name: Скачать рантайм движка
+      - name: Download Windows engine runtime
         uses: actions/download-artifact@v5
         with:
           name: hds-engine-runtime-windows-x64
           path: dist
 
-      - name: Архив исходников для Windows
+      - name: Download macOS package (best-effort)
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-rust-macos-arm64
+          path: dist
+
+      - name: Download macOS engine runtime (best-effort)
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-engine-runtime-macos-arm64
+          path: dist
+
+      - name: Source archives (Windows/macOS)
         shell: pwsh
         env:
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
+          git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-macos.zip" HEAD
 
-      - name: Создание релиза
+      - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          VERSION: ${{ inputs.version }}
+          VERSION: ${{ inputs.version || github.ref_name }}
         shell: pwsh
         run: |
-          $tag = "${{ inputs.version }}"
-          # Заметки: RELEASE_NOTES_<tag>.md или вариант без 'v' (0.6.0-0.9.0).
+          $tag = $env:VERSION
           $noteFile = "RELEASE_NOTES_$tag.md"
           if (-not (Test-Path $noteFile)) {
             $noV = $tag -replace '^v', ''
             if (Test-Path "RELEASE_NOTES_$noV.md") { $noteFile = "RELEASE_NOTES_$noV.md" }
           }
           $assets = @()
-          $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip" | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip.sha256.txt" | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem dist -Filter "hds-engine-runtime-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-engine-runtime-windows-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-*-macos-arm64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-engine-runtime-macos-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += "hermes-disk-search-$tag-windows.zip"
+          $assets += "hermes-disk-search-$tag-macos.zip"
+          Write-Host "[..] assets:"; $assets | ForEach-Object { Write-Host "  $_" }
           if (Test-Path $noteFile) {
             gh release create $tag --title "$tag - hermes-disk-search" --notes-file $noteFile @assets
           } else {
             gh release create $tag --title "$tag - hermes-disk-search" --generate-notes @assets
           }
 
-      - name: Итог
+      - name: Summary
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release list
