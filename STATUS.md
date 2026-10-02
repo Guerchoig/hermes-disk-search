@@ -41,6 +41,10 @@
 > `W1_REPORT.md` §5. **Паритет поиска на боевой БД** — оба контрольных запроса совпали точно
 > (свежий golden) — §6; резидент `llm-host` держим из **release**. Далее: `hds-ui`.
 > `cargo test --workspace` — **165 green (+9 `#[ignore]`)**.
+>
+> **W4 начат (01.10.2026):** CI `rust.yml` (test-rust + build-windows) и
+> `installers/build_rust_release.ps1` (стейджинг `dist\hds-<ver>-windows-x64\` с
+> `hds/hds_mcp/llm_host` + sha256) — журнал `tools/parity/W4_REPORT.md` §1.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

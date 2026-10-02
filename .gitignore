@@ -30,6 +30,8 @@ data/
 
 # Rust (воркспейс `crates/`, спайки W0 `tools/parity/spikes`)
 target/
+# W4: релизная сборка (installers/build_rust_release.ps1)
+dist/
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
 
