@@ -21,6 +21,13 @@
 
 ## 1. Состав каталога
 
+> **Внимание (W5, 02.10.2026).** Часть файлов, перечисленных ниже, **удалена вместе с Python-ядром**
+> и в дереве отсутствует: `golden.py`, `golden_queries.py`, `spike2_hash.py`, `hash_vectors.py`,
+> `walk_parity.py`, `w3_clip_smoke.py` (см. `W4_REPORT.md` §13). Таблицы/команды с ними —
+> **исторические**: эталон сейчас — `compare.py` + замороженный `golden/` и Rust-тесты
+> `crates/*/tests/*`. Актуальное число проверок — `cargo test --workspace` = **174 passed / 0 failed
+> (+9 ignored)** (в §2 встречается историческое «47 проверок», а тест `--test walk_parity` удалён).
+
 ### Генераторы и приёмка (главное)
 | Файл | Что делает |
 |---|---|
@@ -105,6 +112,8 @@
 ## 2. Команды (copy-paste)
 
 ```powershell
+# [W5] golden.py / golden_queries.py / spike2_hash.py / hash_vectors.py / walk_parity.py /
+#      w3_clip_smoke.py удалены вместе с Python-ядром — команды ниже с ними НЕ работают (см. §1).
 # --- приёмка паритета (главное) ---
 .\.venv\Scripts\python.exe tools\parity\gen_fixtures.py          # фикстуры (16 файлов)
 .\.venv\Scripts\python.exe tools\parity\golden.py                # золотые файлы (нужны эмбеддинги)

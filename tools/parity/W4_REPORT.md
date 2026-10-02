@@ -469,3 +469,48 @@ CI-джоба `build-sidecar` (или локально `-WithSidecar`, нуже�
 **Долг (осознанно не в этом шаге).** README/`MIGRATION_PLAN_RUST`/`config.example.yaml` и часть
 `tools/parity/*` ещё упоминают Python-команды; doc-комментарии Rust вида «порт `hds/…py`» —
 историческая провенанс-заметка. mac-артефакт (§10.0, «не проверено») выведен из релиза.
+
+## 14. Живой порядок на машине: legacy Python остановлен, `:8787` → Rust (02.10.2026)
+
+**Найдено при входе в новый чат (расхождение с передачей).** В §0/`HANDOFF_PROMPT` числилось
+«`index.pause` заказчика стоит», но **файла не было**: боевую `D:\hermes-disk-search-db\index.db`
+(4,9 ГБ) продолжал индексировать **legacy-Python** — `watch.lock` = 8028,
+`pythonw -m hds.cli watch` (запущен 01.10 15:00), `index.heartbeat.json` свежий, `paused: false`,
+последняя запись в БД 13:50:17; порт `:8787` держал `pythonw -m hds.cli mcp-http run`
+(6084/20728, с 01.10 08:19). Модули ядра (`hds/cli.py`, `mcp_http.py`, `watcher.py`, `indexer.py`)
+удалены в §13 → процессы были **неперезапускаемыми зомби** (код только в памяти). При свежем
+таймере heartbeat счётчики `seen`/`processed` стояли 12 минут → watcher **подвис**, вероятно на
+перегруженном `:8011` (свободно **109 МиБ** VRAM, чат-роль не влезала).
+
+**Решение заказчика (02.10.2026):** «старая python-сборка — рудимент, делай с ней что хочешь».
+
+**Сделано (боевой индекс и его БД не тронуты).**
+1. Создан **пустой** `index.pause` (0 байт; presence-файл: Python `os.path.exists`, Rust
+   `is_file()`) — задокументированное «пауза стоит». `.gitignore:11` → дерево остаётся чистым.
+2. Остановлены 4 процесса `pythonw` (2 службы × шим+воркер: 8028/48588 `watch`,
+   6084/20728 `mcp-http run`).
+3. Владельцем `:8787` стал штатный Rust-сервер: `target\release\hds.exe mcp-http start`
+   (откат — `hds mcp-http stop`).
+
+**Приёмка (живой прогон).**
+```
+pythonw                     -> процессов нет
+8787 -> pid 61552 (hds.exe) |  8010-8012 -> pid 36704 (llm_host.exe)
+hds mcp-http status   -> {"pid":61552,"state":"mcp","version":"0.1.0"}
+GET /health (8787)    -> {"app":"disk-search","transport":"streamable-http","version":"0.1.0"}
+index.heartbeat.json  -> заморожен (14:02:44; llm_host: «нет свежего heartbeat»)
+llm_host status       -> «индексация: пауза ДА (...\index.pause)»
+nvidia-smi            -> занято 10765/12288 МиБ (было 12005 — освободилось ~1,3 ГБ)
+cargo test --workspace -> 174 passed / 0 failed (+9 ignored); clippy 0/0; fmt 0 diff
+```
+Боевая `index.db` — без записей с 13:50:17 (и после остановки), в БД/`index.pause`-решении ничего
+не менялось.
+
+**Грабли (новые).**
+* `hds mcp-http start` в PowerShell-конвейере (`| Select-Object`) **не возвращает управление**:
+  detached-ребёнок держит pipe (`mcp_http.rs::spawn_instance`). Запускать без конвейера.
+* После старта `mcp-http` держателей `target\release\*.exe` **два** — `llm_host.exe` (резидент) и
+  `hds.exe` (`mcp-http`): релизная сборка требует `hds mcp-http stop` **и** `llm_host stop`
+  (либо CI, либо `-SkipBuild`).
+* «Пауза заказчика» — состояние **файла**, а не памяти чата: проверять `Test-Path .\index.pause`
+  (в передаче число/факт разошлись).

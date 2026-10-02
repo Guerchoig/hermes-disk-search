@@ -79,6 +79,14 @@
 > `cargo test --workspace` — **170 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W1_REPORT.md` §0 (передача, актуально на 02.10.2026);
 > W3 (медиа/CLIP) — `W3_REPORT.md`; W4 (упаковка/CI) — `W4_REPORT.md`; W0 — `SPIKES.md`.**
+> **Живой порядок на машине (02.10.2026):** `index.pause` в передаче числился стоящим, но **файла
+> не было** — боевую `D:\hermes-disk-search-db\index.db` продолжал индексировать legacy-Python
+> (`watch.lock` = 8028, `pythonw -m hds.cli watch`), а `:8787` держал `pythonw -m hds.cli mcp-http`
+> (модули ядра удалены в W5 → перезапуск невозможен). По решению заказчика рудимент снят:
+> 4 процесса `pythonw` остановлены, создан пустой `index.pause` (резидент видит «пауза ДА»),
+> владельцем `:8787` стал Rust `hds mcp-http` (`/health` → `{"app":"disk-search","version":"0.1.0"}`);
+> освободилось ~1,3 ГБ VRAM (12005 → 10765 МиБ). Боевой индекс не тронут (записей нет с 13:50:17).
+> Детали и грабли — `tools/parity/W4_REPORT.md` §14.
 > Ниже (вплоть до §1) — накопительная сводка волн; раздел 0 `W1_REPORT.md` — самый свежий.
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и
@@ -90,7 +98,19 @@
 > §10.7 — грабли окружения)** и **§14 (отчёт B7: файлы, приёмка, грабли)** →
 > `PLAN_W2_LLM_HOST.md` (§A4–§A6 с цифрами) →
 > `MIGRATION_PLAN_RUST.md` (шапка: факты замера W2 и «не переоткрывать»).
-> Ниже — состояние Python-версии (боевой путь, работает через наш `llm-host`).
+> Ниже — **архив**: состояние Python-версии (ядро удалено в W5).
+
+---
+
+## АРХИВ (до W5) — состояние и планы Python-ядра
+
+> Разделы 1–6 ниже описывают **удалённое** Python-ядро (W5). Упомянутые там файлы
+> (`hds/indexer.py`, `progress.py`, `watcher.py`, `ui_server.py`, `db.py`, `dbops.py`, `cli.py`,
+> `search.py`, `rag.py`, `chunker.py`, `embedder.py`, `clip_index.py`, `mcp_server.py`,
+> `llama_server.py`, `rerank.py`, `diag.py`, `mcp_http.py`) в репозитории **отсутствуют** — остался
+> только sidecar-набор `hds\` (`config`, `extractors`, `extract_av`, `extract_static`,
+> `lemmatizer`, `whisper_cpp`). Актуальное состояние — шапка выше, `README.md`,
+> `tools/parity/W4_REPORT.md`.
 
 ## 1. ЗАДАЧА
 

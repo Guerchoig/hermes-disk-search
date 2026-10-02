@@ -21,7 +21,10 @@
 ## Состояние (02.10.2026)
 - Ядро/резидент на Rust (`crates/`); бинарники `hds.exe` / `hds_mcp.exe` / `llm_host.exe`.
 - Владелец портов 8010–8012 — `llm-host` (**release**-резидент, `target\release\llm_host.exe run`).
-- `index.pause` заказчика **СТОИТ — не снимать без его решения**.
+- `index.pause` заказчика **стоит — не снимать без его решения**; наличие проверять **файлом**
+  (`Test-Path .\index.pause`), а не по памяти: в передаче 02.10 оно разошлось с фактом.
+- `:8787` — **Rust** `hds mcp-http` (`target\release\hds.exe mcp-http status`); legacy-процессы
+  Python (`hds.cli watch` / `hds.cli mcp-http`) остановлены 02.10.2026 — `W4_REPORT.md` §14.
 - Python-ядро и Python-джобы CI **удалены**; в Python — только `sidecar\` (извлечение/лемматизация,
   самодостаточный через `installers\build_sidecar.ps1`; `.mpp` требует Java 11+).
 - golden **заморожен** (генератор удалён); паритет — `compare.py` + golden и `crates/*/tests/*`.
@@ -66,7 +69,10 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture
   или начать с пробела; кириллица в `Select-String` молча не ищется (ASCII-шаблон или чтение файла).
 - **Запущенный резидент блокирует свой exe**: `cargo build/release`/`cargo test` (debug) падают
   `os error 5` при занятом `target\{release,debug}\llm_host.exe`. Держим резидента из **release**;
-  для релизной сборки — `llm_host stop` либо `build_rust_release.ps1 -SkipBuild`.
+  для релизной сборки — `llm_host stop` либо `build_rust_release.ps1 -SkipBuild`. **Держателей
+  release-exe теперь два**: резидент и `hds.exe` (`mcp-http`) → `llm_host stop` **и** `hds mcp-http stop`.
+- `hds mcp-http start` в PowerShell-конвейере (`| Select-Object`) **не возвращает управление**
+  (detached-ребёнок держит pipe) — запускать без конвейера.
 - `HDS_CONFIG` в сессии PowerShell **персистентна**.
 - Живая машина: боевой индекс `D:\...\index.db`, `index.pause` стоит; боевой `config.yaml` тюнили
   (`ctx_per_slot 16384`, `rerank.url 127.0.0.1`).
