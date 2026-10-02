@@ -85,7 +85,7 @@ if ($RollbackEnginePatch -or $PatchEngine) {
         Write-Host "[patch] engine runtime is missing in $EngineDir - installing it first"
     } else {
         Write-Host "[patch] applying HDS engine patch (base $($pm.base_tag)) to $EngineDir"
-        $tmpPatch = Join-Path $env:TEMP ("hds-engine-patch-" + [Guid]::NewGuid().ToString("N"))
+        $tmpPatch = Join-Path ([System.IO.Path]::GetTempPath()) ("hds-engine-patch-" + [Guid]::NewGuid().ToString("N"))
         New-Item -ItemType Directory -Force -Path $tmpPatch | Out-Null
         try {
             $ProgressPreference = "SilentlyContinue"
@@ -174,7 +174,7 @@ if ((-not $Force) -and (Test-Path $lib)) {
 }
 
 # --- download ---------------------------------------------------------------
-$tmp = Join-Path $env:TEMP ("hds-engine-" + [Guid]::NewGuid().ToString("N"))
+$tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("hds-engine-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 $archive = Join-Path $tmp $asset.file_name
 $ProgressPreference = "SilentlyContinue"

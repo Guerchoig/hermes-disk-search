@@ -29,7 +29,7 @@ if [ ! -f "$PYDIR/.hds-python" ]; then
     uv python install "$PY_VER" --install-dir "$PYDIR"
     touch "$PYDIR/.hds-python"
 fi
-PY="$(find "$PYDIR" -type f \( -name python3 -o -name python \) 2>/dev/null | sort | head -1)"
+PY="$(find "$PYDIR" -type f \( -name 'python3*' -o -name 'python' \) 2>/dev/null | sort | head -1)"
 if [ -z "$PY" ]; then
     echo "python interpreter not found under $PYDIR" >&2
     exit 1
