@@ -307,6 +307,7 @@ pub fn prepare_dll_search_path(_dir: &Path) -> Result<Vec<String>> {
     ])
 }
 
+#[cfg(windows)]
 fn to_wide(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
     p.as_os_str()
