@@ -41,7 +41,7 @@ chunk:
   overlap: 120              # перекрытие соседних чанков (целые предложения)
 
 embedding:
-  base_url: "http://127.0.0.1:8011/v1"   # llama-server (роль embedding)
+  base_url: "http://127.0.0.1:8011/v1"   # роль embedding (владелец портов — llm-host)
   model: "text-embedding-bge-m3"
   batch_size: 64
   dim: 1024                 # bge-m3 = 1024
@@ -53,7 +53,7 @@ chat:
   temperature: 0.2
   max_context_chars: 14000
 
-llm_server:
+llm_server:                 # роли LLM (движок openresearchtools); владелец портов — bin\llm_host.exe
   bin: ""
   host: "127.0.0.1"
   autostart: true
@@ -114,8 +114,8 @@ search:
   clip_weight: 1.0
   snippet_chars: 500
 
-rerank:
-  enabled: false
+rerank:                     # реранкер ask_my_files (роль rerank; владелец — llm-host)
+  enabled: false            # по умолчанию выключен
   url: "http://localhost:8012/v1"
   model: "bge-reranker-v2-m3"
   timeout: 30

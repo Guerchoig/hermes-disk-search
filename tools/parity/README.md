@@ -236,31 +236,24 @@ target\debug\hds.exe ui --port 8765          # http://127.0.0.1:8765 (стату
 
 **Чек-лист на 5 минут (копипаст):**
 ```powershell
-git --no-pager -C <репозиторий> log --oneline -3   # ветка w2-llm-host (20 коммитов, 30.09.2026)
-cargo test --workspace                       # должно быть 108 green (+6 #[ignore])
-cargo run -p hds-llama --release --bin llm_host_status                       # состояние ролей и VRAM
-cargo run -p hds-llama --release --bin llm_host -- status                    # отчёт РЕЗИДЕНТА (владелец портов)
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20
-powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\resident_smoke.ps1 -PortBase 8030 -HoldSec 600
+git --no-pager -C <репозиторий> log --oneline -6      # ветка w2-llm-host
+git --no-pager -C <репозиторий> status --short
+cargo test --workspace                                # 174 passed / 0 failed (+9 #[ignore])
+cargo clippy --workspace --all-targets -- -D warnings  # 0/0 (блокирующее)
+cargo run -p hds-llama --release --bin llm_host -- status   # отчёт резидента (владелец 8010-8012)
 ```
-Если команды не запускаются — смотрите «Грабли» (ниже), `W2_REPORT.md` §9.7 и **§10.7**.
-**ARB-сценарии перед прогоном требуют свободной VRAM**: сначала `llm_host stop`, потом
-`.\\.venv\\Scripts\\python.exe tools\\parity\\arb_scenarios.py --port-base 8070`, затем `llm_host run`.
+Живой smoke без VRAM: `tools\parity\facade_smoke.ps1 -PortBase 8020 -HoldSec 20`,
+`resident_smoke.ps1 -PortBase 8030 -HoldSec 600` (запускать при **остановленном** резиденте).
+ARB-сценарии (`arb_scenarios.py`) — при свободной VRAM: сначала `llm_host stop`, затем сценарии,
+затем `llm_host run`.
 
-1. `SPIKES.md` — журнал W0: замеры (§1, §14), спайки (§3–§10), риски/находки (§11, §14.7),
-   go/no-go (§12), остаток (§13).
-2. `W2_REPORT.md` — журнал W2: **§9 «Передача в новый чат»** (состояние, коммиты,
-   карта кода, команды, открытые вопросы, грабли) и **§10 «A6 — отчёт»**: что сделано по
-   файлам, **§10.2a** (боевые порты 8010–8012, полный офлоад **9384 МиБ**, `n_batch` −1503 МиБ),
-   **§10.2b** (`ask` целиком; почему реранк на CPU), **§10.2c** (ARB-1…6, 6/6),
-   **§10.6 — живая машина** (кто владеет портами, как останавливать/поднимать),
-   **§10.7 — грабли окружения нового чата**. Затем A1 (устройство/VRAM/скорость + находки
-   про cwd движка и вендорские DLL), B1 (паритет обхода 96 318 файлов), B2 (`content_hash`),
-   B3 (чанкер), A2 (реестр инстансов), A3 (кросс-процессная адресация — её нет),
-   **A4 §7/§7.1** (бюджет VRAM и диспетчер), **§7.2** (замер KV: модель гибридная,
-   KV = 1024 МиБ), **§7.3** (фасад A5: контракт чата, «один инстанс — два режима»).
-3. `../PLAN_W2_LLM_HOST.md` — план W2: треки A/B, критерии приёмки, график, DoD, приложение
-   с точными структурами движка (§11).
-4. `../MIGRATION_PLAN_RUST.MD` — §10.0 (статус платформ), §8.6 (диспетчер VRAM), §12–§13
-   (приёмка и память), риск-регистр (R26–R34).
+**Что читать:**
+1. `W4_REPORT.md` **§0 — передача** (состояние, что закрыто, дальше, грабли);
+2. `../../README.md` — актуальный продукт (Rust-first);
+3. `../../STATUS.md` — журнал состояния;
+4. журналы волн `W1_REPORT.md`…`W4_REPORT.md`;
+5. `../SPIKES.md` — замеры W0; `../../MIGRATION_PLAN_RUST.md` — план (§4 волны, §10 упаковка, §11 CI);
+6. `../HANDOFF_PROMPT.md` — готовый промт для нового чата.
 
+> После W5 **golden заморожен** (генератор удалён вместе с Python-ядром); паритет сверяется
+> `compare.py` + golden и Rust-тестами `crates/*/tests/*`.

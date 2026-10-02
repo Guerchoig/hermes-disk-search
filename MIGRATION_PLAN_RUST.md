@@ -1,71 +1,45 @@
 # План рефакторинга hermes-disk-search: перевод ядра на Rust
 
-> **Статус:** план принят к исполнению. **W0 завершена 29.09.2026** (журнал с цифрами —
-> `tools/parity/SPIKES.md`, §1–§14; золотые файлы закоммичены, 1,87 МБ). **W2 идёт
-> (01.10.2026): закрыты A1–A6** (обвязка движка и устройство, реестр инстансов, адресация —
-> замером, бюджет VRAM, диспетчер + замер KV, фасад `:8010–8012`, резидентный `llm-host`
-> с ARB-1…6) **и B1–B7** (обход/лимиты, `content_hash`, чанкер, конвейер `process_file`,
-> watcher, sidecar-воркер, **db-move и подкоманды CLI** — крейт `crates/hds-cli`);
-> **порты 8010–8012 переведены на `llm-host`**,
-> `cargo test --workspace` — **125 green** (+5 `#[ignore]`); паритет B4 с golden —
-> **16/16 файлов, 6363 чанка**; пилот B-2 — **10 000 файлов / 58 450 чанков, полный
-> паритет** (тексты/FTS/хэши; +7,1 % по времени, §15); память B-4 в норме
-> (индексация +5,2 %/ws +13 %, простой commit −93 %, §16) (журнал — `tools/parity/W2_REPORT.md`:
-> §9 — передача в новый чат, §10 — A6, §11 — B4, §12 — B5, §13 — B6, **§14 — B7, §15 — B-2, §16 — B-4, §17 — crates.io**).
-> Решение go/no-go: **GO**. **W3 (медиа: whisper/CLIP) выполнен 01.10.2026**: ASR из Rust
-> (bridge audio-only + whisper-модель в metadata; `/internal/transcribe` в фасаде),
-> медиа-ветка `hds-index` (`MediaRouter` → владелец GPU) + `hds whisper-check`, live-приёмка
-> 3 реальных медиа (вкл. русское имя в русском каталоге; ASCII-стейджинг), бюджет VRAM whisper
-> + CPU-fallback и вытеснение по простою, **CLIP на ONNX Runtime** (`hds-clip`: vision →
-> `images_vec` 512, text; `clip_store` + `clip-index`; паритет cos_min 0,999950).
-> `cargo test --workspace` — **145 passed / 0 failed (+7 ignored)**.
-> Контекст нового чата — **`tools/parity/W3_REPORT.md`** (§0 передача, §4 приёмка медиа,
-> §5 CLIP, §6 бюджет VRAM whisper).
+> **Статус (02.10.2026): миграция завершена — W1–W5.** Ветка `w2-llm-host` (`main` = `9ed8452`
+> не тронут); `cargo test --workspace` — **174 passed / 0 failed (+9 `#[ignore]`)**;
+> `cargo fmt --check` и `clippy -D warnings` — **блокирующие в CI**. Ядро и все резидентные
+> компоненты на Rust; **Python остался только как sidecar** (извлечение/лемматизация,
+> самодостаточный через `installers\build_sidecar.ps1`), Python-ядро и Python-джобы CI удалены (W5).
+>
+> **Что закрыто:**
+> * **W0** — спайки/фикстуры/golden (`tools/parity/SPIKES.md`).
+> * **W1** — резидентный слой: `hds-search` (поиск/RAG, golden 10/10 + боевая БД), `hds-mcp`
+>   (stdio + streamable-http), `hds-ui` (перепроектированный UI), `llm-host` на портах 8010–8012.
+> * **W2** — ядро: обход/хэш/чанкер, конвейер `process_file`, watcher, sidecar-воркер, `db-move`
+>   и подкоманды `hds`-CLI, `llm-host` + VRAM-диспетчер + фасад (A1–A6, B1–B7).
+> * **W3** — медиа: ASR движком (bridge audio-only, whisper в metadata, `mode: subtitle` → `.srt`,
+>   `/internal/transcribe`), бюджет VRAM + CPU-fallback; CLIP на ONNX (`hds-clip`, cos_min 0,999950).
+> * **W4** — упаковка/установка/CI: `setup.ps1` под `bin\`, доставка рантайма движка
+>   (`engine-manifest.json` v1.15 + sha256) и моделей (GGUF/whisper/CLIP), `build_rust_release.ps1`
+>   (пакет + zip + sha256), `release.yml` с бинарными ассетами, `-SkipBuild`, `NOTICE.md`;
+>   **версионные каталоги `app\<ver>`** + отдельный `update.ps1`; `.mpp` (jpype+mpxj+Java 11+).
+> * **W5** — очистка: `fmt`/`clippy` (61→0) блокирующие; вывод Python из CI; удаление Python-ядра
+>   и legacy-обвязки (оставлен только sidecar-набор `hds\`); `README.md` переписан под Rust-first.
 >
 > **Как продолжить в новом чате (краткая шпаргалка).**
-> 1. Прочитать: `tools/parity/README.md` (карта harness + команды) → `tools/parity/W2_REPORT.md`
->    §9 «Передача в новый чат» (что сделано, где лежит, что дальше, грабли) →
->    `PLAN_W2_LLM_HOST.md` (план W2: треки A/B, критерии, DoD, структуры движка) →
->    при необходимости `tools/parity/SPIKES.md` (журнал W0).
-> 2. Состояние на **02.10.2026**: закрыты **A1–A6, B1–B7, W3** (медиа/CLIP), **W1**
->    (резидентный слой: поиск/RAG/MCP/UI) и начат **W4** (упаковка/CI); вся работа — в ветке
->    `w2-llm-host` (`main` = `9ed8452` не тронут), `cargo test --workspace` —
->    **170 passed (+9 `#[ignore]`)**; боевой индекс не изменён, `index.pause` заказчика стоит.
->    **Владелец портов 8010–8012 — `llm-host`** (release-резидент), Python-роли остановлены;
->    тюнинг KV (`llm_server.chat.ctx_per_slot: 16384`) и `rerank.url: 127.0.0.1` — `W1_REPORT.md` §5.
-> 3. **W1 — сделан** (`W1_REPORT.md` §1–§7): поиск (`hds-search`, golden 10/10 + боевая БД),
->    RAG (`rag::ask`+реранк, `hds ask`), MCP stdio (`hds-mcp`, `hds mcp`), streamable-http +
->    менеджер (`hds mcp --http`, `hds mcp-http`), веб-интерфейс (`hds-ui`, `hds ui`).
->    **W4 — начат** (`W4_REPORT.md` §1: CI `rust.yml`, `installers/build_rust_release.ps1`);
->    дальше: `setup.ps1` под Rust-бинарники + автозапуск `llm-host`, доставка рантайма ASR и
->    ONNX-моделей CLIP, `package`/`release`. **W5** — clippy/fmt (61 предупреждение), `-D warnings`.
-> 4. Решения заказчика — `PLAN_W2_LLM_HOST.md` §9 (в т.ч. **без авто-деградации кванта**,
->    llama-server удаляется в конце W2, `anonymizer_proxy` — ждём переезда). **Вопрос
->    `llm.chat.n_ctx` закрыт 30.09.2026 решением «замер фактического KV»**: замер сделан —
->    модель гибридная (KV только в 8 слоях из 32), `llama_kv_cache = 1024 МиБ` при
->    `32768`/f16, «модель + KV» ≈ 8492 МиБ → в 12 ГБ влезает, `n_ctx: 32768` остаётся.
->    Числа и метод — `W2_REPORT.md` §7.2.
-> 5. Факты, добытые замерами в W2 (не переоткрывать): устройство задаётся **числовым**
->    `manual_devices_csv` (имя движок отвергает); движку обязателен **cwd = каталог движка**
->    и вендорские каталоги (`Engine\vendor\ffmpeg\bin`) в пути поиска DLL; кросс-процессной
->    адресации инстансов **нет** → фасад обязателен (и уже реализован, §7.3 W2_REPORT);
->    бюджет VRAM — только по NVML; **thinking — поле запроса**, поэтому агент (ON) и MCP (OFF)
->    обслуживает один чат-инстанс; движок **сам применяет шаблон чата** к нашему `prompt`
->    (маркеры ChatML ставить нельзя); у гибридных моделей KV держат не все слои
->    (`full_attention_interval`) плюс есть фиксированные SSM-состояние и compute-буфер.
->    Числа и доказательства — `W2_REPORT.md` §1–§7.
-> 6. Грабли, которые уже стоили времени (pipe-дедлок, дерево процессов, `index.pause`,
->    тяжёлый сэмплер, волатильные файлы в хэш-паритете, AV) — `tools/parity/README.md` §3
->    (пункты 1–14): cwd движка, вендорские DLL, длинные пути > 260 символов, машинный NVML
->    и WDDM-вытеснение, `accept()` неблокирующего слушателя, `crates.io`
->    (**на момент W0 недоступен; перепроверен 01.10.2026 — доступен**, `W2_REPORT.md` §17),
->    `.ps1` только в ASCII. **Грабли трека B**: B4 — `tmpXXXX.wav` в golden волатилен,
->    боевой `exclude_dirs` содержит папку проекта (`W2_REPORT.md` §11.5); B5 — свой
->    `ReadDirectoryChangesW` вместо `notify` (тогда его не было в кэше offline; сети не было —
->    01.10.2026 перепроверено, `notify` теперь добавить можно), `watch.lock`
->    атомарно (§12.3); B6 — **подпроцессы воркера (`tesseract`/`ffmpeg`) наследуют
->    протокольный stdin и блокируются** → fd 0 уводим в nul, протокол читаем с дубликата
->    (§13.3).
+> 1. Прочитать `tools/parity/W4_REPORT.md` §0 (передача) → `README.md` (актуальный продукт) →
+>    `STATUS.md` → журналы волн `tools/parity/W1_REPORT.md`…`W4_REPORT.md`.
+> 2. Точка входа (5 минут): `git --no-pager log --oneline -6`; `git status --short`;
+>    `cargo test --workspace` (→ 174/0, +9 ignored); `cargo clippy --workspace --all-targets -- -D warnings`.
+> 3. Приёмка/паритет — `tools/parity/README.md` (карта harness; golden **заморожен** после W5 —
+>    генератор удалён вместе с Python-ядром); Rust-паритет-тесты — `crates/*/tests/*`.
+> 4. Решения заказчика (не пересматривать без него): без авто-деградации кванта; llama.cpp/
+>    llama-server удалён (единый рантайм движка); `anonymizer_proxy` — ждём переезда;
+>    mac-артефакт — «не проверено», выведен из релиза.
+> 5. Факты, добытые замерами (не переоткрывать): устройство задаётся числовым
+>    `manual_devices_csv`; движку нужен cwd = каталог движка + вендорские DLL; кросс-процессной
+>    адресации инстансов нет → фасад обязателен; бюджет VRAM — только NVML; thinking — поле
+>    запроса; движок сам применяет шаблон чата; KV у гибридных моделей держат не все слои.
+> 6. Грабли окружения: `git` — всегда `--no-pager`; PowerShell иногда портит первый токен
+>    команды; `Select-String` с кириллицей молча не находит; `.ps1` — ASCII-only (PS 5.1 без BOM
+>    читает как ANSI), в строках `${var}`, а не `$var:`; запущенный резидент держит свой exe
+>    (релизная сборка/тест падают `os error 5` — держим резидента из `release`, либо `-SkipBuild`);
+>    `HDS_CONFIG` в сессии персистентна.
 >
 > Документ самодостаточен —
 > содержит мотивацию (§1.1), решение с обоснованием и альтернативами (§1.2), целевую
@@ -498,6 +472,9 @@ installers/                 # setup.ps1 (Win), install_macos.command (ранта
 ### 4.2. Волны, задачи, критерии приёмки, оценка
 
 Легенда оценок — «человеко-недели» одного разработчика, знакомого с проектом.
+
+> **Факт (02.10.2026): все волны W0–W5 выполнены** (см. шапку и `tools/parity/W4_REPORT.md`).
+> Таблица ниже — исходная оценка; итог уложился в неё.
 
 | Волна | Содержание | Оценка |
 |---|---|---|
@@ -1422,32 +1399,29 @@ Intel Mac продолжают работать на Python-версии v0.12.0
 * Скрипты установки остаются идемпотентными (как установка рантайма движка): повторный
   запуск ничего не ломает и ничего не перекачивает.
 
+**Реализовано (W4):** `installers\install_app_version.ps1` (версии `app\<ver>`, указатель
+`app\current` (junction), общие `data\`/`models\` (junction-ы), перенос `config.yaml`) и
+`installers\update.ps1` (отдельный процесс: stop задач/резидента → install → switch → start;
+прошлые версии сохраняются — откат). Детали — `W4_REPORT.md` §10.
+
 ---
 
 ## 11. CI: матрица сборок
 
-Сейчас `.github/workflows/release.yml` только архивирует исходники и создаёт релиз,
-`.github/workflows/ci.yml` прогоняет 233 теста на `windows-latest` и `macos-latest`.
-После миграции появляется сборка бинарников.
+**Фактически (W4/W5)** — Python-джобы выведены, матрица Rust-only:
 
-| Джоб | Раннер | Собирает | Особенности |
-|---|---|---|---|
-| `test-py` | `windows-latest` | регрессия Python-эталона (пока он есть) | как сейчас; с W2 сокращается, в W5 исчезает |
-| `lint-rust` | `ubuntu-latest` | `cargo fmt --check`, `clippy -D warnings`, `cargo test` | быстро, без GPU |
-| `build-windows` | `windows-latest` | `hds.exe` + `hdsw.exe` (один вариант, без whisper-сборки) | VC++ runtime: `static_vcruntime`/`+crt-static` (§14); whisper-бэкенды даёт скачиваемый рантайм движка |
-| `fetch-engine-runtime` | `windows-latest` | **обязательно**: скачивание zip по `engine-manifest.json` (cuda+vulkan) с проверкой `sha256`, упаковка в артефакт релиза | рантайм теперь обслуживает и LLM-хост (`llm-host`), и ASR — llama.cpp не собирается и не ставится; кэш по `tag`+`sha256` |
-| `build-macos` | `macos-15` (arm64) | `hds`/`hdsw` + скачивание Metal-рантайма движка | ad-hoc подпись артефакта; **единственная macOS-цель**. ⚠️ **Не выполняется: бюджет macOS-раннеров не выделен (§10.0)**; джоба описана и включается одной строкой, когда появится Mac или решение платить за раннеры |
-| `build-sidecar` | `windows-latest` (macos-15 — ⚠️ не выполняется, §10.0) | воркер: CPython из python-build-standalone + `uv pip install --target` | колеса должны существовать для `win_amd64` и `macosx_arm64` (`pymupdf`, `Pillow`, `pytesseract` — есть; `pymorphy3` — чистый Python) |
-| `package` | соответствующие ОС | zip-архивы + `sha256` | содержимое по §10.1; проверка «распаковали на чистом раннере → `hds check` работает» |
-| `release` | `windows-latest` | `gh release create` с бинарными ассетами | как сейчас + `RELEASE_NOTES_*.md` |
+| Джоб | Раннер | Что делает |
+|---|---|---|
+| `test-rust` | `ubuntu-latest` | `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace` (всё блокирующее) |
+| `build-sidecar` | `windows-latest` | `installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest` (портативный CPython + deps + `hds\`) → артефакт |
+| `build-windows` | `windows-latest` | `cargo build --release` (hds/hds_mcp/llm_host) → `build_rust_release.ps1 -SidecarDir` (пакет + zip + sha256) → smoke «распаковали → `hds.exe --help`» → артефакт |
+| `fetch-engine-runtime` | `windows-latest` | `installers\fetch_engine_runtime.ps1` по `runtime-manifests\engine-manifest.json` (**sha256**) → zip-ассет рантайма движка |
+| `release` | `windows-latest` | `gh release create` с бинарными ассетами (пакет + `.sha256.txt` + рантайм движка + архив исходников); `needs: [build-windows, fetch-engine-runtime]` |
 
-Отдельно: GPU-пути (Windows+NVIDIA CUDA, Windows+AMD/Vulkan — **проверяются вручную** по
-чек-листу W3, в CI GPU нет) и **macOS Metal — не проверяется** (нет Mac и macOS-раннеров,
-§10.0; чек-лист `tools/parity/MAC_CHECKLIST.md` выполняется в постпроектной фазе).
-Кэш: `Swatinem/rust-cache`, кэш рантайма
-движка (по `tag`+`sha256`), `sccache`. Сборка C++ из исходников (Vulkan SDK, CUDA Toolkit,
-`cmake`) **из матрицы исключена** — это следствие решения по whisper (§8.1). Ожидаемое
-время полного релиза — 15–25 минут (против ~5 сейчас); отражается в `releasing.md`.
+Удалено в W5: `ci.yml` (Python-only), джобы `test-py`/`test-macos`/`build-macos`. GPU-пути
+(CUDA/Vulkan) и macOS (Metal) — **вручную** (в CI нет GPU/раннеров; `tools/parity/MAC_CHECKLIST.md`,
+GPU-чек-лист W3). Кэш — `Swatinem/rust-cache`, `astral-sh/setup-uv`. Фактический порядок выпуска —
+`releasing.md`.
 
 ---
 

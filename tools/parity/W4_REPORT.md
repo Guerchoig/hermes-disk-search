@@ -3,6 +3,63 @@
 > Ветка `w2-llm-host` (W4 продолжаем в ней), начато **01.10.2026**. План —
 > `MIGRATION_PLAN_RUST.md` §10 (артефакты/установка) и §11 (CI).
 
+## 0. Передача в новый чат (02.10.2026)
+
+**Где мы.** Ветка `w2-llm-host` (`main` = `9ed8452` не тронут), **13 коммитов за 02.10.2026**.
+`cargo test --workspace` — **174 passed / 0 failed (+9 `#[ignore]`)**; `cargo fmt --check` и
+`cargo clippy --workspace --all-targets -- -D warnings` — **0/0**, блокирующие в CI.
+**Миграция завершена: W1–W5.** Владелец портов 8010–8012 — `llm-host` (release-резидент);
+`index.pause` заказчика **стоит — не снимать**.
+
+**Что закрыто (журналы).**
+* **W0** — `SPIKES.md`. **W1** — `W1_REPORT.md` §1–§7 (поиск/RAG/MCP/UI).
+* **W2** — `W2_REPORT.md` §9–§17 (A1–A6: устройство/VRAM/диспетчер/фасад/`llm-host`; B1–B7: ядро/watcher/sidecar/CLI).
+* **W3** — `W3_REPORT.md` (ASR движком; бюджет VRAM + CPU-fallback; CLIP на ONNX).
+* **W4** — этот файл §1–§13: CI+пакет, установщик под `bin\` + задачи/интеграции, доставка
+  рантайма движка/GGUF/whisper/CLIP, `package`/`release`, UI-дополнения, диагностика in-process,
+  сплит `hds/` (самодостаточный sidecar), корень проекта от exe, версии `app\<ver>`, **`.mpp`/jpype**,
+  dry-run пакета, **W5-финал**.
+* **W5** — `fmt`/`clippy` блокирующие; Python-ядро и Python-джобы CI удалены; `README.md` под Rust-first.
+
+**Карта кода (`crates/`).** `hds-core` (config/db/http/**diag**), `hds-extract` (клиент воркера),
+`hds-index` (walk/hash/chunker/pipeline/watch/transcribe/sidecar/diag/heartbeat), `hds-llama`
+(engine/cluster/ffi/registry/dispatch/facade/host/bridge_audio/whisper/resident/runtime),
+`hds-clip` (ONNX), `hds-search` (fts/snippet/rerank/rag), `hds-mcp`, `hds-ui`, `hds-cli` (`hds`).
+Python — только `sidecar\` (+ копия 6 модулей `hds\` при сборке sidecar).
+
+**Команды (из корня репозитория).**
+```powershell
+cargo test --workspace                                  # 174/0 (+9 ignored)
+cargo clippy --workspace --all-targets -- -D warnings    # 0/0
+cargo run -p hds-cli --bin hds -- search "запрос" --limit 8
+cargo run -p hds-cli --bin hds -- ask "вопрос"
+cargo run -p hds-cli --bin hds -- ui --port 8765
+target\release\llm_host.exe run                          # резидент (владелец 8010-8012)
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version 0.1.0 -SkipBuild
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
+```
+
+**Что дальше (остаток).**
+* **Эксплуатация:** прогнать реальный релиз (push ветки → `release.yml`); создать тег
+  `clip-onnx-v1` (`installers\publish_clip_models.ps1`) до релиза; реальный release-build требует
+  `llm_host stop` либо CI (там резидента нет).
+* **Документный долг:** остаточные упоминания Python в `RELEASE_NOTES_*`; doc-комментарии Rust
+  «порт `hds/…py`» (провенанс).
+* **macOS** — «не проверено» (§10.0): джобы выведены; `tools/parity/MAC_CHECKLIST.md` — постпроектно.
+* Готовый промт для нового чата — `tools/parity/HANDOFF_PROMPT.md`.
+
+**Не переоткрывать (факты).** устройство — числовой `manual_devices_csv`; движку нужен cwd = каталог
+движка + вендорские DLL; кросс-процессной адресации нет → фасад; VRAM — только NVML; thinking — поле
+запроса; KV у гибридных моделей держат не все слои (`full_attention_interval`); whisper: bridge
+audio-only, модель — GGML `.bin` в `metadata_json.whisper_model`; лемматизация — через воркер;
+golden **заморожен** (W5).
+
+**Грабли.** `git` — всегда `--no-pager`; PowerShell иногда портит первый токен команды (начать с
+пробела/повторить); `Select-String` с кириллицей молча не находит (ASCII-шаблон/чтение файла);
+`.ps1` — ASCII-only (PS 5.1 без BOM читает как ANSI), в строках `${var}`, а не `$var:`; резидент
+держит свой exe (релиз/тест — `os error 5`; держать из `release` или `-SkipBuild`); `HDS_CONFIG`
+в сессии персистентна.
+
 ## 1. CI для Rust + релизная сборка (01.10.2026)
 
 **Что сделано.**

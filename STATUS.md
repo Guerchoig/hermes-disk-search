@@ -1,46 +1,15 @@
 # Состояние проекта hermes-disk-search — контекст для нового чата
 
-> Рабочая папка: `C:\Users\Sasha\hermes-disk-search`
-> GitHub: Guerchoig/hermes-disk-search (private), ветка main
-> Версия: v0.3.0 (релиз выпущен через GitHub Actions, run 34935328484 — success)
+> Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (private).
+> Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
-> **Идёт рефакторинг ядра на Rust (ветка `w2-llm-host`, `main` не тронут).**
-> Закрыты A1–A6 (устройство/VRAM/диспетчер/замер KV, фасад `:8010–8012`, резидентный
-> `llm-host`) и B1–B7 (обход/хэш/чанкер, конвейер `process_file`, watcher, sidecar-воркер,
-> **db-move и подкоманды CLI** — новый крейт `crates/hds-cli`, бинарь `hds`);
-> **порты 8010–8012 переведены на `llm-host`** — Python-роли `llama-server` остановлены,
-> автозапуск через ярлык `HermesDiskSearchLlmHost.lnk`, Python MCP/watcher продолжают
-> работать через наш фасад. `cargo test --workspace` — **125 green (+5 `#[ignore]`)**;
-> паритет B4 с golden — **16/16 файлов, 6363 чанка**; watcher — 6 сценариев на реальных
-> событиях ОС; sidecar-воркер — старт 0,17 с, RSS 32,6→61,3 МБ; ARB-1…6 (6/6);
-> `hds.cli ask` проходит целиком. B7 принят: `status`/`check` совпадают с Python;
-> `reindex-fts` на копии боевой БД (10 000 чанков → Python 500/500), `db-move`
-> (комментарии `config.yaml` целы), `forget`, vec0 0.1.9 через `auto_extension`.
-> Пилот B-2 — 10 000 файлов, полный паритет (+7,1 % по времени); память B-4 — в норме
-> (индексация ws +13 %, простой commit −93 %) — `W2_REPORT.md` §15–§16.
-> Следующий шаг — **W3** (whisper/CLIP); **начат**: ASR из Rust работает (bridge audio-only
-> + whisper-модель в metadata, `mode: subtitle` → сегменты), `/internal/transcribe` в фасаде;
-> **шаг 2 сделан** — медиа-ветка `hds-index` (`MediaRouter`: аудио/видео → владелец GPU,
-> прочее → sidecar) + CLI `hds whisper-check`; ключи `index.whisper_{model,mode,custom,gpu}`,
-> `index.transcribe_url`. `cargo test --workspace` — **135 green (+6 `#[ignore]`)**
-> (детали — `tools/parity/W3_REPORT.md` §1.5). **Шаг 3 сделан** — live-приёмка 3 реальных
-> медиа через боевой `/internal/transcribe` (вкл. русское имя в русском каталоге;
-> ASCII-стейджинг подтверждён) — `W3_REPORT.md` §4. **Шаг 4 (CLIP) сделан** — крейт
-> `crates/hds-clip` на `ort` (vision→`images_vec` dim 512, text резидентный, препроцессинг
-> как `CLIPImageProcessor`), боевой `clip_store` + `hds clip-index`; паритет cos_min 0,999950
-> ≥ 0,999 — `W3_REPORT.md` §5. **Критерий VRAM (whisper) закрыт**: перед созданием
-> транскрибатора владелец проверяет бюджет «модель+буфер+резерв» и при нехватке уходит
-> на CPU (`whisper_no_gpu`) с сообщением — §6 (включая вытеснение whisper по простою, ARB-5).
-> **W1 (резидентный слой) начат:** поиск перенесён в `crates/hds-search` (FTS5+vec+CLIP, RRF)
-> + CLI `hds search`; паритет golden `search_*.json` — **10/10 топ-20** (`W1_REPORT.md` §1).
-> **RAG перенесён:** `rag::ask` + реранк + CLI `hds ask` (ответ со ссылками `[N]`) — §2.
-> **MCP (stdio) перенесён:** `crates/hds-mcp` (6 инструментов, JSON-RPC 2.0), `hds mcp`/`hds_mcp` — §3.
-> **MCP streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http …`) — §4.
-> **Порты 8010–8012 переведены на `llm-host`** (Python-роли остановлены): embeddings/chat/rerank
-> под Rust; `hds search`/`hds ask` работают на боевом индексе; тюнинг KV (`ctx_per_slot 16384`) —
-> `W1_REPORT.md` §5. **Паритет поиска на боевой БД** — оба контрольных запроса совпали точно
-> (свежий golden) — §6; резидент `llm-host` держим из **release**. Далее: `hds-ui`.
-> `cargo test --workspace` — **165 green (+9 `#[ignore]`)**.
+> **Сейчас:** ядро и резидентные компоненты — Rust (`crates/`): `hds-search` (поиск/RAG),
+> `hds-mcp` (stdio + http), `hds-ui`, `hds-llama` (`llm-host` — владелец портов 8010–8012 и GPU,
+> VRAM-диспетчер, ASR), `hds-index` (обход/конвейер/watcher/`db-move`/`diag`), `hds-clip` (ONNX),
+> `hds-cli`. **Python остался только как `sidecar`** (извлечение/лемматизация; самодостаточный
+> через `installers\build_sidecar.ps1`; `.mpp` — Java 11+). Python-ядро и Python-джобы CI удалены.
+> `cargo test --workspace` — **174 passed / 0 failed (+9 `#[ignore]`)**; `fmt`/`clippy -D warnings`
+> — блокирующие. `README.md` переписан под Rust-first; передача — `tools/parity/W4_REPORT.md §0`.
 >
 > **W4 начат (01.10.2026):** CI `rust.yml` (test-rust + build-windows) и
 > `installers/build_rust_release.ps1` (стейджинг `dist\hds-<ver>-windows-x64\` с
