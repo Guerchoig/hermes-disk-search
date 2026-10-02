@@ -21,7 +21,12 @@ param(
     [string]$EngineDir = "",
     [string]$Backend = "auto",   # auto | cuda | vulkan | metal | cpu
     [switch]$Force,
-    [switch]$NoUnblock
+    [switch]$NoUnblock,
+    # HDS engine patch overlay (engine-patch/README.md): apply or roll back our
+    # patched DLLs (P1/P2/P3 + KV cache type) over the stock runtime.
+    [switch]$PatchEngine,
+    [switch]$RollbackEnginePatch,
+    [string]$PatchManifest = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,6 +51,77 @@ if (-not $EngineDir) {
         $EngineDir = Join-Path $HOME "Library/Application Support/OpenResearchTools/TranscribeOffline/Engine"
     } else {
         $EngineDir = Join-Path $env:APPDATA "OpenResearchTools\TranscribeOffline\Engine"
+    }
+}
+
+# --- HDS engine patch (overlay over the stock runtime) -----------------------
+# Our patch (engine-patch/README.md): P1 bounded slot wait, P2 model load outside
+# the instance lock (the hang we hit), P3 lock order, KV cache type + flash
+# attention for quantized V. Files and sha256 live in
+# runtime-manifests/engine-patch.json; stock files are kept next to them as *.orig
+# so that -RollbackEnginePatch restores the upstream runtime.
+if ($RollbackEnginePatch -or $PatchEngine) {
+    $patchMf = $PatchManifest
+    if (-not $patchMf) { $patchMf = Join-Path $root "runtime-manifests\engine-patch.json" }
+
+    if ($RollbackEnginePatch) {
+        $orig = @(Get-ChildItem -LiteralPath $EngineDir -Filter "*.orig" -File -ErrorAction SilentlyContinue)
+        if ($orig.Count -eq 0) {
+            Write-Host "[patch] no *.orig backups in $EngineDir - nothing to roll back"
+            exit 0
+        }
+        foreach ($o in $orig) {
+            $target = Join-Path $EngineDir ($o.Name.Substring(0, $o.Name.Length - 5))
+            Copy-Item -LiteralPath $o.FullName -Destination $target -Force
+            Remove-Item -LiteralPath $o.FullName -Force
+        }
+        Write-Host "[ok] engine patch rolled back: $($orig.Count) file(s) restored from *.orig"
+        exit 0
+    }
+
+    if (-not (Test-Path $patchMf)) { throw "engine patch manifest not found: $patchMf" }
+    $pm = Get-Content -Raw -Path $patchMf | ConvertFrom-Json
+    if (-not (Test-Path (Join-Path $EngineDir $libName))) {
+        Write-Host "[patch] engine runtime is missing in $EngineDir - installing it first"
+    } else {
+        Write-Host "[patch] applying HDS engine patch (base $($pm.base_tag)) to $EngineDir"
+        $tmpPatch = Join-Path $env:TEMP ("hds-engine-patch-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Force -Path $tmpPatch | Out-Null
+        try {
+            $ProgressPreference = "SilentlyContinue"
+            foreach ($f in @($pm.files)) {
+                $dst = Join-Path $tmpPatch $f.file_name
+                Write-Host "[..] $($f.file_name)"
+                try {
+                    Invoke-WebRequest -Uri $f.url -OutFile $dst -UseBasicParsing -TimeoutSec 3600
+                } catch {
+                    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                        & curl.exe -L --fail -o $dst $f.url
+                        if ($LASTEXITCODE -ne 0) { throw "curl failed with exit code $LASTEXITCODE" }
+                    } else {
+                        throw
+                    }
+                }
+                $got = (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower()
+                $want = ([string]$f.sha256).Trim().ToLower()
+                if ($got -ne $want) {
+                    throw "sha256 mismatch for $($f.file_name): expected $want, got $got"
+                }
+                $target = Join-Path $EngineDir $f.file_name
+                if ((Test-Path $target) -and -not (Test-Path "$target.orig")) {
+                    Copy-Item -LiteralPath $target -Destination "$target.orig" -Force
+                }
+                Copy-Item -LiteralPath $dst -Destination $target -Force
+                if (-not $NoUnblock) {
+                    try { Unblock-File -LiteralPath $target -ErrorAction Stop } catch { }
+                }
+            }
+            Write-Host "[ok] engine patch applied: $($pm.files.Count) file(s) (originals kept as *.orig)"
+            Write-Host "[i] rollback: fetch_engine_runtime.ps1 -RollbackEnginePatch"
+            exit 0
+        } finally {
+            Remove-Item -LiteralPath $tmpPatch -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 

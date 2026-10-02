@@ -282,11 +282,32 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 CI (`release.yml`): `test-rust` (fmt/clippy/tests) → `build-sidecar` → `build-windows`
 (package + smoke) → `fetch-engine-runtime` → `release`.
 
+## Патч движка (временно, до апстрима)
+
+Ядро работает на движке `openresearchtools/engine` (v1.15). Мы несём **свой патч** движка
+(`engine-patch/`), пока владелец не починит дефекты у себя: инцидент «загрузка роли держала
+мьютекс инстанса и парализовала `status`, вытеснение и роли» — `tools/parity/W4_REPORT.md` §14.
+
+* **Что в патче:** ограниченное ожидание слота (P1), загрузка модели **вне** мьютекса
+  инстанса (P2 — причина инцидента), порядок блокировок (P3) и **тип KV-кэша**
+  (`cache_type_k/v`: теперь работают `--cache-type-k q8_0 --cache-type-v q8_0` из `config.yaml`;
+  для квантованного V патч включает Flash Attention).
+* **Эффект (замер 02.10.2026, RTX 3060):** KV чата 512 → **272 МиБ**, VRAM чата
+  7905 → **7717 МиБ**; compute-буфер embedding при `--ubatch-size 512` — 90 МиБ вместо ~1,4 ГиБ.
+* **Установка/откат:** `installers\fetch_engine_runtime.ps1 -PatchEngine` /
+  `-RollbackEnginePatch` (файлы и sha256 — `runtime-manifests/engine-patch.json`; штатные DLL
+  сохраняются как `*.orig`). Наша сторона совместима со стоковым движком: поля KV добавлены в
+  конец структур API и со стоковой DLL просто игнорируются.
+* **Сборка из исходников** (если нужно воспроизвести): `engine-patch/README.md` — база — тег
+  `v1.15`, тулчейн CUDA 13.4 + Ninja Multi-Config, staging подхватывает патч из `<repo>\bridge`.
+
 ## Диагностика
 
 * `hds check` / в UI «Проверка компонентов» — БД, корни, роли chat/embedding, OCR, ffmpeg,
-  лемматизатор (воркер), **`.mpp`** (mpxj), реранк; отдельный пункт `gpu-manual`
-  (whisper/Vulkan — проверяются вручную, GPU-чек-лист).
+  лемматизатор (воркер), **`.mpp`** (mpxj), реранк, **`gpu-observability`** (L1: свежесть
+  heartbeat резидента, занят ли движок и кем, «наш процесс / чужие» по VRAM — читает
+  `data\llm-host.heartbeat.json`, поэтому работает и когда HTTP резидента молчит); отдельный
+  пункт `gpu-manual` (whisper/Vulkan — проверяются вручную, GPU-чек-лист).
 * `hds status` — состояние индекса; `hds whisper-check` — готовность ASR.
 
 **Грабли.** `git` — всегда `--no-pager`. PowerShell 5.1 читает `.ps1` без BOM как ANSI — наши

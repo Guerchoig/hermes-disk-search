@@ -17,6 +17,17 @@
 * `NVIDIA-CUDA-EULA.txt`, `NVIDIA-CUDA-RUNTIME-NOTICE.txt` — для сборок `*-cuda`
   (`cudart64_*`, `cublas*64_*`, `ggml-cuda.dll`).
 
+### Патч движка (наш, временный — до апстрима)
+Мы поставляем **собственный патч** сборки v1.15 (каталог `engine-patch/`, файлы и sha256 —
+`runtime-manifests/engine-patch.json`): ограниченное ожидание слота, загрузка модели **вне**
+мьютекса инстанса, порядок блокировок и поля типа KV-кэша (+ Flash Attention для квантованного
+V). База — тот же MIT-лицензированный движок; изменения только в
+`bridge/llama_server_cluster.{h,cpp}` и `bridge/llama_server_bridge.{h,cpp}`
+(`engine-patch/hds-engine-patch-v1.15.patch`). Установка/откат —
+`installers/fetch_engine_runtime.ps1 -PatchEngine` / `-RollbackEnginePatch` (штатные DLL
+сохраняются рядом как `*.orig`). До апстрим-фикса ставим свой вариант, после — переходим на
+стоковый (`engine-patch/README.md`).
+
 ## Медиа и OCR
 * **FFmpeg** (`avcodec-*`/`avformat-*`/`avutil-*`/`swresample-*` в `vendor/ffmpeg` рантайма,
   а также системный `ffmpeg` для транскрипции) — LGPL/GPL: лицензия зависит от конкретной

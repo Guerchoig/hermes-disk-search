@@ -79,6 +79,12 @@
 > `cargo test --workspace` — **170 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W1_REPORT.md` §0 (передача, актуально на 02.10.2026);
 > W3 (медиа/CLIP) — `W3_REPORT.md`; W4 (упаковка/CI) — `W4_REPORT.md`; W0 — `SPIKES.md`.**
+> **Оверлей-поставка патча (02.10.2026):** `runtime-manifests/engine-patch.json` (база v1.15,
+> 10 файлов с sha256) + `installers/fetch_engine_runtime.ps1 -PatchEngine|-RollbackEnginePatch`
+> (скачивание/бэкап `*.orig`/откат) + `installers/publish_engine_patch.ps1` (мейнтейнер: падает
+> при дрейфе хэшей, создаёт тег `engine-patch-v1`, заливает ассеты). Доки: README (раздел «Патч
+> движка», `gpu-observability`), NOTICE.md. Проверки: `.ps1` ASCII+parse ok, манифест ↔ DLL
+> `mismatches=0`.
 > **L1 шаг 3 закрыт (02.10.2026):** `load_instance` больше не зовётся на каждый запрос
 > LOAD_ON_DEMAND (движок грузит по запросу), в `hds check`/UI появился пункт
 > **`gpu-observability`** («heartbeat … с назад; движок: занят/свободен; VRAM: наш процесс …

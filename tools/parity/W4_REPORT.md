@@ -596,6 +596,23 @@ VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host 
 3 с назад; движок: свободен; VRAM: наш процесс 7263 МиБ, чужие 454 МиБ; лог резидента 600 с
 назад"}`, общий `"ok": true`; тесты 194/0 (+10), clippy 0/0, fmt 0.
 
+**Оверлей-поставка патча (02.10.2026).** Чтобы патч не ставился руками:
+* `runtime-manifests/engine-patch.json` — манифест оверлея: база (`base_tag` v1.15, коммит
+  `2683eb6`), тег наших ассетов `engine-patch-v1`, 10 файлов (bridge/audio/llama/mtmd/ggml\*)
+  с `size`+`sha256`;
+* `installers/fetch_engine_runtime.ps1 -PatchEngine` / `-RollbackEnginePatch` — скачивание по
+  манифесту с проверкой sha256, бэкап штатных DLL в `*.orig`; откат = восстановление из
+  `*.orig` (на каталоге без бэкапов отвечает «nothing to roll back»);
+* `installers/publish_engine_patch.ps1` (мейнтейнер, ASCII-only) — берёт вывод патченой сборки
+  (`-SourceDir`, `dist/engine-patch/` или `HDS_ENGINE_PATCH_SRC`), **падает при дрейфе хэшей**,
+  создаёт тег `engine-patch-v1` и заливает ассеты (`-Clobber` для замены);
+* доки: `README.md` — раздел «Патч движка (временно, до апстрима)» и `gpu-observability` в
+  «Диагностике»; `NOTICE.md` — наш патч на MIT-базой движка + установка/откат.
+
+Проверки оверлея: `.ps1` — `nonASCII=0`, `parseErrors=0`; манифест ↔ собранные DLL —
+`files=10 mismatches=0`; rollback-ветка смоук-прогнана. Rust-проверки не менялись: 194/0 (+10),
+clippy 0/0, fmt 0.
+
 **Итог L1 (шаги 1–3 закрыты).** Наблюдаемость (шлюз с меткой занятости, атрибуция VRAM по
 процессам, heartbeat резидента, `stop --force`, пункт `gpu-observability`), устойчивость
 (шаговое ожидание загрузки, отложенное вытеснение, bounded-арбитр, `503` вместо ожидания) и
