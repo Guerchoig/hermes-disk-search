@@ -14,8 +14,9 @@ pub const PAGE: &str = r#"<!doctype html>
  main{max-width:900px;margin:0 auto;padding:16px 20px}
  section{background:#131f2b;border:1px solid #24384f;border-radius:10px;padding:14px 16px;margin:14px 0}
  h2{font-size:15px;margin:0 0 10px;color:#9fd0ff}
- input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a3a55;background:#0d1620;color:#e6edf3}
+ input,button,textarea{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a3a55;background:#0d1620;color:#e6edf3}
  input{min-width:280px}button{cursor:pointer;background:#1c2f44}
+ textarea{width:100%;min-height:64px;box-sizing:border-box}
  button:hover{background:#25405e}
  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
  pre{white-space:pre-wrap;word-break:break-word;background:#0d1620;border:1px solid #24384f;border-radius:8px;padding:10px;margin:10px 0 0}
@@ -48,6 +49,16 @@ pub const PAGE: &str = r#"<!doctype html>
    <span id="tmsg" class="muted"></span></div>
   <div id="tree" class="muted">…</div></section>
 
+ <section><h2>Настройки (config.yaml)</h2>
+  <div class="muted">Корни индексации (по одному на строку):</div>
+  <textarea id="roots" rowspan="3" spellcheck="false"></textarea>
+  <div class="row"><button onclick="saveRoots()">Сохранить корни</button>
+   <span id="cmsg" class="muted"></span></div>
+  <div class="muted">Исключённые пути (по одному на строку):</div>
+  <textarea id="excl" spellcheck="false"></textarea>
+  <div class="row"><button onclick="saveExcl()">Сохранить исключения</button></div>
+ </section>
+
  <section><h2>Индексация</h2>
   <div class="row">
    <button onclick="act('/api/index/start')">Старт</button>
@@ -59,7 +70,7 @@ pub const PAGE: &str = r#"<!doctype html>
 </main>
 <script>
 async function jget(u){ const r=await fetch(u); return await r.json(); }
-async function jpost(u){ const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-HDS-UI':'1'}}); return await r.json(); }
+async function jpost(u,body){ const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-HDS-UI':'1'},body:JSON.stringify(body||{})}); return await r.json(); }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 async function refresh(){
   try{ const s=await jget('/api/status');
@@ -119,6 +130,17 @@ async function loadDiag(){
       ' <b>'+esc(c.title||c.id)+'</b>: '+esc(c.msg||'')+'</div>').join('');
   }catch(e){ d.textContent='ошибка: '+e; }
 }
-refresh(); setInterval(refresh, 3000); loadDiag(); loadTree();
+async function loadCfg(){
+  try{ const c=await jget('/api/config');
+    document.getElementById('roots').value=(c.roots||[]).join('\n');
+    document.getElementById('excl').value=(c.exclude_paths||[]).join('\n');
+  }catch(e){}
+}
+function linesOf(id){ return document.getElementById(id).value.split('\n').map(s=>s.trim()).filter(Boolean); }
+async function saveRoots(){ const m=document.getElementById('cmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/roots/save',{roots:linesOf('roots')}); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; } }
+async function saveExcl(){ const m=document.getElementById('cmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/config/excludes',{paths:linesOf('excl')}); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; } }
+refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
 </script></body></html>
 "#;

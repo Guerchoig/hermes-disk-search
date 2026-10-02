@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod config_edit;
 pub mod page;
 pub mod tree;
 
@@ -62,6 +63,15 @@ fn pct_decode(s: &str) -> String {
         }
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Список строк из JSON-тела по ключу (`{"roots": [...]}`).
+fn body_list(body: &str, key: &str) -> Vec<String> {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get(key).and_then(|a| a.as_array()).cloned())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default()
 }
 
 /// Значение query-параметра (`?a=b&c=d`).
@@ -387,8 +397,8 @@ fn run_index_bg(full: bool) -> Result<(), String> {
 
 /// Маршрутизация (чистая функция — тестируется без сокетов).
 ///
-/// `path` — без query; `query` — часть после `?`; `h` — заголовки (CSRF/POST).
-pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders) -> Reply {
+/// `path` — без query; `query` — часть после `?`; `h` — заголовки; `body` — тело POST.
+pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) -> Reply {
     let p = path.trim_end_matches('/');
     match (method, p) {
         ("GET", "") | ("GET", "/index.html") => {
@@ -397,6 +407,7 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders) -> Reply {
         ("GET", "/api/status") => json_ok(status_json()),
         ("GET", "/api/tree") => json_ok(tree::tree_json(qp(query, "walk").is_some())),
         ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
+        ("GET", "/api/config") => json_ok(config_edit::get_config()),
         ("GET", "/api/search") => {
             let q = qp(query, "q").unwrap_or_default();
             if q.trim().is_empty() {
@@ -429,6 +440,14 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders) -> Reply {
                 "/api/index/stop" => json_ok(index_action("stop", false)),
                 "/api/index/pause" => json_ok(index_action("pause", false)),
                 "/api/index/resume" => json_ok(index_action("resume", false)),
+                "/api/roots/save" => {
+                    let roots = body_list(body, "roots");
+                    json_ok(config_edit::set_roots(&roots))
+                }
+                "/api/config/excludes" => {
+                    let paths = body_list(body, "paths");
+                    json_ok(config_edit::set_exclude_paths(&paths))
+                }
                 _ => (404, "application/json", json!({ "error": "not found", "path": path }).to_string()),
             }
         }
@@ -517,8 +536,8 @@ pub fn run_http(host: &str, port: u16) -> Result<(), String> {
         match conn {
             Ok(mut stream) => {
                 std::thread::spawn(move || {
-                    if let Some((m, p, q, h, _b)) = read_request(&mut stream) {
-                        write_reply(&mut stream, route(&m, &p, &q, &h));
+                    if let Some((m, p, q, h, b)) = read_request(&mut stream) {
+                        write_reply(&mut stream, route(&m, &p, &q, &h, &b));
                     }
                 });
             }
