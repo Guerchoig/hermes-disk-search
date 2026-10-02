@@ -99,6 +99,10 @@
 > (`config/extractors/extract_av/extract_static/lemmatizer/whisper_cpp`), удалены ядровые модули,
 > `mcp_start.py`, `ensure_llama_runtime.*`, `tests\`, генераторы golden. golden **заморожен**.
 > Rust-строки с `python -m hds.*` поправлены. Rust — 174/0 (+9), clippy 0/0. `W4_REPORT.md` §13.
+> **README переписан (02.10.2026)** под Rust-first (1011 → ~306 строк): установка
+> (`setup.cmd`→`setup.ps1`: движок/GGUF/whisper/CLIP, задачи, интеграции), версионная установка
+> `app\<ver>`/`update.ps1`, CLI `hds`, UI, MCP, llm-host, sidecar (вкл. `.mpp`/Java), БД/сигналы,
+> `config.yaml`, разработка, диагностика, «осталось в Python» (только sidecar).
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

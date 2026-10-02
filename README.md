@@ -1,1011 +1,306 @@
 # hermes-disk-search
 
-Система хранения и поиска информации на вашем компьютере по запросам на естественном языке.
-Работает поверх **Hermes Agent Desktop** + **llama.cpp (llama-server)** (возможен
-любой OpenAI-совместимый бэкенд) на CUDA-видеокарте или Mac M1-M6.
+Локальный поиск и «спроси по своим файлам» — по дискам машины. **Ядро на Rust**:
+индексация, гибридный поиск (FTS5 + вектор + CLIP), RAG-ответы, MCP-сервер и
+веб-интерфейс. Python остаётся **только там, где он нужен по делу** — извлечение текста
+из офисных форматов/PDF/OCR и русская лемматизация (автономный воркер `sidecar`).
 
-Пример вопроса в чате Hermes: *«Найди на моём компе, в каких проектах использовался 1С:Документооборот»* —
-ответ придёт со ссылками на локальные файлы (тексты, PDF, MS Office, MS Project, видео, картинки).
+> Приватный проект (`Guerchoig/hermes-disk-search`). Состояние и журналы волн миграции:
+> `STATUS.md`, `tools/parity/W4_REPORT.md` (передача + §1–§13), `MIGRATION_PLAN_RUST.md`.
 
 ## Как это работает
 
 ```
-Диспетчер индексации    Индексатор                 Хранилище                Доступ
-watcher: мгновенная ->  обход дисков (D:\)    ->   SQLite + sqlite-vec   ->  MCP-сервер (чат Hermes)
-реакция на события      PDF/DOCX/XLSX/PPTX        + FTS5 (ключевые слова)   поиск_local_files / ask_my_files
-файловой системы        MS Project .mpp           векторы bge-m3            CLI: python -m hds.cli search|ask
-                        картинки: OCR (Tesseract)
-                        аудио/видео: faster-whisper (CUDA/Metal/CPU)
+        llm-host.exe  (резидент, владелец GPU)             :8010 chat
+        движок openresearchtools (LLM + ASR)               :8011 embedding
+              │  OpenAI-совместимый фасад + /internal/*     :8012 rerank
+              │
+  hds.exe ────┤  index / search / ask / status / check / ui (:8765)
+  hds_mcp.exe │  MCP stdio
+  hds mcp     ┘  --http -> :8787     ┌────────────────────────────────┐
+                                     │ sidecar (Python-воркер, stdio)  │
+                                     │  extract / normalize (.mpp,     │
+                                     │  pdf/docx/xlsx/pptx/OCR)        │
+                                     └────────────────────────────────┘
 ```
 
-**Диспетчер индексации (watcher)** запускается при старте системы и постояно отслеживает действия пользователя с файлами и работу индексатора; при создании/удалении/изменении/перемещении файлов диспетчер дает индексатору команду на изменения в индексной базе. Если диспетчер был некоторое время не активен, то при старте он отслеживает все изменения произошедшие за это время в файловой системе.
+* **Индексация** (`hds index` / watcher / UI): обход диска → извлечение текста →
+  чанки → эмбеддинги (`:8011`) → SQLite (`index.db`) + FTS5 + `sqlite-vec` (+ опц. CLIP).
+* **Поиск** (`hds search`): RRF-слияние FTS5 и векторного KNN; опц. CLIP по картинкам.
+* **RAG** (`hds ask`, MCP `ask_my_files`): гибридный поиск → опц. реранк (`:8012`) →
+  ответ чат-моделью (`:8010`) со ссылками `[N]`.
+* **llm-host** — единый резидент: держит роли чат/эмбеддинги/реранк на GPU и **сам ASR**
+  (движок вместо llama.cpp), раздаёт OpenAI-совместимый HTTP на 8010–8012 и владеет
+  VRAM-диспетчером. Кросс-процессной адресации инстансов у движка нет — поэтому всё
+  общение идёт через этот фасад.
+* **sidecar** — автономный Python-процесс (stdio + JSON-RPC 2.0) для того, что решено
+  оставить в Python: офисные форматы/PDF/OCR и `pymorphy3`-лемматизация FTS. Ядро
+  запускает его лениво и владеет процессом. `.mpp` (MS Project) требует Java 11+ (см. ниже).
 
-**Индексатор**, используя ИИ-модель эмбеддингов, по команде диспетчера создает или обновляет индексную базу
+## Требования (Windows x64)
 
-**Индексная база (хранилище)** хранит гибридный индекс и сведения о файлах, она расположена в месте, указанном в настройках, и может быть перемещена из пользовательского интерфейса
-
-**MCP-сервер по команде Hermas Agent** осуществляет гибридный поиск:
-семантический (векторы) + ключевой (FTS5/BM25), затем слияние результатов ()RRF). Если ИИ-модель эмбеддингов недоступна, то поиск производится только по ключевым словам, система продолжает работать.
-
-**Из web-интерфейса** можно изменять настройки, запускать и останавливать диспетчер и индексатор, (пере)индексировать отдельные пути или файлы, изменять местоположение индексной базы.
+* **Windows 10/11 x64**. macOS (Apple Silicon) — код есть, но **артефакт не проверен**
+  (`MIGRATION_PLAN_RUST.md` §10.0; из релиза выведен).
+* **GPU** — не обязательна: без CUDA-карты движок работает на Vulkan/CPU (медленнее).
+  Рекомендуется NVIDIA ≥8 ГБ VRAM (проверено на RTX 3060 12 ГБ: чат 9B + эмбеддинги + ASR).
+* **Microsoft Visual C++ Redistributable (x64)** — установщик поставит при отсутствии.
+* **Java 11+** — только для `.mpp` (MS Project). Без неё `.mpp` индексируется с пометкой,
+  остальное не затрагивается. Воркер сам находит `%LOCALAPPDATA%\jdk-21\*\bin\server\jvm.dll`
+  (`JAVA_HOME` не обязателен).
+* **ffmpeg** — для транскрипции медиа (движок ASR); `winget install Gyan.FFmpeg` (ставит установщик).
+* **Tesseract OCR** — по желанию (текст на картинках/сканах); ставится по согласию.
+* Сеть — для разовой загрузки: рантайм движка (по манифесту), GGUF-модели, модели CLIP.
 
 ## Установка — Windows
 
-Скачайте архив релиза, распакуйте и запустите **`setup.cmd` двойным кликом** —
-обёртка сама снимает пометку «скачано из интернета» (MotW) со всех файлов и
-запускает установщик с `-ExecutionPolicy Bypass` (подробнее — «Блокировки
-скачивания и подпись» ниже). Либо в PowerShell:
+1. Распакуйте архив релиза `hds-<версия>-windows-x64.zip` в любую папку (например `D:\hds`).
+2. Запустите **`setup.cmd`** (двойным щелчком) — он снимет пометку «скачано из интернета» (MotW)
+   и вызовет `setup.ps1` с `-ExecutionPolicy Bypass`.
+
+`setup.ps1` (ASCII-only) делает по шагам:
+
+1. **Проверка артефакта** — есть ли `bin\hds.exe` (иначе понятное сообщение: это не Rust-сборка).
+2. **Системные зависимости через winget** — `ffmpeg` (авто), `Tesseract OCR` (по согласию),
+   Visual C++ Redistributable (если нет).
+3. **Проверка sidecar-воркера** — рукопожатие `hello` (интерпретатор: `HDS_EXTRACT_PYTHON` →
+   `sidecar\python` → `.venv`); при неудаче — подсказка про системный Python 3.10+.
+4. **`config.yaml`** — из `config.example.yaml`, если нет; эвристика «диски из конфига отсутствуют».
+5. **Рантайм движка** — `installers\fetch_engine_runtime.ps1` (по `runtime-manifests\engine-manifest.json`,
+   выбор `cuda`/`vulkan`, проверка **sha256**; кладётся в `%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`).
+6. **Модели** — `fetch_llm_models.ps1` (GGUF chat/embedding/rerank в общий `%LOCALAPPDATA%\llama-runtime`),
+   опц. `fetch_whisper_model.ps1` (ASR), опц. `fetch_clip_models.ps1` (CLIP ~850 МБ).
+7. **Задачи Планировщика** (по согласию): `HermesDiskSearchLlmHost` (`bin\llm_host.exe run`),
+   `HermesDiskSearchWatch` (`bin\hds.exe watch`), `HermesDiskSearchMcp` (`bin\hds.exe mcp-http run`),
+   опц. `HermesDiskSearchUi`.
+8. **Интеграции** — `install_hermes.ps1` / `install_cline.ps1` (MCP по URL `:8787` или stdio `bin\hds_mcp.exe`).
+9. **Ярлык** на рабочем столе («Hermes Disk Search» → `run_ui.ps1`).
+10. **Диагностика** — `bin\hds.exe check`.
+
+Флаги: `-SkipModels`, `-SkipEngine`, `-NoAutostart`, `-SkipIntegrations`, `-SmokeTest`
+(мини-индекс на временной БД).
+
+### Установка с версионированием (`app\<версия>`)
+
+Чтобы обновлять, **не перезаписывая запущенный `hds.exe`/`llm_host.exe`** (на Windows нельзя),
+используйте версионную раскладку:
 
 ```powershell
-cd C:\Users\<пользователь>\hermes-disk-search
-powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_version.ps1 `
+    -From <hds-<версия>-windows-x64 | .zip> -Version <версия> -Root D:\hds -SetCurrent
 ```
 
-Установщик (`setup.ps1` — единственная точка входа, `installers\install_windows.ps1`
-оставлен как обёртка для совместимости) делает всё сам:
+Раскладка: `app\<версия>\` (код версии + `config.yaml`), `app\current` — junction на активную
+версию, общие `data\` и `models\` (junction-ы). `db_path` должен быть абсолютным или
+`data\index.db` — иначе индекс будет «на версию» (скрипт предупредит). Обновление целиком —
+**отдельным** процессом (процесс не может заменить сам себя):
 
-1. Находит рабочий Python 3.x и понятно ругается, если его нет (заглушка Store и т.п.).
-2. Ставит недостающее через winget: **ffmpeg** — автоматически; **Tesseract OCR** — по вашему разрешению; создаёт окружение - venv и устанавливает компоненты из файла зависимостей (+ faster-whisper).
-3. **Ставит llama.cpp (llama-server)** — пре-билд с GitHub Releases (CUDA-сборка
-   при NVIDIA, иначе Vulkan для AMD/Intel) в **общий каталог машины**
-   `%LOCALAPPDATA%\llama-runtime\bin` — тот же рантайм, что у `anonymizer_proxy`
-   (одна сборка llama.cpp и один набор моделей на машину); управляет серверами
-   менеджер `python -m hds.llama_server` (порты 8010/8011/8012).
-4. **Скачивает GGUF-модели** в общий рантайм `%LOCALAPPDATA%\llama-runtime\models\`
-   (embedding `bge-m3` Q8_0 ~1,2 ГБ, общая чат-модель `Qwen3.5-9B-Q6_K` ~7,5 ГБ,
-   реранкер `bge-reranker-v2-m3` ~600 МБ) скриптом
-   `installers\ensure_llama_runtime.ps1`; если модели уже скачаны в `~/.lmstudio`
-   — копируются оттуда, повторный запуск ничего не перекачивает. Позже модели
-   можно скачать/запустить кнопками в веб-интерфейсе (группа «LLM-серверы»).
-5. Замечает `config.yaml` с путями с другого компьютера (отсутствующие диски) и предлагает заменить их на профиль этого компьютера.
-6. По запросу предзагружает модель Whisper (~460 МБ), создаёт ярлык «Hermes Disk Search» на рабочем столе и (по запросу) автозапуск watcher'а, подключает MCP-сервер к Hermes Desktop и (если установлен) к Cline Desktop.
-
-Что нужно от пользователя:
-
-1. **Python 3.10+** с python.org (галочка «Add python.exe to PATH») — установить если не установлен.
-2. **llama.cpp и модели ставятся установщиком автоматически** — ручных действий не требуется. Серверы поднимаются сами при старте веб-интерфейса/MCP (`llm_server.autostart`); ручное управление: `python -m hds.llama_server status|start|stop`. Бинарь и GGUF лежат в общем llama-рантайме машины (`%LOCALAPPDATA%\llama-runtime`), общем с `anonymizer_proxy`; общая чат-модель меняется из UI или `python -m hds.llama_runtime switch <файл>` (см. «Общий llama-рантайм и смена чат-модели»).
-3. **MS Project (.mpp)** — поддерживается «из коробки»: `mpxj` входит в requirements.txt; нужна установка Java 11+ (JDK). Если Java не установлена системно, индексатор сам подхватит пользовательскую JDK из `%LOCALAPPDATA%\jdk-21\` (Temurin 21).
-
-После установки командная строка не нужна: ярлык «Hermes Disk Search» открывает веб-интерфейс, где делается всё — корни индексации, старт/стоп индексации и watcher'а, перенос базы, скачивание/загрузка модели эмбеддингов, правка config.yaml. Веб-интерфейс запускается даже с отсутствующим или испорченным config.yaml (покажет ошибку и предложит поправить).
-
-Диагностика (при желании): `.venv\Scripts\python.exe -m hds.cli check`
-
-### Блокировки «скачано из интернета» и цифровая подпись
-
-- **Windows**: файлы, распакованные из скачанного браузером ZIP, получают пометку
-  MotW (Zone.Identifier), и политика RemoteSigned требует подпись для запуска
-  скриптов. `setup.cmd` снимает пометку (Unblock-File) со всех файлов проекта и
-  запускает установщик с `-ExecutionPolicy Bypass`; setup.ps1 снимает пометку
-  повторно на всякий случай; скачанный Vulkan-рантайм whisper.cpp разблокируется
-  автоматически. SmartScreen при первом запуске скачанных exe может спросить —
-  «Подробнее → Выполнить в любом случае». Полное решение — Authenticode-сертификат
-  (подпись скриптов и exe через signtool убирает и требование подписи, и
-  SmartScreen), но сертификат платный; без него связки setup.cmd + Unblock-File
-  достаточно для запуска.
-- **macOS**: скачанные файлы получают карантинную метку com.apple.quarantine —
-  Gatekeeper блокирует неподписанные приложения («повреждён» / «не удаётся
-  открыть»). `install_macos.command` снимает карантин рекурсивно (`xattr -dr`)
-  с проекта и установленного приложения; mac-приложение в релизе подписано
-  ad-hoc (бесплатно, защищает от «повреждён»). Полное решение — Apple Developer
-  Program ($99/год) + нотаризация.
-
-## Установка — macOS (Apple Silicon M1-M4)
-
-```bash
-cd ~/hermes-disk-search
-bash installers/install_macos.command
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
+    -From hds-<новая>-windows-x64.zip -Version <новая> -Root D:\hds
 ```
 
-Инсталлятор запускается из Терминала и **сам снимает карантин Gatekeeper**
-(`xattr -dr com.apple.quarantine`) с проекта и установленного приложения, а
-копию приложения подписывает **ad-hoc на целевой машине** (кодовую подпись
-нельзя закоммитить в архив) — скачанный архив не будет «повреждённым»,
-приложение запускается без Gatekeeper-блокировок.
+`update.ps1` останавливает задачи/резидента → ставит новую версию → переключает `app\current` →
+запускает задачи. Прошлые версии сохраняются — откат = вернуть `current` на прежнюю.
 
-Инсталлятор сам ставит недостающее через Homebrew (python3, ffmpeg, **llama.cpp** —
-Metal для Apple Silicon включён автоматически, опционально Tesseract +
-`tesseract-lang` для русского OCR), создаёт venv, ставит зависимости и собирает
-**общий llama-рантайм машины** (`installers/ensure_llama_runtime.sh`): llama-server
-и GGUF-модели (bge-m3, общая чат-модель Qwen3.5-9B Q6_K, реранкер) лежат в
-`~/Library/Application Support/llama-runtime` — единый каталог с
-`anonymizer_proxy` и общий набор моделей (на Windows тот же рантайм — в
-`%LOCALAPPDATA%\llama-runtime`). Бинарь llama.cpp берётся из Homebrew
-(в `bin/` рантайма кладётся ссылка — апгрейд llama.cpp подхватывается сам), а
-если brew нет — скачивается готовой сборкой с GitHub Releases (карантин
-Gatekeeper снимается автоматически); уже скачанные в `~/.lmstudio` модели
-копируются, повторный запуск ничего не перекачивает. Далее инсталлятор
-копирует приложение «HDS Индексация» в ~/Applications, подключает MCP-сервер
-к Hermes Desktop и Cline Desktop (если установлен) и запускает диагностику `python -m hds.cli check`.
+### Блокировки «скачано из интернета» и подпись
 
-Отличия от Windows:
+Бинарники не подписаны (подпись кода в бюджет не входит). Поэтому:
 
-- **CUDA недоступна** — инсталлятор на Apple Silicon сам подключает **Metal** через
-  mlx-whisper (устанавливает его и скачивает MLX-веса модели), и транскрипция идёт на GPU.
-  Если mlx-whisper недоступен — CPU (`int8`). Авто-детекция включена по умолчанию
-  (`index.whisper_device: auto`); явно включить Metal: `index.whisper_device: metal`.
-  Важно: через faster-whisper/ctranslate2 Metal недоступен в принципе (ctranslate2
-  поддерживает только cpu/cuda/auto), поэтому Metal — это отдельный бэкенд mlx-whisper.
-- **Пакеты nvidia-* не нужны** и на Mac не ставятся.
-- **Tesseract**: `brew install tesseract tesseract-lang`; языки лежат в
-  `/opt/homebrew/share/tessdata` — код подхватывает их автоматически.
-- **MS Project (.mpp)**: нужна Java — `brew install openjdk` (индексатор найдёт её сам).
-- **llama-server (локальные модели)**: тот же общий llama-рантайм, что на Windows —
-  `~/Library/Application Support/llama-runtime` (переопределяется `LLAMA_RUNTIME_DIR`).
-  Бинарь `bin/llama-server` — ссылка на `brew install llama.cpp` (Metal на Apple Silicon
-  включается сам), модели `chat`/`embedding`/`rerank` — в `models/`. Управление то же:
-  `python -m hds.llama_server status|start|stop` и `python -m hds.llama_runtime list`.
-  Если на Intel-маке роль не стартует (нет Metal-бэкенда), поставьте `-ngl 0` в
-  `llm_server.<роль>.extra_args`; если llama-server жалуется на `--cache-type-k/v q8_0`
-  (нужно flash-attention) — добавьте `-fa on` в те же `extra_args`.
-- **Корни индексации**: в `config.yaml` укажите свои папки, например:
-
-```yaml
-index:
-  roots:
-    - "/Users/ваш-пользователь"
-db_path: 'index.db'   # или путь на внешнем диске, напр. '/Volumes/Disk/index.db'
-```
-
-- **Автозапуск watcher**: в web-интерфейсе (кнопка автозапуска) или LaunchAgent
-  `~/Library/LaunchAgents/local.hds.watch.plist` — поддерживается кодом UI-сервера.
-- **Интеграция с Hermes** (отдельно, в любой момент):
-  `bash installers/install_hermes_macos.sh ["путь к каталогу Hermes"]`.
-
-Диагностика: `.venv/bin/python -m hds.cli check`
+* `setup.cmd`/`setup.ps1` снимают MotW (`Unblock-File`) — иначе политика `RemoteSigned`
+  потребует цифровую подпись для `.ps1`;
+* SmartScreen может показать «Windows protected your PC» для `hds.exe` — «More info → Run anyway».
 
 ## Архивы релиза
 
-На странице релизов GitHub выложены два полных архива — приложение «HDS Индексация»
-и иконки `assets/` уже внутри, отдельно скачивать ничего не нужно:
+| Ассет | Содержимое |
+|---|---|
+| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) | `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, скрипты, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-engine-runtime-windows-x64-cuda.zip` | рантайм движка (LLM-хост + ASR) по манифесту (CI-джоба `fetch-engine-runtime`) |
+| `hermes-disk-search-<версия>-windows.zip` | архив исходников (legacy) |
 
-| Файл                                          | Для чего                                                                                                                                                                                                                 |
-| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hermes-disk-search-<версия>-windows.zip` | Исходники + иконки + инсталляторы для Windows (`installers\install_windows.ps1`)                                                                                                                |
-| `hermes-disk-search-<версия>-macos.zip`   | То же для macOS (`installers/install_macos.command`), права на исполнение сохранены; инсталлятор ставит приложение «HDS Индексация» в ~/Applications |
+Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
+`runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
+`fetch_whisper_model.ps1`. Атрибуция и лицензии — `NOTICE.md`.
 
-Порядок установки из архива: распаковать → запустить инсталлятор своей ОС → следовать подсказкам.
-
-## Использование
+## Использование (CLI `hds`)
 
 ```powershell
 # Первичная индексация (запустить на ночь; прогресс в консоли)
-.venv\Scripts\python.exe -m hds.cli index
+hds index
+hds index --roots "D:\;E:\" --kinds text,pdf --progress-sec 3
 
-# Быстрый поиск
-.venv\Scripts\python.exe -m hds.cli search "в каких проектах использовался 1С:Документооборот"
+# Поиск и RAG
+hds search "техническое задание" --limit 8 [--kinds text,pdf] [--json]
+hds ask "какие требования к срокам?" [--limit 8] [--json]
 
-# Развёрнутый ответ с цитатами (RAG через локальную модель)
-.venv\Scripts\python.exe -m hds.cli ask "в каких проектах использовался 1С:Документооборот"
+# Состояние и диагностика
+hds status [--json]
+hds check  [--json]      # компоненты окружения + роли (то же, что /api/diagnostics в UI)
 
-# Состояние индекса
-.venv\Scripts\python.exe -m hds.cli status
+# Инкремент/обслуживание
+hds reindex <путь> [--no-force]
+hds reindex-fts [--progress-sec N]     # перестроить лемматизированный FTS
+hds forget <путь>
+hds db-move --to <новый путь index.db> [--force]
+hds clip-index                          # дозаполнить CLIP-векторы картинок
+hds whisper-check [--file <медиа>] [--json]
 
-# Наблюдатель: мгновенная индексация по событиям ФС (создание/изменение/удаление/переименование)
-.venv\Scripts\python.exe -m hds.cli watch
-
-# Переиндексировать файл/папку; убрать из индекса
-.venv\Scripts\python.exe -m hds.cli reindex "D:\путь"
-.venv\Scripts\python.exe -m hds.cli forget "D:\путь\файл.pdf"
+# Процессы/сервисы
+hds stop                                # создать index.stop (остановить индексацию)
+hds watch [--roots a;b]                 # наблюдатель ФС
+hds ui [--host H] [--port N]            # веб-интерфейс (default 127.0.0.1:8765)
+hds mcp [--http --host H --port N --path /mcp]   # MCP stdio или streamable-http
+hds mcp-http check|start|stop|status|restart|run
 ```
 
-На macOS те же команды через `.venv/bin/python`:
+Общее: `-h`/`--help`. Конфиг — `config.yaml` (путь можно переопределить `HDS_CONFIG`).
+Индексация кооперативно останавливается файлом `index.stop` и приостанавливается `index.pause`.
 
-```bash
-cd ~/hermes-disk-search
-.venv/bin/python -m hds.cli index
-.venv/bin/python -m hds.cli search "в каких проектах использовался 1С:Документооборот"
-.venv/bin/python -m hds.cli watch
-```
+## Веб-интерфейс (`hds ui`)
 
-### Автозапуск наблюдателя (Windows)
+Ярлык «Hermes Disk Search» (рабочий стол) запускает `run_ui.ps1` → `bin\hds.exe ui` и открывает
+`http://127.0.0.1:8765`. Что умеет: статус индекса и ролей `llm-host`, поиск, `ask`, дерево
+индексации по БД (`/api/tree`, кэш 30 с, `?refresh=1`), диагностика (`/api/diagnostics` = полный
+`hds check`), управление индексацией (`start`/`stop`/`pause`/`resume`), правка `config.yaml`
+(roots/exclude_paths) **с сохранением комментариев**. Страница шлёт `X-HDS-UI: 1` (CSRF-защита POST).
 
-`.\install_autostart.ps1` — создаст задачу Планировщика `HermesDiskSearchWatch` (при входе в систему).
-На macOS — LaunchAgent (plist, `/Library/LaunchAgents/`), команда та же: `python -m hds.cli watch`.
+Логи сервера: `%LOCALAPPDATA%\hermes-disk-search\ui.log` и `ui.err.log`.
 
-### Расписание вместо наблюдателя
+## MCP-сервер
 
-Можно не держать watcher, а индексировать по cron Hermes или Планировщику: ночная команда
-`python -m hds.cli index` (инкрементальная, быстро: только новые/изменённые файлы).
+* **stdio** — `bin\hds_mcp.exe` (он же `hds mcp`): каждый клиент поднимает свой процесс.
+  Инструменты: `search_files`, `ask_my_files`, `get_file`, `index_status`, `start_indexing`, `stop_indexing`.
+* **streamable-http** — ОДИН инстанс на машину: `hds mcp --http` (URL по умолчанию
+  `http://127.0.0.1:8787/mcp`); управление — `hds mcp-http check|start|stop|status|restart|run`
+  (`restart` переиспользует живой инстанс, но перезапускает устаревший).
 
-## Вывод прогресса при индексации
+Интеграции подключают клиентов **по URL** — они не запускают свои процессы (иначе плодятся сироты).
 
-Во время `index` терминал показывает живую строку статуса (обновляется раз в N секунд):
-`⏱ 12:34 | просмотрено 34 512 | обработано 216 | ошибок 2 | 112 файлов/мин | ▶ семинар.mp4 [видео/аудио → ffmpeg + Whisper — 43%, идёт 03:12]`
-
-- **▶ текущий файл** и фаза обработки видны всегда — в том числе во время долгой
-  Whisper-транскрипции (для медиафайлов печатается отдельное сообщение «[..] ... извлечение
-  аудио + Whisper-транскрипция»);
-- **процент обработки медиафайла** — доля транскрибированного аудио в % (по времени сегментов
-  Whisper); обновляется в реальном времени по мере выдачи сегментов (в батчевом режиме —
-  более крупными шагами);
-- **процент эмбеддингов для текстовых файлов** — большие тексты/CSV нарезаются на чанки, и
-  каждый чанк векторизуется через llama-server (роль embedding); в статусе видно «текст/код — N%» = сколько чанков
-  файла уже проиндексировано;
-- **лимит чанков на файл** `index.max_chunks` (по умолчанию 2000): гигантские CSV/логи
-  обрезаются с предупреждением `[warn] ... обрезан до N чанков` — один файл не может
-  завладеть всем индексом и всем временем GPU; `0` — без лимита;
-- завершение файла — с длительностью: `[216] ✓ D:\...\файл.pdf -> indexed(4 чанков) (2.3 с)`;
-- при перенаправлении вывода в файл (не-tty) вместо перерисовки печатаются полные строки
-  статуса с той же периодичностью — логи остаются читаемыми;
-- флаги: `--progress-sec N` (по умолчанию 3; 0 — отключить), `--quiet` (как раньше);
-- в чате Hermes инструмент `index_status` показывает тот же прогресс (текущий файл,
-  счётчики, время) — спросите «как продвигается индексация?».
-
-## Транскрипция Whisper: как устроено
-
-- Модель (`small` по умолчанию) хранится **локально** в `models\whisper-small\` — скачивается
-  один раз через curl (обходит надёжно зависающие запросы huggingface_hub), работает офлайн.
-- Аудио/видео передаётся модели **окнами** (ffmpeg → WAV 16 кГц → сегменты VAD): пульсирующая
-  загрузка GPU в диспетчере задач — нормальное поведение.
-- По умолчанию включён **батчевый режим** (`index.whisper_batch: 8`): GPU загружается ровно,
-  ускорение в 3–5 раз; при сбое автоматически откатывается к последовательному.
-- При зависании CUDA-загрузки (>180 с, `index.whisper_load_timeout`) — автоматический
-  fallback на CPU (`int8`) с русским сообщением.
-- **Выбор устройства — авто-детекция** (`index.whisper_device: auto` по умолчанию).
-  Цепочка на Windows/Linux: **CUDA** (faster-whisper) → **Vulkan** (whisper.cpp — путь
-  GPU-ускорения для AMD/Intel) → **CPU** (`int8`). На macOS: Metal через mlx-whisper
-  (инсталлятор ставит его на Apple Silicon), иначе CPU.
-  Можно задать явно: `cuda`, `vulkan`, `cpu`, `metal` (только macOS).
-- **AMD/Intel без CUDA (Vulkan через whisper.cpp)**: ctranslate2 работает только с CUDA,
-  поэтому для AMD-карт используется отдельный бэкенд — whisper.cpp с Vulkan (GGML Vulkan
-  зреет с 2024 г. и на AMD по скорости сопоставим с CUDA на NVIDIA). Инсталлятор ставит его
-  автоматически, если CUDA не найдена и есть GPU (AMD/Radeon/NVIDIA/Intel); вручную:
-  `.venv\Scripts\python.exe -m hds.cli vulkan-setup` (скачивает бинарник и GGML-веса
-  `ggml-<имя>.bin` в `models\whisper-cpp\`; папку можно переопределить —
-  `index.whisper_cpp_dir`). Подойдёт и любая своя сборка whisper.cpp — просто положите
-  `whisper-cli.exe` в эту папку. Если готовая Vulkan-сборка недоступна, бэкенд можно
-  собрать: `cmake -B build -DGGML_VULKAN=ON` (README whisper.cpp). До установки бэкенда
-  (и при его сбое) транскрипция работает на CPU; UI-диагностика напомнит об установке.
-- Для CUDA нужны `nvidia-cublas-cu12` + `nvidia-cudnn-cu12` (ставятся инсталлятором;
-  код проекта сам добавляет их DLL в пути поиска). Пакеты ставятся только на Windows —
-  на macOS они не нужны.
-- **macOS (M1-M4)**: CUDA физически отсутствует — код сам переключает транскрипцию
-  на Metal (mlx-whisper) или CPU (`int8`), без ошибок «CUDA not available» и без ложных
-  fallback-таймаутов. Metal-ускорение: `index.whisper_device: metal` (или `auto`);
-  веса — `mlx-community/whisper-<имя>-mlx` (`index.whisper_mlx_repo`), скачиваются в
-  HF-кэш инсталлятором или при первой транскрипции; при сбое — обычный fallback на CPU.
-- Проверка вручную: `python -m hds.cli whisper-check`.
-
-## Предупреждения HuggingFace при индексации (и что с ними делать)
-
-При первом запуске транскрипции аудио/видео faster-whisper скачивает модель Whisper
-с HuggingFace и может вывести английские предупреждения. **Они безвредны** и в коде
-проекта подавлены и заменены русскими сообщениями:
-
-| Английское предупреждение                                    | Что означает                                                                                                                                                                                | Что сделано                                                                                                                                                                                                                    |
-| ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Warning: You are sending unauthenticated requests to the HF Hub...`               | Загрузка модели идёт анонимно — действуют сниженные лимиты скорости                                                                         | Разовая загрузка; для ускорения укажите токен в`config.yaml: index.hf_token` (получить: https://huggingface.co/settings/tokens)                                                        |
-| `huggingface_hub cache-system uses symlinks... your machine does not support them` | Без «Режима разработчика» Windows кэш хранит файлы копированием (чуть больше места на диске), загрузка работает | Подавлено (`HF_HUB_DISABLE_SYMLINKS_WARNING=1`); опционально включите Режим разработчика: Параметры → Конфиденциальность → Для разработчиков |
-
-Код проекта сам устанавливает `HF_HUB_DISABLE_SYMLINKS_WARNING=1` и выводит русские
-сообщения (`[whisper] Подготовка модели...`, `[whisper] Модель готова`). Инсталлятор
-Windows предзагружает модель Whisper заранее, чтобы не качать её посреди индексации.
-
-## Безопасная остановка индексации
-
-Индексацию можно прервать в любой момент без ущерба:
-
-- **Ctrl+C** в консоли — аккуратное завершение: обработанные файлы уже сохранены
-  (каждый файл коммитится атомарно), текущий файл откатится и будет дообработан
-  при следующем запуске;
-- **CLI**: `python -m hds.cli stop` — создаёт стоп-сигнал `index.stop`; удобно,
-  когда индексация идёт в другом окне/фоне;
-- **Из чата Hermes**: инструмент `stop_indexing` (то же самое);
-- после остановки стоп-файл удаляется автоматически; `index --full`/`index` продолжат
-  с места остановки (уже проиндексированное пропускается).
-
-## Иконка, ярлыки, инсталляторы
-
-- **Иконка**: `assets/icon.png` (512px), `assets/icon.ico` (Windows), `assets/icon.icns` (macOS).
-  Генерируется программно: `python tools/make_icon.py` (можно заменить свою — просто подмените файлы).
-- **Ярлык запуска индексации**:
-  - Windows: `shortcuts\windows\create_shortcut.ps1` — создаёт «Индексация дисков.lnk»
-    (на рабочем столе) с иконкой; целевой скрипт — `run_index.ps1` в корне проекта.
-  - macOS: `shortcuts/macos/Индексация дисков.command` (двойной клик из Finder;
-    после клонирования выполните `chmod +x`) и приложение
-    `shortcuts/macos/HermesDiskSearchIndex.app` (иконка внутри, копируется инсталлятором в ~/Applications).
-- **Инсталляторы** (проверяют и доустанавливают недостающее; llama.cpp и модели
-  ставят сами в общий llama-рантайм машины, Hermes не устанавливают —
-  предупреждают и дают ссылки):
-  - Windows: `installers\install_windows.ps1` (Python, ffmpeg, Tesseract по желанию, venv,
-    ярлыки, автозапуск watcher по выбору).
-  - macOS: `installers/install_macos.command` (brew, python3, ffmpeg, llama.cpp →
-    общий рантайм `~/Library/Application Support/llama-runtime`, модели,
-    tesseract-lang, venv, Whisper-модель по желанию, установка .app, интеграция с Hermes).
-- **Архивы релиза** — см. раздел «Архивы релиза»: иконки и mac-приложение теперь
-  входят в состав архивов (`assets/` в репозитории — тот же источник).
-
-## LLM-серверы llama.cpp (архитектура, память GPU)
-
-Локальный LLM-бэкенд — три инстанса **llama-server** (llama.cpp), «одна GGUF-модель —
-один сервер», под управлением менеджера `hds/llama_server.py`:
-
-| Роль | Порт | Назначение | Модель (по умолчанию) |
-|------|------|------------|------------------------|
-| `chat` | 8010 | RAG-ответы ask_my_files (`/v1/chat/completions`) | qwen3.5-9b Q6_K (~7,5 ГБ) |
-| `embedding` | 8011 | векторизация (`/v1/embeddings`, `--embedding --pooling cls`) | bge-m3 Q8_0 (~1,2 ГБ) |
-| `rerank` | 8012 | реранкинг (опционально, `--reranking --pooling rank`) | bge-reranker-v2-m3 Q8_0 (~600 МБ) |
-
-Ключевые свойства:
-
-- **Очередь**: все инстансы запускаются с `--parallel 1` — одновременно работает
-  ровно один запрос, остальные ждут в очереди llama-server (конкуренция
-  watcher/UI/MCP/Cline не теряет запросы; таймауты клиентов покрывают ожидание).
-- **Инструменты вызывает агент, а не llama**: chat-сервер запускается без
-  `--jinja`, поле `tools` в запросах не передаётся — RAG-вызов листовой, дэдлоки
-  «модель ждёт инструмент» невозможны.
-- **Thinking-управление**: `chat.thinking: off` (по умолчанию) отправляет
-  `"chat_template_kwargs": {"enable_thinking": false}` — точное отключение
-  размышлений per-request; `auto` — размышления разрешены, клиенту уходит только
-  финальный текст (`reasoning_content` отбрасывается, при пустом ответе —
-  автоматический nudge-дозапрос).
-- **Контексты**: chat 16384, embedding 8192 (требование `EMB_CONTEXT`), rerank 8192;
-  `--ctx-size = llm_server.parallel × ctx_per_slot`. llama.cpp отвечает ЯВНОЙ
-  ошибкой 400 на вход длиннее контекста (LM Studio исторически усекал молча).
-- **Память GPU**: KV-кэш чата квантован в q8_0; `-ngl` и прочие флаги —
-  `llm_server.<role>.extra_args` в config.yaml. При нехватке VRAM перенесите
-  embedding/rerank на CPU (`-ngl 0`) — для этих ролей это почти незаметно.
-
-Проверка состояния: `python -m hds.llama_server status` (или карточка «Проверка
-компонентов» / группа «LLM-серверы» в веб-интерфейсе — там же кнопки запуска
-и скачивания моделей). Логи инстансов: `data/logs/llama_<role>.log`.
-
-### Общий llama-рантайм и смена чат-модели
-
-llama-server и GGUF-модели лежат не в папке проекта, а в **общем каталоге
-машины** (переопределяется `LLAMA_RUNTIME_DIR`):
-
-| ОС | Каталог рантайма |
-|----|------------------|
-| Windows | `%LOCALAPPDATA%\llama-runtime` |
-| macOS | `~/Library/Application Support/llama-runtime` |
-| Linux | `~/.local/share/llama-runtime` |
-
-Каталог общий с `anonymizer_proxy`: одна сборка llama.cpp (Windows — cuda|vulkan,
-macOS — Metal/Homebrew), один набор моделей, одни и те же файлы (общая
-чат-модель, `embedding`, `rerank`):
-
-```
-llama-runtime\
-  bin\                  llama-server(.exe) + DLL/dylib (Windows: сборка cuda|vulkan;
-                        macOS: ссылка на brew install llama.cpp)
-  models\chat\          GGUF чат-моделей + current.json (активная)
-  models\embedding\     bge-m3-Q8_0.gguf
-  models\rerank\        bge-reranker-v2-m3-q8_0.gguf
-  projects.json         реестр проектов (перезапуск их llama-инстансов)
-  version.json          вариант сборки (cuda|vulkan|cpu|metal) + источник
-```
-
-- **`shared:<role>`** в `llm_server.<role>.model` (config.yaml) — «файл из
-  манифеста общего рантайма» (`models\<role>\current.json`): путь к GGUF менять
-  не нужно. Абсолютный путь к файлу — escape-hatch (приоритетнее `shared:`).
-- **Смена чат-модели** видна обоим проектам сразу:
-  - в веб-интерфейсе — группа «LLM-серверы» → виджет «Чат-модель»: выбрать
-    файл или пресет → «Применить и перезапустить». Модель пишется в манифест,
-    chat-инстанс этого проекта и llama-инстансы всех проектов из
-    `projects.json` (в т.ч. `anonymizer_proxy`) перезапускаются;
-  - из командной строки:
-    `.venv\Scripts\python.exe -m hds.llama_runtime switch Qwen3.5-9B-Q6_K.gguf`
-    (`--no-download` — не скачивать отсутствующий пресет, `--no-restart` —
-    только переписать манифест).
-- **Один llama-инстанс на две программы (экономия ~6,6 ГБ)**: рантайм общий, но
-  инстансы могут быть своими у каждого проекта (proxy — 8080, hermes — 8010…8012).
-  На этой машине proxy переключён на **общий инстанс hermes (8010)**: в
-  `anonymizer_proxy\.env` → `LLM_SERVER_PORT=8010`, и proxy при старте видит живой
-  llama (probe по `/props`) и **переиспользует** его, второй процесс не поднимает.
-  Условие — контекст инстанса: `llm_server.chat.ctx_per_slot: 32768` (proxy
-  предупреждает при меньшем: длинные файлы упадут с «request exceeds the available
-  context size»). Владеет инстансом тот, кто поднял его первым (его PID-файл);
-  второй проект только подключается по HTTP.
-- **Обзор рантайма**: `python -m hds.llama_runtime list` (текущая модель,
-  файлы, пресеты, бинарь, проекты) и `python -m hds.llama_runtime dir` (пути).
-- **Установка/переустановка**: идемпотентный установщик рантайма —
-  `installers\ensure_llama_runtime.ps1` (Windows, вызывает `setup.ps1`) и
-  `installers/ensure_llama_runtime.sh` (macOS, вызывает `install_macos.command`);
-  повторный запуск ничего не докачивает. Роли `embedding`/`rerank`, которых нет
-  у proxy, докачиваются установщиком этого проекта.
-- **Установщик моделей**: полезное из старого `installers/ensure_models.*`
-  (fallback-копирование уже скачанных GGUF из `~/.lmstudio` вместо повторной
-  загрузки ~9 ГБ) перенесено в ensure-скрипт рантайма; `ensure_models.ps1` и
-  `ensure_models.sh` **удалены** — и на Windows, и на macOS модели обеспечивает
-  установщик общего рантайма.
-- **`models/` проекта** больше не содержит GGUF llama: там остаются только
-  Whisper-модели (`models\whisper-cpp`, `models\whisper-small`).
-- **Реранкеру нужны `--batch-size/--ubatch-size`**: фрагмент длиннее physical
-  batch (дефолт 512) llama-server отвергает ошибкой 500 («input is too large to
-  process»), поэтому в дефолтном `llm_server.rerank.extra_args` они заданы
-  (8192 — как у роли `embedding`).
-- **macOS**: тот же рантайм в `~/Library/Application Support/llama-runtime`;
-  бинарь — ссылка на `brew install llama.cpp` (или пре-билд с GitHub Releases,
-  если brew нет), модели скачивает `installers/ensure_llama_runtime.sh`.
-  `shared:<role>` в config.yaml работает так же, как на Windows. Escape-hatch:
-  `llm_server.bin` (путь к бинарю) и `python -m hds.llama_runtime` (`list`, `dir`,
-  `switch`, `download`, `register`) — общие для обеих ОС.
-
-## Веб-интерфейс (UI)
-
-Локальная веб-страница управления всей системой: `http://127.0.0.1:8765`.
+## Интеграция с Hermes / Cline
 
 ```powershell
-python -m hds.cli ui          # сервер + браузер откроется автоматически
+powershell -NoProfile -ExecutionPolicy Bypass -File install_hermes.ps1   # Hermes Desktop
+powershell -NoProfile -ExecutionPolicy Bypass -File install_cline.ps1    # Cline Desktop/CLI
 ```
 
-**Ярлык «Hermes Disk Search»** на рабочем столе открывает эту страницу
-(`shortcuts\windows\create_shortcut.ps1` создаёт ярлык; сервер запускается скрыто,
-страница открывается в браузере — если сервер уже работает, просто откроется вкладка).
+Идемпотентно: регистрируют MCP-сервер (URL `:8787`, иначе stdio `bin\hds_mcp.exe`), кладут скилл,
+при необходимости правят `.env` Hermes — блок `NO_PROXY=localhost,127.0.0.1,::1` (иначе httpx2
+шлёт локальные запросы в системный прокси, и MCP отвечает 503). Можно запускать до установки
+клиента и повторить позже.
 
-Возможности UI:
+## llm-host — резидент (владелец GPU и портов 8010–8012)
 
-- **Индексация**: Старт / Старт с переобработкой всего / ⏸ Пауза / ▶ Продолжить / ⏹ Стоп;
-  можно задать корни для конкретного запуска (через «;»), иначе берутся из настроек;
-- **живой ход**: текущий файл и фаза, % транскрипции/эмбеддингов, список последних
-  обработанных файлов;
-- **🌳 Деревья папок индексации**: по умолчанию скрыты (клик по заголовку — показ),
-  строятся при открытии и по кнопке «Обновить деревья»; сворачивание/развертывание
-  папок — нативные `<details>`-элементы. Цвет папки: **зелёный** — все файлы папки
-  в индексе; **жёлтый** — частично; без цвета — не начата; статус родителя — свёртка
-  по потомкам (смесь «выполнено/не начато» = жёлтый). В скобках: файлов на диске /
-  в индексе. Длинные списки сворачиваются в «… ещё N папок»;
-- **Watcher**: статус, запуск/остановка, переключатель автозапуска при входе в систему;
-- **Настройки**: полный редактор `config.yaml` (включая пути индексирования `index.roots`)
-  с валидацией YAML; изменения применяются к новым запускам — после сохранения
-  перезапустите watcher/индексацию кнопками;
-- **Расположение базы индексации**: путь, размер, счётчики; **перенос базы** на новый
-  путь — атомарный, с возвратом состояния watcher'а и индексации.
-
-Сервер слушает только `127.0.0.1` (доступ извне невозможен), порт настраивается
-`python -m hds.cli ui --port N`. POST-эндпоинты API принимают только запросы
-собственной страницы (`Origin: http://127.0.0.1:<порт>`, `Content-Type: application/json`)
-— cross-origin запросы из браузера отклоняются. Статусы отражают **истинное состояние
-любых процессов**: индексация определяется через heartbeat-файл (`index.heartbeat.json`
-обновляется индексатором каждые ~30 с, кросс-процессно), watcher — через `watch.lock`
-(файл занимается **атомарно**: два одновременных старта — автозапуск + кнопка в UI,
-двойной клик — не дают двух наблюдателей; устаревший lock снимается по живости PID)
-и живость PID.
-
-## Watcher: наблюдатель файловой системы
-
-Watcher — постоянно работающий фоновый процесс, поддерживающий индекс в актуальном
-состоянии без ручных запусков.
-
-- **Команда**: `python -m hds.cli watch` (скрыто: `pythonw.exe -m hds.cli watch`).
-- **Процесс в диспетчере задач**: `pythonw.exe` (две строки — лаунчер venv и интерпретатор;
-  отличать по колонке «Командная строка»: `... -m hds.cli watch`).
-- **Автозапуск**: `.\install_autostart.ps1` — сначала пробует задачу Планировщика
-  `HermesDiskSearchWatch` (нужны права администратора), при отказе автоматически создаёт
-  ярлык в папке автозагрузки (`Win+R → shell:startup → HermesDiskSearchWatch.lnk`).
-  Права администратора не требуются.
-- **При старте**: `reconcile_on_start` — быстрый stat-обход корней, догоняющий всё,
-  что изменилось, пока watcher не работал (новые → индексация, пропавшие → prune).
-  Наблюдение включается **до** сверки: изменения во время долгого обхода не теряются.
-- **События**: создание/изменение/удаление/переименование → debounce (ожидание конца
-  записи, `watch.debounce_seconds`) → индексация файла. Удаление в корзину убирает
-  файл из индекса (корзина исключена из индексации на Windows и macOS).
-- **Однократность**: файл-замок `watch.lock` (PID) не даёт запустить второй watcher;
-  при аварийном завершении lock остаётся — следующий старт определяет мёртвый PID
-  и продолжает работу.
-- **Остановка**: убить процесс `pythonw.exe` (два PID — лаунчер и интерпретатор) или
-  ярлык автозагрузки удалить. Пропущенное за простой догонится при следующем старте.
-
-## Индексная база данных (`index.db`)
-
-База — **один файл SQLite**: `~hermes-disk-search-db\index.db`
-(настраивается `db_path` в `config.yaml`).
-
-**Внутри всё вместе:**
-
-| Таблица | Содержимое                                                                     |
-| -------------- | ---------------------------------------------------------------------------------------- |
-| `chunks_vec` | эмбеддинги (sqlite-vec): ~4 КБ на чанк, по 1024 числа float32   |
-| `chunks`     | тексты чанков                                                                |
-| `chunks_fts` | полнотекстовый индекс (FTS5/BM25)                                    |
-| `files`      | каталог файлов (путь, размер, хэш, статус, ошибки) |
-| `meta`       | служебное (размерность эмбеддингов)                       |
-
-Рядом создаются `index.db-wal` и `index.db-shm` — служебные файлы WAL-режима,
-**не удалять** (сами сливаются в основной файл).
-
-**Как работать:**
-
-- **Резервная копия**: остановить watcher → скопировать `index.db*`; либо командой
-  `db-move` на временный путь (она делает консистентную копию);
-- **Перенос на другой диск/путь** — атомарная команда:
-
-  ```powershell
-  python -m hds.cli db-move --to "D:\hermes-disk-search-db\index.db"
-  ```
-
-  Этапы (сбой на любом этапе не портит текущую БД):
-  1. останавливает процессы hds (watch/index);
-   2. создаёт **консистентную копию** через SQLite backup API (WAL учитывается);
-   3. проверяет равенство счётчиков (файлы/чанки) — при расхождении откат;
-   4. **атомарно** переключает `db_path` в `config.yaml` (замена файла через `os.replace`);
-   5. переименовывает старую БД в `index.db.moved-<дата>` — остаётся резервной копией,
-   можно удалить;
-   6. перезапускает watcher с новой БД (если он работал).
-
-   > **Возможный рефакторинг** (сейчас работает как есть): шаг 1 останавливает
-   > процессы `watch`/`index` жёстким `psutil.kill()` (SIGKILL). Целостность БД
-   > не страдает (WAL откатывает незакоммиченное), но транзакция текущего файла
-   > обрывается без аккуратной уборки: файл остаётся со статусом `new`/`error`
-   > и дообрабатывается следующим прогоном индексации. Корректнее —
-   > graceful-остановка через файл `index.stop` с ожиданием по heartbeat
-   > (аналог того, как `_db_move` в UI останавливает внутрипроцессную
-   > индексацию), kill только по таймауту; заодно — guard на отсутствие
-   > старой БД (сейчас `sqlite3.connect(old)` молча создаст пустой файл,
-   > а проверка счётчиков упадёт с «no such table»). Реализация в
-   > `hds/dbops.py::move_db`, оговорка продублирована в её докстринге.
-- **Смена модели эмбеддингов** (`embedding.dim`) — векторная таблица пересоздаётся
-  автоматически, затем `index --full`.
-- **Удалить БД** = переиндексировать всё с нуля.
-- **Рост**: ~4 КБ (вектор) + текст на чанк; полный `D:\` — потенциально несколько ГБ.
-
-## MCP-сервер: один инстанс на машину (streamable-http)
-
-По протоколу MCP при транспорте **stdio** процесс сервера запускает сам клиент:
-у каждого агента (Hermes Desktop, Cline Desktop, Cline CLI, автономный Cline) и
-каждой их сессии — свой процесс `mcp_start.py` (~250 МБ), а долгоживущие
-hub-демоны клиентов (Cline `code-sidecar`) оставляют ещё и сирот: stdin такого
-процесса не закрывается, и старый сервер не выходит сам.
-
-Поэтому штатный режим — **один общий инстанс на машину**: MCP-сервер поднимается
-менеджером `hds/mcp_http.py` на `http://127.0.0.1:8787/mcp` (streamable-http),
-а клиенты только подключаются по URL. Сколько бы агентов ни работало —
-python-процесс один (плюс venv-лаунчер, как у watcher'а).
-
-| | stdio | streamable-http (по умолчанию) |
-|---|---|---|
-| процессов MCP | по одному на клиента и сессию | **один на машину** |
-| кто запускает | клиент при подключении | автозапуск ОС + старт UI/MCP/CLI |
-| сироты после перезапусков | накапливаются | невозможны |
-
-Управление (параметры — секция `mcp_http` в `config.yaml`):
+`bin\llm_host.exe run` — единый процесс: держит роли **chat** (`:8010`), **embedding** (`:8011`),
+**rerank** (`:8012`) на движке openresearchtools и **сам ASR** (whisper через движок), раздаёт
+OpenAI-совместимый HTTP и `/internal/*` (`status`, `transcribe`).
 
 ```powershell
-.\.venv\Scripts\python.exe -m hds.cli mcp-http status             # состояние, PID, URL, версия, актуальность кода
-.\.venv\Scripts\python.exe -m hds.cli mcp-http start              # поднять (живой инстанс переиспользуется)
-.\.venv\Scripts\python.exe -m hds.cli mcp-http stop               # остановить (по PID-файлу, иначе — по владельцу порта)
-.\.venv\Scripts\python.exe -m hds.cli mcp-http restart            # безусловный stop + start
-.\.venv\Scripts\python.exe -m hds.cli mcp-http restart-if-stale   # перезапуск, только если на порту старый код
-.\.venv\Scripts\python.exe -m hds.cli mcp-http check              # exit 0 — наш инстанс жив
-.\.venv\Scripts\python.exe -m hds.cli mcp-http stop-stdio         # разовая чистка старых stdio-сирот
+bin\llm_host.exe run       # запустить резидент (владелец портов)
+bin\llm_host.exe status    # отчёт: роли, VRAM, пауза
+bin\llm_host.exe stop      # graceful: выгрузить инстансы, снять pid
 ```
 
-Живой инстанс опознаётся по `GET /health` (`{"app": "disk-search"}`): если порт
-занял чужой сервис, `start` честно падает с ошибкой, а не подменяет порт. Сервер
-отвязан от агентов (переживает их перезапуск), лог — `data\logs\mcp_http.log`,
-PID — `data\mcp_http.pid`. Инстанс, поднятый автозапуском ОС (`mcp-http run`) или
-руками, PID-файла не пишет — `stop`/`restart` находят его по владельцу порта
-(убивают только если на порту отвечает НАШ `/health`). Автозапуск при входе в
-систему — задача Планировщика `HermesDiskSearchMcp` (ставится
-`install_autostart.ps1`).
+* **VRAM-диспетчер** (`gpu.policy`): `query_priority` (запрос важнее — индексация на паузу),
+  `indexing_priority`, `manual`. Вытесняет роли по приоритетам и **уважает** пользовательскую
+  `index.pause` (не снимает её).
+* Рантайм движка — `%APPDATA%\OpenResearchTools\TranscribeOffline\Engine` (переопределяется
+  `HDS_ENGINE_DIR`/`index.whisper_engine_dir`); GGUF-модели — общий `%LOCALAPPDATA%\llama-runtime`.
+* Автозапуск — задача Планировщика `HermesDiskSearchLlmHost` (`installers\install_llm_host_task.ps1`).
 
-### Обновление проекта: перезапуск общего MCP-сервера
+## sidecar — Python-воркер извлечения
 
-Сервер живёт отдельным процессом и переживает перезапуск UI и агентов — значит
-после обновления кода (`git pull`, распаковка нового архива релиза) на порту
-продолжает работать **старый** код. `start` здесь не поможет: живой инстанс он
-переиспользует, второго процесса не появляется. Порядок такой:
+Автономный процесс `sidecar\hds_extract\worker.py` (stdio + JSON-RPC 2.0, NDJSON): `hello`,
+`extract`, `normalize`, `clip_image` (CLIP в Rust — отвечает «не поддерживаю»), `shutdown`.
+Ядро запускает его лениво и владеет процессом. Извлечение — PDF/DOCX/XLSX/PPTX/OCR и `.mpp`
+(MS Project через mpxj/Java); лемматизация (`pymorphy3`) — для FTS.
+
+**Самодостаточность.** `installers\build_sidecar.ps1` собирает дерево, работающее **без**
+Python-ядра проекта: портативный CPython (python-build-standalone) + зависимости +
+**копия** нужных модулей `hds\` под `sidecar\hds\`. Воркер кладёт `sidecar\` в `sys.path`
+перед корнем проекта — в поставке `hds` берётся из копии, в разработке — из корня.
 
 ```powershell
-# 1) обновить код (git pull / распаковать архив) и, при необходимости, зависимости
-# 2) перезапустить общий MCP-сервер — этого достаточно, клиенты ходят по тому же URL:
-.\.venv\Scripts\python.exe -m hds.cli mcp-http restart-if-stale
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
 ```
 
-`restart-if-stale` сравнивает ответ `/health` с кодом в папке проекта и
-перезапускает сервер **только при расхождении**:
+## Индексная БД и файлы-сигналы
 
-- другая `version` (в `/health` против `hds/__init__.py`);
-- нет метки сборки `build` — инстанс старше самого механизма;
-- метка `build` (максимальный mtime исходников на момент старта сервера)
-  разошлась с текущей — так ловятся и правки без поднятия версии.
-
-Если код актуален — инстанс переиспользуется; если сервер не поднят — он просто
-запускается. Клиенты (Hermes/Cline) ходят по тому же URL, поэтому перезапуск для
-них незаметен: они переподключаются к новому процессу (в Hermes — с новой сессией
-или кнопкой reconnect в разделе MCP). Тот же шаг выполняют `install_hermes.ps1` и
-`install_cline.ps1` (а значит и `setup.ps1`) — обновление через инсталлятор
-перезапускает сервер само.
-
-Проверить, нужен ли перезапуск, и увидеть причину:
-
-```powershell
-.\.venv\Scripts\python.exe -m hds.cli mcp-http status   # version / code_version / stale / stale_reason
-```
-
-Безусловный перезапуск (например, когда правили секцию `mcp_http` в `config.yaml`)
-— обычный `mcp-http restart`.
-
-**Никаких консольных окон.** Сервер запускается через `pythonw.exe` (GUI-подсистема):
-у процесса нет консоли вообще, и в Windows Terminal не появляется лишняя вкладка
-(`python.exe` получает консоль даже с `CREATE_NO_WINDOW`, а при «терминале по
-умолчанию» Windows Terminal она всплывает видимым окном). Вывод сервера идёт
-только в `data\logs\mcp_http.log`.
-
-Вернуться к stdio можно без правок проекта: в конфигах клиентов заменить `url` на
-`command`/`args` (см. разделы про Hermes и Cline ниже); `python -m hds.cli serve`
-остаётся прежним режимом (его же использует `mcp_start.py`).
-
-## Интеграция с Hermes
-
-Hermes Agent Desktop должен знать про наш MCP-сервер и уметь им пользоваться.
-Всё это делает один скрипт — **`install_hermes.ps1`** (Windows) или
-**`installers/install_hermes_macos.sh`** (macOS):
-
-1. поднимает ОБЩИЙ MCP-сервер (`python -m hds.cli mcp-http restart-if-stale`,
-   :8787 — живой инстанс переиспользуется, но если на порту работает старый код
-   проекта, сервер перезапускается) и
-   регистрирует подключение `disk-search` по URL в `<Hermes>\config.yaml`
-   (секция `mcp_servers`);
-2. устанавливает скилл `disk-search` в `<Hermes>\skills\` — правило для агента:
-   «поиск файлов на компе — через MCP disk-search, а не через ripgrep/терминал»;
-3. выставляет `tools.tool_search.enabled: "off"` — без этого Hermes прячет 27
-   инструментов (включая все MCP) за discovery-протоколом `tool_search`, который
-   локальные модели (Qwen3.5-9B) не проходят, и начинает искать через ripgrep;
-4. прописывает в `<Hermes>\.env` обход системного прокси для loopback-адресов
-   (`NO_PROXY=localhost,127.0.0.1,::1`; если системный прокси включён, он ещё и
-   зеркалится в `HTTP(S)_PROXY`, чтобы внешний трафик шёл через него как раньше).
-   HTTP-движок Hermes (`httpx2`) берёт прокси из реестра Windows через
-   `urllib.request.getproxies()`, а та **игнорирует** исключения прокси
-   (`ProxyOverride` = `localhost;127.*`), поэтому без этого блока запросы к
-   `127.0.0.1:8787` уходят в системный прокси: сервер отвечает `503`,
-   MCP-подключение падает с `MCPError: Server returned an error response`,
-   сервер «паркуется» — и агент заявляет, что MCP-инструменты disk-search
-   недоступны (в `logs\agent.log` при этом видно `disk-search failed initial
-   connection ... parking until a reconnect is requested`);
-5. проверяет итоговый `config.yaml` на валидность.
-
-### Когда Hermes уже установлен
-
-Скрипт вызывается автоматически из `setup.ps1` (последний шаг; на macOS — из
-`installers/install_macos.command`). Запустить вручную:
-
-```powershell
-# Windows
-powershell -File install_hermes.ps1
-# нестандартное расположение Hermes:
-powershell -File install_hermes.ps1 -HermesDir "C:\путь\к\hermes"
-```
-
-```bash
-# macOS
-bash installers/install_hermes_macos.sh
-# нестандартное расположение Hermes:
-bash installers/install_hermes_macos.sh "$HOME/путь/к/hermes"
-```
-
-### Если disk-search установлен раньше Hermes
-
-Ничего страшного: `setup.ps1` просто напечатает напоминание. Когда Hermes Desktop
-появится на машине — выполните ту же команду, и подключение произойдёт за один запуск:
-
-```powershell
-powershell -File install_hermes.ps1
-```
-
-### Вручную (без скрипта)
-
-1. В `<Hermes>\config.yaml` в секцию `mcp_servers` добавить:
-
-```yaml
-mcp_servers:
-  disk-search:
-    url: http://127.0.0.1:8787/mcp     # ОБЩИЙ инстанс (streamable-http)
-    timeout: 300
-    # Альтернатива (stdio — процесс на каждого клиента):
-    # command: C:\Users\Sasha\hermes-disk-search\.venv\Scripts\python.exe
-    # args: [C:\Users\Sasha\hermes-disk-search\mcp_start.py]
-```
-
-2. Скопировать скилл: `hermes-skill\SKILL.md` → `<Hermes>\skills\disk-search\SKILL.md`
-   (скилл объясняет агенту, что «найди на компе…» — это инструменты MCP
-   `search_local_files` / `ask_my_files`, а не ripgrep/терминал).
-3. В `<Hermes>\config.yaml` добавить (иначе локальные модели не увидят MCP-инструменты
-   — Hermes прячет их за discovery-протоколом `tool_search`):
-
-```yaml
-tools:
-  tool_search:
-    enabled: "off"
-```
-
-4. В `<Hermes>\.env` добавить обход системного прокси для loopback. **Обязательно,
-   если в системе включён HTTP-прокси** (xray, clash, корпоративный прокси и т.п.):
-
-```
-NO_PROXY=localhost,127.0.0.1,::1
-no_proxy=localhost,127.0.0.1,::1
-# если системный прокси включён — зеркалим его, чтобы интернет шёл через него:
-HTTP_PROXY=http://127.0.0.1:10809
-HTTPS_PROXY=http://127.0.0.1:10809
-```
-
-   Причина: HTTP-клиент Hermes (`httpx2`) определяет прокси через
-   `urllib.request.getproxies()`, которая берёт `ProxyServer` из реестра Windows и
-   **не учитывает `ProxyOverride`** (`localhost;127.*;…`). В результате запросы к
-   общему MCP-серверу (`http://127.0.0.1:8787/mcp`) идут не напрямую, а в системный
-   прокси, который отвечает `503` — Hermes получает
-   `MCPError: Server returned an error response`, паркует `disk-search` и его
-   инструменты становятся агенту недоступны. С `.env` Hermes грузит эти значения с
-   `override=True`, и loopback-адреса идут напрямую, а внешний трафик — через прокси.
-
-### Проверка
-
-- Перезапустите Hermes Desktop (или начните новую сессию чата). Важно:
-  `NO_PROXY`/`HTTP(S)_PROXY` из `.env` читаются при старте процесса, поэтому после
-  правки `.env` нужен именно перезапуск приложения, а не только новая сессия.
-- В логе `logs\agent.log` должна появиться строка регистрации MCP-сервера
-  `disk-search` с транспортом `http` (URL `http://127.0.0.1:8787/mcp`).
-- Сервер поднят? Проверка: `.\.venv\Scripts\python.exe -m hds.cli mcp-http status`.
-- Если в `logs\agent.log` снова `disk-search failed initial connection ... Server
-  returned an error response` — запрос к MCP ушёл в системный прокси: проверьте,
-  что блок `NO_PROXY` действительно дописан в `<Hermes>\.env` (и что прокси в
-  системе реально включён).
-- В чате: «найди на этом компе фильмы» — агент должен вызвать
-  `mcp__disk_search__search_local_files` (видно в UI как вызов инструмента).
-
-## Интеграция с Cline Desktop (Windows / macOS)
-
-Cline (https://cline.bot/desktop) тоже умеет пользоваться disk-search через MCP.
-Всё это делает один скрипт — **`install_cline.ps1`** (Windows) или
-**`installers/install_cline_macos.sh`** (macOS); он вызывается автоматически из
-`setup.ps1` / `installers/install_macos.command` и:
-
-1. поднимает ОБЩИЙ MCP-сервер (`python -m hds.cli mcp-http restart-if-stale`,
-   :8787 — живой инстанс переиспользуется, на старом коде проекта перезапускается) и
-   регистрирует подключение `disk-search` по URL в настройках Cline:
-   `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json` (Windows) /
-   `~/.cline/data/settings/cline_mcp_settings.json` (macOS) — единый файл
-   MCP-настроек Cline Desktop и Cline CLI; дополнительно обновляется
-   `%USERPROFILE%\.cline\mcp.json` / `~/.cline/mcp.json` (вариант конфига
-   Cline CLI);
-2. устанавливает скилл `disk-search`:
-   `hermes-skill\disk-search.md` → `%USERPROFILE%\.cline\skills\disk-search\SKILL.md`
-   (macOS: `hermes-skill/disk-search.md` → `~/.cline/skills/disk-search/SKILL.md`;
-   Cline читает скиллы как папки с `SKILL.md` внутри — ровно такую структуру
-   создаёт и «Skills → New skill...» в самом Cline). Скилл объясняет агенту,
-   что «найди на компе…» — это инструменты MCP-сервера `disk-search`
-   (`search_local_files` / `ask_my_files`), а не встроенный поиск/терминал;
-3. правит только секцию `mcpServers` JSON — остальные серверы и настройки
-   Cline сохраняются; повторный запуск обновляет запись, не дублируя её.
-
-Запись пишется в плоской форме из документации Cline
-(`{"type": "streamableHttp", "url": ...}`) — обёртка `"transport"` устарела и
-для http-сервера невалидна. Ошибка в форме записи приводит к тому, что Cline
-отбрасывает файл настроек целиком: `Invalid MCP settings at
-"...cline_mcp_settings.json": mcpServers.disk-search: Invalid input`, и в сессии
-пропадают ВСЕ MCP-инструменты (агент уходит искать файлы терминалом). Проверка
-после установки: `cline config mcp --json` — список серверов без ошибок.
-Оба инсталлятора (Windows и macOS) делают это сами: после записи контролируют
-форму через `installers/cline_mcp_merge.py`, а если в PATH есть CLI `cline` —
-дополнительно спрашивают у самого клиента (`cline config mcp --json`) и печатают
-предупреждение, если Cline считает настройки невалидными.
-
-### Когда Cline уже установлен
-
-Скрипты вызываются автоматически; запустить вручную:
-
-```powershell
-# Windows
-powershell -File install_cline.ps1
-```
-
-```bash
-# macOS
-bash installers/install_cline_macos.sh
-```
-
-### Если Cline будет установлен позже
-
-Ничего страшного: при установке disk-search скрипт просто напечатает напоминание.
-Когда Cline Desktop появится на машине — выполните ту же команду, и подключение
-произойдёт за один запуск (см. команды выше).
-
-### Вручную (без скрипта)
-
-1. Открыть файл настроек MCP Cline — Windows:
-   `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`, macOS:
-   `~/.cline/data/settings/cline_mcp_settings.json` (если файла нет — создать;
-   тот же файл открывается из Cline: MCP Servers → Configure) и добавить сервер
-   `disk-search` в секцию `mcpServers`:
-
-```json
-{
-  "mcpServers": {
-    "disk-search": {
-      "type": "streamableHttp",
-      "url": "http://127.0.0.1:8787/mcp",
-      "autoApprove": ["search_local_files", "ask_my_files", "index_status",
-                      "start_indexing", "stop_indexing", "reindex_path"],
-      "timeout": 300,
-      "disabled": false
-    }
-  }
-}
-```
-
-   Альтернатива (stdio — Cline запускает процесс сам, по одному на клиента):
-   `"command": "<python из venv>", "args": ["<путь>/mcp_start.py"], "env": {}`
-   (плоские поля, без обёртки).
-
-   **Важно про форму записи.** Cline валидирует файл настроек целиком: при
-   неверной записи отбрасывается ВЕСЬ файл — пропадают все MCP-серверы, а не
-   только `disk-search`. Обёртка `"transport": {"type": "http", ...}`
-   недопустима: во вложенном `transport` схема Cline принимает только
-   `stdio` / `sse` / `streamableHttp` (маппинг `http` → `streamableHttp` работает
-   лишь в плоской форме), и клиент пишет `Invalid MCP settings at
-   "...cline_mcp_settings.json": mcpServers.disk-search: Invalid input`.
-   Проверка: `cline config mcp --json` должен перечислить серверы без ошибок.
-2. Скопировать скилл: `hermes-skill/disk-search.md` →
-   `~/.cline/skills/disk-search/SKILL.md`
-   (Windows: `%USERPROFILE%\.cline\skills\disk-search\SKILL.md`).
-3. Перезапустить Cline Desktop (или начать новую сессию): сервер `disk-search`
-   должен появиться в MCP Servers, а запрос «найди на этом компе фильмы» —
-   вызвать его инструмент `search_local_files`.
+* **`index.db`** — SQLite: `files`, `chunks`, `chunks_fts` (FTS5, лемматизированный), `chunks_vec`
+  (`sqlite-vec`, dim `embedding.dim`), `images_vec` (CLIP, dim 512). Путь — `db_path` (по умолчанию
+  относительный — от корня проекта; в версионной раскладке лучше абсолютный или `data\index.db`).
+* **`index.stop`** — файл-команда: аккуратно остановить текущую индексацию.
+* **`index.pause`** — приостановить индексацию (ставит UI/диспетчер; **пользовательскую не снимать сами**).
+* **`index.heartbeat.json`** — кросс-процессный статус/прогресс (свежесть < 30 с).
+* **`watch.lock`** — pid наблюдателя; **`data\llm-host.pid`** — pid резидента; логи — `data\logs\`.
 
 ## Настройки (`config.yaml`)
 
-Все настройки в одном файле `config.yaml` (UTF-8). Изменения вступают в силу при
-следующем запуске команды — перезапуск Hermes не обязателен.
+Полный образец — `config.example.yaml`. Основное:
 
-### `index` — что и как индексировать
+* **`index`** — `roots` (корни), `exclude_dirs`/`exclude_paths`, `max_file_mb`/`max_media_mb`,
+  `ocr`/`ocr_lang`/`ocr_tesseract_cmd`, `transcribe` + `whisper_*` + `transcribe_url` (ASR движком,
+  владелец — llm-host), `clip`/`clip_*` (ONNX-модели; по умолчанию `models\clip_onnx`), `max_chunks`.
+* **`db_path`** — путь к `index.db` (относительный — от корня проекта).
+* **`chunk`** — `size`/`overlap` (структурный чанкер).
+* **`embedding`** — `base_url` (`:8011/v1`), `model` (`text-embedding-bge-m3`), `batch_size`, `dim` (1024).
+* **`chat`** — `base_url` (`:8010/v1`), `model`, `thinking` (`off|auto`), `temperature`, `max_context_chars`.
+* **`llm_server`** — `host`, `autostart`, порты/модели/`ctx_per_slot`/`extra_args` по ролям
+  (`chat`/`embedding`/`rerank`). Модель роли — `shared:<role>` (из общего рантайма) или путь.
+* **`gpu`** — `policy`, `device_index` (0=CPU, 1=первый GPU), `n_gpu_layers`, `reserve_mb`,
+  `evict_idle_sec`, `pause_index_on_query`, `priorities`.
+* **`mcp_http`** — `host`/`port`/`path`/`autostart`/`start_timeout`.
+* **`search`** — `vec_k`/`fts_k`/`rrf_k`/веса/`snippet_chars`.
+* **`rerank`** — `enabled`/`url`/`model`/`timeout`/`max_latency`.
+* **`watch`** — `debounce_seconds`, `reconcile_on_start`, `max_stable_wait`.
+* **`extract`** (опц.) — `idle_timeout` воркера, сек.
 
-| Параметр         | По умолчанию                | Описание                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| ------------------------ | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `roots`                | `["D:\\"]`                           | Корни индексации (диски/папки), список; можно указать несколько                                                                                                                                                                                                                                                                                                                  |
-| `exclude_dirs`         | системные                     | Имена каталогов, которые пропускаются (без учёта регистра, на любом уровне вложенности)                                                                                                                                                                                                                                                                     |
-| `exclude_paths`        | `[]`                                 | Исключаемые**пути-префиксы** (каталог целиком или отдельный файл, напр. `'D:\Backup\Downloads\opencv'`); редактируется в UI («Параметры обработки»)                                                                                                                                                                               |
-| `max_file_mb`          | `200`                                | Файлы больше этого размера (обычные) пропускаются                                                                                                                                                                                                                                                                                                                                          |
-| `max_media_mb`         | `1500`                               | Отдельный лимит для аудио/видео (транскрипция тяжёлая)                                                                                                                                                                                                                                                                                                                                 |
-| `ocr`                  | `true`                               | OCR картинок и пустых страниц PDF; нужен Tesseract (иначе тихо пропускается)                                                                                                                                                                                                                                                                                                         |
-| `ocr_lang`             | `"rus+eng"`                          | Языки OCR (языковые пакеты Tesseract)                                                                                                                                                                                                                                                                                                                                                                             |
-| `ocr_tesseract_cmd`    | `""`                                 | Путь к`tesseract.exe`, если не в PATH                                                                                                                                                                                                                                                                                                                                                                                  |
-| `transcribe`           | `true`                               | Транскрипция аудио/видео; нужен faster-whisper                                                                                                                                                                                                                                                                                                                                                            |
-| `whisper_model`        | `small`                              | Модель Whisper (`tiny`/`base`/`small`/`medium`/`large-v3`); качается в `models\whisper-<имя>`                                                                                                                                                                                                                                                                                                          |
-| `whisper_device`       | `auto`                               | Авто-детекция: CUDA → Vulkan (whisper.cpp, для AMD/Intel) → CPU (`int8`); на macOS — Metal (mlx-whisper) или CPU. Явно: `cuda`, `vulkan`, `cpu`, `metal` (macOS)                                                                                                                                                                                                                                |
-| `whisper_mlx_repo`     | `mlx-community/whisper-<имя>-mlx` | Репозиторий MLX-весов для Metal-бэкенда (macOS)                                                                                                                                                                                                                                                                                                                                                            |
-| `whisper_cpp_dir`      | `models\whisper-cpp`                 | Папка бэкенда whisper.cpp (бинарник + GGML-веса`ggml-<имя>.bin`); ставится `vulkan-setup`                                                                                                                                                                                                                                                                                                     |
-| `whisper_compute`      | `float16`                            | Точность вычислений:`float16` на GPU, на CPU рекомендуется `int8`                                                                                                                                                                                                                                                                                                                             |
-| `whisper_load_timeout` | `180`                                | Сек; при зависании CUDA-загрузки — авто-fallback на CPU (`int8`)                                                                                                                                                                                                                                                                                                                                     |
-| `whisper_batch`        | `8`                                  | Батчевая транскрипция: ровная загрузка GPU, ускорение ×3–5;`0` — последовательный режим                                                                                                                                                                                                                                                                         |
-| `whisper_language`     | `""`                                 | Язык аудио:`""` — авто-детекция; `"ru"` — фиксировать русский (надёжнее на tiny/base — авто-детект коротких фраз иногда ошибается)                                                                                                                                                                                                      |
-| `whisper_dir`          | `models\whisper-<имя>`            | Папка локальной копии модели (можно вынести на другой диск)                                                                                                                                                                                                                                                                                                                         |
-| `hf_token`             | `""`                                 | Токен HuggingFace (опционально, только для скачивания моделей)                                                                                                                                                                                                                                                                                                                             |
-| `max_chunks`           | `2000`                               | Лимит чанков на файл — защита от гигантских CSV/логов (обрезка с`[warn]`); `0` — без лимита                                                                                                                                                                                                                                                                           |
-| `clip`                 | `true`                               | CLIP-индекс картинок: поиск фото по содержанию («найди изображения живых цветов»). Векторы в таблице`images_vec`; дозаполнить по всем картинкам: `python -m hds.cli clip-index` (первые ~30-60 мин на десятки тысяч фото, затем автоматически при индексации) |
+Переменные окружения: `HDS_CONFIG` (путь к конфигу), `HDS_EXTRACT_PYTHON` (интерпретатор воркера),
+`HDS_ENGINE_DIR` (каталог движка), `HDS_ROOT` (корень проекта).
 
-### `chunk` — нарезка текста (структурный чанкер)
+## Разработка
 
-Границы — по структуре текста: «абзац → строка → предложение → слово»; перекрытие —
-целые предложения; заголовки md/DOCX попадают в начало чанков своей секции; чанк
-не смешивает страницы PDF и таймкоды транскриптов. Перечанковать уже
-проиндексированные файлы без OCR/транскрипции (с переэмбеддингом):
-`python -m hds.cli index --rechunk` (по большой БД — часы, запускать на ночь).
-
-| Параметр | По умолчанию | Описание                                                                                                |
-| ---------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------- |
-| `size`         | `800`                 | Размер чанка в символах (≈400 токенов — точечные запросы)           |
-| `overlap`      | `120`                 | Перекрытие соседних чанков (целые предложения, 10–20 % размера) |
-
-### `embedding` — векторизация (llama-server, роль embedding)
-
-| Параметр | По умолчанию      | Описание                                                                                                                                                                                           |
-| ---------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `base_url`     | `http://127.0.0.1:8011/v1` | Эндпоинт роли embedding llama-server (или другой OpenAI-совместимый)                                                                                              |
-| `model`        | `text-embedding-bge-m3`    | Идентификатор (это же значение передаётся llama-server как `--alias`)                                                                                  |
-| `batch_size`   | `64`                       | Фрагментов на один запрос                                                                                                                                                            |
-| `dim`          | `1024`                     | Размерность модели.**При смене БД автоматически пересоздаёт векторную таблицу** — затем запустите `index --full` |
-
-### `chat` — модель ответов (`ask`, `ask_my_files`)
-
-| Параметр      | По умолчанию      | Описание                                                                                       |
-| --------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `base_url`          | `http://127.0.0.1:8010/v1` | Эндпоинт роли chat llama-server                                                                     |
-| `model`             | `qwen3.5-9b`               | Идентификатор модели (это же значение — `--alias` чат-инстанса)                        |
-| `thinking`          | `off`                      | `off|auto`: точное управление размышлениями thinking-модели (см. раздел «LLM-серверы») |
-| `temperature`       | `0.2`                      | Ниже — строже к фактам                                                               |
-| `max_context_chars` | `14000`                    | Сколько символов найденных фрагментов подавать в ответ |
-
-### `llm_server` — менеджер llama-server
-
-| Параметр      | По умолчанию | Описание                                                                                       |
-| --------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `bin`               | `""`                       | Путь к llama-server; пусто: общий llama-рантайм (`%LOCALAPPDATA%\llama-runtime\bin` — Windows, `~/Library/Application Support/llama-runtime/bin` — macOS) → `tools/llama.cpp/` → PATH                                  |
-| `host` / `parallel` | `127.0.0.1` / `1`          | 1 запрос одновременно на инстанс, остальные в очереди                                  |
-| `autostart`         | `true`                     | Поднимать chat+embedding при старте UI/MCP/cli (в фоне)                                |
-| `<role>.port` / `.model` / `.ctx_per_slot` / `.extra_args` | 8010/8011/8012 | Параметры каждого инстанса (модели — `shared:<role>` из общего рантайма; явный путь к GGUF — escape-hatch)                   |
-
-### `mcp_http` — общий MCP-сервер (streamable-http)
-
-| Параметр | По умолчанию | Описание |
-| ----------------- | -------------------- | ---------------------------------------------------------------------------------------- |
-| `host` / `port` | `127.0.0.1` / `8787` | Адрес ОДНОГО инстанса MCP на машину (клиенты Cline/Hermes ходят по URL) |
-| `path` | `/mcp` | Путь streamable-http endpoint (`http://host:port/mcp`) |
-| `autostart` | `true` | Поднимать при старте UI/MCP/cli (живой инстанс переиспользуется, второго не появляется) |
-| `start_timeout` | `30` | Сек ожидания `GET /health` при старте |
-
-### `search` — гибридный поиск
-
-| Параметр  | По умолчанию | Описание                                                                                          |
-| ----------------- | ----------------------- | --------------------------------------------------------------------------------------------------------- |
-| `vec_k`         | `40`                  | Сколько кандидатов берёт векторный поиск                              |
-| `fts_k`         | `40`                  | Сколько берёт полнотекстовый (FTS5/BM25)                                        |
-| `rrf_k`         | `60`                  | Константа слияния RRF (больше — ровнее вклад обоих методов) |
-| `snippet_chars` | `500`                 | Длина сниппета в результатах                                                     |
-
-### `rerank` — реранкер для ask_my_files (по умолчанию выключен)
-
-Cross-encoder `bge-reranker-v2-m3` (MIT) переставляет топ-20 кандидатов поиска и оставляет топ-8 для генерации ответа — самый стабильный источник прироста точности RAG. GGUF берётся из общего рантайма (`shared:rerank` → `llama-runtime\models\rerank\`), а `--batch-size/--ubatch-size` в `llm_server.rerank.extra_args` обязательны: фрагмент длиннее physical batch (дефолт 512) llama-server отвергает ошибкой 500 («input is too large to process»).
-
-Роль `rerank` запускается менеджером llama-server (LM Studio эндпоинт `/rerank` не реализует):
+Воркспейс — `crates/`:
+`hds-core` (config/db/http/диагностика), `hds-extract` (клиент воркера), `hds-index`
+(обход/хэш/чанкер/конвейер/watch/transcribe/**diag**), `hds-llama` (движок, фасад, `llm_host`),
+`hds-clip` (ONNX vision+text), `hds-search` (fts/snippet/rerank/rag), `hds-mcp`, `hds-ui`,
+`hds-cli` (бинарь `hds`).
 
 ```powershell
-python -m hds.llama_server start rerank   # модель: llm_server.rerank.model (shared:rerank → llama-runtime\models\rerank\)
+cargo build --release -p hds-cli -p hds-mcp -p hds-llama
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace                     # 174 passed / 0 failed (+9 ignored)
+
+# релизный пакет (плана §10.1). Резидент держит target\release\llm_host.exe ->
+# либо -SkipBuild (готовые бинарники), либо предварительный `llm_host stop`.
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version 0.1.0 [-SkipBuild]
+
+# портативный sidecar (нужен uv, ~280 МБ загрузки)
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
 ```
 
-Затем включите `rerank.enabled: true` (галочка в веб-интерфейсе). На CPU реранк 20 фрагментов занимает секунды; при латентности выше `rerank.max_latency` реранкер авто-отключается до перезапуска, поиск продолжает работать без него. Статус —`python -m hds.cli check`.
+CI (`release.yml`): `test-rust` (fmt/clippy/tests) → `build-sidecar` → `build-windows`
+(package + smoke) → `fetch-engine-runtime` → `release`.
 
-### `watch` — наблюдатель файловой системы
+## Диагностика
 
-| Параметр       | По умолчанию | Описание                                                                                                             |
-| ---------------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `debounce_seconds`   | `8`                   | Ждать стабилизации файла после события записи (Office/1С пишут кусками) |
-| `reconcile_on_start` | `true`                | При старте watcher — догоняющий stat-обход (ловит пропущенное за простой)  |
-| `max_stable_wait`    | `120`                 | Макс. ожидание стабилизации файла, сек                                                       |
+* `hds check` / в UI «Проверка компонентов» — БД, корни, роли chat/embedding, OCR, ffmpeg,
+  лемматизатор (воркер), **`.mpp`** (mpxj), реранк; отдельный пункт `gpu-manual`
+  (whisper/Vulkan — проверяются вручную, GPU-чек-лист).
+* `hds status` — состояние индекса; `hds whisper-check` — готовность ASR.
 
-### Прочее (верхний уровень)
+**Грабли.** `git` — всегда `--no-pager`. PowerShell 5.1 читает `.ps1` без BOM как ANSI — наши
+скрипты ASCII-only; в строках писать `${var}`, а не `$var:` (последнее парсится как имя диска).
+Кириллица в `Select-String` не ищется (ASCII-шаблон или чтение файла инструментом).
 
-| Параметр | По умолчанию | Описание                                                                |
-| ---------------- | ----------------------- | ------------------------------------------------------------------------------- |
-| `db_path`      | `index.db`            | Путь к БД (относительный — рядом с проектом) |
+## Лицензии
 
-## Кроссплатформенность (Windows / macOS)
+Сторонние компоненты (движок openresearchtools, NVIDIA CUDA EULA, FFmpeg, Tesseract,
+PyMuPDF — **AGPL-3.0**, mpxj/JPype + Java, модели) и их лицензии — `NOTICE.md`.
 
-- Windows: события ФС через ReadDirectoryChangesW, автозапуск — Планировщик задач.
-- macOS: события через FSEvents (`brew install ffmpeg tesseract-lang`), Whisper работает на CPU/Metal, автозапуск через LaunchAgent.
-- Общий llama-рантайм (llama-server + GGUF-модели) — кроссплатформенный: Windows
-  `%LOCALAPPDATA%\llama-runtime` (сборка cuda|vulkan), macOS
-  `~/Library/Application Support/llama-runtime` (Metal/Homebrew или пре-билд),
-  Linux `~/.local/share/llama-runtime`; установщики — `installers/ensure_llama_runtime.ps1`
-  (Windows) и `installers/ensure_llama_runtime.sh` (macOS), регистрация в
-  `projects.json` и смена общей чат-модели — одинаково (`python -m hds.llama_runtime`).
-- Хранилище и поиск полностью кроссплатформенные (SQLite + sqlite-vec + FTS5).
+## Осталось в Python
 
-## Файлы в корзине не индексируются
-
-- **Windows** (`$RECYCLE.BIN`) и **macOS** (`.Trash`, `.Trashes`) — в `exclude_dirs` по умолчанию;
-- фильтр действует **на всех уровнях**: при обходе дисков, в событиях наблюдателя (watcher):
-  удаление файла = его перемещение ОС в корзину, и watcher теперь распознаёт такие события —
-  файл убирается из индекса, а не индексируется заново;
-- проверка `indexer.path_excluded()` применяется и в `process_file` (защита в глубину);
-- файлы, удалённые при выключенном watcher, остаются в индексе до следующего прохода
-  `index` — затем убираются prune'ом (с защитой от массового ложного удаления).
-
-## Защита от ложных удалений
-
-Если диск был отключён и при обходе «пропало» >20% файлов, очистка индекса блокируется
-до подтверждения (`index --confirm-delete`).
-
-## Файлы проекта
-
-| Путь                                                        | Назначение                                                                                                                                                                  |
-| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hds/indexer.py`                                              | инкрементальный обход, хэши, prune                                                                                                                            |
-| `hds/watcher.py`                                              | события ФС (watchdog), debounce, догон при старте                                                                                                              |
-| `hds/extractors.py`, `extract_static.py`, `extract_av.py` | PDF/Office/текст; MPP/картинки; аудио/видео                                                                                                                    |
-| `hds/db.py`                                                   | SQLite: files/chunks + FTS5 + vec0                                                                                                                                                    |
-| `hds/embedder.py`                                             | клиент /v1/embeddings (llama-server/Ollama/LM Studio)                                                                                                                           |
-| `hds/llama_server.py`                                         | менеджер llama-server: probe/start/stop/status/ensure (роли chat/embedding/rerank) + CLI; общий рантайм — `hds/llama_runtime.py`                                                                       |
-| `hds/llama_runtime.py`                                        | общий llama-рантайм машины: пути по ОС, бинарь, `shared:<role>`, манифест чат-модели, реестр проектов, пресеты, `switch`/`download`/`register` + CLI (SYNC-COPY с anonymizer_proxy) |
-| `installers/ensure_llama_runtime.ps1`, `installers/ensure_llama_runtime.sh` | идемпотентный установщик общего рантайма: llama-server + модели chat/embedding/rerank (Windows / macOS; SYNC-COPY с anonymizer_proxy) |
-| `hds/search.py`                                               | гибридный поиск RRF + сниппеты                                                                                                                                  |
-| `hds/rag.py`                                                  | ответ с цитатами через чат-модель                                                                                                                         |
-| `hds/cli.py`                                                  | CLI                                                                                                                                                                                   |
-| `hds/mcp_server.py`, `mcp_start.py`                         | MCP-сервер (stdio: Hermes, Cline и другие MCP-клиенты)                                                                                                                   |
-| `hds/mcp_http.py`                                          | Менеджер ОБЩЕГО MCP-сервера (streamable-http, :8787): один инстанс на машину для всех агентов                                                       |
-| `install_cline.ps1`, `installers/install_cline_macos.sh`    | подключение disk-search к Cline Desktop/CLI (MCP-сервер + скилл)                                                                                               |
-| `gen_fixtures.py`                                             | тестовые файлы для smoke-теста                                                                                                                                   |
-| `tests/`                                                      | регрессионные тесты (233 шт.: конфиг/БД, индексатор, watcher, поиск/RAG, чанкинг, извлечение, прогресс, dbops, UI, общий llama-рантайм, общий MCP-сервер) |
-| `.github/workflows/release.yml`                               | GitHub Actions: тесты → сборка → релиз (с удалением предыдущих)                                                                                 |
-| `releasing.md`                                                | правила выпуска релизов                                                                                                                                          |
+По плану миграции в Python остаётся **только sidecar** (извлечение/лемматизация) — §2.5/§5.
+Python-ядро (поиск/RAG/MCP/UI/индексатор/менеджер ролей) переписано на Rust и удалено;
+Python-джобы выведены из CI. Паритет-эталон — `tools/parity/` (golden **заморожен**, регенерация
+невозможна — генератор удалён); журналы волн — `tools/parity/W1_REPORT.md`…`W4_REPORT.md`, `STATUS.md`.
