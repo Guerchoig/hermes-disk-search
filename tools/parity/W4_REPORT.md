@@ -738,7 +738,17 @@ sha256 `79d6ec73…`) и `multi-node-server.dll` (**294 400 Б**, sha256 `7593b1
   корректный ответ (`chatml` содержит '4').
 * `cargo test --workspace` — **194 passed / 0 failed (+10 ignored)**; `clippy -D warnings` 0/0; `fmt` 0 diff.
 
-**Остаётся.** Внедрение пересобранных DLL в боевой каталог (`fetch_engine_runtime.ps1 -PatchEngine`)
-и публикация ассетов (`publish_engine_patch.ps1`, тег `engine-patch-v1`) — по отдельному решению
-заказчика. Апстрим-отчёт (EN) — прежний незакрытый пункт L2b.
+**Внедрено и опубликовано (02.10.2026, по решению заказчика).**
+* Боевой каталог: `llm_host stop` → подмена `llama-server-bridge.dll` (`79d6ec73…`) и
+  `multi-node-server.dll` (`7593b176…`) из свежей сборки → `llm_host run`. Проверено: резидент
+  поднялся, `chat LOADED` (VRAM 7682 МиБ), `POST /v1/chat/completions` отвечает; `index.pause` соблюдён.
+  (Штатные `*.orig` от итерации 1 рядом — откат `fetch_engine_runtime.ps1 -RollbackEnginePatch`.)
+* Публикация: `installers/publish_engine_patch.ps1 -SourceDir …\bin\Release` → тег **`engine-patch-v1`**
+  создан, 10 ассетов залиты. Валидировано end-to-end: `fetch_engine_runtime.ps1 -PatchEngine
+  -EngineDir <temp>` скачал 10 файлов, сверил sha256, установил (bridge-hash = `79d6ec73…`) — значит
+  `-PatchEngine` теперь работает и на других машинах. По ходу — фикс `publish_engine_patch.ps1`
+  (грабля: `gh release view` под `$ErrorActionPreference=Stop` давал `NativeCommandError` на
+  «release not found» до чтения `$LASTEXITCODE`; в gh-блоке EAP переведён в `Continue`).
+
+**Остаётся.** Только апстрим-отчёт (EN) — `engine-patch/UPSTREAM_REPORT.md`.
 

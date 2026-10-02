@@ -82,8 +82,15 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 `mtmd.dll`, `ggml*.dll` скопированы поверх, штатные — сохранены рядом как `*.orig` (9 файлов).
 Штатный резидент (`target\release\llm_host.exe run`, без `--engine-dir`) их использует —
 лог подтверждает: `движок: …\TranscribeOffline\Engine`, `роль chat: KV q8_0 272 МиБ`.
-**Откат одной командой:** удалить наши DLL и вернуть `*.orig` (или перезалить стоковый рантайм
-по `runtime-manifests/engine-manifest.json`); наша Rust-сторона совместима со стоком.
+**Откат одной командой:** `installers\fetch_engine_runtime.ps1 -RollbackEnginePatch` (вернёт `*.orig`) —
+или перезалить стоковый рантайм по `runtime-manifests/engine-manifest.json`; наша Rust-сторона
+совместима со стоком.
+
+**Итерация 2 (02.10.2026).** В боевой каталог перезалиты `llama-server-bridge.dll` (`79d6ec73…`) и
+`multi-node-server.dll` (`7593b176…`) из пересборки с закрытым хвостом P3 (остальные DLL не менялись).
+Резидент останавливался на подмену и поднят заново; чат проверен. Патч **опубликован** — тег
+`engine-patch-v1` (10 ассетов), поэтому `fetch_engine_runtime.ps1 -PatchEngine` работает и на других
+машинах.
 
 ## Как проверить (на копии рантайма! боевой не трогаем)
 

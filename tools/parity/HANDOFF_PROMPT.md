@@ -43,9 +43,8 @@ rustc/cargo 1.97.1. Миграция ядра на Rust **завершена (W1
 
 ## Что можно делать дальше (на выбор заказчика)
 1. **Апстрим-отчёт по-английски** (`engine-patch/UPSTREAM_REPORT.md`) — **единственный незакрытый
-   пункт L2b**; публиковать (`gh issue create`) только по решению заказчика. Если нужно, чтобы
-   `fetch_engine_runtime.ps1 -PatchEngine` скачивал ассеты на других машинах — один раз выполнить
-   `installers\publish_engine_patch.ps1` (создаст тег `engine-patch-v1` и зальёт файлы).
+   пункт L2b**; публиковать (`gh issue create`) только по решению заказчика. Тег `engine-patch-v1`
+   уже создан, 10 ассетов залиты (`-PatchEngine` проверен) — повторно публиковать не нужно.
 2. **Реальный релиз**: push ветки → `release.yml` (`test-rust` → `build-sidecar` → `build-windows`
    → `fetch-engine-runtime` → `release`). Локальный release-build требует остановки **двух**
    держателей `target\release\*.exe`: `llm_host stop` **и** `hds mcp-http stop` (либо `-SkipBuild`).

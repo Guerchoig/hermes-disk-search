@@ -54,6 +54,10 @@ foreach ($f in @($mf.files)) {
     $files += $src
 }
 
+# Native gh writes expected diagnostics to stderr; with ErrorActionPreference=Stop
+# Windows PowerShell 5.1 raises NativeCommandError before reading $LASTEXITCODE.
+# Use Continue in the gh section and rely on the explicit $LASTEXITCODE checks below.
+$ErrorActionPreference = "Continue"
 & gh release view $tag --repo $Repository *> $null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[..] creating release $tag"
