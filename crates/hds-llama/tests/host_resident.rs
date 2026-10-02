@@ -120,10 +120,13 @@ fn host_config_defaults_point_to_project_data() {
         cfg.pid_path().ends_with("data/llm-host.pid")
             || cfg.pid_path().ends_with("data\\llm-host.pid")
     );
-    assert!(cfg
-        .log_path()
-        .to_string_lossy()
-        .ends_with("logs\\llm-host.log"));
+    assert!(
+        cfg.log_path().to_string_lossy().ends_with("logs/llm-host.log")
+            || cfg
+                .log_path()
+                .to_string_lossy()
+                .ends_with("logs\\llm-host.log")
+    );
     assert!(cfg.internal && cfg.dispatcher, "боевые умолчания");
     assert_eq!(HostConfig::default().without_residency().pid_file, None);
 }
