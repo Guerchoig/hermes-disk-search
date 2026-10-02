@@ -1,0 +1,16 @@
+[package]
+name = "hds-search"
+description = "W1: гибридный поиск (FTS5 BM25 + sqlite-vec + CLIP), слияние RRF — порт hds/search.py"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+hds-index = { path = "../hds-index" }
+hds-clip = { path = "../hds-clip" }
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

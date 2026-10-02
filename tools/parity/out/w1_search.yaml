@@ -1,0 +1,15 @@
+db_path: 'C:\Users\Sasha\hermes-disk-search\tools\parity\out\index.db'
+index:
+  clip: false
+embedding:
+  base_url: "http://127.0.0.1:8011/v1"
+  model: "text-embedding-bge-m3"
+  batch_size: 64
+  dim: 1024
+search:
+  vec_k: 40
+  fts_k: 40
+  rrf_k: 60
+  fts_weight: 1.0
+  vec_weight: 1.0
+  snippet_chars: 500

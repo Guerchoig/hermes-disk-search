@@ -12,6 +12,7 @@ fn usage() -> String {
      \x20 index        [--roots a;b] [--kinds t,p] [--full] [--rechunk] [--limit N]\n\
      \x20              [--no-prune] [--confirm-delete] [--progress-sec N] [--quiet]\n\
      \x20 status       [--json]\n\
+     \x20 search       <запрос> [--kinds t,p] [--limit N] [--json]\n\
      \x20 check\n\
      \x20 reindex      <path> [--no-force]\n\
      \x20 reindex-fts  [--progress-sec N]\n\
@@ -51,6 +52,18 @@ fn run(args: &[String]) -> i32 {
             quiet: has(rest, "--quiet"),
         }),
         "status" => cmd::status::cmd_status(has(rest, "--json")),
+        "search" => match rest.first() {
+            Some(q) if !q.starts_with("--") => cmd::search::cmd_search(
+                q.clone(),
+                flag_val(rest, "--kinds"),
+                flag_u64(rest, "--limit").map(|v| v as usize).unwrap_or(8),
+                has(rest, "--json"),
+            ),
+            _ => {
+                eprintln!("search: нужен текст запроса");
+                2
+            }
+        },
         "check" => cmd::check::cmd_check(),
         "reindex" => match rest.first() {
             Some(p) => cmd::reindex::cmd_reindex(p, has(rest, "--no-force")),

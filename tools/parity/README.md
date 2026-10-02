@@ -2,7 +2,8 @@
 
 > **Коротко.** Здесь живёт всё, что нужно, чтобы (а) проверять паритет новой реализации с текущей
 > Python-версией и (б) воспроизводить замеры W0. Журнал результатов с цифрами —
-> `SPIKES.md` (читать первым), журнал W2 — `W2_REPORT.md`, детальный план W2 —
+> `SPIKES.md` (читать первым), журнал W2 — `W2_REPORT.md`, журнал W3 (медиа/CLIP) —
+> `W3_REPORT.md`, журнал W1 (поиск/MCP/UI) — `W1_REPORT.md`, детальный план W2 —
 > `../PLAN_W2_LLM_HOST.md`,
 > основной план — `../MIGRATION_PLAN_RUST.MD` (там §4 W0, §10.0 статус платформ, §12/§13 приёмка).
 > Все скрипты запускаются из **корня репозитория** интерпретатором проекта:
@@ -139,6 +140,10 @@ cargo run -p hds-cli   --bin hds -- whisper-check [--file <медиа>] [--json]
 .\.venv\Scripts\python.exe tools\parity\clip_onnx_w3.py        # экспорт text-ONNX (pooling+Dense) + golden out/clip_parity.json
 cargo test -p hds-clip --test clip_parity -- --ignored --nocapture   # паритет vision+text: cos >= 0,999
 .\.venv\Scripts\python.exe tools\parity\w3_clip_smoke.py setup # живая проверка hds clip-index (W3_REPORT.md §5)
+
+# --- W1: порт поиска (hds-search) ---
+cargo test -p hds-search --test search_parity -- --ignored --nocapture  # паритет golden search_*.json (требует out/index.db + фасад :8011)
+# target\debug\hds.exe search 'запрос' --limit 8   (HDS_CONFIG=out/w1_search.yaml, БД фикстур)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

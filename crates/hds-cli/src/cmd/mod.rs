@@ -8,6 +8,7 @@ pub mod forget;
 pub mod index;
 pub mod reindex;
 pub mod reindex_fts;
+pub mod search;
 pub mod status;
 pub mod stop;
 pub mod watch;
