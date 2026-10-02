@@ -754,3 +754,27 @@ sha256 `79d6ec73…`) и `multi-node-server.dll` (**294 400 Б**, sha256 `7593b1
 четырёх дефектов (P1/P2/P3 + KV), с репро, влиянием и предлагаемыми правками. Публикация
 (`gh issue create`) — по решению заказчика. **Этим L2b закрыт полностью.**
 
+## 17. CI под Rust-first (Windows + macOS) и релиз v0.13.0 (02.10.2026)
+
+**Actions переписаны.** `rust.yml` — `test-rust` (Ubuntu, блокирующий) + `test-rust-macos`
+(best-effort) + `build-windows` + `build-macos`. `release.yml` — `test-rust` → `build-sidecar-windows`/
+`-macos` → `build-windows`/`-macos` → `fetch-engine-runtime-windows`/`-macos` → `release`
+(Windows блокирующий; macOS best-effort: `if: always() && …windows success`, mac-ассеты
+подключаются при успехе). Триггеры: `workflow_dispatch` (вход `version`) + push тега `v*`.
+
+**Новые скрипты (macOS).** `installers/build_sidecar_macos.sh` (аналог Windows-sidecar через `uv`
++ python-build-standalone), `installers/build_rust_release_macos.sh` (упаковка
+`dist/hds-<ver>-macos-arm64/` + zip + sha256), `installers/install_macos.command` переписан под
+Rust-first (bin/ + движок metal + sha256-проверка). `releasing.md` → `RELEASING.md` (новые правила).
+
+**Починка кросс-платформенной сборки** (выявлено CI на Ubuntu/macOS; на Windows не виделось):
+`days_from_civil` (hds-cli) и `to_wide` (hds-llama) — под `#[cfg(windows)]`; тесты
+`clip_core::preprocess_*` и `walk_parity::parity_with_python_dump` — мягкий skip без фикстур/корней
+(они в `.gitignore`), `host_resident::host_config_defaults_*` — путь логов терпим к разделителю;
+`fetch_engine_runtime.ps1` использует `[System.IO.Path]::GetTempPath()` (на macOS нет `$env:TEMP`).
+
+**Релиз v0.13.0 опубликован** (прогон `release.yml`, все джобы ✅):
+`hds-0.13.0-{windows-x64,macos-arm64}.zip` (+`.sha256.txt`),
+`hds-engine-runtime-{windows-x64-cuda,macos-arm64-metal}.zip`, архивы исходников.
+Версия — `hds/__init__.py` (`0.13.0`), заметки — `RELEASE_NOTES_v0.13.0.md`.
+

@@ -3,6 +3,10 @@
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (private).
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
+> **Релиз v0.13.0 (02.10.2026):** CI переписан под Rust-first (Windows — блокирующий,
+> macOS — best-effort), опубликован релиз с ассетами **Windows и macOS**; правила выпуска —
+> `RELEASING.md`, журнал — `W4_REPORT.md` §17.
+>
 > **Сейчас:** ядро и резидентные компоненты — Rust (`crates/`): `hds-search` (поиск/RAG),
 > `hds-mcp` (stdio + http), `hds-ui`, `hds-llama` (`llm-host` — владелец портов 8010–8012 и GPU,
 > VRAM-диспетчер, ASR), `hds-index` (обход/конвейер/watcher/`db-move`/`diag`), `hds-clip` (ONNX),
