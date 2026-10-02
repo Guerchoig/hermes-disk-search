@@ -5,11 +5,15 @@
 
 ## 0. Передача в новый чат (02.10.2026)
 
-**Где мы.** Ветка `w2-llm-host` (`main` = `9ed8452` не тронут), **13 коммитов за 02.10.2026**.
-`cargo test --workspace` — **174 passed / 0 failed (+9 `#[ignore]`)**; `cargo fmt --check` и
+**Где мы.** Ветка `w2-llm-host` (`main` = `9ed8452` не тронут), **HEAD `a24109f`**.
+`cargo test --workspace` — **194 passed / 0 failed (+10 `#[ignore]`)**; `cargo fmt --check` и
 `cargo clippy --workspace --all-targets -- -D warnings` — **0/0**, блокирующие в CI.
-**Миграция завершена: W1–W5.** Владелец портов 8010–8012 — `llm-host` (release-резидент);
+**Миграция завершена: W1–W5.** Владелец портов 8010–8012 — `llm-host` (release-резидент), и он
+работает на **патченом движке** (KV q8_0: 272 МиБ вместо 512 f16; VRAM чата 7717 МиБ);
 `index.pause` заказчика **стоит — не снимать**.
+**Сверх плана закрыто 02.10.2026: L1** (наблюдаемость, устойчивость, чистка триггеров) и **L2b**
+(свой патч движка v1.15 — собран, проверен живьём, внедрён в боевой каталог; оверлей-поставка и
+доки) — подробно в **§15**.
 
 **Что закрыто (журналы).**
 * **W0** — `SPIKES.md`. **W1** — `W1_REPORT.md` §1–§7 (поиск/RAG/MCP/UI).
@@ -20,6 +24,9 @@
   сплит `hds/` (самодостаточный sidecar), корень проекта от exe, версии `app\<ver>`, **`.mpp`/jpype**,
   dry-run пакета, **W5-финал**.
 * **W5** — `fmt`/`clippy` блокирующие; Python-ядро и Python-джобы CI удалены; `README.md` под Rust-first.
+* **L1/L2b (сверх плана, 02.10.2026)** — §14 (живой порядок на машине: кто держит VRAM) и **§15**
+  (L1 шаги 1–3: шлюз/атрибуция VRAM/heartbeat/`stop --force`/`gpu-observability`; KV-квант; патч
+  движка — текст, сборка, живая проверка, внедрение в боевой каталог, оверлей-поставка, доки).
 
 **Карта кода (`crates/`).** `hds-core` (config/db/http/**diag**), `hds-extract` (клиент воркера),
 `hds-index` (walk/hash/chunker/pipeline/watch/transcribe/sidecar/diag/heartbeat), `hds-llama`
@@ -29,20 +36,30 @@ Python — только `sidecar\` (+ копия 6 модулей `hds\` при 
 
 **Команды (из корня репозитория).**
 ```powershell
-cargo test --workspace                                  # 174/0 (+9 ignored)
+cargo test --workspace                                  # 194/0 (+10 ignored)
 cargo clippy --workspace --all-targets -- -D warnings    # 0/0
+cargo run -p hds-cli --bin hds -- check --json           # -> gpu-observability (heartbeat/VRAM)
 cargo run -p hds-cli --bin hds -- search "запрос" --limit 8
 cargo run -p hds-cli --bin hds -- ask "вопрос"
-cargo run -p hds-cli --bin hds -- ui --port 8765
+target\release\llm_host.exe status                       # роли + «VRAM по процессам»
 target\release\llm_host.exe run                          # резидент (владелец 8010-8012)
+target\release\llm_host.exe stop                         # --force — если движок завис
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\fetch_engine_runtime.ps1 -PatchEngine
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\fetch_engine_runtime.ps1 -RollbackEnginePatch
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\publish_engine_patch.ps1 -SourceDir <bin\Release>
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version 0.1.0 -SkipBuild
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
 ```
 
 **Что дальше (остаток).**
+* **Апстрим-отчёт (EN)** `engine-patch/UPSTREAM_REPORT.md` — единственный незакрытый пункт L2b;
+  публикация (`gh issue create`) — только по решению заказчика. Чтобы `-PatchEngine` работал на
+  других машинах, один раз выполнить `installers\publish_engine_patch.ps1` (тег `engine-patch-v1`).
 * **Эксплуатация:** прогнать реальный релиз (push ветки → `release.yml`); создать тег
   `clip-onnx-v1` (`installers\publish_clip_models.ps1`) до релиза; реальный release-build требует
-  `llm_host stop` либо CI (там резидента нет).
+  остановки **двух** держателей exe (`llm_host stop` **и** `hds mcp-http stop`) либо CI.
+* **Хвосты патча движка (низкий риск):** `set_cluster_error` ещё под instance-локом в пяти путях
+  запросов (микросекундные окна ABBA против `remove_instance`) — снимается приёмом P3.
 * **Документный долг:** остаточные упоминания Python в `RELEASE_NOTES_*`; doc-комментарии Rust
   «порт `hds/…py`» (провенанс).
 * **macOS** — «не проверено» (§10.0): джобы выведены; `tools/parity/MAC_CHECKLIST.md` — постпроектно.
@@ -52,13 +69,23 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 движка + вендорские DLL; кросс-процессной адресации нет → фасад; VRAM — только NVML; thinking — поле
 запроса; KV у гибридных моделей держат не все слои (`full_attention_interval`); whisper: bridge
 audio-only, модель — GGML `.bin` в `metadata_json.whisper_model`; лемматизация — через воркер;
-golden **заморожен** (W5).
+golden **заморожен** (W5). **Движок — наш патч до апстрима:** stock v1.15 игнорирует
+`--cache-type-k/v` (полей нет в API) и грузит модель под `instance->mutex` (инцидент §14); наш патч
+P1/P2/P3+KV, Rust-сторона совместима со стоком. **L1:** метка занятости движка (`gate.rs`),
+атрибуция VRAM по процессам (PDH, `gpuattr.rs`), heartbeat `data\llm-host.heartbeat.json`,
+`stop --force`, пункт `gpu-observability` в `hds check`/UI.
 
 **Грабли.** `git` — всегда `--no-pager`; PowerShell иногда портит первый токен команды (начать с
 пробела/повторить); `Select-String` с кириллицей молча не находит (ASCII-шаблон/чтение файла);
 `.ps1` — ASCII-only (PS 5.1 без BOM читает как ANSI), в строках `${var}`, а не `$var:`; резидент
-держит свой exe (релиз/тест — `os error 5`; держать из `release` или `-SkipBuild`); `HDS_CONFIG`
-в сессии персистентна.
+держит свой exe (релиз/тест — `os error 5`; держать из `release` или `-SkipBuild`), держателей
+release-exe **два** (резидент и `hds mcp-http`); `HDS_CONFIG` в сессии персистентна.
+**Сборка патча:** staging `build_bridge.ps1` сохраняет mtime → ninja может не пересобрать мост
+(удалять `*cluster*.obj`/`*bridge*.obj`; проверять маркер `slot wait timeout` в DLL).
+**Сборка движка:** нужен `vcvarsall x64` + `Ninja Multi-Config` + `-DisableGgmlNative` (VS-генератор
+падает на CUDA, `GGML_NATIVE` несовместим с `GGML_BACKEND_DL`). **PowerShell:** JSON для `curl.exe`
+передавать файлом (`--data-binary "@file"`), `*>` пишет UTF-16 (читать `Out-File -Encoding utf8`),
+`config.yaml` боевой **в .gitignore**.
 
 ## 1. CI для Rust + релизная сборка (01.10.2026)
 
