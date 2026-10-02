@@ -36,7 +36,9 @@
 > **RAG перенесён:** `rag::ask` + реранк + CLI `hds ask` (ответ со ссылками `[N]`) — §2.
 > **MCP (stdio) перенесён:** `crates/hds-mcp` (6 инструментов, JSON-RPC 2.0), `hds mcp`/`hds_mcp` — §3.
 > **MCP streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http …`) — §4.
-> Далее: `hds-ui`. `cargo test --workspace` — **165 green (+8 `#[ignore]`)**.
+> **Порты 8010–8012 переведены на `llm-host`** (Python-роли остановлены): embeddings/chat/rerank
+> под Rust; `hds search`/`hds ask` работают на боевом индексе; тюнинг KV (`ctx_per_slot 16384`) —
+> `W1_REPORT.md` §5. Далее: `hds-ui`. `cargo test --workspace` — **165 green (+8 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и
