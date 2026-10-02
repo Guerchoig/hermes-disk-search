@@ -10,14 +10,17 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hds_core::config::{self, dig, Config};
+use hds_core::db;
 use hds_core::error::{CoreError, Result};
-use hds_core::{db, http};
 use hds_index::transcribe::MediaRouter;
 use hds_index::{Embedder, Sidecar};
-use serde_json::Value;
 
-/// Таймаут сетевого зонда `check` (как `_PROBE_TIMEOUT = 3` в Python).
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+// Проверки окружения переехали в `hds-index::diag` (общий код с веб-интерфейсом);
+// реэкспорт сохраняет прежний путь `hds_cli::support::…` (тесты, подкоманды).
+pub use hds_index::diag::{
+    norm_path, probe_role, props_context, resolve_model, role_addr, runtime_dir, tesseract_ready,
+    which, Probe, PROBE_TIMEOUT,
+};
 
 /// `embedding.dim` (по умолчанию 1024).
 pub fn dim_of(cfg: &Config) -> i64 {
@@ -85,217 +88,6 @@ pub fn parse_kinds(s: &str) -> Option<Vec<String>> {
     } else {
         Some(parts)
     }
-}
-
-/// Каталог общего llama-рантайма (`llama_runtime.runtime_dir`): env → LOCALAPPDATA/home.
-pub fn runtime_dir() -> PathBuf {
-    if let Ok(v) = std::env::var("LLAMA_RUNTIME_DIR") {
-        if !v.trim().is_empty() {
-            return PathBuf::from(v);
-        }
-    }
-    #[cfg(windows)]
-    {
-        if let Ok(v) = std::env::var("LOCALAPPDATA") {
-            if !v.is_empty() {
-                return PathBuf::from(v).join("llama-runtime");
-            }
-        }
-        if let Ok(h) = std::env::var("USERPROFILE") {
-            return PathBuf::from(h)
-                .join("AppData")
-                .join("Local")
-                .join("llama-runtime");
-        }
-        PathBuf::from("llama-runtime")
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        PathBuf::from(home)
-            .join(".local")
-            .join("share")
-            .join("llama-runtime")
-    }
-}
-
-/// Порт `llama_runtime.resolve_model` + `llama_server._abs_model`: путь GGUF роли.
-///
-/// `shared:<role>` → манифест `models/<role>/current.json` (`{"file": …}`), а если
-/// манифеста нет — **единственный** `*.gguf` каталога (как Python). Если разрешить
-/// не удалось — возвращаем каталог роли (в Python `_abs_model` ловит
-/// `FileNotFoundError` и отдаёт `models_dir(role)`).
-pub fn resolve_model(cfg: &Config, role: &str) -> PathBuf {
-    let spec = dig(cfg, &format!("llm_server.{role}.model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or(role)
-        .trim()
-        .to_string();
-    if let Some(rest) = spec.strip_prefix("shared:") {
-        let r = if rest.trim().is_empty() {
-            role
-        } else {
-            rest.trim()
-        };
-        let dir = runtime_dir().join("models").join(r);
-        if let Some(name) = manifest_file(&dir.join("current.json")) {
-            let p = dir.join(&name);
-            if p.is_file() {
-                return p;
-            }
-            // имя в манифесте могло отличаться регистром (ФС Windows регистронезависима)
-            if let Some(cand) = gguf_files(&dir)
-                .into_iter()
-                .find(|c| c.file_name().map(|n| n == name.as_str()).unwrap_or(false))
-            {
-                return cand;
-            }
-            return dir;
-        }
-        let ggufs = gguf_files(&dir);
-        if ggufs.len() == 1 {
-            return ggufs.into_iter().next().unwrap();
-        }
-        return dir;
-    }
-    let p = PathBuf::from(&spec);
-    if p.is_absolute() {
-        p
-    } else {
-        config::project_root().join(p)
-    }
-}
-
-/// `*.gguf` в каталоге, отсортированные по имени (порт `sorted(d.glob("*.gguf"))`).
-fn gguf_files(dir: &Path) -> Vec<PathBuf> {
-    let mut v: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| {
-                p.is_file()
-                    && p.extension()
-                        .and_then(|e| e.to_str())
-                        .map(|e| e.eq_ignore_ascii_case("gguf"))
-                        .unwrap_or(false)
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    v.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
-    v
-}
-
-/// `{"file": …}` из манифеста модели (UTF-8/BOM); `None` — нет/битый.
-fn manifest_file(path: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(path).ok()?;
-    let text = text.trim_start_matches('\u{feff}');
-    let v: Value = serde_json::from_str(text).ok()?;
-    v.get("file")
-        .and_then(|f| f.as_str())
-        .map(|s| s.to_string())
-        .filter(|s| !s.is_empty())
-}
-
-/// Порт пары `(host, port)` роли: `llm_server.host` (127.0.0.1) + `llm_server.<role>.port`.
-pub fn role_addr(cfg: &Config, role: &str) -> (String, u16) {
-    let host = dig(cfg, "llm_server.host")
-        .and_then(|v| v.as_str())
-        .unwrap_or("127.0.0.1")
-        .to_string();
-    let default = match role {
-        "chat" => 8010,
-        "embedding" => 8011,
-        "rerank" => 8012,
-        _ => 8010,
-    };
-    let port = dig(cfg, &format!("llm_server.{role}.port"))
-        .and_then(|v| v.as_u64())
-        .unwrap_or(default) as u16;
-    (host, port)
-}
-
-/// Итог пробы роли (как `STATE_*` в `hds/llama_server.py`).
-pub enum Probe {
-    /// Живой сервер с ожидаемой моделью (наши `/health` + `/props.total_slots`).
-    Llama(Value),
-    /// Порт занят, но это не ожидаемый сервер (`/props` без `total_slots`/другая модель).
-    Foreign,
-    /// Никто не слушает.
-    Down,
-}
-
-/// Порт `llama_server.probe`: `/health`, затем `/props` (сверка `total_slots` и `model_path`).
-pub fn probe_role(cfg: &Config, role: &str, timeout: Duration) -> Probe {
-    let (host, port) = role_addr(cfg, role);
-    let healthy = http::request(&host, port, "GET", "/health", &[], None, timeout)
-        .map(|r| (200..300).contains(&r.status))
-        .unwrap_or(false);
-    if !healthy {
-        return Probe::Down;
-    }
-    let props = match http::request(&host, port, "GET", "/props", &[], None, timeout) {
-        Ok(r) if (200..300).contains(&r.status) => r.json().unwrap_or(Value::Null),
-        _ => return Probe::Foreign,
-    };
-    let slots = props
-        .get("total_slots")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    if slots < 1 {
-        return Probe::Foreign;
-    }
-    let actual = props
-        .get("model_path")
-        .or_else(|| props.get("model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if !actual.is_empty() {
-        let expected = resolve_model(cfg, role);
-        if norm_path(actual) != norm_path(&expected.to_string_lossy()) {
-            return Probe::Foreign;
-        }
-    }
-    Probe::Llama(props)
-}
-
-/// Фактический контекст инстанса из `/props` (`props_context`).
-pub fn props_context(props: &Value) -> Option<i64> {
-    props
-        .get("default_generation_settings")
-        .and_then(|d| d.get("n_ctx"))
-        .and_then(|v| v.as_i64())
-        .or_else(|| props.get("n_ctx").and_then(|v| v.as_i64()))
-}
-
-/// Нормализация пути для сравнения (`normcase(normpath())`: общий разделитель + нижний регистр).
-pub fn norm_path(s: &str) -> String {
-    s.replace('\\', "/").to_lowercase()
-}
-
-/// Поиск исполняемого файла в `PATH` (порт `shutil.which` для одного имени).
-pub fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let cand = dir.join(name);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
-}
-
-/// `tesseract` доступен: путь из `index.ocr_tesseract_cmd` или `PATH` (как `_tesseract_ready`).
-pub fn tesseract_ready(cfg: &Config) -> bool {
-    if let Some(cmd) = dig(cfg, "index.ocr_tesseract_cmd").and_then(|v| v.as_str()) {
-        if !cmd.trim().is_empty() && Path::new(cmd.trim()).is_file() {
-            return true;
-        }
-    }
-    which("tesseract.exe").is_some() || which("tesseract").is_some()
 }
 
 /// `time.time()`.

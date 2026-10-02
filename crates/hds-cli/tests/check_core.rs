@@ -1,9 +1,12 @@
 //! Тесты чистых частей `check` (без сети): БД и корни.
+//!
+//! Логика проверок живёт в `hds-index::diag` (общий код с веб-интерфейсом).
 
 mod common;
 
 use common::TempDir;
 use hds_core::config::load_from;
+use hds_index::diag::{check_db, check_roots};
 
 #[test]
 fn check_db_ok_on_temp_db() {
@@ -11,7 +14,7 @@ fn check_db_ok_on_temp_db() {
     let db = td.join("index.db");
     let cfg_path = td.write_config(&format!("db_path: '{}'\n", db.to_string_lossy()));
     let cfg = load_from(&cfg_path).unwrap();
-    let c = hds_cli::cmd::check::check_db(&cfg);
+    let c = check_db(&cfg);
     assert_eq!(c.status, "ok", "title: {}", c.title);
 }
 
@@ -24,7 +27,7 @@ fn check_roots_warn_on_missing() {
         missing.to_string_lossy()
     ));
     let cfg = load_from(&cfg_path).unwrap();
-    assert_eq!(hds_cli::cmd::check::check_roots(&cfg).status, "warn");
+    assert_eq!(check_roots(&cfg).status, "warn");
 }
 
 #[test]
@@ -35,7 +38,7 @@ fn check_roots_ok_on_present() {
         td.path.to_string_lossy()
     ));
     let cfg = load_from(&cfg_path).unwrap();
-    assert_eq!(hds_cli::cmd::check::check_roots(&cfg).status, "ok");
+    assert_eq!(check_roots(&cfg).status, "ok");
 }
 
 #[test]
@@ -43,5 +46,5 @@ fn check_roots_warn_when_empty() {
     let td = TempDir::new("chkroots-empty");
     let cfg_path = td.write_config("db_path: 'x'\n");
     let cfg = load_from(&cfg_path).unwrap();
-    assert_eq!(hds_cli::cmd::check::check_roots(&cfg).status, "warn");
+    assert_eq!(check_roots(&cfg).status, "warn");
 }

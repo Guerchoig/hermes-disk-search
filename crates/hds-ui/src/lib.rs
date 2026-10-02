@@ -174,61 +174,36 @@ fn csrf_ok(h: &ReqHeaders) -> bool {
     origin_ok && (ctype_ok || marker_ok)
 }
 
-/// `/api/diagnostics`: **полный** `hds check` плюс состояние резидентного `llm-host`.
-///
-/// Проверки выполняет тот же бинарь (`<рядом>\hds.exe check --json`): так логика одна
-/// на CLI и UI. Вынести её в общий модуль нельзя — `hds-cli` уже зависит от `hds-ui`
-/// (подкоманда `hds ui`), получился бы цикл пакетов.
+/// `/api/diagnostics`: полный `hds check` (общий код `hds_index::diag::run_checks`,
+/// тот же, что у `hds check`) плюс состояние резидентного `llm-host`
+/// (владельца портов 8010–8012).
 pub fn diagnostics_json() -> Value {
-    let mut checks: Vec<Value> = match run_cli_check() {
-        Ok(v) => v,
-        Err(msg) => {
-            vec![json!({ "id": "check", "status": "warn", "title": "hds check", "msg": msg })]
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => {
+            let checks = vec![
+                json!({ "id": "config", "status": "fail", "title": "config.yaml",
+                                       "msg": e.message() }),
+            ];
+            return json!({ "checks": checks, "ok": false, "config": config_path_str() });
         }
     };
 
-    if let Ok(cfg) = load() {
-        let lh = llm_host_status(&cfg);
-        checks.push(json!({
-            "id": "llm_host",
-            "status": if lh["up"].as_bool() == Some(true) { "ok" } else { "warn" },
-            "title": "llm-host",
-            "msg": if lh["up"].as_bool() == Some(true) { format!("up (pid {})", lh["pid"]) } else { "не отвечает".to_string() }
-        }));
-    }
+    let mut checks: Vec<Value> = hds_index::diag::run_checks(&cfg)
+        .iter()
+        .map(|c| json!({ "id": c.id, "status": c.status, "title": c.title, "msg": c.msg, "fix": c.fix }))
+        .collect();
+
+    let lh = llm_host_status(&cfg);
+    checks.push(json!({
+        "id": "llm_host",
+        "status": if lh["up"].as_bool() == Some(true) { "ok" } else { "warn" },
+        "title": "llm-host",
+        "msg": if lh["up"].as_bool() == Some(true) { format!("up (pid {})", lh["pid"]) } else { "не отвечает".to_string() }
+    }));
 
     let ok = checks.iter().all(|c| c["status"] != "fail");
     json!({ "checks": checks, "ok": ok, "config": config_path_str() })
-}
-
-/// `hds.exe check --json` рядом с текущим исполняемым файлом → список проверок.
-fn run_cli_check() -> Result<Vec<Value>, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let dir = exe
-        .parent()
-        .ok_or_else(|| "нет каталога у исполняемого файла".to_string())?;
-    let name = if cfg!(windows) { "hds.exe" } else { "hds" };
-    let cand = dir.join(name);
-    if !cand.is_file() {
-        return Err(format!("{} не найден рядом с {}", name, exe.display()));
-    }
-    let out = std::process::Command::new(&cand)
-        .arg("check")
-        .arg("--json")
-        .output()
-        .map_err(|e| format!("запуск {}: {e}", cand.display()))?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let v: Value =
-        serde_json::from_str(text.trim()).map_err(|e| format!("разбор `check --json`: {e}"))?;
-    if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-        return Ok(vec![
-            json!({ "id": "config", "status": "fail", "title": "config.yaml", "msg": err }),
-        ]);
-    }
-    Ok(v.get("checks")
-        .and_then(|c| c.as_array())
-        .cloned()
-        .unwrap_or_default())
 }
 
 /// Путь конфига (для диагностики).

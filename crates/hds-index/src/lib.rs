@@ -13,6 +13,7 @@
 //!   `~$`-файлы Office, предварительные проверки файла (`FileFilter`).
 
 pub mod chunker;
+pub mod diag;
 pub mod embed;
 pub mod hash;
 pub mod heartbeat;

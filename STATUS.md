@@ -67,6 +67,10 @@
 > **W5 (очистка, 02.10.2026):** `cargo fmt --all` (104 файла) + clippy **61 → 0**; в CI
 > (`rust.yml`, `release.yml`) `cargo fmt --check` и `clippy -D warnings` — **блокирующие**.
 > Тесты — 170/0 (+9 ignored). `W4_REPORT.md` §6. **W4 закрыт** (шаги 1–4 + W5).
+> **Доп. (02.10.2026):** диагностика перенесена в `hds-index::diag` — UI зовёт `run_checks`
+> **in-process** (убран запуск `hds.exe check --json`); добавлен `NOTICE.md`. Тесты — 170/0.
+> `W4_REPORT.md` §7. Остаток: сплит `hds/` для self-contained sidecar (`build-sidecar`),
+> версионные каталоги `app\<ver>` (§10.6).
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

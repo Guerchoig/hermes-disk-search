@@ -196,3 +196,36 @@ cargo test --workspace                                    # 170 passed / 0 faile
 `build-sidecar`/`build-macos` (mac — «не проверено», §10.0), версионные каталоги `app\<ver>`
 (§10.6). `hdsw.exe`/`hds serve` не вводим — фактические имена (`hds.exe` + подкоманды,
 `llm_host.exe`, `hds_mcp.exe`).
+
+## 7. Диагностика in-process (общий код `hds-index::diag`) + `NOTICE.md` (02.10.2026)
+
+**Зачем.** В §5 проверки в UI делались запуском `<рядом>\hds.exe check --json` (обход цикла
+`hds-cli → hds-ui`). Работало, но зависело от наличия `hds.exe` рядом и поднимало второй
+процесс. Переносим логику в **`hds-index`** (он же зависимость `hds-ui` — цикла нет): один
+источник проверок, вызов в процессе.
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `crates\hds-index\src\diag.rs` | **новый**: перенос `hds-cli::cmd::check` и помощников (`probe_role`, `role_addr`, `resolve_model`, `runtime_dir`, `props_context`, `which`, `tesseract_ready`, `norm_path`, `Probe`, `PROBE_TIMEOUT`) + `Check`/`run_checks`. `check_db`/`check_roots` — `pub` (чистые, для тестов). |
+| `crates\hds-index\src\lib.rs` | `pub mod diag;`. |
+| `crates\hds-cli\src\support.rs` | перемещённые помощники **удалены**; `pub use hds_index::diag::{…}` — прежний путь `hds_cli::support::…` сохранён (тесты/подкоманды без изменений). |
+| `crates\hds-cli\src\cmd\check.rs` | тонкая обёртка: печать + `--json` над `hds_index::diag::run_checks`. |
+| `crates\hds-ui\src\lib.rs` | `/api/diagnostics` — **in-process** `hds_index::diag::run_checks` (убран `run_cli_check`/`std::process`). |
+| `crates\hds-cli\tests\check_core.rs` | импорт из `hds_index::diag`. |
+| `NOTICE.md` | **новый**: атрибуция (движок, CUDA EULA, FFmpeg, Tesseract, PyMuPDF/AGPL, sidecar-зависимости, модели); копируется в артефакт `build_rust_release.ps1`. |
+
+**Приёмка.**
+```
+cargo fmt --all -- --check                               # 0 diff
+cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings / 0 errors
+cargo test --workspace                                    # 170 passed / 0 failed (+9 ignored)
+# UI :8799 -> GET /api/diagnostics: checks=10 (db:ok roots:ok chat:warn emb:fail ocr:ok
+#   ffmpeg:ok lemmatizer:ok rerank:ok python-only:warn llm_host:warn)
+```
+
+**Остаётся (вне W4/W5).** Self-containment Python-sidecar: воркер тянет
+`hds.extractors → extract_av/extract_static` (faster-whisper, jpype/mpxj) — нужен сплит `hds/`
+(модули извлечения/лемматизации → `sidecar/`), затем джобы `build-sidecar`/`build-macos`;
+версионные каталоги `app\<ver>` (§10.6); `.mpp` (jpype/mpxj) пока нет в `requirements.lock`.
