@@ -121,3 +121,73 @@ pub fn check_fit(free_mib: Option<u64>, need_mib: u64, reserve_mib: u64) -> Fit 
         },
     }
 }
+
+/// Байт на элемент compute-буфера движка — калибровка по живым замерам W2
+/// (`W2_REPORT.md` §10.2a): Qwen3.5-9B (4096 × 32 слоя) при `n_batch` 2048 давал
+/// ≈1972 МиБ, при 512 — ≈469 МиБ, то есть ≈7,5 байта на элемент (K/V-буферы f32 плюс
+/// служебные). Значение грубое, но именно его не хватало бюджету: он считал только
+/// «модель + KV», а `n_ubatch = 8192` у embedding — это гигабайты.
+pub const COMPUTE_BYTES_PER_ELEMENT: f64 = 7.5;
+
+/// Оценка compute-буфера движка, МиБ: `n_ubatch × embedding_length × block_count × C`.
+///
+/// Буфер выделяется при загрузке и не зависит от KV-типа. Для embedding с
+/// `n_ubatch = 8192` (bge-m3: 1024 × 24) это ≈1,4 ГиБ, тогда как прежний бюджет
+/// обещал «нужно 636 МиБ» — отсюда «загадочная» занятая VRAM при индексации.
+pub fn compute_buffer_mib(meta: &GgufMeta, n_ubatch: i64) -> f64 {
+    let embd = meta.embedding_length as f64;
+    let layers = meta.block_count as f64;
+    let tokens = n_ubatch.max(1) as f64;
+    tokens * embd * layers * COMPUTE_BYTES_PER_ELEMENT / (1024.0 * 1024.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn meta(embd: u32, layers: u32) -> GgufMeta {
+        GgufMeta {
+            architecture: "test".to_string(),
+            block_count: layers,
+            head_count: 32,
+            head_count_kv: 8,
+            embedding_length: embd,
+            key_length: None,
+            value_length: None,
+            causal: Some(true),
+            full_attention_interval: None,
+        }
+    }
+
+    /// Калибровка по замеру W2: 4096 × 32 слоя, ubatch 2048 → ≈1972 МиБ, 512 → ≈469 МиБ.
+    #[test]
+    fn compute_buffer_matches_w2_measurements() {
+        let m = meta(4096, 32);
+        let at2048 = compute_buffer_mib(&m, 2048);
+        assert!((at2048 - 1972.0).abs() < 60.0, "2048 → {at2048}");
+        let at512 = compute_buffer_mib(&m, 512);
+        assert!((at512 - 469.0).abs() < 40.0, "512 → {at512}");
+        assert!(at512 < at2048 / 3.0, "буфер обязан падать с ubatch");
+    }
+
+    /// Embedding с legacy `n_ubatch = 8192` — гигабайты (то, что пропускал бюджет).
+    #[test]
+    fn embedding_large_ubatch_is_gigabytes() {
+        let m = meta(1024, 24);
+        let big = compute_buffer_mib(&m, 8192);
+        let small = compute_buffer_mib(&m, 512);
+        assert!(big > 1000.0, "8192 → {big} МиБ (ожидаем ~1,4 ГиБ)");
+        assert!(small < 120.0, "512 → {small} МиБ (ожидаем ~90 МиБ)");
+    }
+
+    /// Вырожденные значения не дают NaN/панику.
+    #[test]
+    fn compute_buffer_survives_zero_meta() {
+        let m = meta(0, 0);
+        assert_eq!(compute_buffer_mib(&m, 2048), 0.0);
+        assert!(
+            compute_buffer_mib(&m, 0) >= 0.0,
+            "ubatch 0 не ломает формулу"
+        );
+    }
+}

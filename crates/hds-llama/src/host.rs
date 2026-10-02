@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
-use crate::budget::estimate_need_mib;
+use crate::budget::{compute_buffer_mib, estimate_need_mib};
 use crate::cluster::{Cluster, InstanceSpec};
 use crate::config::{self, GpuConfig, LlmHostConfig, Mode};
 use crate::dispatch::{self, instance_use, plan_query, Demand, InstanceUse, Plan};
@@ -112,7 +112,13 @@ pub fn role_needs(cfg: &LlmHostConfig, runtime_root: &Path) -> BTreeMap<String, 
         };
         let need = match read_meta(&model_path) {
             Ok(meta) => {
-                estimate_need_mib(&meta, file_mib, rc.n_ctx.max(0) as i64, parallel, kv_bits)
+                let base =
+                    estimate_need_mib(&meta, file_mib, rc.n_ctx.max(0) as i64, parallel, kv_bits);
+                // compute-буфер движка: масштабируется `n_ubatch`, и на больших значениях
+                // (legacy embedding `--ubatch-size 8192`) это гигабайты — прежняя оценка
+                // «модель + KV» их не видела вовсе.
+                let ubatch = rc.n_ubatch.or(rc.n_batch).unwrap_or(2048).max(1) as i64;
+                base + compute_buffer_mib(&meta, ubatch).ceil() as u64
             }
             // без метаданных считаем хотя бы вес файла (+5 %, как в оценке бюджета)
             Err(_) => file_mib + file_mib / 20,
@@ -1761,16 +1767,31 @@ impl Host {
                     if let Ok(meta) = read_meta(&inst.model_path) {
                         let n_ctx = spec.n_ctx.unwrap_or(0) as i64;
                         let parallel = resolved.parallel.max(1) as i64;
+                        // KV-тип роли и compute-буфер — часть честной оценки «нужно».
+                        let kv_bits = if spec.cache_type_k == Some(8) {
+                            KvBits::Q8_0
+                        } else {
+                            KvBits::F16
+                        };
+                        let n_ubatch = spec.n_ubatch.or(spec.n_batch).unwrap_or(2048).max(1) as i64;
+                        let buffer_mib = compute_buffer_mib(&meta, n_ubatch);
                         log.line(&format!(
-                            "роль {}: модель {file_mib} МиБ, KV f16 {:.0} МиБ (KV-слоёв {} из {}), \
-                             n_batch {} n_ubatch {}, нужно {} МиБ",
+                            "роль {}: модель {file_mib} МиБ, KV {} {:.0} МиБ (KV-слоёв {} из {}), \
+                             compute-буфер {:.0} МиБ (n_ubatch {}), n_batch {}, нужно {} МиБ",
                             inst.role,
-                            crate::budget::kv_cache_mib(&meta, n_ctx, parallel, KvBits::F16),
+                            if kv_bits == KvBits::Q8_0 {
+                                "q8_0"
+                            } else {
+                                "f16"
+                            },
+                            crate::budget::kv_cache_mib(&meta, n_ctx, parallel, kv_bits),
                             meta.kv_layer_count(),
                             meta.block_count,
+                            buffer_mib,
+                            n_ubatch,
                             spec.n_batch.unwrap_or(2048),
-                            spec.n_ubatch.unwrap_or(2048),
-                            estimate_need_mib(&meta, file_mib, n_ctx, parallel, KvBits::F16)
+                            estimate_need_mib(&meta, file_mib, n_ctx, parallel, kv_bits)
+                                + buffer_mib.ceil() as u64
                         ));
                         // Смысл предупреждения: при тесной карте compute-буфер съедает
                         // до 2 ГиБ, а уменьшение `n_batch` — самый дешёвый рычаг

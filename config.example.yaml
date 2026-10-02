@@ -70,7 +70,9 @@ llm_server:                 # роли LLM (движок openresearchtools); в�
     port: 8011
     model: "models/embedding/bge-m3-Q8_0.gguf"
     ctx_per_slot: 8192
-    extra_args: "--batch-size 8192 --ubatch-size 8192 -ngl 99"
+    # `--ubatch-size` — compute-буфер движка (n_ubatch × hidden × слои). 8192 при 12 ГБ
+    # неразумен (≈1,4 ГиБ у bge-m3), 512 — дефолт llama.cpp и ~16× меньше.
+    extra_args: "--batch-size 8192 --ubatch-size 512 -ngl 99"
   rerank:
     port: 8012
     model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"

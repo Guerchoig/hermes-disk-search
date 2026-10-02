@@ -48,6 +48,33 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 13.4 (`nvcc`), `whisper.cpp` рядом (для аудио-моста). Полная поставка (как ассет) —
 через `build_full_stack_cuda.ps1` с `-EnableCpuAllVariants`/`-StageCudaRuntime`, как в CI.
 
+## Результаты живой проверки (02.10.2026, RTX 3060 12 ГБ)
+
+Собран нашим патчем и проверен на **копии** рантайма (`C:\Users\Sasha\engine-patched`),
+боевой каталог движка не тронут; резидент запущен с `--engine-dir <копия>`.
+
+| Что | Было (сток v1.15) | Стало (патч) |
+|---|---|---|
+| Размер DLL | `llama-server-bridge.dll` 5,16 МБ, `multi-node-server.dll` 0,28 МБ | 5,18 / 0,28 МБ (сборка воспроизводит апстрим) |
+| Экспорты `multi-node-server.dll` | 39 | 39 (**ABI не менялся**) |
+| KV чата (n_ctx 16384, 8/32 слоёв) | f16 = 512 МиБ | **q8_0 = 272 МиБ** |
+| VRAM с загруженным чатом | 7905 МиБ | **7704 МиБ** (−201 МиБ; разница с −240 — Flash Attention) |
+| compute-буфер embedding (legacy `--ubatch-size 8192`) | ~1,4 ГиБ (бюджет этого не видел) | **90 МиБ** при `n_ubatch 512` (конфиг исправлен) |
+| Чат | — | `POST /v1/chat/completions` → `"content":"ok"`, 2 токена ✔ |
+| Embeddings | — | `POST /v1/embeddings` → вектор 1024 ✔ |
+
+Наш бюджет теперь печатает честную оценку (лог резидента):
+`роль chat: модель 7112 МиБ, KV q8_0 272 МиБ (KV-слоёв 8 из 32), compute-буфер 480 МиБ (n_ubatch 512), n_batch 512, нужно 8220 МиБ`.
+
+### Грабля сборки (стоила времени)
+
+`build_bridge.ps1` **копирует исходники моста с сохранением mtime** (`bridge/README.md` —
+«patchable layer»), поэтому после правки патча `<BuildDir>` может решить, что объекты
+свежее источников, и **не пересобрать** (`ninja: no work to do`, в DLL остаётся старый код).
+Проверять: маркерная строка в DLL (`slot wait timeout`) или
+`Get-ChildItem <BuildDir> -Recurse -Filter '*cluster*.obj'` по времени. Лечение: удалить
+объекты моста (`*cluster*.obj`, `*bridge*.obj`) перед сборкой — их проще, чем mtime.
+
 ## Как проверить (на копии рантайма! боевой не трогаем)
 
 1. Скопировать каталог движка (`%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`) в

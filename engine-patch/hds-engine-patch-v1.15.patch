@@ -46,7 +46,7 @@ index da72ef1..94f4015 100644
      int32_t seed;
      int32_t ctx_shift;
 diff --git a/bridge/llama_server_cluster.cpp b/bridge/llama_server_cluster.cpp
-index 63dce16..82bea20 100644
+index 63dce16..ab227a2 100644
 --- a/bridge/llama_server_cluster.cpp
 +++ b/bridge/llama_server_cluster.cpp
 @@ -96,6 +96,9 @@ struct owned_instance_params {
@@ -59,7 +59,19 @@ index 63dce16..82bea20 100644
  };
  
  struct model_instance {
-@@ -1391,6 +1394,8 @@ owned_instance_params normalize_instance_params(
+@@ -104,6 +107,11 @@ struct model_instance {
+ 
+     std::mutex mutex;
+     std::condition_variable cv;
++    // HDS patch: сериализация загрузки модели. Пока модель грузится (секунды),
++    // request-лок `mutex` НЕ держим — иначе `list_instances`, `unload_instance` и
++    // другие роли встают за загрузкой (в нашем инциденте это парализовало и статус,
++    // и вытеснение, и чат). См. `ensure_instance_loaded`/`create_bridge_detached`.
++    std::mutex load_mutex;
+     int64_t instance_id = 0;
+     owned_instance_params params;
+     int32_t retention_mode = LLAMA_SERVER_CLUSTER_INSTANCE_KEEP_LOADED;
+@@ -1391,6 +1399,8 @@ owned_instance_params normalize_instance_params(
      out.model_kind = normalize_instance_model_kind(input);
      out.allow_cpu = input.allow_cpu;
      out.allow_integrated_gpu = input.allow_integrated_gpu;
@@ -68,7 +80,7 @@ index 63dce16..82bea20 100644
  
      if (!out.manual_devices_csv.empty()) {
          const std::vector<std::string> requested_devices = split_csv(out.manual_devices_csv);
-@@ -1781,6 +1786,9 @@ bridge_handle_ptr create_bridge_for_instance(
+@@ -1781,6 +1791,9 @@ bridge_handle_ptr create_bridge_for_instance(
      bridge_params.embedding = instance.params.embedding;
      bridge_params.reranking = instance.params.reranking;
      bridge_params.cache_ram_mib = 0;
@@ -78,7 +90,7 @@ index 63dce16..82bea20 100644
      bridge_params.use_mlock = 0;
  
      if (instance.params.n_ctx > 0) {
-@@ -2143,45 +2151,26 @@ void clear_instance_grace_state(model_instance & instance) {
+@@ -2143,45 +2156,26 @@ void clear_instance_grace_state(model_instance & instance) {
      instance.grace_deadline_unix_ms = 0;
  }
  
@@ -140,7 +152,7 @@ index 63dce16..82bea20 100644
          }
  
          const std::vector<owned_execution_group> groups =
-@@ -2209,35 +2198,112 @@ bool ensure_instance_loaded_locked(model_instance & instance, bool for_request,
+@@ -2209,35 +2203,112 @@ bool ensure_instance_loaded_locked(model_instance & instance, bool for_request,
              }
          }
          if (chosen == nullptr) {
@@ -271,7 +283,7 @@ index 63dce16..82bea20 100644
  }
  
  void finish_request_locked(model_instance & instance) {
-@@ -2266,16 +2332,31 @@ int32_t instance_parallel_limit(const model_instance & instance) {
+@@ -2266,16 +2337,31 @@ int32_t instance_parallel_limit(const model_instance & instance) {
      return std::max<int32_t>(1, instance.params.n_parallel);
  }
  
@@ -304,7 +316,7 @@ index 63dce16..82bea20 100644
      }
      if (counted_as_queued && instance.queued_request_count > 0) {
          instance.queued_request_count -= 1;
-@@ -3036,26 +3117,30 @@ int32_t llama_server_cluster_set_instance_retention_mode(
+@@ -3036,26 +3122,30 @@ int32_t llama_server_cluster_set_instance_retention_mode(
          return -1;
      }
  
@@ -352,7 +364,7 @@ index 63dce16..82bea20 100644
      set_cluster_error(cluster, "");
      return 0;
  }
-@@ -3073,9 +3158,11 @@ int32_t llama_server_cluster_load_instance(
+@@ -3073,9 +3163,11 @@ int32_t llama_server_cluster_load_instance(
          return -1;
      }
  
@@ -366,7 +378,7 @@ index 63dce16..82bea20 100644
          set_cluster_error(cluster, load_error);
          return -1;
      }
-@@ -3097,14 +3184,22 @@ int32_t llama_server_cluster_unload_instance(
+@@ -3097,14 +3189,22 @@ int32_t llama_server_cluster_unload_instance(
          return -1;
      }
  
@@ -394,7 +406,7 @@ index 63dce16..82bea20 100644
      set_cluster_error(cluster, "");
      return 0;
  }
-@@ -3148,16 +3243,20 @@ int32_t llama_server_cluster_chat_complete(
+@@ -3148,16 +3248,20 @@ int32_t llama_server_cluster_chat_complete(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -416,7 +428,7 @@ index 63dce16..82bea20 100644
  
      llama_server_bridge_chat_request bridge_req = llama_server_bridge_default_chat_request();
      bridge_req.prompt = req->prompt;
-@@ -3268,7 +3367,8 @@ int32_t llama_server_cluster_vlm_complete(
+@@ -3268,7 +3372,8 @@ int32_t llama_server_cluster_vlm_complete(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -426,7 +438,7 @@ index 63dce16..82bea20 100644
          out->metrics.loaded_this_call = was_loaded ? 0 : 1;
          out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
          out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
-@@ -3278,6 +3378,7 @@ int32_t llama_server_cluster_vlm_complete(
+@@ -3278,6 +3383,7 @@ int32_t llama_server_cluster_vlm_complete(
      }
      out->metrics.loaded_this_call = was_loaded ? 0 : 1;
      out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
@@ -434,7 +446,7 @@ index 63dce16..82bea20 100644
  
      llama_server_bridge_vlm_request bridge_req = llama_server_bridge_default_vlm_request();
      bridge_req.prompt = req->prompt != nullptr ? req->prompt : "";
-@@ -3389,7 +3490,8 @@ int32_t llama_server_cluster_embeddings(
+@@ -3389,7 +3495,8 @@ int32_t llama_server_cluster_embeddings(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -444,7 +456,7 @@ index 63dce16..82bea20 100644
          out->metrics.loaded_this_call = was_loaded ? 0 : 1;
          out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
          out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
-@@ -3399,6 +3501,7 @@ int32_t llama_server_cluster_embeddings(
+@@ -3399,6 +3506,7 @@ int32_t llama_server_cluster_embeddings(
      }
      out->metrics.loaded_this_call = was_loaded ? 0 : 1;
      out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
@@ -452,7 +464,7 @@ index 63dce16..82bea20 100644
  
      llama_server_bridge_embeddings_request bridge_req = llama_server_bridge_default_embeddings_request();
      bridge_req.body_json = req->body_json;
-@@ -3478,7 +3581,8 @@ int32_t llama_server_cluster_rerank(
+@@ -3478,7 +3586,8 @@ int32_t llama_server_cluster_rerank(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -462,7 +474,7 @@ index 63dce16..82bea20 100644
          out->metrics.loaded_this_call = was_loaded ? 0 : 1;
          out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
          out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
-@@ -3488,6 +3592,7 @@ int32_t llama_server_cluster_rerank(
+@@ -3488,6 +3597,7 @@ int32_t llama_server_cluster_rerank(
      }
      out->metrics.loaded_this_call = was_loaded ? 0 : 1;
      out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
@@ -470,7 +482,7 @@ index 63dce16..82bea20 100644
  
      llama_server_bridge_rerank_request bridge_req = llama_server_bridge_default_rerank_request();
      bridge_req.body_json = req->body_json;
-@@ -3639,7 +3744,8 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+@@ -3639,7 +3749,8 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -480,7 +492,7 @@ index 63dce16..82bea20 100644
          out->metrics.loaded_this_call = was_loaded ? 0 : 1;
          out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
          out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
-@@ -3649,6 +3755,7 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+@@ -3649,6 +3760,7 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
      }
      out->metrics.loaded_this_call = was_loaded ? 0 : 1;
      out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
