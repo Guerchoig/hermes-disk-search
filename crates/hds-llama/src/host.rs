@@ -407,6 +407,25 @@ pub const OBSERVE_BUDGET: Duration = Duration::from_millis(300);
 /// постфактум (зависший вызов из `W4_REPORT.md` §14 шёл 3 часа и не оставлял следов).
 pub const SLOW_CALL_MS: u64 = 30_000;
 
+/// Бюджет ожидания шлюза при загрузке/ожидании готовности роли (`ensure_loaded`,
+/// `/internal/load`). Дольше ждать не нужно: движок либо отвечает, либо мы честно
+/// говорим «занят» (`W4_REPORT.md` §14).
+pub const LOAD_STEP_BUDGET: Duration = Duration::from_secs(30);
+
+/// Бюджет ожидания шлюза для применения решения диспетчера. Если движок занят чужим
+/// вызовом, вытеснение **откладывается**: вставать в очередь нельзя — именно это
+/// превращало запрос в «резидент не отвечает».
+pub const DISPATCH_BUDGET: Duration = Duration::from_millis(500);
+
+/// Бюджет ожидания для фонового арбитра: занят движок — просто пропускаем такт
+/// (арбитру не нужно решение «во что бы то ни стало»).
+pub const ARBITER_BUDGET: Duration = Duration::from_millis(500);
+
+/// Ошибка «движок занят»: клиент видит её как `503` вместо бесконечного ожидания.
+fn busy_err(busy: crate::gate::Busy) -> EngineError {
+    EngineError::Other(format!("движок занят ({busy}) — попробуйте позже"))
+}
+
 impl ClusterShared {
     pub fn new(cluster: Cluster) -> ClusterShared {
         ClusterShared(crate::gate::Gate::new(cluster))
@@ -432,6 +451,41 @@ impl ClusterShared {
         f: impl FnOnce(&Cluster) -> T,
     ) -> std::result::Result<T, crate::gate::Busy> {
         self.0.try_with(what, budget, f)
+    }
+
+    /// Дождаться готовности инстанса, **не удерживая шлюз**: опрос шагами, между
+    /// шагами замок свободен. Нужен всем, кто ждёт загрузку (`ensure_loaded`,
+    /// `/internal/load`): иначе один ожидающий блокирует `status`, арбитр и другие роли
+    /// — ровно то, что случилось в инциденте `W4_REPORT.md` §14 (загрузка держала
+    /// мьютекс, а снаружи это выглядело как «резидент не отвечает»).
+    pub fn wait_loaded_stepwise(
+        &self,
+        what: &str,
+        id: crate::ffi::InstanceId,
+        timeout: Duration,
+    ) -> Result<crate::cluster::Instance> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            match self.try_with(what, LOAD_STEP_BUDGET, |c| {
+                c.instance_by_id(id).ok().flatten()
+            }) {
+                Ok(Some(inst)) if inst.is_loaded() || inst.is_failed() => return Ok(inst),
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(EngineError::InstanceNotFound {
+                        name: format!("id={id}"),
+                    })
+                }
+                // шлюз занят чужим вызовом: ждём следующего шага, пока идёт таймаут
+                Err(_) => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(EngineError::Other(format!(
+                    "таймаут ожидания загрузки инстанса {id} ({timeout:?}): движок не ответил"
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(500));
+        }
     }
 
     /// Кто держит движок сейчас (`None` — свободен).
@@ -618,11 +672,18 @@ impl ClusterBackend {
         });
         if !loaded {
             let load_tag = format!("load:{role}");
-            cl.with_tagged(&load_tag, |c| c.load(id))?;
+            // `load_instance` идёт секунды (модель с диска) — это нормально, но и сама
+            // загрузка, и ожидание готовности берут бюджет, а не «ждут вечно»: замок
+            // между шагами свободен (§14).
+            cl.try_with(&load_tag, LOAD_STEP_BUDGET, |c| c.load(id))
+                .map_err(|busy| {
+                    EngineError::Other(format!(
+                        "движок занят ({busy}) — роль '{role}' не загрузить за {} с",
+                        LOAD_STEP_BUDGET.as_secs()
+                    ))
+                })??;
             let wait_tag = format!("wait_loaded:{role}");
-            cl.with_tagged(&wait_tag, |c| {
-                c.wait_loaded(id, Duration::from_secs(300), Duration::from_millis(500))
-            })?;
+            cl.wait_loaded_stepwise(&wait_tag, id, Duration::from_secs(300))?;
         }
         self.note_used(role);
         Ok(id)
@@ -687,21 +748,45 @@ impl ClusterBackend {
             let uses = self.uses();
             plan_query(&self.gpu, self.free_mib(), &Demand::new(role, need), &uses)
         };
-        let log = self.cl()?.with_tagged("dispatcher", |cluster| {
-            dispatch::apply(cluster, &self.pause, &plan)
-        });
-        for line in plan.lines().iter().chain(log.iter()) {
-            self.log.line(&format!("[dispatcher] {line}"));
-        }
+        // Применяем решение к движку — но **с бюджетом**: если движок занят чужим
+        // вызовом (загрузка/инференс другой роли), вытеснение откладываем. Ждать
+        // нельзя: именно ожидание за чужим вызовом превращало запрос в «резидент не
+        // отвечает» (`W4_REPORT.md` §14), а запрос без вытеснения обычно проходит —
+        // движок сам поднимет роль (`LOAD_ON_DEMAND`) или честно откажет.
+        let mut defer_line: Option<String> = None;
+        let deferred = match self
+            .cl()?
+            .try_with("dispatcher", DISPATCH_BUDGET, |cluster| {
+                dispatch::apply(cluster, &self.pause, &plan)
+            }) {
+            Ok(log) => {
+                for line in plan.lines().iter().chain(log.iter()) {
+                    self.log.line(&format!("[dispatcher] {line}"));
+                }
+                false
+            }
+            Err(busy) => {
+                defer_line = Some(format!("движок занят ({busy}) — вытеснение отложено"));
+                self.log.line(&format!(
+                    "[dispatcher] {}",
+                    defer_line.as_deref().unwrap_or("")
+                ));
+                true
+            }
+        };
+        let verdict_str = plan.verdict.as_str().to_string();
         if let Ok(mut d) = self.decisions.lock() {
-            d.push(format!("{role}: {}", plan.verdict.as_str()));
+            d.push(format!("{role}: {verdict_str}"));
             d.extend(plan.lines());
+            if let Some(why) = &defer_line {
+                d.push(format!("[deferred] {why}"));
+            }
         }
         let verdict_ok = plan.verdict.is_ok();
         if let Ok(mut last) = self.last_plan.lock() {
             *last = Some(plan);
         }
-        if !verdict_ok {
+        if !verdict_ok && !deferred {
             // Паузу мы поставили «под запрос» (действие PauseIndex), но запрос
             // отклонён — снимаем её здесь же: иначе неудавшийся запрос оставит
             // индексацию стоящей навсегда (R30: «индексация встала»). Чужую паузу
@@ -715,6 +800,15 @@ impl ClusterBackend {
                     .unwrap_or_else(|| "?".to_string()),
                 self.cfg.model_policy
             )));
+        }
+        if !verdict_ok {
+            // Вытеснение не выполнено (движок занят), а вердикт «не хватает» — это наша
+            // оценка, а не приговор: движок умеет выгружать сам. Отдаём запрос как есть —
+            // откажет, и клиент получит честную ошибку движка.
+            self.log.line(&format!(
+                "[dispatcher] вердикт {verdict_str}: вытеснение не выполнено — запрос \
+                 '{role}' отдаём движку как есть"
+            ));
         }
         Ok(self.pause.lease(&format!("запрос роли {role}")).ok())
     }
@@ -924,10 +1018,17 @@ impl ClusterBackend {
         }
 
         for (why, plan) in plans {
-            let log = self
-                .cl()
-                .map(|cl| cl.with(|cluster| dispatch::apply(cluster, &self.pause, &plan)))
-                .unwrap_or_default();
+            // Арбитр не должен залипать на чужом вызове: занят движок — пропускаем такт
+            // (в §14 арбитр ждал за зависшей загрузкой и не мог вытеснить ничего).
+            let log = match self.cl() {
+                Ok(cl) => match cl.try_with("arbiter", ARBITER_BUDGET, |cluster| {
+                    dispatch::apply(cluster, &self.pause, &plan)
+                }) {
+                    Ok(log) => log,
+                    Err(busy) => vec![format!("движок занят ({busy}) — вытеснение отложено")],
+                },
+                Err(_) => Vec::new(),
+            };
             for line in plan.lines().iter().chain(log.iter()) {
                 self.log.line(&format!("[arbiter/{why}] {line}"));
             }
@@ -1146,7 +1247,9 @@ impl Backend for ClusterBackend {
     /// `/internal/devices` — устройства движка (bridge-индексы, память, бэкенд).
     fn internal_devices(&self) -> Result<Value> {
         let cl = self.cl()?;
-        let devices = cl.with(|c| c.devices())?;
+        let devices = cl
+            .try_with("devices", OBSERVE_BUDGET, |c| c.devices())
+            .map_err(busy_err)??;
         Ok(json!({
             "lines": devices.iter().map(device_line).collect::<Vec<_>>(),
             "devices": devices
@@ -1182,9 +1285,10 @@ impl Backend for ClusterBackend {
         })?;
         let _lease = self.prepare(role)?;
         let cl = self.cl()?;
-        cl.with(|c| c.load(id))?;
+        cl.try_with(&format!("load:{role}"), LOAD_STEP_BUDGET, |c| c.load(id))
+            .map_err(busy_err)??;
         let inst =
-            cl.with(|c| c.wait_loaded(id, Duration::from_secs(300), Duration::from_millis(500)))?;
+            cl.wait_loaded_stepwise(&format!("wait_loaded:{role}"), id, Duration::from_secs(300))?;
         self.note_used(role);
         self.log.line(&format!(
             "[internal] роль '{role}': загружена ({}), id={id}",
@@ -1197,7 +1301,8 @@ impl Backend for ClusterBackend {
     fn internal_unload(&self, role: &str) -> Result<Value> {
         let cl = self.cl()?;
         let id = self.id_of(role)?;
-        cl.with(|c| c.unload(id))?;
+        cl.try_with(&format!("unload:{role}"), OBSERVE_BUDGET, |c| c.unload(id))
+            .map_err(busy_err)??;
         let state = cl
             .with(|c| {
                 c.instance_by_id(id)

@@ -820,22 +820,35 @@ pub fn handle(
         Route::Health => Response::ok(health_json()),
         Route::Models => Response::ok(models_json(&cfg.aliases, unix_now() as i64)),
         Route::Props => match props_role(cfg, backend) {
-            Some((role, props)) => Response::ok(props_json(
-                &role,
-                props
-                    .get("model_path")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(""),
-                props.get("n_ctx").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                props
-                    .get("total_slots")
-                    .and_then(|v| v.as_i64())
-                    .unwrap_or(1) as i32,
-                &cfg.aliases_of(&role)
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| role.clone()),
-            )),
+            Some((role, props)) => {
+                let mut body = props_json(
+                    &role,
+                    props
+                        .get("model_path")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or(""),
+                    props.get("n_ctx").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+                    props
+                        .get("total_slots")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(1) as i32,
+                    &cfg.aliases_of(&role)
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| role.clone()),
+                );
+                // L1 (`W4_REPORT.md` §15): наблюдаемость роли сквозь штатный `/props` —
+                // состояние инстанса и занятость движка («кто держит и сколько»), если
+                // бэкенд их знает (резидентный `llm-host` знает; режим `facade` — нет).
+                if let Value::Object(map) = &mut body {
+                    for key in ["state", "busy"] {
+                        if let Some(v) = props.get(key) {
+                            map.insert(key.to_string(), v.clone());
+                        }
+                    }
+                }
+                Response::ok(body)
+            }
             None => Response::error(
                 503,
                 "ни один инстанс фасада не поднят (инстансы стартуют вместе с llm-host)",
