@@ -52,9 +52,9 @@ if ($Status) {
     exit 0
 }
 
-if (-not $Exe) { $Exe = Join-Path $root "target\release\llm_host.exe" }
+if (-not $Exe) { $Exe = Join-Path $root "bin\llm_host.exe" }
 if (-not (Test-Path $Exe)) {
-    Write-Error "llm-host binary not found: $Exe`nBuild it first: cargo build --release -p hds-llama --bin llm_host"
+    Write-Error "llm-host binary not found: $Exe`nBuild the release first: installers\build_rust_release.ps1 (or cargo build --release -p hds-llama --bin llm_host for a dev tree)"
     exit 1
 }
 

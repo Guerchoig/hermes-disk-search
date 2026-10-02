@@ -36,7 +36,8 @@ echo        .\setup.ps1
 echo.
 echo  2. No internet access for winget / model downloads.
 echo.
-echo  3. Python 3.10+ not installed (setup.ps1 prints instructions).
+echo  3. The archive is not a Rust build (bin\hds.exe is missing);
+echo     setup.ps1 prints instructions.
 echo.
 pause
 exit /b 1

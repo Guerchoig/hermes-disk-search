@@ -38,3 +38,48 @@ dist\hds-0.1.0-windows-x64\bin\hds.exe --help   # ok
 автозапуск `llm-host` вместо Python-ролей), доставка ONNX-моделей CLIP и рантайма ASR
 (`engine-manifest.json` + sha256, джоба `fetch-engine-runtime`), `package` (zip + sha256),
 `release` с бинарными ассетами.
+
+## 2. Установщик под Rust-бинарники + автозапуск llm-host (02.10.2026)
+
+**Решения заказчика (02.10.2026):** (1) `.ps1` — ASCII-only **English**; (2) GGUF-модели —
+отдельный `fetch_llm_models.ps1`; (3) CLIP — наши release-ассеты + `clip-manifest.json`;
+(4) `default_onnx_dir` → `models\clip_onnx`; (5) инсталлеры правим на `mcp-http restart`
+(вместо `restart-if-stale`); (6) Python-джобы в `release.yml` пока оставляем; (7) фиксируем
+**фактические** имена бинарников (`hds.exe`/`hds_mcp.exe`/`llm_host.exe`, не `hdsw`).
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `setup.ps1` | **переписан** под Rust-раскладку `bin\` (ASCII-only, English): MotW; проверка `bin\hds.exe` (иначе подсказка про §10.3); winget-зависимости (`ffmpeg` авто, `Tesseract` по согласию, VC++ Redist если нет `vcruntime140[_1].dll`); проверка sidecar-воркера (`hello`-рукопожатие; python: `HDS_EXTRACT_PYTHON` → `sidecar\python` → `.venv`, фолбэк §10.2 п.4); `config.yaml` из образца + эвристика отсутствующих дисков; рантайм движка; GGUF/whisper; задачи Планировщика; интеграции; ярлык; `bin\hds.exe check`; `-SmokeTest` (мини-индекс на temp-БД). Флаги: `-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SmokeTest`. |
+| `installers\fetch_engine_runtime.ps1` | **новый**: выбор ассета из `runtime-manifests\engine-manifest.json` по платформе+бэкенду (`auto` → NVIDIA `cuda`, иначе `vulkan`/`metal`), скачивание, **sha256**, распаковка (+flatten single root), `Unblock-File`, штамп `.hds-engine.json`. Идемпотентен (существующий рантайм без штампа не перекачивается). |
+| `installers\fetch_llm_models.ps1` | **новый**: GGUF chat/embedding/rerank в общий `%LOCALAPPDATA%\llama-runtime\models\<role>` (модельная часть старого `ensure_llama_runtime.ps1`, **без** llama-server); быстрый путь из LM Studio; `current.json`. |
+| `installers\fetch_whisper_model.ps1` | **новый**: `whisper-large-v3-turbo-GGML.bin` в `%APPDATA%\OpenResearchTools\models\…` (опц.; sha256 у HF нет — проверка размера). |
+| `runtime-manifests\engine-manifest.json` (+ `-sources.json`) | **новые, коммитятся**: пин upstream **v1.15** (`windows-x64` cuda/vulkan, `macos-arm64` metal) с `url`+`sha256` (копия формата `transcribeoffline`/движка). |
+| `installers\install_llm_host_task.ps1` | `-Exe` по умолчанию `target\release\llm_host.exe` → **`bin\llm_host.exe`**; сообщение о сборке → `build_rust_release.ps1`. |
+| `install_autostart.ps1` | **переписан**: задачи `HermesDiskSearchWatch` (`bin\hds.exe watch`) и `HermesDiskSearchMcp` (`bin\hds.exe mcp-http run`); удаление legacy pythonw-задач/ярлыков; фолбэк на Startup. |
+| `run_ui.ps1` | **переписан**: `bin\hds.exe ui --port 8765` + ожидание `/api/status` + открытие браузера; логи в `%LOCALAPPDATA%\hermes-disk-search`. |
+| `run_index.ps1` | **переписан**: `bin\hds.exe index`. |
+| `install_hermes.ps1` | **переписан** (ASCII/English): MCP-блок `url` (из `config.yaml mcp_http.*`, **без Python**) либо stdio `bin\hds_mcp.exe`; `hds mcp-http restart`; валидации — regex (вместо `yaml.safe_load`); NO_PROXY-блок в `.env` (ASCII-маркеры, idempotent). |
+| `install_cline.ps1` | **переписан** (ASCII/English): python для `cline_mcp_merge.py` (`HDS_EXTRACT_PYTHON` → sidecar → `.venv`); URL из `config.yaml`; `hds mcp-http restart`. |
+| `installers\install_windows.ps1`, `setup.cmd` | текст/проверки под Rust-артефакт (ASCII). |
+
+**Приёмка (безопасная, боевое не тронуто).** Все новые/переписанные `.ps1` — `BOM=False,
+nonASCII=0`; `Parser::ParseFile` — без ошибок; JSON-манифесты валидны; `cargo test --workspace`
+— **170/0 (+9 ignored)**.
+```
+powershell -File installers\fetch_engine_runtime.ps1
+# [..] engine runtime: tag v1.15, backend cuda -> target: %APPDATA%\…\TranscribeOffline\Engine
+# [ok] engine runtime already present (no manifest stamp; use -Force to re-fetch)   exit 0
+powershell -File installers\fetch_engine_runtime.ps1 -Backend nosuchbackend
+# backend 'nosuchbackend' is not available for 'windows-x64' (tag v1.15); available: vulkan, cuda   exit 1
+powershell -File installers\fetch_llm_models.ps1 -Models bogus
+# [--] unknown model role: bogus   exit 0
+# mcpUrl из живого config.yaml -> http://127.0.0.1:8787/mcp
+```
+Полный `setup.ps1` интерактивен (Read-Host) и требует `bin\`-артефакт — end-to-end в этой
+сессии не прогонялся; синтаксис проверен, все вызовы fetch-скриптов протестированы отдельно.
+
+**Дальше:** `clip-manifest.json` + `installers\fetch_clip_models.ps1` + `default_onnx_dir`
+→ `models\clip_onnx` (шаг 2); `package` (zip+sha256) и `release.yml` с бинарными ассетами и
+джобой `fetch-engine-runtime` (шаг 3); UI-дополнения и W5 (шаг 4).

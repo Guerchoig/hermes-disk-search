@@ -1,290 +1,293 @@
-﻿# Единый установщик hermes-disk-search для Windows:
-# системные зависимости (ffmpeg/Tesseract по запросу) + venv + зависимости +
-# модель эмбеддингов bge-m3 + диагностика + ярлык/автозапуск + интеграция с Hermes.
-# Пользователю достаточно запустить этот скрипт; всё остальное — из веб-интерфейса.
+# hermes-disk-search - Windows installer for the Rust build (W4).
+#
+# Installs the Rust stack shipped in bin\ (hds.exe, hds_mcp.exe, llm_host.exe):
+# system dependencies, sidecar worker check, engine runtime, GGUF models and the
+# logon tasks (file watcher, MCP server, llm-host resident).
+#
+# Usage (double-click is preferred):
+#   setup.cmd
+# or:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1
+#
+# NOTE: ASCII-only on purpose - Windows PowerShell 5.1 reads a BOM-less .ps1 as
+# ANSI and mangles non-ASCII text (tools/parity/README.md section 3, item 14).
+param(
+    [switch]$SkipModels,
+    [switch]$SkipEngine,
+    [switch]$NoAutostart,
+    [switch]$SkipIntegrations,
+    [switch]$SmokeTest
+)
+
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 Set-Location $root
 
-# Снятие пометки «скачано из интернета» (Zone.Identifier): архив релиза,
-# распакованный Проводником, передаёт её всем файлам, и политика RemoteSigned
-# требует цифровую подпись для запуска скриптов. Текущий запуск уже идёт
-# с -ExecutionPolicy Bypass, поэтому снять пометку безопасно — повторные
-# запуски и «Запустить с помощью PowerShell» будут работать без Bypass.
+function Step($m) { Write-Host ""; Write-Host "== $m ==" -ForegroundColor Cyan }
+function Ok($m) { Write-Host "[ok] $m" -ForegroundColor Green }
+function Warn($m) { Write-Host "[--] $m" -ForegroundColor Yellow }
+function Note($m) { Write-Host "     $m" -ForegroundColor DarkGray }
+
+# --- 1. Mark of the Web -----------------------------------------------------
+# A release archive unpacked by Explorer marks every file as "downloaded from the
+# internet"; the RemoteSigned policy then demands a signature for scripts. This
+# run already uses -ExecutionPolicy Bypass, so clearing MotW is safe.
 try {
     Get-ChildItem -Path $root -Recurse -File -ErrorAction SilentlyContinue |
         Unblock-File -ErrorAction SilentlyContinue
 } catch { }
+Ok "cleared the 'downloaded from internet' flag (MotW)"
 
-# --- Поиск рабочего Python 3.x ---
-# Кандидаты: py-лаунчер, затем python из PATH.
-# Заглушка Microsoft Store (WindowsApps) отсеивается фактическим запуском --version.
-$pyExe = $null
-$pyArgs = @()
-foreach ($cand in @(@{ exe = "py"; args = @("-3") }, @{ exe = "python"; args = @() })) {
-    $cmd = Get-Command $cand.exe -ErrorAction SilentlyContinue
-    if (-not $cmd) { continue }
-    try {
-        $ver = & $cmd.Source @($cand.args + @("--version")) 2>&1
-        if ($LASTEXITCODE -eq 0 -and "$ver" -match "Python 3\.") {
-            $pyExe = $cmd.Source
-            $pyArgs = $cand.args
-            break
-        }
-    } catch { }
-}
-if (-not $pyExe) {
-    Write-Host "ОШИБКА: не найден рабочий Python 3.x." -ForegroundColor Red
-    Write-Host "Возможные причины:"
-    Write-Host "  1) Python не установлен: команда 'python' — это заглушка Microsoft Store,"
-    Write-Host "     которая ничего не запускает (открывает магазин)."
-    Write-Host "  2) Установлен только Python 2 или 'python' не добавлен в PATH."
-    Write-Host ""
-    Write-Host "Установите Python 3.10+ с https://www.python.org/downloads/"
-    Write-Host "(при установке отметьте галочку 'Add python.exe to PATH'),"
-    Write-Host "затем откройте НОВОЕ окно PowerShell и запустите setup.ps1 снова."
+# --- 2. Verify the Rust artifact -------------------------------------------
+$binDir = Join-Path $root "bin"
+$hdsExe = Join-Path $binDir "hds.exe"
+$llmHostExe = Join-Path $binDir "llm_host.exe"
+$mcpExe = Join-Path $binDir "hds_mcp.exe"
+
+Step "Checking the Rust artifact"
+if (-not (Test-Path $hdsExe)) {
+    Write-Host "[!!] bin\hds.exe not found - this is not a Rust release archive." -ForegroundColor Red
+    Warn "If you unpacked the SOURCE archive (Python version), use the Python setup instead."
+    Warn "A Rust build is produced by: installers\build_rust_release.ps1 -Version <ver>"
+    Read-Host "Press Enter to exit"
     exit 1
 }
-Write-Host "[ok] Python: $pyExe $($pyArgs -join ' ')"
+Ok "found $hdsExe"
+if (-not (Test-Path $llmHostExe)) { Warn "bin\llm_host.exe not found - the GPU resident cannot start" }
+if (-not (Test-Path $mcpExe)) { Warn "bin\hds_mcp.exe not found - stdio MCP integration will be limited" }
 
-# --- Системные зависимости через winget ---
+# From here on native tools are invoked: keep going on non-zero exit codes and
+# check $LASTEXITCODE explicitly (native stderr in a pipeline under 'Stop' is a
+# terminating NativeCommandError - tools/parity/README.md section 3, item 14).
+$ErrorActionPreference = "Continue"
+
+# --- 3. System dependencies via winget -------------------------------------
 $haveWinget = [bool](Get-Command winget -ErrorAction SilentlyContinue)
 
-# ffmpeg (транскрипция видео) — ставим автоматически
-if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
-    if ($haveWinget) {
-        Write-Host "[..] ffmpeg не найден — установка через winget (нужен для транскрипции видео)..."
-        winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
-        Write-Host "     Если ffmpeg не появился в PATH — откройте НОВОЕ окно PowerShell и перезапустите setup.ps1." -ForegroundColor DarkGray
-    } else {
-        Write-Host "[--] ffmpeg не найден, winget недоступен (видео будут без транскрипции)." -ForegroundColor Yellow
-        Write-Host "     Установите вручную: https://www.gyan.dev/ffmpeg/builds/" -ForegroundColor Yellow
-    }
+Step "System dependencies"
+# ffmpeg (video transcription) - installed automatically
+if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Ok "ffmpeg found"
+} elseif ($haveWinget) {
+    Write-Host "[..] ffmpeg not found - installing via winget (needed for video transcription)..."
+    winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
+    Note "If ffmpeg is still missing from PATH, open a NEW PowerShell window."
 } else {
-    Write-Host "[ok] ffmpeg найден"
+    Warn "ffmpeg not found and winget is unavailable (video without transcription)."
+    Note "Install manually: https://www.gyan.dev/ffmpeg/builds/"
 }
 
-# Tesseract OCR (текст на картинках/сканах) — по разрешению пользователя
-if (-not (Get-Command tesseract -ErrorAction SilentlyContinue) -and
-        -not (Test-Path "$env:ProgramFiles\Tesseract-OCR\tesseract.exe")) {
-    $ans = Read-Host "[?] Установить Tesseract OCR (текст на картинках/сканах)? [y/N]"
-    if ($ans -match '^[YyДд]') {
+# Tesseract OCR (text inside images/scans) - with user consent
+if ((Get-Command tesseract -ErrorAction SilentlyContinue) -or (Test-Path "$env:ProgramFiles\Tesseract-OCR\tesseract.exe")) {
+    Ok "Tesseract OCR found"
+} else {
+    $ans = Read-Host "[?] Install Tesseract OCR (text inside images/scans)? [y/N]"
+    if ($ans -match '^[Yy]') {
         if ($haveWinget) {
             winget install -e --id UB-Mannheim.TesseractOCR --accept-source-agreements --accept-package-agreements
-            Write-Host "   Русский язык OCR: если не установлен, скачайте пакет 'rus' с https://github.com/tesseract-ocr/tessdata" -ForegroundColor Yellow
+            Note "Russian OCR data: if missing, download 'rus' from https://github.com/tesseract-ocr/tessdata"
         } else {
-            Write-Host "   winget недоступен: https://github.com/UB-Mannheim/tesseract/wiki" -ForegroundColor Yellow
+            Warn "winget unavailable: https://github.com/UB-Mannheim/tesseract/wiki"
         }
     } else {
-        Write-Host "[--] Пропущено: картинки будут индексироваться без OCR (можно установить позже)." -ForegroundColor DarkGray
+        Warn "skipped: images will be indexed without OCR (can be added later)."
     }
+}
+
+# Visual C++ runtime - the Rust build links against the dynamic MSVC CRT
+$vcOk = (Test-Path "$env:SystemRoot\System32\vcruntime140.dll") -and (Test-Path "$env:SystemRoot\System32\vcruntime140_1.dll")
+if ($vcOk) {
+    Ok "Visual C++ runtime present"
+} elseif ($haveWinget) {
+    Write-Host "[..] Microsoft Visual C++ runtime not found - installing..."
+    winget install -e --id Microsoft.VCRedist.2015+.x64 --accept-source-agreements --accept-package-agreements
 } else {
-    Write-Host "[ok] Tesseract OCR найден"
+    Warn "Visual C++ runtime not found; if hds.exe fails to start, install 'Microsoft Visual C++ Redistributable (x64)'."
 }
 
-# llama.cpp (llama-server) + GGUF-модели — ОБЩИЙ llama-рантайм машины
-# (%LLAMA_RUNTIME_DIR% / %LOCALAPPDATA%\llama-runtime): тот же бинарь (одна
-# сборка cuda|vulkan) и тот же набор моделей, что у anonymizer_proxy; смена
-# чат-модели применяется ко всем проектам сразу. llama-server переживает
-# перезапуски UI (отвязанный процесс, управление — python -m hds.llama_server).
-Write-Host "== Общий llama-рантайм (llama-server + GGUF-модели) =="
-try {
-    & powershell -NoProfile -ExecutionPolicy Bypass `
-        -File "$root\installers\ensure_llama_runtime.ps1" `
-        -Models chat,embedding,rerank `
-        -ProjectName "hermes-disk-search" `
-        -ProjectRoot $root `
-        -RestartArgs "-m hds.llama_server restart chat"
-    if ($LASTEXITCODE -ne 0) { throw "ensure_llama_runtime.ps1 завершился с кодом $LASTEXITCODE" }
-} catch {
-    Write-Host "[!!] Общий llama-рантайм не готов: $_" -ForegroundColor Yellow
-    Write-Host "     Повторите: powershell -File installers\ensure_llama_runtime.ps1 -Models chat,embedding,rerank" -ForegroundColor Yellow
-    Write-Host "     (поиск по ключевым словам работает и без GGUF-моделей)" -ForegroundColor Yellow
-}
-
-# --- Создание venv ---
-$venvDir = "$root\.venv"
-$venvPython = "$venvDir\Scripts\python.exe"
-$venvOk = $false
-if ((Test-Path $venvPython) -and (Test-Path "$venvDir\pyvenv.cfg")) {
-    # Если архив распакован вместе со старой .venv, её пути могут указывать
-    # на несуществующий Python — проверяем, что базовый интерпретатор на месте.
-    $venvHome = (Select-String -Path "$venvDir\pyvenv.cfg" -Pattern '^\s*home\s*=\s*(.+)$').Matches |
-        Select-Object -First 1 | ForEach-Object { $_.Groups[1].Value.Trim() }
-    $venvOk = ($venvHome -ne "") -and (Test-Path $venvHome)
-}
-if (-not $venvOk) {
-    if (Test-Path $venvDir) {
-        Write-Host "[..] Найдена неполная/перенесённая .venv — удаляю и создаю заново..."
-        Remove-Item -Recurse -Force $venvDir
+# --- 4. sidecar worker (Python) --------------------------------------------
+Step "Extraction worker (sidecar)"
+function Find-WorkerPython {
+    if ($env:HDS_EXTRACT_PYTHON -and (Test-Path $env:HDS_EXTRACT_PYTHON)) { return $env:HDS_EXTRACT_PYTHON }
+    $bundled = Join-Path $root "sidecar\python"
+    if (Test-Path $bundled) {
+        $exe = Get-ChildItem -Path $bundled -Recurse -Filter python.exe -ErrorAction SilentlyContinue |
+            Sort-Object { $_.FullName.Length } | Select-Object -First 1
+        if ($exe) { return $exe.FullName }
     }
-    Write-Host "== Создание venv =="
-    & $pyExe @pyArgs -m venv $venvDir
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $venvPython)) {
-        Write-Host "ОШИБКА: не удалось создать venv в '$venvDir'." -ForegroundColor Red
-        Write-Host "Проверьте, что модуль venv доступен:"
-        Write-Host "    & '$pyExe' $($pyArgs -join ' ') -m venv --help"
-        exit 1
-    }
+    $venv = Join-Path $root ".venv\Scripts\python.exe"
+    if (Test-Path $venv) { return $venv }
+    return $null
+}
+function Test-Worker {
+    param([string]$Python)
+    $worker = Join-Path $root "sidecar\hds_extract\worker.py"
+    if (-not (Test-Path $worker)) { return $false }
+    $req = '{"jsonrpc":"2.0","id":1,"method":"hello","params":{"protocol":1}}'
+    try { $out = $req | & $Python $worker --root $root 2>$null | Select-Object -First 1 } catch { return $false }
+    if (-not $out) { return $false }
+    try { $j = $out | ConvertFrom-Json } catch { return $false }
+    return [bool]$j.result
 }
 
-$python = $venvPython
-& $python -m pip install --upgrade pip
-if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: pip install --upgrade pip завершился с ошибкой." -ForegroundColor Red; exit 1 }
+$workerPython = Find-WorkerPython
+if ($workerPython -and (Test-Worker -Python $workerPython)) {
+    Ok "worker is ready ($workerPython)"
+} elseif ($workerPython) {
+    Warn "worker did not answer 'hello': $workerPython"
+    Note "The bundled sidecar may be incomplete. Fallback: install Python 3.10+ and set HDS_EXTRACT_PYTHON."
+} else {
+    Warn "no Python for the extraction worker found."
+    Note "Expected sidecar\python\python.exe (bundled) or .venv\Scripts\python.exe."
+    Note "Fallback: install Python 3.10+ and set the HDS_EXTRACT_PYTHON environment variable."
+}
 
-Write-Host "== Установка зависимостей =="
-& $python -m pip install -r "$root\requirements.txt"
-if ($LASTEXITCODE -ne 0) { Write-Host "ОШИБКА: установка зависимостей из requirements.txt не удалась." -ForegroundColor Red; exit 1 }
-
-Write-Host "== Опционально: faster-whisper (транскрипция на CUDA) =="
-& $python -m pip install faster-whisper
-& $python -m pip install nvidia-cublas-cu12 nvidia-cudnn-cu12
-
-Write-Host "== GPU для транскрипции (AMD/Intel без CUDA → whisper.cpp Vulkan) =="
-$cudaCount = (& $python -c "import ctranslate2; print(ctranslate2.get_cuda_device_count())" 2>$null | Select-Object -Last 1)
-if ("$cudaCount".Trim() -eq "0") {
-    $gpu = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -match 'AMD|Radeon|NVIDIA|GeForce|Intel' } | Select-Object -First 1
-    if ($gpu) {
-        Write-Host "[..] CUDA не найдена, GPU: $($gpu.Name) — установка whisper.cpp (Vulkan)..."
-        & $python -m hds.cli vulkan-setup
-        if ($LASTEXITCODE -ne 0) {
-            Write-Host "[--] whisper.cpp не установлен — транскрипция будет на CPU (int8)." -ForegroundColor Yellow
-            Write-Host "     Позже: .venv\Scripts\python.exe -m hds.cli vulkan-setup (или вручную)." -ForegroundColor Yellow
-        }
+# --- 5. config.yaml ---------------------------------------------------------
+Step "config.yaml"
+$cfg = Join-Path $root "config.yaml"
+if (-not (Test-Path $cfg)) {
+    $example = Join-Path $root "config.example.yaml"
+    if (Test-Path $example) {
+        Copy-Item $example $cfg -Force
+        Ok "created config.yaml from config.example.yaml"
+        Note "Set index.roots in the web UI (or edit config.yaml)."
     } else {
-        Write-Host "[--] Дискретный GPU с Vulkan не обнаружен — транскрипция на CPU (int8)" -ForegroundColor DarkGray
-    }
-} else {
-    Write-Host "[ok] CUDA доступна ($cudaCount) — whisper.cpp (Vulkan) не требуется"
-}
-
-# --- CLIP-эмбеддинги картинок: PyTorch с CUDA при NVIDIA ---
-# requirements.txt ставит обычный (CPU) torch: CLIP-кодировщик картинок
-# (sentence-transformers, hds/clip_index.py) при индексации фото работал бы
-# на CPU даже на NVIDIA-машине. Ставим CUDA-сборку по согласию пользователя
-# (колесо ~2,5 ГБ); при неудаче индексация продолжит работать — CLIP на CPU.
-if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
-    $torchCuda = & $python -c "import torch; print(torch.cuda.is_available())" 2>$null | Select-Object -Last 1
-    if ("$torchCuda".Trim() -ne "True") {
-        $ans = Read-Host "[?] Установить PyTorch с CUDA (CLIP-эмбеддинги картинок на GPU, ~2,5 ГБ)? [y/N]"
-        if ($ans -match '^[YyДд]') {
-            $done = $false
-            foreach ($idx in @("https://download.pytorch.org/whl/cu126",
-                               "https://download.pytorch.org/whl/cu124",
-                               "https://download.pytorch.org/whl/cu121")) {
-                Write-Host "[..] pip install torch --index-url $idx ..."
-                & $python -m pip install --upgrade torch --index-url $idx -q
-                if ($LASTEXITCODE -eq 0) {
-                    $ok = & $python -c "import torch; print(torch.cuda.is_available())" 2>$null | Select-Object -Last 1
-                    if ("$ok".Trim() -eq "True") { $done = $true; break }
-                }
-            }
-            if ($done) {
-                Write-Host "[ok] PyTorch CUDA установлен — CLIP-эмбеддинги картинок на GPU" -ForegroundColor Green
-            } else {
-                Write-Host "[--] PyTorch CUDA не установился (нет колеса под этот Python/драйвер) — CLIP на CPU." -ForegroundColor Yellow
-                Write-Host "     Это не блокер: поиск картинок по содержанию продолжит работать (медленнее)." -ForegroundColor DarkGray
-            }
-        } else {
-            Write-Host "[--] Пропущено: CLIP-эмбеддинги картинок останутся на CPU." -ForegroundColor DarkGray
-        }
-    } else {
-        Write-Host "[ok] PyTorch CUDA уже доступна — CLIP-эмбеддинги картинок на GPU"
+        Warn "config.example.yaml not found - create config.yaml manually."
     }
 }
 
-Write-Host "== Модели llama-server: общий llama-рантайм (см. шаг выше) =="
-Write-Host "   bge-m3 + чат-модель + реранкер установлены в общий каталог" -ForegroundColor DarkGray
-Write-Host "   ensure_models.ps1 больше не используется (модели обеспечены" -ForegroundColor DarkGray
-Write-Host "   installers\ensure_llama_runtime.ps1 — один набор на все проекты)." -ForegroundColor DarkGray
-
-Write-Host "== Опционально: предзагрузка модели Whisper (~460 МБ, транскрипция аудио/видео) =="
-$ans = Read-Host "Предзагрузить сейчас? [y/N]"
-if ($ans -match '^[YyДд]') {
-    $env:HF_HUB_OFFLINE = "1"; $env:HF_HUB_DISABLE_SYMLINKS_WARNING = "1"
-    & $python -c "import sys; sys.path.insert(0, r'$root'); from hds.config import load; from hds.extract_av import _get_whisper; _get_whisper(load()); print('[ok] модель Whisper готова')"
-    if ($LASTEXITCODE -ne 0) { Write-Host "[--] Не удалось: модель скачается при первой транскрипции" -ForegroundColor Yellow }
-    Write-Host "     Совет: включите Режим разработчика Windows (Параметры -> Конфиденциальность ->" -ForegroundColor DarkGray
-    Write-Host "     Для разработчиков), чтобы кэш моделей не дублировал файлы на диске." -ForegroundColor DarkGray
-} else {
-    Write-Host "[--] Пропущено: модель скачается автоматически при первой транскрипции." -ForegroundColor DarkGray
-}
-
-Write-Host "== OCR (Tesseract): путь для запуска из ярлыка и языки rus/eng =="
-# hermes-disk-search стартует из ярлыка/агента с минимальным PATH: tesseract.exe
-# из Program Files там не находится (в UI появляется «Tesseract OCR не найден»),
-# а базовый пакет UB-Mannheim не содержит русского языка. Шаг прописывает
-# index.ocr_tesseract_cmd в config.yaml и раскладывает rus+eng в
-# %LOCALAPPDATA%\Tesseract-OCR\tessdata (без прав администратора; HDS сам
-# подключает этот каталог через TESSDATA_PREFIX).
-& $python "$root\installers\configure_ocr.py"
-if ($LASTEXITCODE -ne 0) {
-    Write-Host "[--] OCR не настроен автоматически — см. сообщения выше." -ForegroundColor DarkGray
-}
-
-Write-Host "== Проверка config.yaml (пути с другого компьютера) =="
-$cfgPath = "$root\config.yaml"
-if (Test-Path $cfgPath) {
-    # Читаем строго как UTF-8 (config.yaml может быть без BOM и с русскими комментариями;
-    # Get-Content без -Encoding в PS 5.1 читал бы его в ANSI и портил кириллицу)
-    $encCfg = New-Object System.Text.UTF8Encoding($false)
-    $cfgText = [System.IO.File]::ReadAllText($cfgPath, $encCfg)
-    $missingDrives = @()
-    foreach ($m in [regex]::Matches($cfgText, "[`"']?([A-Za-z]):\\")) {
-        $d = $m.Groups[1].Value + ":\"
-        if ((Test-Path "$($m.Groups[1].Value):\") -eq $false -and ($missingDrives -notcontains $d)) { $missingDrives += $d }
+# A config.yaml copied from another computer may point at missing drives.
+if (Test-Path $cfg) {
+    $enc = New-Object System.Text.UTF8Encoding($false)
+    $text = [System.IO.File]::ReadAllText($cfg, $enc)
+    $missing = @()
+    foreach ($m in [regex]::Matches($text, "[`"']?([A-Za-z]):\\\\")) {
+        $letter = $m.Groups[1].Value
+        $drive = $letter + ":\"
+        if (-not (Test-Path ($letter + ":\")) -and ($missing -notcontains $drive)) { $missing += $drive }
     }
-    if ($missingDrives.Count -gt 0) {
-        Write-Host "[!!] config.yaml содержит пути на отсутствующих дисках: $($missingDrives -join ', ')" -ForegroundColor Yellow
-        Write-Host "     (config.yaml перенесён с другого компьютера). Индексация и БД не заработают,"
-        Write-Host "     пока db_path и index.roots не указывают на существующие пути."
-        $ans = Read-Host "     Заменить пути на профиль этого компьютера ($env:USERPROFILE)? [Y/n]"
+    if ($missing.Count -gt 0) {
+        Warn "config.yaml points at missing drives: $($missing -join ', ')"
+        Note "The file was probably copied from another computer."
+        $ans = Read-Host "     Replace those paths with this profile ($env:USERPROFILE)? [Y/n]"
         if ($ans -notmatch '^[Nn]') {
             $up = $env:USERPROFILE
-            # 1) db_path -> %USERPROFILE%\hermes-disk-search-db\index.db
             $rxDb = [regex]::new("(?m)^db_path:.*$")
-            $cfgText = $rxDb.Replace($cfgText, { param($mm) "db_path: '$up\hermes-disk-search-db\index.db'" }, 1)
-            # 2) пути списков (index.roots, exclude_paths) на отсутствующих дисках -> %USERPROFILE% (подпуть сохраняется)
+            $text = $rxDb.Replace($text, { param($mm) "db_path: '$up\hermes-disk-search-db\index.db'" }, 1)
             $rxList = [regex]::new('(?m)^(\s*-\s*)(["'']?)([A-Za-z]):\\+(.*?)\2\s*$')
-            $cfgText = $rxList.Replace($cfgText, {
+            $text = $rxList.Replace($text, {
                 param($mm)
-                if ($missingDrives -contains ($mm.Groups[3].Value + ":\")) {
-                    $rest = $mm.Groups[4].Value -replace "\\\\+", "\"
+                if ($missing -contains ($mm.Groups[3].Value + ":\")) {
+                    $rest = $mm.Groups[4].Value -replace '\\+', '\'
                     if ($rest) { "$($mm.Groups[1].Value)'$up\$rest'" } else { "$($mm.Groups[1].Value)'$up'" }
                 } else { $mm.Value }
             })
-            [System.IO.File]::WriteAllText($cfgPath, $cfgText, (New-Object System.Text.UTF8Encoding($false)))
-            Write-Host "[ok] config.yaml обновлён. Корни индексации можно уточнить в веб-интерфейсе (run_ui.ps1)." -ForegroundColor Green
+            [System.IO.File]::WriteAllText($cfg, $text, (New-Object System.Text.UTF8Encoding($false)))
+            Ok "config.yaml updated (index.roots can be refined in the web UI)"
         }
     } else {
-        Write-Host "[ok] config.yaml: все диски из путей существуют"
+        Ok "all drives referenced by config.yaml exist"
     }
 }
 
-Write-Host "== Диагностика =="
-& $python -m hds.cli check
+# --- 6. Engine runtime (LLM host + ASR) -------------------------------------
+if (-not $SkipEngine) {
+    Step "Engine runtime (llm-host + ASR)"
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_engine_runtime.ps1")
+        if ($LASTEXITCODE -ne 0) { throw "fetch_engine_runtime.ps1 exited with code $LASTEXITCODE" }
+    } catch {
+        Warn "engine runtime not ready: $_"
+        Note "Repeat later: powershell -File installers\fetch_engine_runtime.ps1"
+    }
+} else {
+    Step "Engine runtime (skipped)"
+}
 
-Write-Host "== Интеграция с Hermes Desktop (MCP-сервер + скилл) =="
-# Не обязателен на этом шаге: если Hermes ещё не установлен, скрипт напечатает,
-# как подключить позже, и завершится успешно.
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_hermes.ps1"
+# --- 7. Models --------------------------------------------------------------
+if (-not $SkipModels) {
+    Step "GGUF models (chat/embedding/rerank)"
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_llm_models.ps1") -Models chat,embedding,rerank
+        if ($LASTEXITCODE -ne 0) { throw "fetch_llm_models.ps1 exited with code $LASTEXITCODE" }
+    } catch {
+        Warn "GGUF models not fully ready: $_"
+        Note "Repeat later: powershell -File installers\fetch_llm_models.ps1"
+    }
 
-Write-Host "== Интеграция с Cline Desktop (MCP-сервер + скилл) =="
-# Не обязательна на этом шаге: если Cline ещё не установлен, скрипт напечатает,
-# как подключить позже, и завершится успешно.
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_cline.ps1"
+    Step "Whisper model (ASR, optional)"
+    $ans = Read-Host "[?] Download the whisper model now (about 1.5 GB)? [y/N]"
+    if ($ans -match '^[Yy]') {
+        try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_whisper_model.ps1") }
+        catch { Warn "whisper model not downloaded: $_" }
+    } else {
+        Warn "skipped: the model is downloaded on first transcription."
+    }
+} else {
+    Step "Models (skipped)"
+}
 
-Write-Host "== Ярлык на рабочем столе (веб-интерфейс) =="
-& powershell -NoProfile -ExecutionPolicy Bypass -File "$root\shortcuts\windows\create_shortcut.ps1"
+# --- 8. Logon tasks ---------------------------------------------------------
+if (-not $NoAutostart) {
+    Step "Logon tasks"
+    $ans = Read-Host "[?] Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]"
+    if ($ans -notmatch '^[Nn]') {
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\install_llm_host_task.ps1") -Start
+            if ($LASTEXITCODE -ne 0) { Warn "llm-host task: exit code $LASTEXITCODE" }
+        } catch { Warn "llm-host task: $_" }
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "install_autostart.ps1")
+        } catch { Warn "watcher/MCP tasks: $_" }
+    } else {
+        Warn "skipped: start the resident manually with bin\llm_host.exe run"
+    }
+} else {
+    Step "Logon tasks (skipped)"
+}
 
-Write-Host "== Автозапуск наблюдателя файлов =="
-$ans = Read-Host "Настроить автозапуск watcher'а при входе в систему? [y/N]"
-if ($ans -match '^[YyДд]') {
-    & powershell -NoProfile -ExecutionPolicy Bypass -File "$root\install_autostart.ps1"
+# --- 9. Hermes / Cline integration -----------------------------------------
+if (-not $SkipIntegrations) {
+    Step "Hermes Desktop / Cline integration"
+    try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "install_hermes.ps1") } catch { Warn "Hermes: $_" }
+    try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "install_cline.ps1") } catch { Warn "Cline: $_" }
+} else {
+    Step "Integrations (skipped)"
+}
+
+# --- 10. Desktop shortcut ---------------------------------------------------
+Step "Desktop shortcut"
+try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "shortcuts\windows\create_shortcut.ps1") }
+catch { Warn "shortcut: $_" }
+
+# --- 11. Diagnostics --------------------------------------------------------
+Step "Diagnostics"
+& $hdsExe check
+
+# --- 12. Optional smoke test (mini index on test_data) ----------------------
+if ($SmokeTest) {
+    Step "Smoke test (mini index)"
+    $data = Join-Path $root "test_data"
+    if (-not (Test-Path $data)) {
+        Warn "test_data\ not found - smoke test skipped"
+    } else {
+        $stamp = [Guid]::NewGuid().ToString("N")
+        $tmpCfg = Join-Path $env:TEMP ("hds-smoke-$stamp.yaml")
+        $tmpDb = Join-Path $env:TEMP ("hds-smoke-$stamp.db")
+        $yaml = "index:`r`n  roots:`r`n    - '$data'`r`n  ocr: false`r`n  transcribe: false`r`ndb_path: '$tmpDb'`r`n"
+        [IO.File]::WriteAllText($tmpCfg, $yaml, (New-Object System.Text.UTF8Encoding($false)))
+        $env:HDS_CONFIG = $tmpCfg
+        & $hdsExe index --quiet
+        if ($LASTEXITCODE -ne 0) { Warn "index exited with code $LASTEXITCODE (a running llm-host is required)" }
+        & $hdsExe status
+        Remove-Item Env:\HDS_CONFIG -ErrorAction SilentlyContinue
+        Remove-Item $tmpCfg, $tmpDb -Force -ErrorAction SilentlyContinue
+        Note "Smoke test uses a temporary database; the production index is not touched."
+    }
 }
 
 Write-Host ""
-Write-Host "== Готово. Дальше — только веб-интерфейс: ярлык «Hermes Disk Search» на рабочем столе ==" -ForegroundColor Cyan
-Write-Host "   (корни индексации, ▶ Старт индексации, watcher, перенос базы, скачивание моделей — всё из UI)" -ForegroundColor Cyan
-Read-Host "Enter для выхода"
+Write-Host "== Done. Next step: the web UI ==" -ForegroundColor Cyan
+Write-Host "   Use the 'Hermes Disk Search' desktop shortcut: index roots, Start indexing," -ForegroundColor Cyan
+Write-Host "   watcher, model switching - all in one place." -ForegroundColor Cyan
+Read-Host "Press Enter to exit"

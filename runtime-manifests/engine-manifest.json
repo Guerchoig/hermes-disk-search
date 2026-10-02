@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "project": "Openresearchtools-Engine",
+  "repository": "openresearchtools/engine",
+  "tag": "v1.15",
+  "generated_at": "2026-03-21T00:44:29Z",
+  "release_url": "https://github.com/openresearchtools/engine/releases/tag/v1.15",
+  "assets": [
+    {
+      "id": "windows-x64-vulkan",
+      "platform": "windows-x64",
+      "backend": "vulkan",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.15-windows-x64-vulkan.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-windows-x64-vulkan.zip",
+      "sha256": "d00058e9e7ee626b0be199be2bcc6a98e0899b3ca6a2cb95a4658a8895e77579"
+    },
+    {
+      "id": "macos-arm64-metal",
+      "platform": "macos-arm64",
+      "backend": "metal",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.15-macos-arm64-metal.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-macos-arm64-metal.zip",
+      "sha256": "0779197e2e852143dcccc81f68b4d25d474f08d0e92a57b90d531860c4eb689b"
+    },
+    {
+      "id": "windows-x64-cuda",
+      "platform": "windows-x64",
+      "backend": "cuda",
+      "archive": "zip",
+      "file_name": "Openresearchtools-Engine-v1.15-windows-x64-cuda.zip",
+      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-windows-x64-cuda.zip",
+      "sha256": "de717dc32f50210dd059ab3770ff50abc728c9a372cadc62414422f1b3901727"
+    }
+  ]
+}

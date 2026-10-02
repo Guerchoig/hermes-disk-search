@@ -45,6 +45,13 @@
 > **W4 начат (01.10.2026):** CI `rust.yml` (test-rust + build-windows) и
 > `installers/build_rust_release.ps1` (стейджинг `dist\hds-<ver>-windows-x64\` с
 > `hds/hds_mcp/llm_host` + sha256) — журнал `tools/parity/W4_REPORT.md` §1.
+> **W4 шаг 1 (02.10.2026):** установщик под Rust-бинарники (`setup.ps1`/`install_windows.ps1`,
+> ASCII-only English): `bin\hds.exe`, winget-зависимости, проверка sidecar-воркера, рантайм
+> движка (`installers\fetch_engine_runtime.ps1` + `runtime-manifests\engine-manifest.json`
+> v1.15, sha256), GGUF/whisper (`fetch_llm_models.ps1`/`fetch_whisper_model.ps1`), автозапуск
+> `llm-host` (`install_llm_host_task.ps1`, теперь `bin\llm_host.exe`) + watcher/MCP
+> (`install_autostart.ps1`), интеграции Hermes/Cline → `bin\hds_mcp.exe`/`mcp-http restart`,
+> ярлык, `hds check` — `W4_REPORT.md` §2.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

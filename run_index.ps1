@@ -1,13 +1,14 @@
-﻿# Запуск индексации дисков hermes-disk-search
+# Run a one-shot incremental indexing pass (Rust build).
+# ASCII-only on purpose (Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 $root = $PSScriptRoot
 Set-Location $root
-$py = Join-Path $root ".venv\Scripts\python.exe"
-if (-not (Test-Path $py)) {
-    Write-Host "== venv не найден. Сначала запустите setup.ps1 ==" -ForegroundColor Yellow
-    Read-Host "Enter для выхода"
+$hdsExe = Join-Path $root "bin\hds.exe"
+if (-not (Test-Path $hdsExe)) {
+    Write-Host "== bin\hds.exe not found. Run setup.cmd first ==" -ForegroundColor Yellow
+    Read-Host "Press Enter to exit"
     exit 1
 }
-Write-Host "== hermes-disk-search: индексация (инкрементальная) ==" -ForegroundColor Cyan
-& $py -m hds.cli index
+Write-Host "== hermes-disk-search: indexing (incremental) ==" -ForegroundColor Cyan
+& $hdsExe index
 Write-Host ""
-Read-Host "Готово. Нажмите Enter для выхода"
+Read-Host "Done. Press Enter to exit"
