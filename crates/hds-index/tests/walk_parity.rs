@@ -211,6 +211,12 @@ fn parity_with_python_dump() {
                 continue;
             }
             let roots: Vec<String> = str_vec(&sc["roots"]);
+            // Дамп может ссылаться на локально сгенерированное дерево (в CI его нет) —
+            // пропускаем сценарий, если ни один корень не существует.
+            if roots.iter().all(|r| !Path::new(r).exists()) {
+                println!("сценарий '{name}' пропущен: корни отсутствуют ({roots:?})");
+                continue;
+            }
             let dirs: Vec<String> = str_vec(&sc["exclude_dirs"]);
             let prefixes: Vec<String> = str_vec(&sc["exclude_paths"]);
             let limits = IndexLimits::new(
