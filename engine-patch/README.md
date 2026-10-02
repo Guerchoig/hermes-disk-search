@@ -75,6 +75,16 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 `Get-ChildItem <BuildDir> -Recurse -Filter '*cluster*.obj'` по времени. Лечение: удалить
 объекты моста (`*cluster*.obj`, `*bridge*.obj`) перед сборкой — их проще, чем mtime.
 
+## Установлено на этой машине (02.10.2026)
+
+Патч внедрён в **боевой** каталог движка (`%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`):
+наши `llama-server-bridge.dll`, `multi-node-server.dll`, `llama-server-audio.dll`, `llama.dll`,
+`mtmd.dll`, `ggml*.dll` скопированы поверх, штатные — сохранены рядом как `*.orig` (9 файлов).
+Штатный резидент (`target\release\llm_host.exe run`, без `--engine-dir`) их использует —
+лог подтверждает: `движок: …\TranscribeOffline\Engine`, `роль chat: KV q8_0 272 МиБ`.
+**Откат одной командой:** удалить наши DLL и вернуть `*.orig` (или перезалить стоковый рантайм
+по `runtime-manifests/engine-manifest.json`); наша Rust-сторона совместима со стоком.
+
 ## Как проверить (на копии рантайма! боевой не трогаем)
 
 1. Скопировать каталог движка (`%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`) в
