@@ -13,6 +13,7 @@ fn usage() -> String {
      \x20              [--no-prune] [--confirm-delete] [--progress-sec N] [--quiet]\n\
      \x20 status       [--json]\n\
      \x20 search       <запрос> [--kinds t,p] [--limit N] [--json]\n\
+     \x20 ask          <вопрос> [--limit N] [--json]\n\
      \x20 check\n\
      \x20 reindex      <path> [--no-force]\n\
      \x20 reindex-fts  [--progress-sec N]\n\
@@ -65,6 +66,17 @@ fn run(args: &[String]) -> i32 {
             }
         },
         "check" => cmd::check::cmd_check(),
+        "ask" => match rest.first() {
+            Some(q) if !q.starts_with("--") => cmd::ask::cmd_ask(
+                q.clone(),
+                flag_u64(rest, "--limit").map(|v| v as usize).unwrap_or(8),
+                has(rest, "--json"),
+            ),
+            _ => {
+                eprintln!("ask: нужен текст вопроса");
+                2
+            }
+        },
         "reindex" => match rest.first() {
             Some(p) => cmd::reindex::cmd_reindex(p, has(rest, "--no-force")),
             None => {

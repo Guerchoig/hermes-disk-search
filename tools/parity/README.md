@@ -144,6 +144,7 @@ cargo test -p hds-clip --test clip_parity -- --ignored --nocapture   # пари�
 # --- W1: порт поиска (hds-search) ---
 cargo test -p hds-search --test search_parity -- --ignored --nocapture  # паритет golden search_*.json (требует out/index.db + фасад :8011)
 # target\debug\hds.exe search 'запрос' --limit 8   (HDS_CONFIG=out/w1_search.yaml, БД фикстур)
+# target\debug\hds.exe ask 'вопрос'  --limit 8    (тот же конфиг; чат-роль :8010)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

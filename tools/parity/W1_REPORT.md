@@ -41,3 +41,28 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture   # Q01..
 
 **Далее по W1:** `hds-mcp`/`hds-ui` (поиск/`ask` через тот же крейт: `Clip::embed_text`
 в поисковую ветку уже подключён), RAG (`rag.ask`).
+
+## 2. RAG-ответ `hds/rag.py` → `hds-search::rag` + реранк (01.10.2026)
+
+**Что сделано.** `ask` (ответ по локальным файлам) перенесён в Rust:
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-search/src/rag.rs` | `ask()` (поиск → контекст → чат-роль `/chat/completions`), `build_context`, `strip_think`, `Answer`/`to_json`; `SYSTEM_PROMPT`/nudge дословно |
+| `crates/hds-search/src/rerank.rs` | `rerank_results` (роль rerank `/v1/rerank`, авто-отключение по латентности) |
+| `crates/hds-cli/src/cmd/ask.rs` | `hds ask <вопрос> [--limit] [--json]` |
+
+**Поведение сохранено:** чат-роль — только генератор (инструменты не передаются),
+`thinking=off` → `chat_template_kwargs.enable_thinking=false`; один nudge-дозапрос при
+пустом `content` (размышления в `reasoning_content`); при недоступности модели —
+ответ со списком найденных файлов; `rerank.enabled: false` по умолчанию.
+
+**Живой прогон** (чат-роль `:8010`, БД фикстур): вопрос «Где задаются пороговые суммы
+согласования договоров?» → корректный ответ со ссылками `[N]` и списком источников
+(`инструкция_документооборот.md`, `акты_сверки_многостраничный.pdf`).
+
+**Тесты:** 4 (lib, чистые: `strip_think`, `build_context`/бюджет, `Answer::to_json`).
+Итого `cargo test --workspace` — **154 passed / 0 failed (+8 ignored)**.
+
+**Далее по W1:** `hds-mcp`/`hds-ui` (MCP/UI через `hds-search` + `rag::ask`).
+

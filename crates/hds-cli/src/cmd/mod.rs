@@ -1,6 +1,7 @@
 //! Подкоманды CLI. Каждая — тонкий порт соответствующей функции `hds/cli.py`
 //! (или `hds/dbops.py`/`hds/diag.py`); общие помощники — в [`crate::support`].
 
+pub mod ask;
 pub mod check;
 pub mod clip_index;
 pub mod db_move;

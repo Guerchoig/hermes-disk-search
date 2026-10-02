@@ -33,7 +33,8 @@
 > на CPU (`whisper_no_gpu`) с сообщением — §6 (включая вытеснение whisper по простою, ARB-5).
 > **W1 (резидентный слой) начат:** поиск перенесён в `crates/hds-search` (FTS5+vec+CLIP, RRF)
 > + CLI `hds search`; паритет golden `search_*.json` — **10/10 топ-20** (`W1_REPORT.md` §1).
-> Далее: `hds-mcp`/`hds-ui`, RAG. `cargo test --workspace` — **150 green (+8 `#[ignore]`)**.
+> **RAG перенесён:** `rag::ask` + реранк + CLI `hds ask` (ответ со ссылками `[N]`) — §2.
+> Далее: `hds-mcp`/`hds-ui`. `cargo test --workspace` — **154 green (+8 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

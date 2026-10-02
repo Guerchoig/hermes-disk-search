@@ -8,6 +8,8 @@
 //! (как Python): поиск не должен падать из-за недоступной роли.
 
 pub mod fts;
+pub mod rag;
+pub mod rerank;
 pub mod snippet;
 
 use std::collections::HashMap;
@@ -17,6 +19,7 @@ use hds_index::{vector_blob, Embedder, Lemmatizer};
 use rusqlite::Connection;
 
 pub use fts::{find_tokens, fts_query, fts_search_ids, fts_tokens, lemmatize_token};
+pub use rag::{ask, build_context, Answer};
 pub use snippet::{format_location, make_snippet};
 
 /// Результат поиска (поля — как словарь `search()`; `location` — `format_location`).
