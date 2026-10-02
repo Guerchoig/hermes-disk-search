@@ -27,6 +27,11 @@ pub const PAGE: &str = r#"<!doctype html>
 <main>
  <section><h2>Состояние</h2><div id="status" class="muted">…</div></section>
 
+ <section><h2>Проверка компонентов</h2>
+  <div class="row"><button onclick="loadDiag()">Обновить</button>
+   <span id="dmsg" class="muted"></span></div>
+  <div id="diag" class="muted">…</div></section>
+
  <section><h2>Поиск</h2>
   <div class="row"><input id="q" placeholder="например: накладная склад">
    <input id="lim" type="number" value="8" min="1" max="30" style="min-width:70px">
@@ -37,6 +42,11 @@ pub const PAGE: &str = r#"<!doctype html>
   <div class="row"><input id="aq" placeholder="о чём … ?" style="min-width:360px">
    <button onclick="doAsk()">Спросить</button></div>
   <pre id="aans" class="muted" style="display:none"></pre></section>
+
+ <section><h2>Дерево индекса</h2>
+  <div class="row"><button onclick="loadTree()">Показать/обновить</button>
+   <span id="tmsg" class="muted"></span></div>
+  <div id="tree" class="muted">…</div></section>
 
  <section><h2>Индексация</h2>
   <div class="row">
@@ -49,7 +59,7 @@ pub const PAGE: &str = r#"<!doctype html>
 </main>
 <script>
 async function jget(u){ const r=await fetch(u); return await r.json(); }
-async function jpost(u){ const r=await fetch(u,{method:'POST'}); return await r.json(); }
+async function jpost(u){ const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-HDS-UI':'1'}}); return await r.json(); }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 async function refresh(){
   try{ const s=await jget('/api/status');
@@ -88,6 +98,27 @@ async function act(u){
   try{ const r=await jpost(u); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; }
   refresh();
 }
-refresh(); setInterval(refresh, 3000);
+function stIcon(s){ return s==='done'?'&#9989;':(s==='partial'?'&#9888;&#65039;':'&#11036;'); }
+function nodeHtml(n,depth){
+  const pad='&nbsp;&nbsp;'.repeat(depth);
+  let h=pad+stIcon(n.status)+' <b>'+esc(n.name)+'</b> <span class="muted">(файлов '+n.files+', инд '+n.indexed+')</span><br>';
+  (n.children||[]).slice(0,60).forEach(c=>{ h+=nodeHtml(c,depth+1); });
+  return h;
+}
+async function loadTree(){
+  const t=document.getElementById('tree'); t.textContent='…';
+  try{ const j=await jget('/api/tree');
+    document.getElementById('tmsg').textContent='папок: '+(j.dirs??'?')+' · файлов на диске: '+(j.disk_files??'?');
+    t.innerHTML=(j.trees||[]).map(n=>nodeHtml(n,0)).join('')||'<span class="muted">нет данных</span>';
+  }catch(e){ t.textContent='ошибка: '+e; }
+}
+async function loadDiag(){
+  const d=document.getElementById('diag'); d.textContent='…';
+  try{ const j=await jget('/api/diagnostics');
+    d.innerHTML=(j.checks||[]).map(c=>'<div>'+stIcon(c.status==='ok'?'done':(c.status==='warn'?'partial':'none'))+
+      ' <b>'+esc(c.title||c.id)+'</b>: '+esc(c.msg||'')+'</div>').join('');
+  }catch(e){ d.textContent='ошибка: '+e; }
+}
+refresh(); setInterval(refresh, 3000); loadDiag(); loadTree();
 </script></body></html>
 "#;
