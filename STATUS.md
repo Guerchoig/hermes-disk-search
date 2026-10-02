@@ -90,6 +90,10 @@
 > (Java 11+; воркер сам находит JDK 21); `_capabilities` репортит `mpp`; `build_sidecar` self-test
 > импортирует jpype/mpxj; `hds check` получил пункт **`mpp`**. Живой `.mpp` из фикстуры извлечён
 > (задачи/даты). Rust 174/0, Python 269 OK. `W4_REPORT.md` §11. Остаток: `build-macos`, тег `clip-onnx-v1`.
+> **Пакет (dry-run, 02.10.2026):** `build_rust_release.ps1` += `-SkipBuild` (взять готовые
+> `target\release\*.exe`, не трогая резидента). Прогон 0.1.0 → `dist\hds-0.1.0-windows-x64\`
+> (46 файлов, все разделы §10.1) + zip + sha256; `bin\hds.exe --help` работает. `releasing.md`,
+> `W4_REPORT.md` §12.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

@@ -356,3 +356,26 @@ cargo clippy -D warnings / fmt --check # 0/0 / 0
 **Оговорка.** В CI `windows-latest` Java может отсутствовать → `extract_mpp` отработает
 пункт-заглушкой (тест `.mpp` не должен требовать JVM). Полный паритет `.mpp` проверяется на
 машине с JDK (здесь — JDK 21).
+
+## 12. Сборка релизного пакета (dry-run с `-SkipBuild`) (02.10.2026)
+
+**Зачем.** `build_rust_release.ps1` расширяли в §4 под полную раскладку §10.1, но **живьём он
+не прогонялся** (живой резидент держит `target\release\llm_host.exe` → `cargo build --release`
+падает `os error 5`). Добавлен `-SkipBuild` (взять готовые `target\release\*.exe`) — пакет
+собирается, не трогая резидента.
+
+**Прогон.**
+```
+installers\build_rust_release.ps1 -Version 0.1.0 -SkipBuild
+# [w4] -SkipBuild: reusing existing target\release binaries
+# [w4] staged:  dist\hds-0.1.0-windows-x64   (46 файлов)
+# [w4] package: dist\hds-0.1.0-windows-x64.zip
+# [w4] sha256:  93e387a3fea94397276eb045b203a7d34b98dfd681b6ac5f09817449e7bd7484
+```
+Состав (проверено): `bin\{hds,hds_mcp,llm_host}.exe`; `installers\` (вкл. `install_app_version.ps1`,
+`update.ps1`, `build_sidecar.ps1`, `fetch_*`); `runtime-manifests\` (3 json); `sidecar\`;
+`assets\ shortcuts\ hermes-skill\`; корневые скрипты + `setup.cmd`; `config.example.yaml`;
+`README.md`; `NOTICE.md`; `sha256.txt`. `bin\hds.exe --help` из распакованного дерева работает.
+
+**Оговорка.** Локально `sidecar\` — dev-копия (без портативного Python): полный пакет собирает
+CI-джоба `build-sidecar` (или локально `-WithSidecar`, нужен `uv` ~280 МБ загрузки).

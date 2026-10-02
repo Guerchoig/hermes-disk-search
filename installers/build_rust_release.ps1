@@ -2,6 +2,8 @@
 #
 # Usage (from the repo root):
 #   powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version 0.1.0
+#   ... -SkipBuild          # reuse existing target\release binaries (e.g. the resident holds
+#                           # llm_host.exe -> cargo build --release fails with os error 5)
 #
 # Result:
 #   dist\hds-<Version>-windows-x64\              full install layout (bin, installers, sidecar, ...)
@@ -15,15 +17,20 @@ param(
     [string]$Version = "0.1.0",
     [switch]$SkipZip,
     [switch]$WithSidecar,
-    [string]$SidecarDir = ""
+    [string]$SidecarDir = "",
+    [switch]$SkipBuild
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 
-Write-Host "[w4] building release binaries..."
-cargo build --release -p hds-cli -p hds-mcp -p hds-llama
-if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+if (-not $SkipBuild) {
+    Write-Host "[w4] building release binaries..."
+    cargo build --release -p hds-cli -p hds-mcp -p hds-llama
+    if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
+} else {
+    Write-Host "[w4] -SkipBuild: reusing existing target\release binaries"
+}
 
 $stage = Join-Path $root "dist\hds-$Version-windows-x64"
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
