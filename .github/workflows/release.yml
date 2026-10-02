@@ -1,5 +1,7 @@
 name: Release
 
+# Релиз hermes-disk-search: бинарные ассеты Rust (Windows) + рантайм движка,
+# плюс (пока Python есть) регрессия эталона и mac-архив. W5 уберёт Python-джобы.
 on:
   workflow_dispatch:
     inputs:
@@ -16,7 +18,8 @@ permissions:
   contents: write
 
 jobs:
-  test:
+  # ---------- Python regression (kept until W5, per the migration plan) ----------
+  test-py:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -39,25 +42,22 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python -m unittest discover -s tests -v
 
-  # Проверка совместимости с macOS (Apple Silicon M1-M4): зависимости ставятся
-  # без nvidia-* (CUDA на Mac нет), тесты должны проходить без CUDA/Tesseract.
+  # Проверка совместимости с macOS (Apple Silicon M1-M4): зависимости без nvidia-*.
   test-macos:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
 
-      # Python из Homebrew: сборки python.org (actions/setup-python на macOS)
-      # собраны без поддержки загрузки расширений sqlite3 — sqlite-vec
-      # не загрузится и векторный поиск будет недоступен.
-      - name: Python 3.12 (Homebrew — sqlite3 с загрузкой расширений)
+      # Python из Homebrew: сборки python.org собраны без поддержки загрузки
+      # расширений sqlite3 - sqlite-vec не загрузится и векторный поиск отключится.
+      - name: Python 3.12 (Homebrew - sqlite3 with extension loading)
         run: |
           PY3="$(brew --prefix python@3.12 2>/dev/null)/bin/python3.12"
           if [ ! -x "$PY3" ]; then
             brew install python@3.12
             PY3="$(brew --prefix python@3.12)/bin/python3.12"
           fi
-          "$PY3" -c "import sqlite3; c = sqlite3.connect(':memory:'); c.enable_load_extension(False); print('[ok] sqlite3: загрузка расширений доступна')"
-          # PEP 668: brew-python запрещает pip без venv — создаём venv
+          "$PY3" -c "import sqlite3; c = sqlite3.connect(':memory:'); c.enable_load_extension(False); print('[ok] sqlite3: extension loading available')"
           "$PY3" -m venv "$HOME/.hds-venv"
           echo "$HOME/.hds-venv/bin" >> "$GITHUB_PATH"
 
@@ -75,11 +75,84 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python3 -m unittest discover -s tests -v
 
-  # Архив для macOS собирается на macOS-раннере: git archive сохраняет права
-  # на исполнение (.command, run_index) — это важно для Mac-архива.
+  # ---------- Rust: tests + lint (informative clippy; -D warnings is W5) ----------
+  test-rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: clippy (информативно; -D warnings - задача W5)
+        run: cargo clippy --workspace --all-targets
+
+      - name: Тесты Rust
+        run: cargo test --workspace
+
+  # ---------- Rust: Windows binaries + package (zip + sha256) ----------
+  build-windows:
+    needs: [test-rust]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Сборка релиза и упаковка (bin + installers + sha256 + zip)
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          $ver = "$env:VERSION" -replace '^v', ''
+          powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version $ver
+
+      - name: "Smoke: распакованный архив - hds запускается"
+        shell: pwsh
+        run: |
+          $ver = "${{ inputs.version }}" -replace '^v', ''
+          Expand-Archive -Path "dist\hds-$ver-windows-x64.zip" -DestinationPath dist\check
+          dist\check\bin\hds.exe --help
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-rust-windows-x64
+          path: |
+            dist/hds-*-windows-x64.zip
+            dist/hds-*-windows-x64.zip.sha256.txt
+          if-no-files-found: error
+
+  # ---------- Engine runtime (llm-host + ASR) as a release asset (offline installs) ----------
+  fetch-engine-runtime:
+    needs: [test-rust]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Скачать рантайм движка по манифесту (sha256)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File installers\fetch_engine_runtime.ps1 -EngineDir dist\engine-runtime
+
+      - name: Упаковать рантайм движка
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\engine-runtime\* -DestinationPath dist\hds-engine-runtime-windows-x64-cuda.zip -Force
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-engine-runtime-windows-x64
+          path: dist/hds-engine-runtime-windows-x64-cuda.zip
+          if-no-files-found: error
+
+  # ---------- macOS source archive (kept until W5; git archive preserves exec bits) ----------
   build-macos:
-    needs: [test, test-macos]
-    if: success()
+    needs: [test-py, test-macos]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v5
@@ -87,8 +160,7 @@ jobs:
       - name: Архив релиза для macOS (исходники + иконки + инсталляторы)
         run: |
           VERSION="${{ inputs.version }}"
-          git archive --format=zip --prefix="hermes-disk-search/" \
-            -o "hermes-disk-search-${VERSION}-macos.zip" HEAD
+          git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-${VERSION}-macos.zip" HEAD
 
       - uses: actions/upload-artifact@v5
         with:
@@ -96,26 +168,37 @@ jobs:
           path: hermes-disk-search-*-macos.zip
           if-no-files-found: error
 
+  # ---------- Release with binary assets ----------
   release:
-    needs: [test, build-macos]
-    if: success()
+    needs: [test-py, build-windows, fetch-engine-runtime, build-macos]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
 
-      - name: Скачивание macOS-ассетов
+      - name: Скачать бинарные ассеты (Windows)
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-rust-windows-x64
+          path: dist
+
+      - name: Скачать рантайм движка
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-engine-runtime-windows-x64
+          path: dist
+
+      - name: Скачать macOS-ассеты
         uses: actions/download-artifact@v5
         with:
           name: macos-archive
           path: dist
 
-      - name: Архив релиза для Windows (исходники + иконки + инсталляторы)
+      - name: Архив исходников для Windows
+        shell: pwsh
         env:
           VERSION: ${{ inputs.version }}
-        shell: pwsh
         run: |
-          git archive --format=zip --prefix="hermes-disk-search/" `
-            -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
+          git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
 
       - name: Создание релиза
         env:
@@ -124,27 +207,22 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ inputs.version }}"
-          # Заметки ищем в двух вариантах имени: RELEASE_NOTES_v0.10.0.md
-          # (как в releasing.md и в релизах до 0.5.10) и RELEASE_NOTES_0.10.0.md
-          # (вариант без префикса v, который использовался в 0.6.0–0.9.0).
-          # Без второго варианта gh release create уходил на --generate-notes
-          # и заметки молча не попадали в релиз (так было в 0.6.0–0.9.0).
+          # Заметки: RELEASE_NOTES_<tag>.md или вариант без 'v' (0.6.0-0.9.0).
           $noteFile = "RELEASE_NOTES_$tag.md"
           if (-not (Test-Path $noteFile)) {
             $noV = $tag -replace '^v', ''
-            if (Test-Path "RELEASE_NOTES_$noV.md") {
-              $noteFile = "RELEASE_NOTES_$noV.md"
-            }
+            if (Test-Path "RELEASE_NOTES_$noV.md") { $noteFile = "RELEASE_NOTES_$noV.md" }
           }
-          $macZip = Join-Path 'dist' "hermes-disk-search-$tag-macos.zip"
-          $assets = @(
-            "hermes-disk-search-$tag-windows.zip",
-            $macZip
-          )
+          $assets = @()
+          $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip" | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip.sha256.txt" | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "hds-engine-runtime-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += "hermes-disk-search-$tag-windows.zip"
+          $assets += (Join-Path 'dist' "hermes-disk-search-$tag-macos.zip")
           if (Test-Path $noteFile) {
-            gh release create $tag --title "$tag — hermes-disk-search" --notes-file $noteFile @assets
+            gh release create $tag --title "$tag - hermes-disk-search" --notes-file $noteFile @assets
           } else {
-            gh release create $tag --title "$tag — hermes-disk-search" --generate-notes @assets
+            gh release create $tag --title "$tag - hermes-disk-search" --generate-notes @assets
           }
 
       - name: Итог

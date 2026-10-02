@@ -108,3 +108,28 @@ release-тег `clip-onnx-v1` ещё **не создан** — перед пуб
 
 **Дальше:** `package` (zip + sha256) и `release.yml` с бинарными ассетами и джобой
 `fetch-engine-runtime` (шаг 3); UI-дополнения и W5 (шаг 4).
+
+## 4. `package` (zip + sha256) и `release` с бинарными ассетами (02.10.2026)
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `installers\build_rust_release.ps1` | **переписан**: стейджинг полной раскладки `dist\hds-<ver>-windows-x64\` (§10.1) — `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `assets\`, `hermes-skill\`, `sidecar\`, `shortcuts\windows\`, корневые скрипты (`setup.cmd/setup.ps1/install_hermes/cline/autostart/run_ui/run_index`), `config.example.yaml`, `README.md` (и `NOTICE.md`, если есть), `sha256.txt`; затем **zip** (содержимое в корне архива) + `<zip>.sha256.txt`. `-SkipZip` — только стейджинг. ASCII-only. |
+| `.github/workflows/release.yml` | **переписан**: `test-py`/`test-macos` (Python, **оставлены** до W5) + `test-rust` (clippy информативно + `cargo test`) + `build-windows` (cargo release → `build_rust_release.ps1` → smoke «распаковали → `hds.exe --help`» → upload) + **`fetch-engine-runtime`** (скачивание рантайма движка по манифесту, проверка sha256, zip-ассет) + `build-macos` (архив исходников) + `release` (`gh release create` с **бинарными** ассетами). Версия нормализуется (`v0.2.0` → `0.2.0` для пути пакета). |
+| `releasing.md` | обновлены «Порядок выпуска» и «Ассеты релиза»: бинарный Windows-пакет + рантайм движка + архивы исходников; CLIP-модели — отдельный тег `clip-onnx-v1`. |
+
+**Решения.** Python-джобы в релизе оставлены (решение заказчика №6; уйдут в W5). Рантайм
+движка — **отдельный** release-ассет `hds-engine-runtime-windows-x64-cuda.zip` (§10.1 допускает
+и «вложение в архив как опцию»); `NOTICE.md` копируется, если появится (атрибуция — отдельная
+задача).
+
+**Приёмка.** `release.yml` — **валидный YAML** (jobs: `test-py`, `test-macos`, `test-rust`,
+`build-windows`, `fetch-engine-runtime`, `build-macos`, `release`); `build_rust_release.ps1` —
+`parse-ok`, `nonASCII=0`; `rust.yml`/`ci.yml` — YAML ок (не тронуты).
+**Оговорка (честно).** Функциональный прогон упаковки в этой сессии невозможен: живой resident
+`target\release\llm_host.exe` держит exe → `cargo build --release` падает `os error 5` (нужен
+`llm_host stop`); end-to-end упаковки и сборка engine-ассета проверяются на CI (`windows-latest`).
+
+**Дальше:** UI-дополнения (полный `hds check` в `/api/diagnostics`, кэш дерева, автозапуск UI)
+и W5 (clippy/fmt, `-D warnings`).

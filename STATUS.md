@@ -56,6 +56,10 @@
 > (release-ассеты `clip-onnx-v1`, sha256) + `installers\fetch_clip_models.ps1`
 > (+`publish_clip_models.ps1` для мейнтейнера); `default_onnx_dir` → `models\clip_onnx`
 > (dev-фолбэк `tools\parity\out\clip_onnx`) — `W4_REPORT.md` §3. Тесты — 170/0 (+9 ignored).
+> **W4 шаг 3 (02.10.2026):** `package` — `installers\build_rust_release.ps1` (полная раскладка
+> `dist\hds-<ver>-windows-x64\` + zip + sha256); `release.yml` переписан (test-rust, build-windows
+> + smoke, `fetch-engine-runtime`, `release` с бинарными ассетами; Python-джобы оставлены до W5);
+> `releasing.md` обновлён — `W4_REPORT.md` §4.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`
