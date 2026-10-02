@@ -42,9 +42,9 @@ rustc/cargo 1.97.1. Миграция ядра на Rust **завершена (W1
 - golden **заморожен** (генератор удалён); паритет — `compare.py` + golden и `crates/*/tests/*`.
 
 ## Что можно делать дальше (на выбор заказчика)
-1. **Апстрим-отчёт по-английски** (`engine-patch/UPSTREAM_REPORT.md`) — **единственный незакрытый
-   пункт L2b**; публиковать (`gh issue create`) только по решению заказчика. Тег `engine-patch-v1`
-   уже создан, 10 ассетов залиты (`-PatchEngine` проверен) — повторно публиковать не нужно.
+1. **Апстрим-отчёт по-английски** (`engine-patch/UPSTREAM_REPORT.md`) — **написан**; публиковать
+   (`gh issue create`) — только по решению заказчика. Патч опубликован (тег `engine-patch-v1`,
+   10 ассетов; `-PatchEngine` проверен) и внедрён в боевой каталог — повторно не нужно.
 2. **Реальный релиз**: push ветки → `release.yml` (`test-rust` → `build-sidecar` → `build-windows`
    → `fetch-engine-runtime` → `release`). Локальный release-build требует остановки **двух**
    держателей `target\release\*.exe`: `llm_host stop` **и** `hds mcp-http stop` (либо `-SkipBuild`).

@@ -52,9 +52,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 ```
 
 **Что дальше (остаток).**
-* **Апстрим-отчёт (EN)** `engine-patch/UPSTREAM_REPORT.md` — единственный незакрытый пункт L2b;
-  публикация (`gh issue create`) — только по решению заказчика. Чтобы `-PatchEngine` работал на
-  других машинах, один раз выполнить `installers\publish_engine_patch.ps1` (тег `engine-patch-v1`).
+* **Апстрим-отчёт (EN)** `engine-patch/UPSTREAM_REPORT.md` — **написан** (issue-ready); публикация
+  (`gh issue create`) — по решению заказчика. Патч **опубликован** (`installers\publish_engine_patch.ps1`,
+  тег `engine-patch-v1`, 10 ассетов) — `-PatchEngine` работает на других машинах (проверено end-to-end).
 * **Эксплуатация:** прогнать реальный релиз (push ветки → `release.yml`); создать тег
   `clip-onnx-v1` (`installers\publish_clip_models.ps1`) до релиза; реальный release-build требует
   остановки **двух** держателей exe (`llm_host stop` **и** `hds mcp-http stop`) либо CI.
@@ -750,5 +750,7 @@ sha256 `79d6ec73…`) и `multi-node-server.dll` (**294 400 Б**, sha256 `7593b1
   (грабля: `gh release view` под `$ErrorActionPreference=Stop` давал `NativeCommandError` на
   «release not found» до чтения `$LASTEXITCODE`; в gh-блоке EAP переведён в `Continue`).
 
-**Остаётся.** Только апстрим-отчёт (EN) — `engine-patch/UPSTREAM_REPORT.md`.
+**Апстрим-отчёт (EN) написан (02.10.2026).** `engine-patch/UPSTREAM_REPORT.md` — issue-ready разбор
+четырёх дефектов (P1/P2/P3 + KV), с репро, влиянием и предлагаемыми правками. Публикация
+(`gh issue create`) — по решению заказчика. **Этим L2b закрыт полностью.**
 
