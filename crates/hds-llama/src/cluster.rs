@@ -161,6 +161,11 @@ pub struct InstanceSpec {
     pub n_parallel: Option<i32>,
     pub n_threads: Option<i32>,
     pub n_gpu_layers: Option<i32>,
+    /// Тип KV-кэша (ggml_type: 1 = F16, 8 = Q8_0; `None` — по умолчанию движка = F16).
+    /// Появилось в нашем патче движка: в API полей не было, поэтому
+    /// `--cache-type-k/v` из конфига применить было невозможно (KV всегда f16).
+    pub cache_type_k: Option<i32>,
+    pub cache_type_v: Option<i32>,
 }
 
 impl InstanceSpec {
@@ -219,6 +224,12 @@ impl InstanceSpec {
         if let Some(v) = self.n_gpu_layers {
             p.n_gpu_layers = v;
         }
+        // Всегда пишем тип KV явно: `default_instance_params` движок возвращает по
+        // значению, и у стоковой (непатченой) библиотеки хвостовые поля нашей
+        // структуры остаются неинициализированными — опираться на «0 по умолчанию»
+        // нельзя (0 = «не задан» → мост возьмёт F16).
+        p.cache_type_k = self.cache_type_k.unwrap_or(0);
+        p.cache_type_v = self.cache_type_v.unwrap_or(0);
         Ok((p, keep))
     }
 }

@@ -107,6 +107,10 @@ pub struct InstanceParamsRaw {
     pub n_threads: i32,
     pub n_threads_batch: i32,
     pub n_gpu_layers: i32,
+    /// HDS patch движка: тип KV-кэша (ggml_type; 0 = «не задан» → F16).
+    /// Порядок полей обязан совпадать с `llama_server_cluster_instance_params`.
+    pub cache_type_k: i32,
+    pub cache_type_v: i32,
 }
 
 /// `struct llama_server_cluster_instance_info`.

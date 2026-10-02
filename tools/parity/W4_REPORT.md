@@ -523,6 +523,24 @@ VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host 
 строку «VRAM по процессам: наш процесс 7501 МиБ (95 %), чужие 360 МиБ», `/props` отдаёт
 `state: LOADED` и `busy: null`.
 
+**KV-квант чата: причина найдена, закрыто на двух сторонах (02.10.2026).** `--cache-type-k/v`
+из конфига не работал не из-за конфига: в cluster/bridge API движка **нет полей под тип KV**
+(`llama_server_cluster_instance_params` — 22 поля, `llama_server_bridge_params` — тоже; в
+реализации ни одного `cache_type`), поэтому KV всегда грузился как f16 (у нашего чата — 512 МиБ
+при n_ctx 16384). При этом вендоренный llama.cpp это умеет: `common_params.cache_type_k/v`
+(`common/common.h:290`) → `cparams.type_k/type_v` (`common/common.cpp:1380`) →
+`llama_context_params.type_k/type_v` (`include/llama.h:353`).
+* **наша сторона (сделано, этот шаг):** `parse_kv_type` + распознавание `--cache-type-k/v` в
+  legacy `extra_args` и ключей `llm.<role>.cache_type_k/v`; поля в `InstanceSpec`/
+  `InstanceParamsRaw` (всегда пишутся явно — `default_instance_params` движок возвращает по
+  значению, у стоковой DLL хвост структуры неинициализирован); учёт `KvBits::Q8_0` в оценке
+  бюджета. Предупреждение «флаг не распознан» ушло — боевой `config.yaml` заработает без правок.
+* **сторона движка (в работе, L2b):** 2 поля в cluster+bridge параметрах, присвоение
+  `bridge->params.cache_type_k/v` рядом с `n_ctx/n_batch`, включение Flash Attention при
+  квантованном V (llama.cpp требует FA для `type_v != F16`); у embedding/rerank FA выключен
+  движком, но там KV-кэша нет. После сборки замеряем (`kv_probe`): ожидаем KV ≈ 256 МиБ вместо
+  512, то есть −256 МиБ.
+
 **Осталось по L1 (шаг 3).** Убрать триггер: `n_batch/n_ubatch` для embedding (было
 8192/8192 при 12 ГБ и загруженном чате), оценка compute-буферов в `budget.rs`, отказ от
 `load_instance` на каждый запрос LOAD_ON_DEMAND ролей; пункт `gpu-observability` в

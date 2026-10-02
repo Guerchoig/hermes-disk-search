@@ -159,6 +159,9 @@ fn plan_role(
     spec.n_batch = rc.n_batch;
     spec.n_ubatch = rc.n_ubatch;
     spec.n_threads = rc.n_threads;
+    // KV-кэш роли (наш патч движка): q8_0 экономит ~половину KV у чата.
+    spec.cache_type_k = rc.cache_type_k;
+    spec.cache_type_v = rc.cache_type_v;
     if !cpu_role {
         spec.n_gpu_layers = Some(n_gpu_layers);
     }

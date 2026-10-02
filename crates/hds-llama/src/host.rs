@@ -103,14 +103,17 @@ pub fn role_needs(cfg: &LlmHostConfig, runtime_root: &Path) -> BTreeMap<String, 
             continue;
         }
         let parallel = cfg.parallel.max(1) as i64;
+        // KV-тип роли учитываем в оценке: с нашим патчем движка `--cache-type-k/v`
+        // доходит до llama.cpp, и q8_0 даёт примерно вдвое меньше KV у чата.
+        let kv_bits = if rc.cache_type_k == Some(8) {
+            KvBits::Q8_0
+        } else {
+            KvBits::F16
+        };
         let need = match read_meta(&model_path) {
-            Ok(meta) => estimate_need_mib(
-                &meta,
-                file_mib,
-                rc.n_ctx.max(0) as i64,
-                parallel,
-                KvBits::F16,
-            ),
+            Ok(meta) => {
+                estimate_need_mib(&meta, file_mib, rc.n_ctx.max(0) as i64, parallel, kv_bits)
+            }
             // без метаданных считаем хотя бы вес файла (+5 %, как в оценке бюджета)
             Err(_) => file_mib + file_mib / 20,
         };

@@ -189,6 +189,11 @@ pub struct RoleConfig {
     pub n_batch: Option<i32>,
     pub n_ubatch: Option<i32>,
     pub n_threads: Option<i32>,
+    /// Тип KV-кэша роли: `llm.<role>.cache_type_k/v` (имя «q8_0» или число) либо legacy
+    /// `--cache-type-k/v` из `extra_args`. Работает нашим патчем движка: в стоковом
+    /// cluster/bridge API таких полей нет, поэтому флаги раньше игнорировались.
+    pub cache_type_k: Option<i32>,
+    pub cache_type_v: Option<i32>,
     /// Legacy `-ngl` из `llm_server.<role>.extra_args` (используется, если
     /// `gpu.n_gpu_layers` не задан явно).
     pub legacy_n_gpu_layers: Option<i32>,
@@ -483,6 +488,18 @@ fn build_role(
     let n_threads = dig_i64(root, &format!("llm.{role}.n_threads"))
         .map(|v| v.max(0) as i32)
         .or(ea.n_threads);
+    // KV-кэш роли: `llm.<role>.cache_type_k/v` (строка «q8_0» или число) приоритетнее
+    // legacy `--cache-type-k/v`. Применяется нашим патчем движка.
+    let cache_type_k = dig(root, &format!("llm.{role}.cache_type_k"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_kv_type)
+        .or_else(|| dig_i64(root, &format!("llm.{role}.cache_type_k")).map(|v| v.max(0) as i32))
+        .or(ea.cache_type_k);
+    let cache_type_v = dig(root, &format!("llm.{role}.cache_type_v"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_kv_type)
+        .or_else(|| dig_i64(root, &format!("llm.{role}.cache_type_v")).map(|v| v.max(0) as i32))
+        .or(ea.cache_type_v);
     if let (Some(ub), Some(b)) = (n_ubatch, n_batch) {
         if ub > b {
             let msg = format!(
@@ -507,6 +524,8 @@ fn build_role(
         n_batch,
         n_ubatch,
         n_threads,
+        cache_type_k,
+        cache_type_v,
         legacy_n_gpu_layers,
         notes,
     })
@@ -519,8 +538,28 @@ pub struct ExtraArgs {
     pub n_batch: Option<i32>,
     pub n_ubatch: Option<i32>,
     pub n_threads: Option<i32>,
+    /// `--cache-type-k/v` (ggml_type): работает с нашим патчем движка.
+    pub cache_type_k: Option<i32>,
+    pub cache_type_v: Option<i32>,
     /// Нераспознанные флаги (с значениями) — для `hdsw check`.
     pub unknown: Vec<String>,
+}
+
+/// Тип KV-кэша по имени или числу (как у `llama-server --cache-type-k/v`).
+///
+/// Понимаем `f16` (1), `q4_0` (2), `q5_0` (6), `q8_0` (8), `bf16` (30) и просто
+/// число (ggml_type). Неизвестное имя → `None`, тогда флаг попадёт в `unknown`
+/// и честно останется в предупреждениях.
+pub fn parse_kv_type(s: &str) -> Option<i32> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "f16" | "fp16" => Some(1),
+        "q4_0" => Some(2),
+        "q5_0" => Some(6),
+        "q8_0" => Some(8),
+        "bf16" => Some(30),
+        "" => None,
+        other => other.parse::<i32>().ok(),
+    }
 }
 
 /// Разобрать строку `extra_args` (как её писал llama-server).
@@ -553,6 +592,12 @@ pub fn parse_extra_args(s: &str) -> ExtraArgs {
             "-t" | "--threads" => {
                 out.n_threads = value(&mut i).and_then(|v| v.parse().ok());
             }
+            "--cache-type-k" | "-ctk" => {
+                out.cache_type_k = value(&mut i).and_then(|v| parse_kv_type(&v));
+            }
+            "--cache-type-v" | "-ctv" => {
+                out.cache_type_v = value(&mut i).and_then(|v| parse_kv_type(&v));
+            }
             other if other.starts_with('-') => {
                 let v = value(&mut i);
                 out.unknown.push(match v {
@@ -576,12 +621,14 @@ mod tests {
     fn extra_args_parses_known_flags() {
         let ea = parse_extra_args("--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99");
         assert_eq!(ea.n_gpu_layers, Some(99));
-        assert_eq!(
-            ea.unknown,
-            vec![
-                "--cache-type-k q8_0".to_string(),
-                "--cache-type-v q8_0".to_string()
-            ]
+        // С нашим патчем движка эти флаги больше не «неизвестные»: они доезжают
+        // до llama.cpp (q8_0 = GGML_TYPE_Q8_0 = 8).
+        assert_eq!(ea.cache_type_k, Some(8));
+        assert_eq!(ea.cache_type_v, Some(8));
+        assert!(
+            ea.unknown.is_empty(),
+            "непознанных флагов быть не должно: {:?}",
+            ea.unknown
         );
 
         let ea = parse_extra_args("--batch-size 8192 --ubatch-size 8192 -ngl 99");
@@ -656,13 +703,34 @@ llm_server:
             "реранкер по legacy — на CPU"
         );
 
+        // KV-квант из legacy `extra_args` теперь применяется нашим патчем движка,
+        // а не превращается в предупреждение «флаг не распознан».
+        assert_eq!(chat.cache_type_k, Some(8), "q8_0 из extra_args");
+        assert_eq!(
+            chat.cache_type_v, None,
+            "в этом конфиге задан только `--cache-type-k`"
+        );
         assert!(
-            cfg.warnings
-                .iter()
-                .any(|w| w.contains("--cache-type-k q8_0")),
-            "должно быть предупреждение про нераспознанный флаг: {:?}",
+            !cfg.warnings.iter().any(|w| w.contains("--cache-type-k")),
+            "предупреждения про KV-флаги быть не должно: {:?}",
             cfg.warnings
         );
+    }
+
+    /// Имена/числа типов KV-кэша (`--cache-type-k/v`) → ggml_type.
+    #[test]
+    fn kv_type_names_map_to_ggml_ids() {
+        assert_eq!(parse_kv_type("Q8_0"), Some(8), "регистр не важен");
+        assert_eq!(parse_kv_type("q8_0"), Some(8));
+        assert_eq!(parse_kv_type("f16"), Some(1));
+        assert_eq!(parse_kv_type("bf16"), Some(30));
+        assert_eq!(
+            parse_kv_type("4"),
+            Some(4),
+            "числовой ggml_type проходит как есть"
+        );
+        assert_eq!(parse_kv_type("не-тип"), None);
+        assert_eq!(parse_kv_type(""), None);
     }
 
     /// Новые ключи `llm.<role>.{n_batch,n_ubatch,n_threads}` приоритетнее legacy

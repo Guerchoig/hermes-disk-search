@@ -199,10 +199,17 @@ fn legacy_config_resolves_roles_from_shared_runtime() {
         rr.notes
     );
 
+    // С нашим патчем движка KV-флаги из legacy `extra_args` больше не попадают в
+    // предупреждения: они доезжают до llama.cpp через план инстанса.
     assert!(
-        cfg.warnings.iter().any(|w| w.contains("--cache-type-k")),
-        "warnings: {:?}",
+        !cfg.warnings.iter().any(|w| w.contains("--cache-type-k")),
+        "предупреждения про KV-флаги быть не должно: {:?}",
         cfg.warnings
+    );
+    assert_eq!(
+        chat_p.spec.cache_type_k,
+        Some(8),
+        "q8_0 из extra_args → ggml_type в плане инстанса"
     );
 }
 
