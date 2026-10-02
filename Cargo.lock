@@ -551,6 +551,7 @@ dependencies = [
  "hds-index",
  "hds-mcp",
  "hds-search",
+ "hds-ui",
  "rusqlite",
  "serde_json",
 ]
@@ -642,6 +643,18 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "hds-ui"
+version = "0.1.0"
+dependencies = [
+ "hds-core",
+ "hds-extract",
+ "hds-index",
+ "hds-search",
+ "rusqlite",
+ "serde_json",
 ]
 
 [[package]]

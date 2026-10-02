@@ -178,3 +178,34 @@ parse-error). Итого `cargo test --workspace` — **165 passed / 0 failed (+
 **debug**-сборки. Владельцем портов 8010–8012 держим **release**-резидента
 (`target\release\llm_host.exe run`) — debug-сборки/тесты разблокированы.
 
+
+## 7. Веб-интерфейс `hds-ui` (перепроектированный, 01.10.2026)
+
+**Почему не 1:1-порт.** `hds/ui_server.py` (1201 стр.) — это **операционный слой Python**
+(`llama_server` start/stop, скачивание/смена моделей, `chat-model/set`, правка
+`config.yaml`, watch-autostart). После перехода на `llm-host` (роли держит Rust) этот
+слой неактуален, поэтому UI **перепроектирован** под Rust-стек, а не скопирован.
+
+**Что сделано** — крейт `crates/hds-ui` (свой лёгкий HTTP-сервер + встроенная страница):
+
+| Эндпоинт | Назначение |
+|---|---|
+| `GET /` | страница (статус/поиск/ask/управление индексацией), `text/html` |
+| `GET /api/status` | индекс (`db.stats` + heartbeat) + роли `llm-host` (HTTP `/internal/status`) |
+| `GET /api/search?q=&limit=&kinds=` | результаты поиска (`hds-search`) |
+| `GET /api/ask?q=` | RAG-ответ (`hds-search::rag`) |
+| `POST /api/index/start?full=` / `stop` / `pause` / `resume` | управление индексацией через файлы `index.stop`/`index.pause` |
+
+Запуск: `hds ui [--host H] [--port N]` (default `127.0.0.1:8765`) или бинарь `hds_ui`.
+
+**Живой прогон** (боевой `config.yaml`, `llm-host` владеет 8010–8012):
+`GET /` → 200 (страница); `GET /api/status` → реальные данные (612 220 чанков; `llm-host`
+up, chat `LOADED`, `n_ctx=16384`); `GET /api/search?q=Технические задания` → 2 результата
+с реальными путями `D:\…`.
+
+**Тесты:** `tests/ui_core.rs` — 4 (страница/404/валидация/декодирование query).
+Итого `cargo test --workspace` — **169 passed / 0 failed (+9 ignored)**.
+
+**Далее:** по мере надобности — `diagnostics` (порт `hds check`), дерево `index.roots`
+(`/api/tree`), права/CSRF (как в Python), автозапуск UI (W4).
+

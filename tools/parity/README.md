@@ -152,6 +152,9 @@ target\debug\hds.exe mcp      # эквивалент `hds_mcp`; клиенты (
 target\debug\hds.exe mcp-http check|start|stop|status|restart|run [--host --port --path]
 target\debug\hds.exe mcp --http --port 8787   # сервер в foreground (endpoint /mcp, probe /health)
 
+# --- W1: веб-интерфейс (перепроектированный под Rust) ---
+target\debug\hds.exe ui --port 8765          # http://127.0.0.1:8765 (статус/поиск/ask/индексация)
+
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi
 .\.venv\Scripts\python.exe tools\parity\spike6_parity.py         # embeddings/rerank/chat

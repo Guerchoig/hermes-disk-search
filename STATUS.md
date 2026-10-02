@@ -45,6 +45,9 @@
 > **W4 начат (01.10.2026):** CI `rust.yml` (test-rust + build-windows) и
 > `installers/build_rust_release.ps1` (стейджинг `dist\hds-<ver>-windows-x64\` с
 > `hds/hds_mcp/llm_host` + sha256) — журнал `tools/parity/W4_REPORT.md` §1.
+> **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
+> страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
+> `hds ui`/`hds_ui` — `W1_REPORT.md` §7. `cargo test --workspace` — **169 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

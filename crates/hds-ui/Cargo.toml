@@ -1,0 +1,18 @@
+[package]
+name = "hds-ui"
+description = "W1/W4: минимальный веб-интерфейс disk-search на Rust (статус/поиск/ask/индексация)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+hds-index = { path = "../hds-index" }
+hds-search = { path = "../hds-search" }
+hds-extract = { path = "../hds-extract" }
+rusqlite.workspace = true
+serde_json.workspace = true
+
+[[bin]]
+name = "hds_ui"
+path = "src/bin/hds_ui.rs"
