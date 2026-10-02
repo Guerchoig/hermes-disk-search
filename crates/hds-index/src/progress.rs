@@ -82,7 +82,7 @@ impl Event {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Inner {
     seen_count: u64,
     processed_count: u64,
@@ -98,27 +98,6 @@ pub struct Inner {
     last_done: Option<(String, String, f64)>,
     last_path: Option<String>,
     events: VecDeque<Event>,
-}
-
-impl Default for Inner {
-    fn default() -> Self {
-        Inner {
-            seen_count: 0,
-            processed_count: 0,
-            errors: 0,
-            chunks: 0,
-            by_kind: BTreeMap::new(),
-            total: 0,
-            seen_ts: VecDeque::new(),
-            current: None,
-            current_since: None,
-            progress: None,
-            paused: false,
-            last_done: None,
-            last_path: None,
-            events: VecDeque::new(),
-        }
-    }
 }
 
 /// Порт `progress.ProgressReporter` (см. модуль).
@@ -267,7 +246,15 @@ impl ProgressReporter {
         if key.starts_with("error") {
             g.errors += 1;
         }
-        if ["indexed", "moved", "unchanged", "skipped_big", "skipped_type"].contains(&key.as_str()) {
+        if [
+            "indexed",
+            "moved",
+            "unchanged",
+            "skipped_big",
+            "skipped_type",
+        ]
+        .contains(&key.as_str())
+        {
             g.processed_count += 1;
         }
         g.chunks += chunks;
@@ -440,7 +427,11 @@ fn status_line(inner: &Arc<Mutex<Inner>>, t0: Instant, final_: bool) -> String {
         line = format!("⏸ ПАУЗА | {line}");
     }
     let tail = if let Some((path, phase)) = &g.current {
-        let age = fmt_dur(g.current_since.map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0));
+        let age = fmt_dur(
+            g.current_since
+                .map(|t| t.elapsed().as_secs_f64())
+                .unwrap_or(0.0),
+        );
         let name = basename(path);
         match g.progress {
             Some(p) => format!(" | ▶ {} [{}, {:.0}%, идёт {}]", name, phase, p, age),
@@ -527,4 +518,3 @@ pub fn phase_for(kind: Option<&str>) -> &'static str {
         _ => "обработка",
     }
 }
-

@@ -29,9 +29,11 @@ struct Tmp {
 
 impl Tmp {
     fn new(name: &str) -> Tmp {
-        let dir = std::env::temp_dir()
-            .join("hds-llama-tests")
-            .join(format!("resident-{}-{}", std::process::id(), name));
+        let dir = std::env::temp_dir().join("hds-llama-tests").join(format!(
+            "resident-{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         Tmp { dir }
@@ -76,7 +78,11 @@ fn stale_pid_file_is_reclaimed() {
     // 0x7FFF_FF00 (2147483392) не может быть живым pid: в Windows/Linux
     // пространство pid ограничено 2^22, значит OpenProcess вернёт NULL
     std::fs::write(&path, "2147483392\n").expect("пишем мусорный pid");
-    assert_eq!(resident::owner_pid(&path), None, "мёртвый pid не считается живым");
+    assert_eq!(
+        resident::owner_pid(&path),
+        None,
+        "мёртвый pid не считается живым"
+    );
 
     let taken = PidFile::acquire(&path).expect("устаревший файл снимается и занимается заново");
     assert_eq!(resident::read_pid(&path), Some(std::process::id()));
@@ -102,9 +108,18 @@ fn log_file_collects_lines() {
 fn host_config_defaults_point_to_project_data() {
     let cfg = HostConfig::default();
     let root = host::repo_root();
-    assert_eq!(cfg.pid_file.as_deref(), Some(resident::default_pid_path(&root).as_path()));
-    assert_eq!(cfg.log_file.as_deref(), Some(resident::default_log_path(&root).as_path()));
-    assert!(cfg.pid_path().ends_with("data/llm-host.pid") || cfg.pid_path().ends_with("data\\llm-host.pid"));
+    assert_eq!(
+        cfg.pid_file.as_deref(),
+        Some(resident::default_pid_path(&root).as_path())
+    );
+    assert_eq!(
+        cfg.log_file.as_deref(),
+        Some(resident::default_log_path(&root).as_path())
+    );
+    assert!(
+        cfg.pid_path().ends_with("data/llm-host.pid")
+            || cfg.pid_path().ends_with("data\\llm-host.pid")
+    );
     assert!(cfg
         .log_path()
         .to_string_lossy()
@@ -317,7 +332,11 @@ fn internal_routes_are_gated_by_flag() {
         "{}",
         off.json
     );
-    assert!(backend.called().is_empty(), "backend не тронули: {:?}", backend.called());
+    assert!(
+        backend.called().is_empty(),
+        "backend не тронули: {:?}",
+        backend.called()
+    );
 
     let on = handle(
         &req("GET", "/internal/status", ""),
@@ -379,7 +398,13 @@ fn internal_commands_reach_backend() {
     assert!(bad.json.to_string().contains("role"), "{}", bad.json);
 
     let called = backend.called();
-    for expected in ["devices", "load:rerank", "load:chat", "unload:embedding", "stop"] {
+    for expected in [
+        "devices",
+        "load:rerank",
+        "load:chat",
+        "unload:embedding",
+        "stop",
+    ] {
         assert!(
             called.iter().any(|c| c == expected),
             "нет вызова {expected}: {called:?}"
@@ -436,12 +461,18 @@ fn facade_mode_proxies_upstream_as_is() {
     assert_eq!(props.json["n_ctx"], 4096);
 
     // эмбеддинги тоже проксируются, а не обрабатываются локально
-    let emb = handle(&req("POST", "/v1/embeddings", r#"{"input":"x"}"#), &cfg, &backend);
+    let emb = handle(
+        &req("POST", "/v1/embeddings", r#"{"input":"x"}"#),
+        &cfg,
+        &backend,
+    );
     assert_eq!(emb.status, 200, "{}", emb.json);
     assert_eq!(emb.json["origin"], "upstream");
 
     assert!(
-        stub.hits().iter().any(|h| h.contains("/v1/chat/completions")),
+        stub.hits()
+            .iter()
+            .any(|h| h.contains("/v1/chat/completions")),
         "апстрим получил запрос: {:?}",
         stub.hits()
     );
@@ -469,7 +500,10 @@ fn client_json_talks_to_our_own_server() {
     )
     .expect("POST с телом");
     assert_eq!(status, 200);
-    assert!(json["body_len"].as_u64().unwrap_or(0) > 0, "тело дошло: {json}");
+    assert!(
+        json["body_len"].as_u64().unwrap_or(0) > 0,
+        "тело дошло: {json}"
+    );
 
     // закрытый порт — понятная ошибка (её показывает CLI)
     let err = client_json(
@@ -532,7 +566,10 @@ llm_server:
 
     // клиентские адреса CLI — по тем же портам
     let urls = host::client_ports(&cfg, "127.0.0.1", Some(18000));
-    assert!(urls.contains(&"http://127.0.0.1:18000".to_string()), "{urls:?}");
+    assert!(
+        urls.contains(&"http://127.0.0.1:18000".to_string()),
+        "{urls:?}"
+    );
 }
 
 /// Оценка «модель + KV» считается без движка; роль без модели пропускается.
@@ -554,7 +591,11 @@ llm_server:
 "#,
     );
     let cfg = hds_llama::config::load(&path).expect("конфиг читается");
-    assert!(!cfg.roles.is_empty(), "роль в конфиге есть: {:?}", cfg.roles.len());
+    assert!(
+        !cfg.roles.is_empty(),
+        "роль в конфиге есть: {:?}",
+        cfg.roles.len()
+    );
     let needs = host::role_needs(&cfg, &tmp.dir.join("runtime"));
     assert!(
         needs.is_empty(),
@@ -616,7 +657,10 @@ fn host_off_mode_serves_status_without_engine() {
     assert_eq!(status, 200, "{json}");
     assert_eq!(json["mode"], "off");
     assert!(
-        json["lines"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+        json["lines"]
+            .as_array()
+            .map(|a| !a.is_empty())
+            .unwrap_or(false),
         "человеческие строки отчёта: {json}"
     );
 

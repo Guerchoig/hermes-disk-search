@@ -83,7 +83,9 @@ fn parse_args() -> std::result::Result<Args, String> {
                             [--n-ctx N] [--n-parallel N]"
                     .to_string())
             }
-            other if other.starts_with("--") => return Err(format!("неизвестный аргумент: {other}")),
+            other if other.starts_with("--") => {
+                return Err(format!("неизвестный аргумент: {other}"))
+            }
             other => args.model = Some(PathBuf::from(other)),
         }
     }
@@ -147,7 +149,9 @@ fn run() -> Result<()> {
             std::process::exit(2);
         }
     };
-    let size_mib = std::fs::metadata(&model).map(|m| m.len() >> 20).unwrap_or(0);
+    let size_mib = std::fs::metadata(&model)
+        .map(|m| m.len() >> 20)
+        .unwrap_or(0);
     println!("модель: {} ({} МиБ)", model.display(), size_mib);
 
     let all = read_all(&model)?;

@@ -33,13 +33,19 @@ fn session_state_distinguishes_live_paused_stale() {
     // свежий с паузой → Paused (новый прогон НЕ блокируется — R30)
     hb.write(&json!({"seen": 5, "paused": true}));
     assert_eq!(session_state(&hb, 30.0), SessionState::Paused);
-    assert!(!index_running(&hb, 30.0), "паузная сессия не блокирует новый прогон");
+    assert!(
+        !index_running(&hb, 30.0),
+        "паузная сессия не блокирует новый прогон"
+    );
 
     // старый `ts` (внутри файла) → Stale, даже если mtime свежий
     // (пишем файл напрямую: `write()` всегда ставит свежий `ts`, как Python)
     std::fs::write(hb.path(), r#"{"seen": 5, "paused": false, "ts": 1.0}"#).unwrap();
     assert_eq!(session_state(&hb, 30.0), SessionState::Stale);
-    assert!(!index_running(&hb, 30.0), "зависшая сессия не блокирует новый прогон");
+    assert!(
+        !index_running(&hb, 30.0),
+        "зависшая сессия не блокирует новый прогон"
+    );
 
     hb.remove();
     assert_eq!(session_state(&hb, 30.0), SessionState::None);
@@ -91,7 +97,10 @@ fn eta_absent_without_total() {
     rep.seen();
     assert!(rep.eta_sec().is_none());
     let d = rep.heartbeat_data();
-    assert!(d.get("eta_sec").is_none(), "eta_sec убирается при отсутствии ETA");
+    assert!(
+        d.get("eta_sec").is_none(),
+        "eta_sec убирается при отсутствии ETA"
+    );
     assert!(d.get("remaining").is_none());
 
     rep.set_total(5);

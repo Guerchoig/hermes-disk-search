@@ -44,7 +44,12 @@ fn workdir(tag: &str) -> PathBuf {
 }
 
 fn dummy_embedder() -> Embedder {
-    Embedder::new("http://127.0.0.1:1/v1", "m", 1, std::time::Duration::from_millis(50))
+    Embedder::new(
+        "http://127.0.0.1:1/v1",
+        "m",
+        1,
+        std::time::Duration::from_millis(50),
+    )
 }
 
 /// Запись `FILE_NOTIFY_INFORMATION` (next, action, len, UTF-16 имя).
@@ -87,7 +92,10 @@ fn parse_notifications_maps_actions() {
     let ev = watch::parse_notifications(&buf, root, &mut pending);
     assert_eq!(
         ev,
-        vec![WatchEvent::Moved(root.join("old.txt"), root.join("new.txt"))]
+        vec![WatchEvent::Moved(
+            root.join("old.txt"),
+            root.join("new.txt")
+        )]
     );
 }
 
@@ -121,8 +129,14 @@ fn wait_stable_and_missing() {
     let dir = workdir("stable");
     let f = dir.join("a.txt");
     std::fs::write(&f, b"data").unwrap();
-    assert!(watch::wait_stable(&f, 2, 10), "размер не меняется — стабилен");
-    assert!(!watch::wait_stable(&dir.join("nope.txt"), 2, 10), "нет файла → false");
+    assert!(
+        watch::wait_stable(&f, 2, 10),
+        "размер не меняется — стабилен"
+    );
+    assert!(
+        !watch::wait_stable(&dir.join("nope.txt"), 2, 10),
+        "нет файла → false"
+    );
 }
 
 #[test]
@@ -136,17 +150,33 @@ fn handle_event_modified_indexes_and_skips() {
     let f = dir.join("a.txt");
     std::fs::write(&f, b"hello").unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(f.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(f.clone()),
+        &mut st,
     )
     .unwrap();
     assert_eq!(status.as_deref(), Some("indexed(0 чанков)"));
-    assert!(db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&f)).unwrap().is_some());
+    assert!(
+        db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&f))
+            .unwrap()
+            .is_some()
+    );
 
     // .tmp → пропуск
     let t = dir.join("x.tmp");
     std::fs::write(&t, b"x").unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(t.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(t.clone()),
+        &mut st,
     )
     .unwrap();
     assert!(status.is_none());
@@ -157,7 +187,13 @@ fn handle_event_modified_indexes_and_skips() {
     let rf = rec.join("gone.txt");
     std::fs::write(&rf, b"x").unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(rf), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(rf),
+        &mut st,
     )
     .unwrap();
     assert!(status.is_none());
@@ -174,44 +210,90 @@ fn handle_event_deleted_and_moved() {
     let src = dir.join("src.txt");
     std::fs::write(&src, b"data").unwrap();
     watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(src.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(src.clone()),
+        &mut st,
     )
     .unwrap();
 
     let dst = dir.join("dst.txt");
     std::fs::rename(&src, &dst).unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Moved(src.clone(), dst.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Moved(src.clone(), dst.clone()),
+        &mut st,
     )
     .unwrap();
     assert_eq!(status.as_deref(), Some("moved"));
-    assert!(db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&src)).unwrap().is_none());
-    assert!(db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&dst)).unwrap().is_some());
+    assert!(
+        db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&src))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&dst))
+            .unwrap()
+            .is_some()
+    );
 
     std::fs::remove_file(&dst).unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Deleted(dst.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Deleted(dst.clone()),
+        &mut st,
     )
     .unwrap();
     assert_eq!(status.as_deref(), Some("removed_from_index"));
-    assert!(db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&dst)).unwrap().is_none());
+    assert!(
+        db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&dst))
+            .unwrap()
+            .is_none()
+    );
 
     // перемещение в корзину → удаление из индекса
     let s2 = dir.join("s2.txt");
     std::fs::write(&s2, b"x").unwrap();
     watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(s2.clone()), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(s2.clone()),
+        &mut st,
     )
     .unwrap();
     let rec = dir.join("$RECYCLE.BIN").join("s2.txt");
     std::fs::create_dir_all(dir.join("$RECYCLE.BIN")).unwrap();
     std::fs::rename(&s2, &rec).unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Moved(s2.clone(), rec), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Moved(s2.clone(), rec),
+        &mut st,
     )
     .unwrap();
     assert_eq!(status.as_deref(), Some("moved"));
-    assert!(db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&s2)).unwrap().is_none());
+    assert!(
+        db::get_file_by_path(&conn, &hds_index::pipeline::path_str(&s2))
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -224,7 +306,13 @@ fn handle_event_error_does_not_panic() {
     let f = dir.join("bad.txt");
     std::fs::write(&f, b"x").unwrap();
     let status = watch::handle_event(
-        &conn, &cfg, &emb, &ex, &lem, &WatchEvent::Modified(f), &mut st,
+        &conn,
+        &cfg,
+        &emb,
+        &ex,
+        &lem,
+        &WatchEvent::Modified(f),
+        &mut st,
     )
     .unwrap();
     assert!(status.unwrap().starts_with("error: сбой"));

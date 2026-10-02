@@ -35,7 +35,15 @@ pub fn cmd_search(query: String, kinds: Option<String>, limit: usize, json: bool
     };
     let kinds_v = kinds.and_then(|k| parse_kinds(&k));
     let kinds_slice = kinds_v.as_deref().filter(|k| !k.is_empty());
-    let res = hds_search::search(&conn, Some(&emb), &sidecar, &cfg, &query, kinds_slice, limit);
+    let res = hds_search::search(
+        &conn,
+        Some(&emb),
+        &sidecar,
+        &cfg,
+        &query,
+        kinds_slice,
+        limit,
+    );
     sidecar.shutdown();
 
     if json {
@@ -51,12 +59,7 @@ pub fn cmd_search(query: String, kinds: Option<String>, limit: usize, json: bool
         return 1;
     }
     for (i, r) in res.iter().enumerate() {
-        println!(
-            "\n[{}] {}  (score {:.4})",
-            i + 1,
-            r.location(),
-            r.score
-        );
+        println!("\n[{}] {}  (score {:.4})", i + 1, r.location(), r.score);
         let snip: String = r.snippet.replace('\n', " ").chars().take(600).collect();
         println!("    {snip}");
     }

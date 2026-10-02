@@ -15,7 +15,7 @@ use crate::IMAGE_SIZE;
 /// CLIP mean (RGB) из `preprocessor_config.json`.
 const MEAN: [f32; 3] = [0.481_454_66, 0.457_827_5, 0.408_210_73];
 /// CLIP std (RGB).
-const STD: [f32; 3] = [0.268_629_54, 0.261_302_58, 0.275_777_11];
+const STD: [f32; 3] = [0.268_629_54, 0.261_302_6, 0.275_777_1];
 
 /// Прочитать картинку и подготовить вход vision-энкодера `[1,3,224,224]` (CHW).
 pub fn preprocess_image(path: &Path) -> Result<Vec<f32>> {
@@ -42,7 +42,7 @@ pub fn to_input(img: &RgbImage) -> Vec<f32> {
             let px = cropped.get_pixel(x as u32, y as u32);
             for c in 0..3 {
                 let v = (px[c] as f32 / 255.0 - MEAN[c]) / STD[c];
-                out[c * plane + (y * s + x) as usize] = v;
+                out[c * plane + (y * s + x)] = v;
             }
         }
     }

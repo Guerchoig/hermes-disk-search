@@ -11,8 +11,11 @@ fn forget_removes_file_and_chunks() {
     let td = TempDir::new("forget");
     let path = td.join("index.db");
     let conn = db::connect(&path, 1024).unwrap();
-    conn.execute("INSERT INTO files(path, status) VALUES('f.txt', 'indexed')", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO files(path, status) VALUES('f.txt', 'indexed')",
+        [],
+    )
+    .unwrap();
     db::add_chunk(&conn, 1, 0, None, None, None, "t", "t").unwrap();
 
     assert!(hds_cli::cmd::forget::forget(&conn, "f.txt").unwrap());
@@ -32,8 +35,11 @@ fn status_fields_match_python_shape() {
     let td = TempDir::new("status");
     let path = td.join("index.db");
     let conn = db::connect(&path, 1024).unwrap();
-    conn.execute("INSERT INTO files(path, kind, status) VALUES('a.md', 'text', 'indexed')", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO files(path, kind, status) VALUES('a.md', 'text', 'indexed')",
+        [],
+    )
+    .unwrap();
     db::add_chunk(&conn, 1, 0, None, None, None, "hello", "hello").unwrap();
     conn.execute(
         "INSERT INTO files(path, kind, status, error) VALUES('b.pdf', 'pdf', 'error', 'boom')",

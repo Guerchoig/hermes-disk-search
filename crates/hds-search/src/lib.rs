@@ -72,14 +72,27 @@ struct Rrf {
 impl Rrf {
     fn from_config(cfg: &Config) -> Rrf {
         Rrf {
-            vec_k: dig(cfg, "search.vec_k").and_then(|v| v.as_i64()).unwrap_or(40) as usize,
-            fts_k: dig(cfg, "search.fts_k").and_then(|v| v.as_i64()).unwrap_or(40) as usize,
-            rrf_k: dig(cfg, "search.rrf_k").and_then(|v| v.as_i64()).unwrap_or(60),
-            fts_w: dig(cfg, "search.fts_weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
-            vec_w: dig(cfg, "search.vec_weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
-            clip_w: dig(cfg, "search.clip_weight").and_then(|v| v.as_f64()).unwrap_or(1.0),
-            snippet_chars: dig(cfg, "search.snippet_chars").and_then(|v| v.as_i64()).unwrap_or(500)
-                as usize,
+            vec_k: dig(cfg, "search.vec_k")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(40) as usize,
+            fts_k: dig(cfg, "search.fts_k")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(40) as usize,
+            rrf_k: dig(cfg, "search.rrf_k")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(60),
+            fts_w: dig(cfg, "search.fts_weight")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
+            vec_w: dig(cfg, "search.vec_weight")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
+            clip_w: dig(cfg, "search.clip_weight")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0),
+            snippet_chars: dig(cfg, "search.snippet_chars")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(500) as usize,
         }
     }
 }
@@ -178,7 +191,9 @@ pub fn search(
     let clip_wanted = kinds
         .map(|ks| ks.is_empty() || ks.iter().any(|k| k == "image"))
         .unwrap_or(true);
-    let clip_on = dig(cfg, "index.clip").and_then(|v| v.as_bool()).unwrap_or(true);
+    let clip_on = dig(cfg, "index.clip")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     if clip_wanted && clip_on {
         if let Some(clip) = hds_clip::shared(cfg) {
             if let Ok(qv) = clip.embed_text(query) {
@@ -202,7 +217,6 @@ pub fn search(
             }
         }
     }
-
 
     if scores.map.is_empty() {
         return Vec::new();
@@ -262,7 +276,6 @@ pub fn search(
     results
 }
 
-
 /// `round(x, 5)` (Python) — до 5 знаков.
 fn round5(x: f64) -> f64 {
     (x * 1e5).round() / 1e5
@@ -277,7 +290,12 @@ fn query_ids(
     let mut st = conn.prepare(sql)?;
     let rows = st.query_map(
         rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Option<f64>>(1)?.unwrap_or(0.0))),
+        |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+            ))
+        },
     )?;
     Ok(rows.filter_map(|r| r.ok()).collect())
 }
@@ -291,8 +309,10 @@ fn first_chunk_of_files(conn: &Connection, fids: &[i64]) -> HashMap<i64, i64> {
     let placeholders = vec!["?"; fids.len()].join(",");
     let sql =
         format!("SELECT id, file_id FROM chunks WHERE file_id IN ({placeholders}) ORDER BY id");
-    let params: Vec<Box<dyn rusqlite::ToSql>> =
-        fids.iter().map(|f| Box::new(*f) as Box<dyn rusqlite::ToSql>).collect();
+    let params: Vec<Box<dyn rusqlite::ToSql>> = fids
+        .iter()
+        .map(|f| Box::new(*f) as Box<dyn rusqlite::ToSql>)
+        .collect();
     if let Ok(mut st) = conn.prepare(&sql) {
         if let Ok(rows) = st.query_map(
             rusqlite::params_from_iter(params.iter().map(|b| b.as_ref())),
@@ -305,4 +325,3 @@ fn first_chunk_of_files(conn: &Connection, fids: &[i64]) -> HashMap<i64, i64> {
     }
     map
 }
-

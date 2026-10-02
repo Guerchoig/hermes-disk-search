@@ -20,7 +20,10 @@ fn repo_root() -> PathBuf {
 
 /// Нормализованные ключи путей (сравнение как в Python: регистр/разделители).
 fn norm_set<I: IntoIterator<Item = PathBuf>>(paths: I) -> BTreeSet<String> {
-    paths.into_iter().map(|p| normalize_path(&p.to_string_lossy())).collect()
+    paths
+        .into_iter()
+        .map(|p| normalize_path(&p.to_string_lossy()))
+        .collect()
 }
 
 /// Пройти корни и вернуть (файлы, сообщения обхода).
@@ -57,9 +60,11 @@ struct TempTree {
 
 impl TempTree {
     fn new(name: &str) -> TempTree {
-        let root = std::env::temp_dir()
-            .join("hds-index-tests")
-            .join(format!("{}-{}", std::process::id(), name));
+        let root = std::env::temp_dir().join("hds-index-tests").join(format!(
+            "{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp tree");
         TempTree { root }
@@ -161,7 +166,10 @@ fn parity_dumps() -> Vec<PathBuf> {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_default();
-            if name.starts_with("walk_parity") && name.ends_with(".json") && name != "walk_parity.json" {
+            if name.starts_with("walk_parity")
+                && name.ends_with(".json")
+                && name != "walk_parity.json"
+            {
                 files.push(p);
             }
         }
@@ -194,71 +202,78 @@ fn parity_with_python_dump() {
             .unwrap_or_else(|e| panic!("нет {}: {e}", dump.display()));
         let v: serde_json::Value = serde_json::from_str(&text).expect("walk_parity json");
         let scenarios = v["scenarios"].as_array().expect("scenarios");
-    for sc in scenarios {
-        let name = sc["name"].as_str().unwrap_or("?");
-        // «Боевой» сценарий — только по флагу: обход всего дерева диска
-        // занимает минуты и не нужен в каждом прогоне (gate как у `#[ignore]`).
-        if name == "real" && std::env::var("HDS_WALK_PARITY_REAL").as_deref() != Ok("1") {
-            println!("сценарий 'real' пропущен (задайте HDS_WALK_PARITY_REAL=1)");
-            continue;
-        }
-        let roots: Vec<String> = str_vec(&sc["roots"]);
-        let dirs: Vec<String> = str_vec(&sc["exclude_dirs"]);
-        let prefixes: Vec<String> = str_vec(&sc["exclude_paths"]);
-        let limits = IndexLimits::new(
-            sc["limits"]["max_file_mb"].as_u64().unwrap_or(200),
-            sc["limits"]["max_media_mb"].as_u64().unwrap_or(2500),
-        );
-        let expected: BTreeSet<String> = str_vec(&sc["files"])
-            .iter()
-            .map(|p| normalize_path(p))
-            .collect();
-
-        let opts = WalkOptions::from_parts(&roots, &dirs, &prefixes);
-        let (files, _events) = walk(&opts);
-        let got = norm_set(files);
-        total_files += got.len();
-
-        let missing: Vec<&String> = expected.difference(&got).collect();
-        let extra: Vec<&String> = got.difference(&expected).collect();
-        assert!(
-            missing.is_empty() && extra.is_empty(),
-            "сценарий '{name}': не найдено {} (пример: {:?}), лишних {} (пример: {:?})",
-            missing.len(),
-            missing.first(),
-            extra.len(),
-            extra.first()
-        );
-        println!("сценарий '{name}': {}/{} путей совпало", got.len(), expected.len());
-
-        // Решения предполётных проверок (вид → exclude → ~$ → лимит)
-        let filter = FileFilter::new(Excludes::new(&dirs, &prefixes), limits);
-        let map = sc["precheck"].as_object().expect("precheck");
-        let mut stat_skipped = 0usize;
-        for (p, want) in map {
-            let want = want.as_str().unwrap_or_default();
-            // Python не смог stat-нуть путь > MAX_PATH (260) — Rust умеет
-            // (расширенные пути): осознанное расхождение, см. W2_REPORT.md §2.
-            if want == "SkippedStat" {
-                stat_skipped += 1;
+        for sc in scenarios {
+            let name = sc["name"].as_str().unwrap_or("?");
+            // «Боевой» сценарий — только по флагу: обход всего дерева диска
+            // занимает минуты и не нужен в каждом прогоне (gate как у `#[ignore]`).
+            if name == "real" && std::env::var("HDS_WALK_PARITY_REAL").as_deref() != Ok("1") {
+                println!("сценарий 'real' пропущен (задайте HDS_WALK_PARITY_REAL=1)");
                 continue;
             }
-            let path = Path::new(p);
-            let Ok(md) = std::fs::metadata(path) else {
-                continue; // файл исчез после дампа (волатильные логи) — не падаем
-            };
-            let got = precheck_name(filter.precheck(path, md.len()));
-            assert_eq!(got, want, "precheck расходится для {p}");
-        }
-        if stat_skipped > 0 {
-            println!(
-                "сценарий '{name}': {stat_skipped} путей со 'SkippedStat' пропущено \
-                 (длинные пути >260: Python не stat-ит, Rust stat-ит)"
+            let roots: Vec<String> = str_vec(&sc["roots"]);
+            let dirs: Vec<String> = str_vec(&sc["exclude_dirs"]);
+            let prefixes: Vec<String> = str_vec(&sc["exclude_paths"]);
+            let limits = IndexLimits::new(
+                sc["limits"]["max_file_mb"].as_u64().unwrap_or(200),
+                sc["limits"]["max_media_mb"].as_u64().unwrap_or(2500),
             );
+            let expected: BTreeSet<String> = str_vec(&sc["files"])
+                .iter()
+                .map(|p| normalize_path(p))
+                .collect();
+
+            let opts = WalkOptions::from_parts(&roots, &dirs, &prefixes);
+            let (files, _events) = walk(&opts);
+            let got = norm_set(files);
+            total_files += got.len();
+
+            let missing: Vec<&String> = expected.difference(&got).collect();
+            let extra: Vec<&String> = got.difference(&expected).collect();
+            assert!(
+                missing.is_empty() && extra.is_empty(),
+                "сценарий '{name}': не найдено {} (пример: {:?}), лишних {} (пример: {:?})",
+                missing.len(),
+                missing.first(),
+                extra.len(),
+                extra.first()
+            );
+            println!(
+                "сценарий '{name}': {}/{} путей совпало",
+                got.len(),
+                expected.len()
+            );
+
+            // Решения предполётных проверок (вид → exclude → ~$ → лимит)
+            let filter = FileFilter::new(Excludes::new(&dirs, &prefixes), limits);
+            let map = sc["precheck"].as_object().expect("precheck");
+            let mut stat_skipped = 0usize;
+            for (p, want) in map {
+                let want = want.as_str().unwrap_or_default();
+                // Python не смог stat-нуть путь > MAX_PATH (260) — Rust умеет
+                // (расширенные пути): осознанное расхождение, см. W2_REPORT.md §2.
+                if want == "SkippedStat" {
+                    stat_skipped += 1;
+                    continue;
+                }
+                let path = Path::new(p);
+                let Ok(md) = std::fs::metadata(path) else {
+                    continue; // файл исчез после дампа (волатильные логи) — не падаем
+                };
+                let got = precheck_name(filter.precheck(path, md.len()));
+                assert_eq!(got, want, "precheck расходится для {p}");
+            }
+            if stat_skipped > 0 {
+                println!(
+                    "сценарий '{name}': {stat_skipped} путей со 'SkippedStat' пропущено \
+                 (длинные пути >260: Python не stat-ит, Rust stat-ит)"
+                );
+            }
         }
     }
-    }
-    assert!(total_files > 0, "ни одного файла в дампе — проверять нечего");
+    assert!(
+        total_files > 0,
+        "ни одного файла в дампе — проверять нечего"
+    );
     println!("всего файлов сверено: {total_files}");
 }
 
@@ -271,4 +286,3 @@ fn str_vec(v: &serde_json::Value) -> Vec<String> {
         })
         .unwrap_or_default()
 }
-

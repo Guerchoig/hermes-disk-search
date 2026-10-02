@@ -42,17 +42,13 @@ use crate::resident::{self, Log, PidFile};
 use crate::runtime::RuntimePaths;
 use crate::status::{device_line, StatusInput, StatusReport};
 use crate::vram::{NvmlProbe, VramProbe};
-use crate::{Engine, engine::EngineCwd};
+use crate::{engine::EngineCwd, Engine};
 
 /// Корень репозитория (относительно крейта: `crates/hds-llama/../..`).
 ///
 /// Нужен для путей по умолчанию: `config.yaml`, `index.pause`, `data/`.
 pub fn repo_root() -> PathBuf {
-    clean_path(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(".."),
-    )
+    clean_path(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
 }
 
 /// Абсолютный путь **до** переключения cwd на каталог движка (`Engine::activate`).
@@ -135,7 +131,12 @@ pub fn instance_uses(
         .iter()
         .map(|i| {
             let own = needs.get(&i.name).copied().unwrap_or(0);
-            instance_use(i, &i.name.clone(), own, idle.get(&i.name).copied().unwrap_or(0))
+            instance_use(
+                i,
+                &i.name.clone(),
+                own,
+                idle.get(&i.name).copied().unwrap_or(0),
+            )
         })
         .collect()
 }
@@ -347,7 +348,11 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
     let pause_line = format!(
         "пауза индексации: файл {} — {}, вложенность {}",
         pause.path().display(),
-        if pause.is_paused() { "стоит" } else { "нет" },
+        if pause.is_paused() {
+            "стоит"
+        } else {
+            "нет"
+        },
         pause.depth()
     );
     let instances_line = if instances.is_empty() {
@@ -374,7 +379,6 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
         instances_line,
     })
 }
-
 
 /// Кластер, доступный из потоков фасада (§3 плана W2: «один владелец GPU»).
 ///
@@ -454,7 +458,6 @@ pub struct ClusterBackend {
     whisper: Mutex<Option<WhisperCell>>,
 }
 
-
 /// Ленивый транскрибатор whisper под `Mutex` (raw-указатели bridge ⇒ `!Send/!Sync`;
 /// доступ строго под `Mutex`, поэтому `Send+Sync` помечаем вручную — как
 /// [`ClusterShared`]).
@@ -492,40 +495,6 @@ fn whisper_device(
     }
 }
 
-#[cfg(test)]
-mod whisper_device_tests {
-    use super::whisper_device;
-
-    #[test]
-    fn enough_vram_keeps_gpu() {
-        let (d, fb) = whisper_device(0, 1549, 1024, Some(11255));
-        assert_eq!(d, 0);
-        assert!(fb.is_none());
-    }
-
-    #[test]
-    fn tight_vram_falls_back_to_cpu() {
-        // 1549 + 256 + 1024 = 2829 > 2000 → CPU с причиной
-        let (d, fb) = whisper_device(0, 1549, 1024, Some(2000));
-        assert_eq!(d, -1);
-        assert!(fb.unwrap().contains("2829"));
-    }
-
-    #[test]
-    fn explicit_cpu_is_respected() {
-        let (d, fb) = whisper_device(-1, 1549, 1024, Some(10));
-        assert_eq!(d, -1);
-        assert!(fb.is_none(), "запрос на CPU не считается фолбэком");
-    }
-
-    #[test]
-    fn no_nvml_keeps_gpu() {
-        let (d, fb) = whisper_device(0, 1549, 1024, None);
-        assert_eq!(d, 0);
-        assert!(fb.is_none());
-    }
-}
-
 /// whisper-модель из общего каталога движка: `*.bin`/`*.gguf` в каталоге `*whisper*`.
 fn default_whisper_model() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
@@ -559,16 +528,12 @@ impl ClusterBackend {
     fn cl(&self) -> Result<&Arc<ClusterShared>> {
         self.cluster.as_ref().ok_or_else(|| {
             EngineError::Other(match self.mode {
-                Mode::Off => {
-                    "LLM выключен (llm_server.mode: off) — инстансы не создаются, \
+                Mode::Off => "LLM выключен (llm_server.mode: off) — инстансы не создаются, \
                      поиск работает только по FTS"
-                        .to_string()
-                }
-                Mode::Facade => {
-                    "режим llm_server.mode: facade — своих инстансов нет, роли держит \
+                    .to_string(),
+                Mode::Facade => "режим llm_server.mode: facade — своих инстансов нет, роли держит \
                      внешний OpenAI-совместимый сервер"
-                        .to_string()
-                }
+                    .to_string(),
                 Mode::Embedded => "кластер движка не создан".to_string(),
             })
         })
@@ -576,7 +541,10 @@ impl ClusterBackend {
 
     /// Свободная VRAM (NVML) — источник истины (R29).
     fn free_mib(&self) -> Option<u64> {
-        self.nvml.as_ref().and_then(|p| p.snapshot()).map(|v| v.free_mib)
+        self.nvml
+            .as_ref()
+            .and_then(|p| p.snapshot())
+            .map(|v| v.free_mib)
     }
 
     fn id_of(&self, role: &str) -> Result<i64> {
@@ -826,7 +794,6 @@ impl ClusterBackend {
     }
 }
 
-
 impl Backend for ClusterBackend {
     fn chat(&self, req: &ChatRequest) -> Result<(String, Usage)> {
         let _lease = self.prepare("chat")?;
@@ -899,7 +866,12 @@ impl Backend for ClusterBackend {
             .cluster
             .as_ref()
             .and_then(|c| {
-                c.with(|x| x.instance_by_id(id).ok().flatten().map(|i| i.state_name.clone()))
+                c.with(|x| {
+                    x.instance_by_id(id)
+                        .ok()
+                        .flatten()
+                        .map(|i| i.state_name.clone())
+                })
             })
             .unwrap_or_default();
         Some(json!({
@@ -954,10 +926,22 @@ impl Backend for ClusterBackend {
             map.insert("lines".to_string(), json!(report.lines()));
             map.insert("mode".to_string(), json!(self.mode.as_str()));
             map.insert("pid".to_string(), json!(self.pid));
-            map.insert("uptime_sec".to_string(), json!(self.started.elapsed().as_secs()));
-            map.insert("pid_file".to_string(), json!(self.pid_path.display().to_string()));
-            map.insert("log_file".to_string(), json!(self.log_path.display().to_string()));
-            map.insert("dispatcher_enabled".to_string(), json!(self.dispatch_enabled));
+            map.insert(
+                "uptime_sec".to_string(),
+                json!(self.started.elapsed().as_secs()),
+            );
+            map.insert(
+                "pid_file".to_string(),
+                json!(self.pid_path.display().to_string()),
+            );
+            map.insert(
+                "log_file".to_string(),
+                json!(self.log_path.display().to_string()),
+            );
+            map.insert(
+                "dispatcher_enabled".to_string(),
+                json!(self.dispatch_enabled),
+            );
             map.insert(
                 "instances_by_role".to_string(),
                 json!(self
@@ -1030,10 +1014,16 @@ impl Backend for ClusterBackend {
         let id = self.id_of(role)?;
         cl.with(|c| c.unload(id))?;
         let state = cl
-            .with(|c| c.instance_by_id(id).ok().flatten().map(|i| i.state_name.clone()))
+            .with(|c| {
+                c.instance_by_id(id)
+                    .ok()
+                    .flatten()
+                    .map(|i| i.state_name.clone())
+            })
             .unwrap_or_default();
-        self.log
-            .line(&format!("[internal] роль '{role}': выгружена ({state}), id={id}"));
+        self.log.line(&format!(
+            "[internal] роль '{role}': выгружена ({state}), id={id}"
+        ));
         Ok(json!({ "role": role, "id": id, "state": state, "loaded": false }))
     }
 
@@ -1081,7 +1071,9 @@ impl Backend for ClusterBackend {
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
-        let model_mib = std::fs::metadata(&model).map(|m| m.len() >> 20).unwrap_or(0);
+        let model_mib = std::fs::metadata(&model)
+            .map(|m| m.len() >> 20)
+            .unwrap_or(0);
         let (dev, fallback) = whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.free_mib());
         if let Some(reason) = fallback {
             self.log.line(&format!(
@@ -1113,9 +1105,7 @@ impl Backend for ClusterBackend {
         let segments: Vec<Value> = tr
             .segments
             .iter()
-            .map(|s| {
-                json!({ "text": s.text, "t_start": s.t_start, "t_end": s.t_end })
-            })
+            .map(|s| json!({ "text": s.text, "t_start": s.t_start, "t_end": s.t_end }))
             .collect();
         Ok(json!({
             "path": path,
@@ -1134,7 +1124,8 @@ pub fn write_json_file(path: &Path, value: &Value) -> Result<()> {
     }
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| EngineError::Other(format!("json: {e}")))?;
-    std::fs::write(path, text).map_err(|e| EngineError::Other(format!("{}: {e}", path.display())))?;
+    std::fs::write(path, text)
+        .map_err(|e| EngineError::Other(format!("{}: {e}", path.display())))?;
     println!("отчёт: {}", path.display());
     Ok(())
 }
@@ -1181,7 +1172,11 @@ fn apply_ngl_override(
     log.line(&format!(
         "проверочный режим: --ngl {ngl} применён к {applied} ролям (устройство: {})",
         if ngl == 0 {
-            format!("CPU{}", cpu.map(|c| format!(" (bridge index {c})")).unwrap_or_default())
+            format!(
+                "CPU{}",
+                cpu.map(|c| format!(" (bridge index {c})"))
+                    .unwrap_or_default()
+            )
         } else {
             "как в конфиге".to_string()
         }
@@ -1258,10 +1253,7 @@ pub fn dig_f64(root: &serde_yaml::Value, path: &str) -> Option<f64> {
 /// `llm_server.facade.<role>` — на конкретную, иначе штатные клиентские адреса из
 /// конфига (`chat.base_url`, `embedding.base_url`, `rerank.url`): они уже указывают
 /// на тот же OpenAI-совместимый сервер, что обслуживает проект сегодня.
-fn upstream_map(
-    yaml: &serde_yaml::Value,
-    cfg: &LlmHostConfig,
-) -> BTreeMap<String, String> {
+fn upstream_map(yaml: &serde_yaml::Value, cfg: &LlmHostConfig) -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
     for rc in &cfg.roles {
         if let Some(url) = dig_str(yaml, &format!("llm_server.facade.{}", rc.role)) {
@@ -1293,7 +1285,6 @@ fn describe_upstream(m: &BTreeMap<String, String>) -> String {
         .collect::<Vec<_>>()
         .join(", ")
 }
-
 
 /// Резидентный `llm-host`: владеет движком, инстансами, фасадом, pid- и лог-файлом.
 ///
@@ -1358,12 +1349,11 @@ impl Host {
         }
 
         let resolved = config::load(&cfg.config)?;
-        let yaml: serde_yaml::Value = serde_yaml::from_str(
-            &std::fs::read_to_string(&cfg.config).map_err(|e| {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&cfg.config).map_err(|e| {
                 EngineError::Other(format!("конфиг {}: {e}", cfg.config.display()))
-            })?,
-        )
-        .map_err(|e| EngineError::Other(format!("конфиг {}: {e}", cfg.config.display())))?;
+            })?)
+            .map_err(|e| EngineError::Other(format!("конфиг {}: {e}", cfg.config.display())))?;
         for w in &resolved.warnings {
             log.note(&format!("конфиг: {w}"));
         }
@@ -1378,7 +1368,9 @@ impl Host {
             host: host.clone(),
             ports: ports.clone(),
             thinking: cfg.thinking.unwrap_or_else(|| {
-                Thinking::parse(&dig_str(&yaml, "chat.thinking").unwrap_or_else(|| "off".to_string()))
+                Thinking::parse(
+                    &dig_str(&yaml, "chat.thinking").unwrap_or_else(|| "off".to_string()),
+                )
             }),
             max_tokens: dig_i64(&yaml, "chat.max_tokens").unwrap_or(600) as i32,
             temperature: dig_f64(&yaml, "chat.temperature").unwrap_or(0.2) as f32,
@@ -1396,7 +1388,6 @@ impl Host {
             server.max_tokens,
             server.temperature
         ));
-
 
         let mut engine = None;
         let mut cwd = None;
@@ -1513,7 +1504,11 @@ impl Host {
                 if let Some(chat) = ids.get("chat").copied() {
                     log.line("загружаю чат-инстанс (KEEP_LOADED)…");
                     cls.load(chat)?;
-                    let inst = cls.wait_loaded(chat, Duration::from_secs(300), Duration::from_millis(500))?;
+                    let inst = cls.wait_loaded(
+                        chat,
+                        Duration::from_secs(300),
+                        Duration::from_millis(500),
+                    )?;
                     log.line(&format!("  чат: {}", inst.state_name));
                 }
                 cluster = Some(Arc::new(ClusterShared::new(cls)));
@@ -1645,8 +1640,6 @@ impl Host {
     }
 }
 
-
-
 /// Чтение состояния и остановка — вторая часть `impl`, чтобы `start` не тонул
 /// в мелочах.
 impl Host {
@@ -1765,7 +1758,6 @@ impl Host {
     }
 }
 
-
 impl Host {
     /// Остановить хост: фасад → инстансы → своя пауза → pid-файл.
     ///
@@ -1799,8 +1791,11 @@ impl Host {
                 cleanup.push(format!("{role}: remove_instance -> {removed:?}"));
             }
             if !cleanup.is_empty() {
-                self.log
-                    .line(&format!("инстансы сняты: {} ({})", cleanup.len(), cleanup.join("; ")));
+                self.log.line(&format!(
+                    "инстансы сняты: {} ({})",
+                    cleanup.len(),
+                    cleanup.join("; ")
+                ));
             }
             self.cleanup.extend(cleanup);
         }
@@ -1810,7 +1805,8 @@ impl Host {
             match self.pause.resume() {
                 Ok(_) => released += 1,
                 Err(e) => {
-                    self.log.note(&format!("пауза: не удалось отпустить аренду: {e}"));
+                    self.log
+                        .note(&format!("пауза: не удалось отпустить аренду: {e}"));
                     break;
                 }
             }
@@ -1837,7 +1833,11 @@ impl Host {
             self.log.line(&format!(
                 "pid-файл {}: {}",
                 pid.path().display(),
-                if released { "освобождён" } else { "не наш — оставлен" }
+                if released {
+                    "освобождён"
+                } else {
+                    "не наш — оставлен"
+                }
             ));
         }
         self.log.line(&format!(
@@ -1855,3 +1855,36 @@ impl Drop for Host {
     }
 }
 
+#[cfg(test)]
+mod whisper_device_tests {
+    use super::whisper_device;
+
+    #[test]
+    fn enough_vram_keeps_gpu() {
+        let (d, fb) = whisper_device(0, 1549, 1024, Some(11255));
+        assert_eq!(d, 0);
+        assert!(fb.is_none());
+    }
+
+    #[test]
+    fn tight_vram_falls_back_to_cpu() {
+        // 1549 + 256 + 1024 = 2829 > 2000 → CPU с причиной
+        let (d, fb) = whisper_device(0, 1549, 1024, Some(2000));
+        assert_eq!(d, -1);
+        assert!(fb.unwrap().contains("2829"));
+    }
+
+    #[test]
+    fn explicit_cpu_is_respected() {
+        let (d, fb) = whisper_device(-1, 1549, 1024, Some(10));
+        assert_eq!(d, -1);
+        assert!(fb.is_none(), "запрос на CPU не считается фолбэком");
+    }
+
+    #[test]
+    fn no_nvml_keeps_gpu() {
+        let (d, fb) = whisper_device(0, 1549, 1024, None);
+        assert_eq!(d, 0);
+        assert!(fb.is_none());
+    }
+}

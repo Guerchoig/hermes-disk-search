@@ -8,7 +8,11 @@ use hds_extract::worker::{discover_python, Worker, WorkerConfig};
 
 fn mock_cfg() -> Option<WorkerConfig> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let py = discover_python(&PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.parent()?)?;
+    let py = discover_python(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()?
+            .parent()?,
+    )?;
     let mut cfg = WorkerConfig::new(&py, &root);
     cfg.script = root.join("mock_worker.py");
     cfg.request_timeout = Duration::from_secs(20);

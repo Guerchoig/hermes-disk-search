@@ -35,7 +35,5 @@ pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
 pub use transcribe::{
     resolve_whisper_model, MediaRouter, TranscribeClient, TranscribeConfig, DEFAULT_TRANSCRIBE_URL,
 };
-pub use walk::{
-    walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions,
-};
+pub use walk::{walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions};
 pub use watch::{run_watch, WatchEvent, WatchLock, WatchState};

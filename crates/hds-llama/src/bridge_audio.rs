@@ -153,7 +153,12 @@ impl BridgeAudio {
     ///
     /// Audio-only: `model` = `None` («For audio-only use, `model_path` may be omitted»,
     /// `docs/bridge-audio-dll.md`); модель whisper задаётся в `metadata_json.whisper_model`.
-    pub fn create(&self, model: Option<&Path>, gpu: Option<i32>, n_gpu_layers: i32) -> Result<Bridge> {
+    pub fn create(
+        &self,
+        model: Option<&Path>,
+        gpu: Option<i32>,
+        n_gpu_layers: i32,
+    ) -> Result<Bridge> {
         let mut keep: Vec<CString> = Vec::new();
         let model_ptr = match model {
             Some(m) => {

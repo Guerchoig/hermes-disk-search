@@ -4,12 +4,7 @@
 //! streamable-http инстанс на машину (`/health` + `/mcp`), см. `hds mcp-http`.
 
 /// `cmd_mcp`: stdio-цикл или HTTP-сервер; возвращает код выхода.
-pub fn cmd_mcp(
-    http: bool,
-    host: Option<String>,
-    port: Option<u16>,
-    path: Option<String>,
-) -> i32 {
+pub fn cmd_mcp(http: bool, host: Option<String>, port: Option<u16>, path: Option<String>) -> i32 {
     if !http {
         return hds_mcp::run_stdio();
     }
@@ -24,4 +19,3 @@ pub fn cmd_mcp(
         }
     }
 }
-

@@ -12,7 +12,12 @@ pub fn get_config() -> Value {
     let arr = |k: &str| {
         dig(&cfg, k)
             .and_then(|v| v.as_sequence())
-            .map(|s| s.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect::<Vec<_>>())
+            .map(|s| {
+                s.iter()
+                    .filter_map(|x| x.as_str())
+                    .map(|x| x.to_string())
+                    .collect::<Vec<_>>()
+            })
             .unwrap_or_default()
     };
     json!({
@@ -24,9 +29,12 @@ pub fn get_config() -> Value {
 
 /// Значения списка `key` как строки (для проверки после записи).
 fn list_of(cfg: &Config, key: &str) -> Option<Vec<String>> {
-    dig(cfg, key)
-        .and_then(|v| v.as_sequence())
-        .map(|s| s.iter().filter_map(|x| x.as_str()).map(|x| x.to_string()).collect())
+    dig(cfg, key).and_then(|v| v.as_sequence()).map(|s| {
+        s.iter()
+            .filter_map(|x| x.as_str())
+            .map(|x| x.to_string())
+            .collect()
+    })
 }
 
 /// Заменить блок списка `key` в тексте, сохранив остальное (комментарии/соседние ключи).
@@ -124,7 +132,9 @@ fn set_list(key: &str, items: &[String]) -> Value {
     let dotted = format!("index.{key}");
     match load_text(&new_text) {
         Ok(c) if list_of(&c, &dotted).is_some() => {}
-        Ok(_) => return json!({ "ok": false, "msg": format!("{dotted} не список в итоговом YAML") }),
+        Ok(_) => {
+            return json!({ "ok": false, "msg": format!("{dotted} не список в итоговом YAML") })
+        }
         Err(e) => {
             return json!({ "ok": false, "msg": format!("итоговый config.yaml некорректен: {e}") })
         }
@@ -143,4 +153,3 @@ fn looks_abs(p: &str) -> bool {
         || p.starts_with('\\')
         || p.starts_with('/')
 }
-

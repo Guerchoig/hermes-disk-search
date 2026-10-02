@@ -181,7 +181,9 @@ impl Excludes {
     /// через [`walk_files`], где отсечение делается на уровне каталогов).
     pub fn excludes_path(&self, path: &Path) -> bool {
         let p = path.to_string_lossy().replace('\\', "/");
-        if p.split('/').any(|part| self.dir_excluded(&part.to_lowercase())) {
+        if p.split('/')
+            .any(|part| self.dir_excluded(&part.to_lowercase()))
+        {
             return true;
         }
         self.matches_prefix(path)
@@ -336,6 +338,3 @@ impl FileFilter {
         PreCheck::Ok
     }
 }
-
-
-

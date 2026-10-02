@@ -96,7 +96,10 @@ pub fn parse_error(v: &Value) -> RpcError {
             .and_then(|m| m.as_str())
             .unwrap_or("неизвестная ошибка воркера")
             .to_string(),
-        hint: v.get("hint").and_then(|h| h.as_str()).map(|h| h.to_string()),
+        hint: v
+            .get("hint")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
     }
 }
 
@@ -151,11 +154,18 @@ pub fn extract_from(v: &Value) -> ExtractResult {
 
 fn segment_from(s: &Value) -> Segment {
     Segment {
-        text: s.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string(),
+        text: s
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
         page: s.get("page").and_then(|p| p.as_i64()),
         t_start: s.get("t_start").and_then(|t| t.as_f64()),
         t_end: s.get("t_end").and_then(|t| t.as_f64()),
-        head: s.get("head").and_then(|h| h.as_str()).map(|h| h.to_string()),
+        head: s
+            .get("head")
+            .and_then(|h| h.as_str())
+            .map(|h| h.to_string()),
     }
 }
 

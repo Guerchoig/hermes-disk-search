@@ -260,11 +260,7 @@ impl Worker {
                 arr.iter()
                     .map(|row| {
                         row.as_array()
-                            .map(|a| {
-                                a.iter()
-                                    .map(|x| x.as_f64().unwrap_or(0.0) as f32)
-                                    .collect()
-                            })
+                            .map(|a| a.iter().map(|x| x.as_f64().unwrap_or(0.0) as f32).collect())
                             .unwrap_or_default()
                     })
                     .collect()

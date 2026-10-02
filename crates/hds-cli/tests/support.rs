@@ -50,7 +50,8 @@ fn resolve_model_shared_variants() {
     let chat_gguf = chat.join("Q.gguf");
     std::fs::write(&chat_gguf, b"x").unwrap();
     std::fs::write(chat.join("current.json"), "{\"file\": \"Q.gguf\"}").unwrap();
-    let cfg_chat = load_from(&td.write_config("llm_server:\n  chat:\n    model: 'shared:chat'\n")).unwrap();
+    let cfg_chat =
+        load_from(&td.write_config("llm_server:\n  chat:\n    model: 'shared:chat'\n")).unwrap();
     assert_eq!(resolve_model(&cfg_chat, "chat"), chat_gguf);
 
     // 2) манифеста нет, ровно один *.gguf → он и есть активная модель
@@ -58,7 +59,9 @@ fn resolve_model_shared_variants() {
     std::fs::create_dir_all(&emb).unwrap();
     let emb_gguf = emb.join("bge-m3-Q8_0.gguf");
     std::fs::write(&emb_gguf, b"x").unwrap();
-    let cfg_emb = load_from(&td.write_config("llm_server:\n  embedding:\n    model: 'shared:embedding'\n")).unwrap();
+    let cfg_emb =
+        load_from(&td.write_config("llm_server:\n  embedding:\n    model: 'shared:embedding'\n"))
+            .unwrap();
     assert_eq!(resolve_model(&cfg_emb, "embedding"), emb_gguf);
 
     // 3) манифеста нет, gguf несколько → каталог роли (как Python при ошибке)
@@ -66,7 +69,9 @@ fn resolve_model_shared_variants() {
     std::fs::create_dir_all(&rerank).unwrap();
     std::fs::write(rerank.join("a.gguf"), b"x").unwrap();
     std::fs::write(rerank.join("b.gguf"), b"x").unwrap();
-    let cfg_rerank = load_from(&td.write_config("llm_server:\n  rerank:\n    model: 'shared:rerank'\n")).unwrap();
+    let cfg_rerank =
+        load_from(&td.write_config("llm_server:\n  rerank:\n    model: 'shared:rerank'\n"))
+            .unwrap();
     assert_eq!(resolve_model(&cfg_rerank, "rerank"), rerank);
 
     std::env::remove_var("LLAMA_RUNTIME_DIR");

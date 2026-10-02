@@ -123,9 +123,9 @@ impl VramProbe for NvmlProbe {
         let dev = self.nvml.device_by_index(self.index).ok()?;
         let mem = dev.memory_info().ok()?;
         Some(VramSnapshot {
-            total_mib: (mem.total as u64) >> 20,
-            used_mib: (mem.used as u64) >> 20,
-            free_mib: (mem.free as u64) >> 20,
+            total_mib: mem.total >> 20,
+            used_mib: mem.used >> 20,
+            free_mib: mem.free >> 20,
         })
     }
 }
@@ -232,4 +232,3 @@ impl VramSampler {
         self.peak()
     }
 }
-

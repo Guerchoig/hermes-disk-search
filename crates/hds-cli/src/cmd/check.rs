@@ -88,7 +88,11 @@ pub fn check_roots(cfg: &Config) -> Check {
         .cloned()
         .collect();
     if missing.is_empty() {
-        Check::new("roots", "ok", format!("Корни индексации: {}", roots.join(", ")))
+        Check::new(
+            "roots",
+            "ok",
+            format!("Корни индексации: {}", roots.join(", ")),
+        )
     } else {
         Check::new(
             "roots",
@@ -313,8 +317,12 @@ fn check_ffmpeg() -> Check {
     if which("ffmpeg.exe").is_some() || which("ffmpeg").is_some() {
         Check::new("ffmpeg", "ok", "ffmpeg найден")
     } else {
-        Check::new("ffmpeg", "warn", "ffmpeg не найден — видео без транскрипции")
-            .fix("Установите Gyan.FFmpeg и перезапустите watcher/индексацию.")
+        Check::new(
+            "ffmpeg",
+            "warn",
+            "ffmpeg не найден — видео без транскрипции",
+        )
+        .fix("Установите Gyan.FFmpeg и перезапустите watcher/индексацию.")
     }
 }
 
@@ -372,7 +380,11 @@ fn check_rerank(cfg: &Config) -> Option<Check> {
         })
         .unwrap_or(false);
     if ok {
-        Some(Check::new("rerank", "ok", "Реранкер (llama-server) отвечает"))
+        Some(Check::new(
+            "rerank",
+            "ok",
+            "Реранкер (llama-server) отвечает",
+        ))
     } else {
         Some(
             Check::new(

@@ -16,7 +16,9 @@ static INDEXING: AtomicBool = AtomicBool::new(false);
 
 /// Подключение к БД (порт `_conn`).
 fn connect(cfg: &Config) -> Result<rusqlite::Connection, String> {
-    let dim = dig(cfg, "embedding.dim").and_then(|v| v.as_i64()).unwrap_or(1024);
+    let dim = dig(cfg, "embedding.dim")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024);
     db::connect(&db_abs_path(cfg), dim).map_err(|e| e.message())
 }
 
@@ -120,13 +122,23 @@ pub fn ask_my_files(question: &str) -> String {
         .sources
         .iter()
         .enumerate()
-        .map(|(i, r)| format!("[{}] {}", i + 1, format_location(&r.path, r.page, r.t_start)))
+        .map(|(i, r)| {
+            format!(
+                "[{}] {}",
+                i + 1,
+                format_location(&r.path, r.page, r.t_start)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n");
     format!(
         "{}\n\nИсточники:\n{}",
         out.answer,
-        if src.is_empty() { "(нет)" } else { src.as_str() }
+        if src.is_empty() {
+            "(нет)"
+        } else {
+            src.as_str()
+        }
     )
 }
 
@@ -145,7 +157,11 @@ pub fn index_status() -> String {
     let running = INDEXING.load(Ordering::Relaxed) || heartbeat::index_running(&hb, 30.0);
     let mut lines = vec![format!(
         "Индексация сейчас: {}",
-        if running { "идёт" } else { "не запущена" }
+        if running {
+            "идёт"
+        } else {
+            "не запущена"
+        }
     )];
     // прогресс — из heartbeat-файла (кросс-процессный; в Python — in-process reporter)
     if let Some(v) = hb.read() {
@@ -210,7 +226,11 @@ pub fn start_indexing(full: bool) -> String {
     format!(
         "Фоновая индексация запущена ({}). Прогресс — через index_status. Остановка — \
          инструментом stop_indexing.",
-        if full { "полная" } else { "инкрементальная" }
+        if full {
+            "полная"
+        } else {
+            "инкрементальная"
+        }
     )
 }
 
@@ -278,4 +298,3 @@ fn run_indexing(full: bool) -> Result<(), String> {
     side.shutdown();
     r.map(|_| ()).map_err(|e| e.message())
 }
-

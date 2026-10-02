@@ -37,7 +37,10 @@ pub fn rerank_results(
         "documents": results.iter().map(|r| r.text.clone()).collect::<Vec<_>>(),
     });
     let timeout = std::time::Duration::from_secs(
-        dig(cfg, "rerank.timeout").and_then(|v| v.as_i64()).unwrap_or(30).max(1) as u64,
+        dig(cfg, "rerank.timeout")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(30)
+            .max(1) as u64,
     );
     let t0 = Instant::now();
     let resp = match http::request(
@@ -66,7 +69,9 @@ pub fn rerank_results(
         }
     };
     let elapsed = t0.elapsed().as_secs_f64();
-    let max_lat = dig(cfg, "rerank.max_latency").and_then(|v| v.as_f64()).unwrap_or(15.0);
+    let max_lat = dig(cfg, "rerank.max_latency")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(15.0);
     if elapsed > max_lat {
         DISABLED.store(true, Ordering::Relaxed);
         eprintln!(

@@ -46,11 +46,9 @@ impl GgufMeta {
         if let Some(k) = self.key_length {
             return k;
         }
-        if self.head_count == 0 {
-            0
-        } else {
-            self.embedding_length / self.head_count
-        }
+        self.embedding_length
+            .checked_div(self.head_count)
+            .unwrap_or(0)
     }
 
     /// Есть ли KV-кэш: энкодеры (`causal = false`) его не держат —
@@ -70,7 +68,7 @@ impl GgufMeta {
             return 0;
         }
         match self.full_attention_interval {
-            Some(n) if n > 1 => (self.block_count + n - 1) / n,
+            Some(n) if n > 1 => self.block_count.div_ceil(n),
             _ => self.block_count,
         }
     }
@@ -80,7 +78,7 @@ impl GgufMeta {
     pub fn kv_layer_count_within(&self, offloaded: u32) -> u32 {
         let layers = offloaded.min(self.block_count);
         match self.full_attention_interval {
-            Some(n) if n > 1 => (layers + n - 1) / n,
+            Some(n) if n > 1 => layers.div_ceil(n),
             _ => layers,
         }
     }
@@ -183,7 +181,7 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
                     emb = v;
                 }
             }
-            _ => skip_value(&mut r, vtype, &path)?,
+            _ => skip_value(&mut r, vtype, path)?,
         }
     }
     if block_count == 0 || head_count == 0 || emb == 0 {
@@ -197,10 +195,22 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
         architecture: arch,
         block_count: block_count as u32,
         head_count: head_count as u32,
-        head_count_kv: if head_kv == 0 { head_count as u32 } else { head_kv as u32 },
+        head_count_kv: if head_kv == 0 {
+            head_count as u32
+        } else {
+            head_kv as u32
+        },
         embedding_length: emb as u32,
-        key_length: if key_len == 0 { None } else { Some(key_len as u32) },
-        value_length: if value_len == 0 { None } else { Some(value_len as u32) },
+        key_length: if key_len == 0 {
+            None
+        } else {
+            Some(key_len as u32)
+        },
+        value_length: if value_len == 0 {
+            None
+        } else {
+            Some(value_len as u32)
+        },
         causal,
         full_attention_interval: if full_attn_interval > 1 {
             Some(full_attn_interval as u32)
@@ -212,9 +222,10 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
 
 /// Открыть файл GGUF и прочитать заголовок: `(reader, число KV-пар)`.
 fn open_header(path: &Path) -> Result<(BufReader<File>, u64)> {
-    let mut r = BufReader::new(File::open(path).map_err(|e| {
-        EngineError::Other(format!("GGUF {}: не читается ({e})", path.display()))
-    })?);
+    let mut r =
+        BufReader::new(File::open(path).map_err(|e| {
+            EngineError::Other(format!("GGUF {}: не читается ({e})", path.display()))
+        })?);
     let mut magic = [0u8; 4];
     r.read_exact(&mut magic)
         .map_err(|e| EngineError::Other(format!("GGUF {}: {e}", path.display())))?;
@@ -226,7 +237,7 @@ fn open_header(path: &Path) -> Result<(BufReader<File>, u64)> {
         )));
     }
     let version = read_u32(&mut r)?;
-    if version < 2 || version > 3 {
+    if !(2..=3).contains(&version) {
         return Err(EngineError::Other(format!(
             "{}: версия GGUF {version} не поддерживается (ожидается 2 или 3)",
             path.display()
@@ -499,8 +510,8 @@ fn fixed_size(vtype: u32) -> Option<u64> {
     match vtype {
         0 | 1 | 7 => Some(1),
         2 | 3 => Some(2),
-        4 | 5 | 6 => Some(4),
-        10 | 11 | 12 => Some(8),
+        4..=6 => Some(4),
+        10..=12 => Some(8),
         _ => None,
     }
 }
@@ -568,8 +579,18 @@ mod tests {
         b.extend_from_slice(&7u64.to_le_bytes()); // семь KV-пар (см. ниже)
         kv("general.architecture", 8, &str_val("llama"), &mut b);
         kv("llama.block_count", 4, &block_count.to_le_bytes(), &mut b);
-        kv("llama.attention.head_count", 4, &head_count.to_le_bytes(), &mut b);
-        kv("llama.attention.head_count_kv", 4, &head_kv.to_le_bytes(), &mut b);
+        kv(
+            "llama.attention.head_count",
+            4,
+            &head_count.to_le_bytes(),
+            &mut b,
+        );
+        kv(
+            "llama.attention.head_count_kv",
+            4,
+            &head_kv.to_le_bytes(),
+            &mut b,
+        );
         kv("llama.embedding_length", 4, &emb.to_le_bytes(), &mut b);
         let mut arr = 4u32.to_le_bytes().to_vec(); // массив u32: 3 элемента
         arr.extend_from_slice(&3u64.to_le_bytes());
@@ -649,5 +670,3 @@ mod tests {
         let _ = std::fs::remove_file(&p);
     }
 }
-
-

@@ -22,7 +22,11 @@ fn parse_response_ok_and_id_mismatch() {
     let v = parse_response(line, 3).unwrap();
     assert_eq!(v["a"], 1);
     let err = parse_response(line, 4).unwrap_err();
-    assert!(err.message().contains("неожиданный id"), "{}", err.message());
+    assert!(
+        err.message().contains("неожиданный id"),
+        "{}",
+        err.message()
+    );
 }
 
 #[test]
@@ -67,6 +71,9 @@ fn extract_and_lemmas_parsing() {
     assert_eq!(r.warnings, vec!["страница 7: пустой текст"]);
     assert_eq!(r.elapsed_ms, 12.5);
 
-    assert_eq!(lemmas_from(&json!({"lemmas": ["настройка", "скрипт"]})), vec!["настройка", "скрипт"]);
+    assert_eq!(
+        lemmas_from(&json!({"lemmas": ["настройка", "скрипт"]})),
+        vec!["настройка", "скрипт"]
+    );
     assert!(lemmas_from(&json!({})).is_empty());
 }

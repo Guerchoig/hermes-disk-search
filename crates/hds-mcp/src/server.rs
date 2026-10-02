@@ -26,7 +26,10 @@ pub fn handle(msg: &Value) -> Option<Value> {
                 .pointer("/params/name")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let args = msg.pointer("/params/arguments").cloned().unwrap_or_else(|| json!({}));
+            let args = msg
+                .pointer("/params/arguments")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
             match schema::call(name, &args) {
                 Ok(text) => json!({
                     "content": [{ "type": "text", "text": text }],

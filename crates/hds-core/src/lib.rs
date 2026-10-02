@@ -22,8 +22,8 @@ pub mod error;
 pub mod http;
 
 pub use config::{
-    config_path, db_abs_path, dig, load, load_from, project_root, replace_file, Config,
-    APP_NAME, EMB_CONTEXT,
+    config_path, db_abs_path, dig, load, load_from, project_root, replace_file, Config, APP_NAME,
+    EMB_CONTEXT,
 };
 pub use db::{connect, has_vec, vec_ok, DbError, FileRow, Stats};
 pub use error::{CoreError, Result};

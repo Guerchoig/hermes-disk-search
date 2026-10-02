@@ -287,7 +287,8 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
     // A4 шаг 2: политика диспетчера, пауза индексации, чужой вычет и источник VRAM.
     if let Some(v) = dig_str(root, "gpu.policy") {
         let parsed = GpuPolicy::parse(&v);
-        if !["query_priority", "indexing_priority", "manual"].contains(&v.trim().to_lowercase().as_str())
+        if !["query_priority", "indexing_priority", "manual"]
+            .contains(&v.trim().to_lowercase().as_str())
         {
             warnings.push(format!(
                 "gpu.policy: неизвестное значение «{v}» — используем {}",
@@ -334,7 +335,9 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
         host: dig_str(root, "llm_server.host").unwrap_or_else(|| "127.0.0.1".to_string()),
         parallel,
         autostart: dig_bool(root, "llm_server.autostart").unwrap_or(true),
-        start_timeout: dig_i64(root, "llm_server.start_timeout").unwrap_or(300).max(1) as u64,
+        start_timeout: dig_i64(root, "llm_server.start_timeout")
+            .unwrap_or(300)
+            .max(1) as u64,
         mode: Mode::parse(
             &dig_str(root, "llm_server.mode").unwrap_or_else(|| "embedded".to_string()),
         ),
@@ -348,7 +351,11 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
 /// Умолчания роли — из `hds/llama_server.py` (`_role_cfg` и `DEFAULTS`).
 fn role_defaults(role: &str) -> (u16, i32, &'static str) {
     match role {
-        "chat" => (8010, 32768, "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"),
+        "chat" => (
+            8010,
+            32768,
+            "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99",
+        ),
         "embedding" => (8011, 8192, "--batch-size 8192 --ubatch-size 8192 -ngl 99"),
         "rerank" => (8012, 8192, "-ngl 0"),
         // whisper — не HTTP-роль: ASR-инстанс поднимается в W3
@@ -433,8 +440,9 @@ fn build_role(
         }
         None => default_retention,
     };
-    let grace_seconds =
-        dig_i64(root, &format!("llm.{role}.grace_seconds")).unwrap_or(300).max(0) as i32;
+    let grace_seconds = dig_i64(root, &format!("llm.{role}.grace_seconds"))
+        .unwrap_or(300)
+        .max(0) as i32;
 
     let (kind, embedding, reranking) = match role {
         "embedding" => (model_kind::EMBEDDINGS, true, false),
@@ -642,10 +650,16 @@ llm_server:
         let rr = cfg.role("rerank").expect("rerank");
         assert_eq!(rr.model_kind, model_kind::RERANK);
         assert!(rr.reranking && !rr.embedding);
-        assert_eq!(rr.legacy_n_gpu_layers, Some(0), "реранкер по legacy — на CPU");
+        assert_eq!(
+            rr.legacy_n_gpu_layers,
+            Some(0),
+            "реранкер по legacy — на CPU"
+        );
 
         assert!(
-            cfg.warnings.iter().any(|w| w.contains("--cache-type-k q8_0")),
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("--cache-type-k q8_0")),
             "должно быть предупреждение про нераспознанный флаг: {:?}",
             cfg.warnings
         );
@@ -675,7 +689,11 @@ llm:
         let root: Value = serde_yaml::from_str(yaml).expect("yaml");
         let cfg = build(Path::new("test.yaml"), &root);
         let chat = cfg.role("chat").expect("chat");
-        assert_eq!(chat.n_batch, Some(512), "llm.chat.n_batch перебивает --batch-size");
+        assert_eq!(
+            chat.n_batch,
+            Some(512),
+            "llm.chat.n_batch перебивает --batch-size"
+        );
         assert_eq!(chat.n_ubatch, Some(1024));
         assert_eq!(chat.n_threads, Some(4));
         assert!(
@@ -685,6 +703,3 @@ llm:
         );
     }
 }
-
-
-

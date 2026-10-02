@@ -80,9 +80,11 @@ fn parse_args() -> std::result::Result<Args, String> {
                     .map_err(|e| format!("--nvml-index: {e}"))?
             }
             "--help" | "-h" => {
-                return Err("использование: vram_budget [--config FILE] [--runtime DIR] \
+                return Err(
+                    "использование: vram_budget [--config FILE] [--runtime DIR] \
                             [--engine-dir DIR] [--json FILE] [--reserve-mb N]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -124,7 +126,10 @@ fn run() -> Result<()> {
 
     // Свободная VRAM: NVML — источник истины (R29)
     let probe = NvmlProbe::open(args.nvml_index).ok();
-    let free_mib = probe.as_ref().and_then(|p| p.snapshot()).map(|s| s.free_mib);
+    let free_mib = probe
+        .as_ref()
+        .and_then(|p| p.snapshot())
+        .map(|s| s.free_mib);
     println!(
         "NVML: {} | свободно {} МиБ | резерв {} МиБ | gpu.device_index={}",
         probe
@@ -226,10 +231,11 @@ fn run() -> Result<()> {
     }
 
     if !chat_ok {
-        println!("\nвнимание: чат-модель не влезает при текущей занятой VRAM — \
+        println!(
+            "\nвнимание: чат-модель не влезает при текущей занятой VRAM — \
                   выгрузите индексные роли (A4) или смените модель в UI; \
-                  авто-деградации нет (решение заказчика 29.09.2026)");
+                  авто-деградации нет (решение заказчика 29.09.2026)"
+        );
     }
     Ok(())
 }
-

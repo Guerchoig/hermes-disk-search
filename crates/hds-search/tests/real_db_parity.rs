@@ -12,7 +12,9 @@ use hds_search::search;
 use serde_json::Value as J;
 
 fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 fn py_f(v: f64) -> String {
@@ -42,7 +44,11 @@ fn gkey(r: &J) -> String {
 fn real_db_control_queries() {
     let root = repo();
     let py = root.join(".venv").join("Scripts").join("python.exe");
-    let golden = root.join("tools").join("parity").join("golden").join("real_db_queries.json");
+    let golden = root
+        .join("tools")
+        .join("parity")
+        .join("golden")
+        .join("real_db_queries.json");
     if !py.exists() || !golden.exists() {
         println!("пропуск: нет .venv / golden");
         return;
@@ -55,7 +61,10 @@ fn real_db_control_queries() {
         }
     };
     if let Some(serde_yaml::Value::Mapping(idx)) = cfg.get_mut("index") {
-        idx.insert(serde_yaml::Value::String("clip".into()), serde_yaml::Value::Bool(false));
+        idx.insert(
+            serde_yaml::Value::String("clip".into()),
+            serde_yaml::Value::Bool(false),
+        );
     }
     let db = hds_core::config::db_abs_path(&cfg);
     if !db.exists() {
@@ -77,11 +86,9 @@ fn real_db_control_queries() {
     let lem: &dyn Lemmatizer = &sidecar;
 
     hds_core::db::register_vec0();
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open real db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open real db");
 
     let g: J = serde_json::from_str(&std::fs::read_to_string(&golden).unwrap()).unwrap();
     let mut fails = Vec::new();
@@ -89,8 +96,15 @@ fn real_db_control_queries() {
         let search_q = q.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
         let label = q.get("query").and_then(|v| v.as_str()).unwrap_or("");
         let res = search(&conn, Some(&emb), lem, &cfg, search_q, None, 20);
-        let ka: Vec<String> = res.iter().map(|r| rkey(&r.path, r.page, r.t_start)).collect();
-        let gr = q.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let ka: Vec<String> = res
+            .iter()
+            .map(|r| rkey(&r.path, r.page, r.t_start))
+            .collect();
+        let gr = q
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let kg: Vec<String> = gr.iter().map(gkey).collect();
         if ka == kg {
             println!("«{label}»: ok ({} результатов, порядок совпал)", res.len());
@@ -115,12 +129,18 @@ fn real_db_control_queries() {
         }
         // боевая БД дрейфует с момента golden (watcher) → допуск: топ-1 + пересечение ≥16
         if !(top1_ok && overlap >= 16) {
-            fails.push(format!("«{label}»: топ-1 {top1_ok}, пересечение {overlap}/20"));
+            fails.push(format!(
+                "«{label}»: топ-1 {top1_ok}, пересечение {overlap}/20"
+            ));
         }
     }
     sidecar.shutdown();
     for f in &fails {
         println!("[FAIL] {f}");
     }
-    assert!(fails.is_empty(), "паритет на боевой БД не сошёлся: {} ошибок", fails.len());
+    assert!(
+        fails.is_empty(),
+        "паритет на боевой БД не сошёлся: {} ошибок",
+        fails.len()
+    );
 }

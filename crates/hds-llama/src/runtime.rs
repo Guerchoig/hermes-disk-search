@@ -105,7 +105,9 @@ pub fn resolve_model(root: &Path, spec: &str, role: &str) -> Result<PathBuf> {
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
                 let p = e.path();
-                if p.extension().map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false)
+                if p.extension()
+                    .map(|x| x.eq_ignore_ascii_case("gguf"))
+                    .unwrap_or(false)
                     && e.file_name().to_string_lossy().eq_ignore_ascii_case(&name)
                 {
                     return Ok(p);
@@ -126,7 +128,11 @@ pub fn resolve_model(root: &Path, spec: &str, role: &str) -> Result<PathBuf> {
         .map(|rd| {
             rd.flatten()
                 .map(|e| e.path())
-                .filter(|p| p.extension().map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false))
+                .filter(|p| {
+                    p.extension()
+                        .map(|x| x.eq_ignore_ascii_case("gguf"))
+                        .unwrap_or(false)
+                })
                 .collect()
         })
         .unwrap_or_default();

@@ -67,8 +67,7 @@ impl TranscribeConfig {
             .unwrap_or_else(|| DEFAULT_TRANSCRIBE_URL.to_string());
         let url = url.trim_end_matches('/').to_string();
         let model = resolve_whisper_model(cfg);
-        let mode =
-            dig_str(cfg, "index.whisper_mode").unwrap_or_else(|| DEFAULT_MODE.to_string());
+        let mode = dig_str(cfg, "index.whisper_mode").unwrap_or_else(|| DEFAULT_MODE.to_string());
         let custom =
             dig_scalar(cfg, "index.whisper_custom").unwrap_or_else(|| DEFAULT_CUSTOM.to_string());
         let gpu = dig(cfg, "index.whisper_gpu")
@@ -350,7 +349,6 @@ fn which(prog: &str) -> Option<PathBuf> {
     None
 }
 
-
 /// Обёртка-`Extractor`: медиа → владелец GPU, всё прочее → Python-воркер.
 pub struct MediaRouter<E: Extractor> {
     inner: E,
@@ -422,4 +420,3 @@ impl<E: Extractor> Extractor for MediaRouter<E> {
         self.inner.extract(path)
     }
 }
-

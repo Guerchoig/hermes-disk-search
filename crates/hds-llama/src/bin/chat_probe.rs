@@ -78,11 +78,7 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--engine-dir" => args.engine_dir = Some(PathBuf::from(take("--engine-dir")?)),
             "--role" => args.role = take("--role")?,
             "--json" => args.json = Some(PathBuf::from(take("--json")?)),
-            "--ngl" => {
-                args.ngl = take("--ngl")?
-                    .parse()
-                    .map_err(|e| format!("--ngl: {e}"))?
-            }
+            "--ngl" => args.ngl = take("--ngl")?.parse().map_err(|e| format!("--ngl: {e}"))?,
             "--n-ctx" => {
                 args.n_ctx = take("--n-ctx")?
                     .parse()
@@ -100,10 +96,12 @@ fn parse_args() -> std::result::Result<Args, String> {
             }
             "--prompt" => args.prompt = Some(take("--prompt")?),
             "--help" | "-h" => {
-                return Err("использование: chat_probe [--role chat] [--ngl 0] [--n-ctx 4096] \
+                return Err(
+                    "использование: chat_probe [--role chat] [--ngl 0] [--n-ctx 4096] \
                             [--n-predict 48] [--config FILE] [--runtime DIR] [--engine-dir DIR] \
                             [--json FILE]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -136,7 +134,6 @@ fn render_qwen_chatml(system: &str, user: &str) -> String {
     let end = format!("{lt}|im_end|{gt}");
     format!("{start}system\n{system}{end}\n{start}user\n{user}{end}\n{start}assistant\n")
 }
-
 
 struct Row {
     name: String,
@@ -199,16 +196,24 @@ fn run() -> Result<()> {
         Duration::from_secs(args.load_timeout),
         Duration::from_millis(500),
     )?;
-    println!("инстанс '{name}' id={id} загружен (state={})\n", inst.state_name);
+    println!(
+        "инстанс '{name}' id={id} загружен (state={})\n",
+        inst.state_name
+    );
     if let Some(prompt) = &args.prompt {
         // одиночный произвольный prompt: печатаем и текст, и число токенов промпта
         // (по нему видно, добавляет ли движок шаблон чата сам)
         let out = cluster.chat_complete(id, prompt, args.n_predict, 0.2, Some(("off", 0, None)))?;
-        println!("--- произвольный prompt ({} символов, reasoning=off)", prompt.chars().count());
+        println!(
+            "--- произвольный prompt ({} символов, reasoning=off)",
+            prompt.chars().count()
+        );
         println!("вход:  {:?}", prompt);
         println!("ответ: {}", indent(out.text.trim()));
-        println!("токенов промпта: {} (по нему видно, добавляет ли движок шаблон)",
-            out.metrics.prompt_tokens);
+        println!(
+            "токенов промпта: {} (по нему видно, добавляет ли движок шаблон)",
+            out.metrics.prompt_tokens
+        );
     } else {
         probe_cases(&cluster, id, &args, &model, json_path.as_deref())?;
     }
@@ -237,10 +242,16 @@ fn probe_cases(
     let flat = render_qwen(system, user);
     let templated = render_qwen_chatml(system, user);
 
+    #[allow(clippy::type_complexity)]
     let cases: Vec<(&str, String, &str, Option<(&str, i32, Option<&str>)>)> = vec![
         ("flat", flat, "off", Some(("off", 0, None))),
         ("chatml", templated, "off", Some(("off", 0, None))),
-        ("chatml", render_qwen_chatml(system, user), "on+none", Some(("on", -1, Some("none")))),
+        (
+            "chatml",
+            render_qwen_chatml(system, user),
+            "on+none",
+            Some(("on", -1, Some("none"))),
+        ),
         ("chatml", render_qwen_chatml(system, user), "не задан", None),
     ];
 
@@ -267,10 +278,12 @@ fn probe_cases(
         });
     }
 
-    let short = |s: Option<&str>| -> String {
-        s.unwrap_or("—").chars().take(90).collect::<String>()
-    };
-    let flat_answer = rows.iter().find(|r| r.prompt_kind == "flat").map(|r| r.text.clone());
+    let short =
+        |s: Option<&str>| -> String { s.unwrap_or("—").chars().take(90).collect::<String>() };
+    let flat_answer = rows
+        .iter()
+        .find(|r| r.prompt_kind == "flat")
+        .map(|r| r.text.clone());
     let tmpl_answer = rows
         .iter()
         .find(|r| r.prompt_kind == "chatml" && r.reasoning == "off")
@@ -289,12 +302,24 @@ fn probe_cases(
     println!("  chatml-prompt → {}", short(tmpl_answer.as_deref()));
     println!(
         "  chatml содержит правильный ответ '4': {}",
-        if templated_beats_flat { "да" } else { "нет" }
+        if templated_beats_flat {
+            "да"
+        } else {
+            "нет"
+        }
     );
     println!(
         "  reasoning=off через кластер: {} (блок размышлений {})",
-        if reasoning_off_has_thinking { "НЕ ЧИСТО" } else { "ок" },
-        if reasoning_off_has_thinking { "ЕСТЬ" } else { "отсутствует" }
+        if reasoning_off_has_thinking {
+            "НЕ ЧИСТО"
+        } else {
+            "ок"
+        },
+        if reasoning_off_has_thinking {
+            "ЕСТЬ"
+        } else {
+            "отсутствует"
+        }
     );
 
     if let Some(json_path) = json_path {

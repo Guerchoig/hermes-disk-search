@@ -32,7 +32,10 @@ impl Fake {
     }
 
     fn thinking_log(&self) -> Vec<Thinking> {
-        self.seen_thinking.lock().map(|v| v.clone()).unwrap_or_default()
+        self.seen_thinking
+            .lock()
+            .map(|v| v.clone())
+            .unwrap_or_default()
     }
 }
 
@@ -162,7 +165,7 @@ fn post(port: u16, path: &str, body: &str) -> (u16, String) {
     let raw = format!(
         "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\n\r\n{body}",
-        body.as_bytes().len()
+        body.len()
     );
     send(port, raw.as_bytes(), false)
 }
@@ -194,7 +197,10 @@ fn facade_serves_llama_server_compatible_endpoints() {
     // /health — 2xx (Python-версия по нему понимает, что порт живой)
     let (status, body) = get(port, "/health");
     assert_eq!(status, 200, "{body}");
-    assert_eq!(serde_json::from_str::<Value>(&body).unwrap()["status"], "ok");
+    assert_eq!(
+        serde_json::from_str::<Value>(&body).unwrap()["status"],
+        "ok"
+    );
 
     // /props — total_slots >= 1 и model_path (иначе probe вернёт FOREIGN)
     let (status, body) = get(port, "/props");
@@ -226,8 +232,14 @@ fn facade_serves_llama_server_compatible_endpoints() {
     let v: Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["object"], "chat.completion");
     let content = v["choices"][0]["message"]["content"].as_str().unwrap();
-    assert!(content.starts_with("Ответ на: S"), "в промпт попал system: {content}");
-    assert!(!content.contains("секрет"), "размышления вырезаны: {content}");
+    assert!(
+        content.starts_with("Ответ на: S"),
+        "в промпт попал system: {content}"
+    );
+    assert!(
+        !content.contains("секрет"),
+        "размышления вырезаны: {content}"
+    );
     assert_eq!(v["usage"]["total_tokens"], 58);
 
     // чат с `chat-think` — размышления видны
@@ -262,7 +274,9 @@ fn facade_serves_llama_server_compatible_endpoints() {
     assert_eq!(status, 200, "{body}");
     let v: Value = serde_json::from_str(&body).unwrap();
     assert!(
-        v["choices"][0]["message"].get("reasoning_content").is_none(),
+        v["choices"][0]["message"]
+            .get("reasoning_content")
+            .is_none(),
         "MCP (enable_thinking=false) получает ответ без размышлений"
     );
     assert_eq!(
@@ -271,7 +285,11 @@ fn facade_serves_llama_server_compatible_endpoints() {
     );
 
     // эмбеддинги и реранк — как у llama-server
-    let (status, body) = post(port, "/v1/embeddings", r#"{"input":["a","b"],"model":"embedding"}"#);
+    let (status, body) = post(
+        port,
+        "/v1/embeddings",
+        r#"{"input":["a","b"],"model":"embedding"}"#,
+    );
     assert_eq!(status, 200, "{body}");
     let v: Value = serde_json::from_str(&body).unwrap();
     assert!(v["data"][0]["embedding"].is_array());
@@ -292,7 +310,10 @@ fn facade_reports_errors_with_clear_messages() {
     // неизвестный путь
     let (status, body) = get(port, "/v1/unknown");
     assert_eq!(status, 404, "{body}");
-    assert!(body.contains("/v1/chat/completions"), "подсказка путей: {body}");
+    assert!(
+        body.contains("/v1/chat/completions"),
+        "подсказка путей: {body}"
+    );
 
     // пустое тело у POST
     let (status, body) = post(port, "/v1/chat/completions", "");
@@ -429,4 +450,3 @@ fn http_transport_handles_keep_alive_continue_and_chunked() {
 
     stop.store(true, Ordering::Relaxed);
 }
-

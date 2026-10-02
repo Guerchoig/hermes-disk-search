@@ -66,8 +66,12 @@ pub fn index_filter(cfg: &Config) -> (Excludes, IndexLimits) {
     let dirs = string_list(cfg, "index.exclude_dirs");
     let paths = string_list(cfg, "index.exclude_paths");
     let limits = IndexLimits::new(
-        dig(cfg, "index.max_file_mb").and_then(|v| v.as_u64()).unwrap_or(200),
-        dig(cfg, "index.max_media_mb").and_then(|v| v.as_u64()).unwrap_or(2500),
+        dig(cfg, "index.max_file_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(200),
+        dig(cfg, "index.max_media_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2500),
     );
     (Excludes::new(&dirs, &paths), limits)
 }
@@ -93,18 +97,25 @@ pub fn chunk_size(cfg: &Config) -> usize {
 
 /// Перекрытие (`chunk.overlap`, по умолчанию 120).
 pub fn chunk_overlap(cfg: &Config) -> i64 {
-    dig(cfg, "chunk.overlap").and_then(|v| v.as_i64()).unwrap_or(120)
+    dig(cfg, "chunk.overlap")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(120)
 }
 
 /// Лимит чанков на файл (`index.max_chunks`, 0 = без лимита).
 pub fn max_chunks(cfg: &Config) -> usize {
-    dig(cfg, "index.max_chunks").and_then(|v| v.as_u64()).unwrap_or(3000) as usize
+    dig(cfg, "index.max_chunks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(3000) as usize
 }
 
 /// Результат фазы извлечения.
 pub enum ExtractOutcome {
     /// Ранний выход: статус-строка и вид (если известен) — `(status, kind)`.
-    Early { status: String, kind: Option<String> },
+    Early {
+        status: String,
+        kind: Option<String>,
+    },
     /// Файл готов к коммиту: id, чанки и вид.
     Ready {
         fid: i64,
@@ -237,15 +248,7 @@ pub fn extract_file(
         }
     }
 
-    let fid = db::upsert_file(
-        conn,
-        &p,
-        &ext,
-        kind,
-        size as i64,
-        mtime,
-        chash.as_deref(),
-    )?;
+    let fid = db::upsert_file(conn, &p, &ext, kind, size as i64, mtime, chash.as_deref())?;
     let (kind2, segments) = match extractor.extract(path) {
         Ok(v) => v,
         Err(e) => {
@@ -273,7 +276,11 @@ pub fn extract_file(
     } else {
         chunks
     };
-    let kind_out = if kind2.is_empty() { kind.to_string() } else { kind2 };
+    let kind_out = if kind2.is_empty() {
+        kind.to_string()
+    } else {
+        kind2
+    };
     Ok(ExtractOutcome::Ready {
         fid,
         chunks,
@@ -334,23 +341,20 @@ pub fn commit_file(
     db::delete_file_data(conn, fid)?;
     for (i, c) in chunks.iter().enumerate() {
         let fts_i = fts.get(i).cloned().unwrap_or_default();
-        let cid = db::add_chunk(conn, fid, i as i64, c.page, c.t_start, c.t_end, &c.text, &fts_i)?;
+        let cid = db::add_chunk(
+            conn, fid, i as i64, c.page, c.t_start, c.t_end, &c.text, &fts_i,
+        )?;
         if let Some(v) = vectors.get(i) {
             db::add_vector(conn, cid, &vector_blob(v))?;
         }
     }
-    db::finish_file(
-        conn,
-        fid,
-        "indexed",
-        None,
-        Some(total as i64),
-        now_epoch(),
-    )?;
+    db::finish_file(conn, fid, "indexed", None, Some(total as i64), now_epoch())?;
     Ok(format!("indexed({} чанков)", total))
 }
 
 /// Порт `process_file`: обе фазы + CLIP-задел. Возвращает `(status, kind)`.
+// Дословный порт Python-сигнатуры (8 параметров) — не сворачиваем.
+#[allow(clippy::too_many_arguments)]
 pub fn process_file(
     conn: &rusqlite::Connection,
     cfg: &Config,
@@ -387,7 +391,10 @@ pub fn clip_store(
     if kind != "image" || !status.starts_with("indexed") {
         return;
     }
-    if !dig(cfg, "index.clip").and_then(|v| v.as_bool()).unwrap_or(true) {
+    if !dig(cfg, "index.clip")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
         return;
     }
     let Some(clip) = hds_clip::shared(cfg) else {
@@ -452,7 +459,10 @@ impl Default for RunIndexArgs {
 fn effective_roots(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
     match roots {
         Some(r) => r.to_vec(),
-        None => string_list(cfg, "index.roots").iter().map(PathBuf::from).collect(),
+        None => string_list(cfg, "index.roots")
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
     }
 }
 
@@ -473,7 +483,10 @@ pub fn collect_files(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
         |ev| match ev {
             WalkEvent::Scan(p) => println!("[scan] {}", p.display()),
             WalkEvent::SkipRootExcluded(p) => {
-                println!("[skip] корень исключён настройкой exclude_paths: {}", p.display())
+                println!(
+                    "[skip] корень исключён настройкой exclude_paths: {}",
+                    p.display()
+                )
             }
             WalkEvent::SkipRootMissing(p) => println!("[skip] корень не найден: {}", p.display()),
         },
@@ -602,7 +615,9 @@ pub fn run_index(
     let hb = HeartbeatFile::new(&root);
 
     if heartbeat::index_running(&hb, 30.0) {
-        println!("[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход.");
+        println!(
+            "[index] в другом процессе уже идёт индексация (свежий index.heartbeat.json) — выход."
+        );
         return Ok(json!({"skipped_other_process": true}));
     }
 
@@ -698,7 +713,9 @@ pub fn run_index(
         rep.seen();
         let kind = kinds::kind_of(&kinds::ext_of(path));
         rep.set_current(&path_str(path), phase_for(kind));
-        write_hb(Some(json!({"path": path_str(path), "phase": phase_for(kind)})));
+        write_hb(Some(
+            json!({"path": path_str(path), "phase": phase_for(kind)}),
+        ));
 
         if kind == Some("media") && media_will_process(conn, path, args.full)? {
             rep.note();
@@ -713,14 +730,22 @@ pub fn run_index(
 
         let cb = |p: f64| rep.set_progress(p);
         let t1 = std::time::Instant::now();
-        let (status, kind2) =
-            match process_file(conn, cfg, emb, path, args.full, extractor, lemmatizer, Some(&cb)) {
-                Ok(v) => v,
-                Err(e) => (
-                    format!("error: {}", trunc(&e.message(), 200)),
-                    kind.map(|k| k.to_string()),
-                ),
-            };
+        let (status, kind2) = match process_file(
+            conn,
+            cfg,
+            emb,
+            path,
+            args.full,
+            extractor,
+            lemmatizer,
+            Some(&cb),
+        ) {
+            Ok(v) => v,
+            Err(e) => (
+                format!("error: {}", trunc(&e.message(), 200)),
+                kind.map(|k| k.to_string()),
+            ),
+        };
         let dur = t1.elapsed().as_secs_f64();
         write_hb(None);
 

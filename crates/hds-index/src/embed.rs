@@ -57,7 +57,12 @@ impl Embedder {
         let batch = dig(cfg, "embedding.batch_size")
             .and_then(|v| v.as_i64())
             .unwrap_or(DEFAULT_BATCH as i64) as usize;
-        Embedder::new(base, model, batch, Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+        Embedder::new(
+            base,
+            model,
+            batch,
+            Duration::from_secs(DEFAULT_TIMEOUT_SECS),
+        )
     }
 
     /// Адрес базовой точки (для сообщений об ошибках).

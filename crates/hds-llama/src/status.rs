@@ -194,9 +194,9 @@ impl StatusReport {
                 .map(|(i, _)| i)
                 .collect();
             let sum: u64 = loaded.iter().map(|&i| roles[i].need_mib).sum();
-            if sum > 0 {
-                for &i in &loaded {
-                    roles[i].vram_measured_mib = Some(used * roles[i].need_mib / sum);
+            for &i in &loaded {
+                if let Some(v) = (used * roles[i].need_mib).checked_div(sum) {
+                    roles[i].vram_measured_mib = Some(v);
                 }
             }
         }
@@ -435,12 +435,13 @@ fn role_status(
         .and_then(|p| p.spec.retention_mode)
         .or_else(|| inst.map(|i| i.retention_mode))
         .unwrap_or(rc.retention_mode);
-    let n_gpu_layers = planned
-        .and_then(|p| p.spec.n_gpu_layers)
-        .unwrap_or_else(|| match rc.legacy_n_gpu_layers {
-            Some(0) => 0,
-            _ => cfg.gpu.n_gpu_layers,
-        });
+    let n_gpu_layers =
+        planned
+            .and_then(|p| p.spec.n_gpu_layers)
+            .unwrap_or(match rc.legacy_n_gpu_layers {
+                Some(0) => 0,
+                _ => cfg.gpu.n_gpu_layers,
+            });
     RoleStatus {
         role: rc.role.clone(),
         port: rc.port,

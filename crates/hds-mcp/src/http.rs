@@ -16,7 +16,11 @@ pub type Reply = (u16, &'static str, String);
 
 /// Обработать HTTP-запрос (чистая функция — тестируется без сокетов).
 pub fn route(method: &str, req_path: &str, body: &str, mcp_path: &str) -> Reply {
-    let p = req_path.split('?').next().unwrap_or("").trim_end_matches('/');
+    let p = req_path
+        .split('?')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('/');
     match (method, p) {
         ("GET", "/health") => (
             200,
@@ -115,8 +119,8 @@ fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
 
 /// Запустить HTTP-MCP сервер (блокирующе). `path` — endpoint (например `/mcp`).
 pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
-    let listener = TcpListener::bind((host, port))
-        .map_err(|e| format!("bind {host}:{port}: {e}"))?;
+    let listener =
+        TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
         match conn {

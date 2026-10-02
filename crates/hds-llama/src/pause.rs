@@ -73,7 +73,10 @@ impl IndexPause {
 
     /// Причина текущей паузы (для лога/статуса).
     pub fn reason(&self) -> String {
-        self.inner.lock().map(|i| i.reason.clone()).unwrap_or_default()
+        self.inner
+            .lock()
+            .map(|i| i.reason.clone())
+            .unwrap_or_default()
     }
 
     /// Поставить паузу. Возвращает `Ok(true)`, если паузу поставили **мы**

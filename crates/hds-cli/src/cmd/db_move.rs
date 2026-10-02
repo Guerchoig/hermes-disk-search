@@ -55,7 +55,10 @@ pub fn move_db(args: &MoveDbArgs) -> MoveResult {
     let old = &args.old_db;
     let new = &args.new_db;
     if new == old {
-        return MoveResult::fail(format!("Новый путь совпадает с текущим: {}", new.display()), false);
+        return MoveResult::fail(
+            format!("Новый путь совпадает с текущим: {}", new.display()),
+            false,
+        );
     }
     if new.exists() && !args.force {
         return MoveResult::fail(
@@ -67,10 +70,7 @@ pub fn move_db(args: &MoveDbArgs) -> MoveResult {
         );
     }
     if !old.exists() {
-        return MoveResult::fail(
-            format!("Исходная БД не найдена: {}", old.display()),
-            false,
-        );
+        return MoveResult::fail(format!("Исходная БД не найдена: {}", old.display()), false);
     }
 
     let watch_was = stop_watcher(&args.project_root);
@@ -84,7 +84,11 @@ pub fn move_db(args: &MoveDbArgs) -> MoveResult {
     if new.exists() {
         let _ = std::fs::remove_file(new); // --force: VACUUM INTO не перезаписывает цель
     }
-    println!("[db-move] копирую {} -> {} ...", old.display(), new.display());
+    println!(
+        "[db-move] копирую {} -> {} ...",
+        old.display(),
+        new.display()
+    );
     if let Err(e) = vacuum_into(old, new) {
         return MoveResult::fail(
             format!("Копирование не удалось: {}", e.message()),

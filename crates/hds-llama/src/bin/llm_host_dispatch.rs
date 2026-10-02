@@ -51,11 +51,7 @@ struct Args {
 }
 
 fn repo_root() -> PathBuf {
-    clean(
-        &Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("..")
-            .join(".."),
-    )
+    clean(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
 }
 
 fn absolutize(p: &Path) -> PathBuf {
@@ -129,11 +125,13 @@ fn parse_args() -> std::result::Result<Args, String> {
             }
             "--apply" => args.apply = true,
             "--help" | "-h" => {
-                return Err("использование: llm_host_dispatch --role chat|embedding|rerank|whisper \
+                return Err(
+                    "использование: llm_host_dispatch --role chat|embedding|rerank|whisper \
                             [--kind query|indexing] [--need-mib N] [--apply] [--budget-mb N] \
                             [--config FILE] [--runtime DIR] [--engine-dir DIR] [--pause-dir DIR] \
                             [--json FILE] [--load-timeout SEC]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -162,7 +160,13 @@ fn need_for_role(
     let meta = read_meta(&path)?;
     let n_ctx = rc.n_ctx.max(0) as i64;
     let kv = kv_cache_mib(&meta, n_ctx, cfg.parallel.max(1) as i64, KvBits::F16);
-    let need = estimate_need_mib(&meta, file_mib, n_ctx, cfg.parallel.max(1) as i64, KvBits::F16);
+    let need = estimate_need_mib(
+        &meta,
+        file_mib,
+        n_ctx,
+        cfg.parallel.max(1) as i64,
+        KvBits::F16,
+    );
     println!(
         "роль '{role}': файл {file_mib} МиБ, слоёв {}, голов KV {}, n_ctx {n_ctx}, KV f16 {kv:.0} МиБ \
          → потребность {need} МиБ",
@@ -257,10 +261,16 @@ fn run() -> Result<()> {
             "нет (создаёт llm-host при старте — A6)".to_string()
         } else {
             uses.iter()
-                .map(|u| format!(
-                    "{}[{}/{}, {} МиБ, простой {} с]",
-                    u.name, u.role, u.retention_label(), u.vram_mib, u.idle_secs
-                ))
+                .map(|u| {
+                    format!(
+                        "{}[{}/{}, {} МиБ, простой {} с]",
+                        u.name,
+                        u.role,
+                        u.retention_label(),
+                        u.vram_mib,
+                        u.idle_secs
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join("; ")
         }
@@ -269,7 +279,11 @@ fn run() -> Result<()> {
     let pause = Arc::new(IndexPause::new(args.pause_dir.clone()));
     println!(
         "index.pause: {} ({})",
-        if pause.is_paused() { "стоит" } else { "нет" },
+        if pause.is_paused() {
+            "стоит"
+        } else {
+            "нет"
+        },
         pause.path().display()
     );
 
@@ -328,7 +342,7 @@ fn run() -> Result<()> {
             &model,
         )?;
     }
-    print!("\n");
+    println!();
     // код возврата как у проверки приёмки: не влезает → 1 (само решение — это отчёт, не деградация)
     if !plan.verdict.is_ok() {
         std::process::exit(1);
@@ -389,7 +403,8 @@ fn save_json(
     }
     let text = serde_json::to_string_pretty(&report)
         .map_err(|e| EngineError::Other(format!("json: {e}")))?;
-    std::fs::write(path, text).map_err(|e| EngineError::Other(format!("{}: {e}", path.display())))?;
+    std::fs::write(path, text)
+        .map_err(|e| EngineError::Other(format!("{}: {e}", path.display())))?;
     println!("\nотчёт: {}", path.display());
     Ok(())
 }

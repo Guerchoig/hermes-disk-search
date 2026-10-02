@@ -23,7 +23,10 @@ fn preprocess_shape_and_range() {
     assert_eq!(v.len(), 3 * IMAGE_SIZE * IMAGE_SIZE, "CHW [1,3,224,224]");
     // нормализованные значения: не NaN и в разумных пределах (не «сырые» 0..255)
     assert!(v.iter().all(|x| x.is_finite()));
-    assert!(v.iter().any(|x| x.abs() > 1.0), "значения должны быть нормализованы");
+    assert!(
+        v.iter().any(|x| x.abs() > 1.0),
+        "значения должны быть нормализованы"
+    );
 }
 
 #[test]
@@ -37,8 +40,14 @@ fn config_disabled_by_flag() {
 fn config_default_paths() {
     let c = ClipConfig::from_config(&cfg("index:\n  clip: true\n"));
     assert!(c.enabled);
-    assert!(c.vision_model.to_string_lossy().ends_with("clip_vision.onnx"));
-    assert!(c.text_model.to_string_lossy().ends_with("clip_text_dense.onnx"));
+    assert!(c
+        .vision_model
+        .to_string_lossy()
+        .ends_with("clip_vision.onnx"));
+    assert!(c
+        .text_model
+        .to_string_lossy()
+        .ends_with("clip_text_dense.onnx"));
     assert!(c.tokenizer.to_string_lossy().ends_with("tokenizer.json"));
 }
 

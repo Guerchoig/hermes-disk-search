@@ -24,7 +24,9 @@ use hds_index::sidecar::{Extractor, Sidecar};
 use serde_json::{json, Map, Value};
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 /// Чтение golden-файла (обычный `.json` или сжатый `.json.gz`).
@@ -93,7 +95,9 @@ fn golden_parity_16_fixtures() {
     // проекта (`hermes-disk-search`) — для паритета исключения снимаем
     // (golden.py тоже обходит их: он зовёт extractors.extract напрямую).
     let cfg = without_excludes(cfg);
-    let dim = dig(&cfg, "embedding.dim").and_then(|v| v.as_i64()).unwrap_or(1024);
+    let dim = dig(&cfg, "embedding.dim")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024);
 
     let emb = Embedder::from_config(&cfg);
     if emb.ping().is_err() {
@@ -113,7 +117,11 @@ fn golden_parity_16_fixtures() {
         }
     };
 
-    let out = root.join("tools").join("parity").join("out").join("rust_parity");
+    let out = root
+        .join("tools")
+        .join("parity")
+        .join("out")
+        .join("rust_parity");
     let _ = std::fs::remove_dir_all(&out);
     std::fs::create_dir_all(&out).unwrap();
     let conn = db::connect(&out.join("index.db"), dim).unwrap();
@@ -162,15 +170,15 @@ fn golden_parity_16_fixtures() {
         });
 
         // конвейер: process_file (чанки + FTS + векторы через фасад)
-        let (status, _k) = match pipeline::process_file(
-            &conn, &cfg, &emb, &path, false, &sidecar, &sidecar, None,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                fails.push(format!("{name}: process_file: {}", e.message()));
-                continue;
-            }
-        };
+        let (status, _k) =
+            match pipeline::process_file(&conn, &cfg, &emb, &path, false, &sidecar, &sidecar, None)
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    fails.push(format!("{name}: process_file: {}", e.message()));
+                    continue;
+                }
+            };
         if !status.starts_with("indexed") {
             fails.push(format!("{name}: статус {status}"));
             continue;
@@ -203,8 +211,18 @@ fn golden_parity_16_fixtures() {
             json!({"kind": kind, "size": sz, "content_hash": chash}),
         );
 
-        compare_strict(&golden, &format!("{stem}.segments.json"), &segs_value, &mut fails);
-        compare_strict(&golden, &format!("{stem}.chunks.json"), &chunks_value, &mut fails);
+        compare_strict(
+            &golden,
+            &format!("{stem}.segments.json"),
+            &segs_value,
+            &mut fails,
+        );
+        compare_strict(
+            &golden,
+            &format!("{stem}.chunks.json"),
+            &chunks_value,
+            &mut fails,
+        );
         compare_strict(&golden, &format!("{stem}.fts.json"), &fts_value, &mut fails);
         ok += 1;
     }
@@ -227,7 +245,11 @@ fn golden_parity_16_fixtures() {
         println!("[FAIL] {f}");
     }
     sidecar.shutdown();
-    assert!(fails.is_empty(), "паритет не сошёлся: {} ошибок", fails.len());
+    assert!(
+        fails.is_empty(),
+        "паритет не сошёлся: {} ошибок",
+        fails.len()
+    );
 }
 
 /// Чанки файла из БД в формате golden (`text/page/t_start/t_end`).
@@ -256,9 +278,7 @@ fn read_fts(conn: &rusqlite::Connection, fid: i64) -> Vec<String> {
              WHERE c.file_id=?1 ORDER BY c.ord",
         )
         .unwrap();
-    let rows = st
-        .query_map([fid], |r| r.get::<_, String>(0))
-        .unwrap();
+    let rows = st.query_map([fid], |r| r.get::<_, String>(0)).unwrap();
     rows.filter_map(|r| r.ok()).collect()
 }
 

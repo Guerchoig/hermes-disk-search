@@ -55,7 +55,11 @@ pub fn estimate_need_mib(
 #[derive(Debug, Clone, PartialEq)]
 pub enum Fit {
     /// Свободной VRAM достаточно (с учётом резерва).
-    Fits { free_mib: u64, need_mib: u64, reserve_mib: u64 },
+    Fits {
+        free_mib: u64,
+        need_mib: u64,
+        reserve_mib: u64,
+    },
     /// Не хватает: сколько не хватает и что предлагается вытеснить.
     NotEnough {
         free_mib: u64,

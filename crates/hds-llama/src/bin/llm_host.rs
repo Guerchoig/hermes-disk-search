@@ -95,7 +95,11 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--host" => host.host = Some(take("--host")?),
             "--pause-dir" => host.pause_dir = PathBuf::from(take("--pause-dir")?),
             "--port" => {
-                port = Some(take("--port")?.parse().map_err(|e| format!("--port: {e}"))?)
+                port = Some(
+                    take("--port")?
+                        .parse()
+                        .map_err(|e| format!("--port: {e}"))?,
+                )
             }
             "--port-base" => {
                 host.port_base = Some(
@@ -111,7 +115,11 @@ fn parse_args() -> std::result::Result<Args, String> {
                 "off" | "false" | "0" => host.dispatcher = false,
                 other => return Err(format!("--dispatcher: ожидалось on|off, получено {other}")),
             },
-            "--hold" => hold = take("--hold")?.parse().map_err(|e| format!("--hold: {e}"))?,
+            "--hold" => {
+                hold = take("--hold")?
+                    .parse()
+                    .map_err(|e| format!("--hold: {e}"))?
+            }
             "--json" => json = Some(PathBuf::from(take("--json")?)),
             "--local" => local = true,
             "--no-engine" => no_engine = true,
@@ -240,11 +248,7 @@ fn candidate_urls(args: &Args, cfg: &config::LlmHostConfig, host_addr: &str) -> 
 /// кодом, что и `llm_host_status` (общий `host::local_status`).
 fn cmd_status(args: &Args) -> Result<()> {
     let cfg = config::load(&args.host.config)?;
-    let host_addr = args
-        .host
-        .host
-        .clone()
-        .unwrap_or_else(|| cfg.host.clone());
+    let host_addr = args.host.host.clone().unwrap_or_else(|| cfg.host.clone());
     let urls = candidate_urls(args, &cfg, &host_addr);
     if !args.local {
         for url in &urls {
@@ -310,15 +314,10 @@ fn cmd_status(args: &Args) -> Result<()> {
     Ok(())
 }
 
-
 /// `llm-host load|unload|devices|stop` — через внутренний API резидента.
 fn cmd_internal(args: &Args, action: &str, role: Option<String>) -> Result<()> {
     let cfg = config::load(&args.host.config)?;
-    let host_addr = args
-        .host
-        .host
-        .clone()
-        .unwrap_or_else(|| cfg.host.clone());
+    let host_addr = args.host.host.clone().unwrap_or_else(|| cfg.host.clone());
     let urls = candidate_urls(args, &cfg, &host_addr);
     let method = if action == "devices" { "GET" } else { "POST" };
     // загрузка роли идёт с диска (секунды-минуты), остальное быстро
@@ -352,7 +351,9 @@ fn cmd_internal(args: &Args, action: &str, role: Option<String>) -> Result<()> {
                     .and_then(|e| e.get("message"))
                     .and_then(|m| m.as_str())
                     .unwrap_or("без текста ошибки");
-                return Err(EngineError::Other(format!("{target}: HTTP {status}: {msg}")));
+                return Err(EngineError::Other(format!(
+                    "{target}: HTTP {status}: {msg}"
+                )));
             }
             // порт не отвечает: возможно, это роль без фасада — пробуем следующий
             Err(_) => continue,
@@ -407,4 +408,3 @@ fn roles_broken(json: &serde_json::Value) -> bool {
         })
         .unwrap_or(false)
 }
-

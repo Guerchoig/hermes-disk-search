@@ -2,7 +2,7 @@
 //! «NVML − baseline» и машинночитаемый JSON (поля из §A4, их читает UI).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use hds_llama::config;
 use hds_llama::ffi::{model_kind, retention, state};
@@ -20,14 +20,19 @@ struct Env {
 
 impl Env {
     fn new(name: &str) -> Env {
-        let root = std::env::temp_dir()
-            .join("hds-llama-tests")
-            .join(format!("status-{}-{}", std::process::id(), name));
+        let root = std::env::temp_dir().join("hds-llama-tests").join(format!(
+            "status-{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&root);
         let runtime = root.join("llama-runtime");
         std::fs::create_dir_all(runtime.join("models").join("chat")).expect("runtime");
-        std::fs::write(runtime.join("models").join("chat").join("qwen.gguf"), b"GGUF")
-            .expect("model");
+        std::fs::write(
+            runtime.join("models").join("chat").join("qwen.gguf"),
+            b"GGUF",
+        )
+        .expect("model");
         Env { root, runtime }
     }
 
@@ -68,7 +73,7 @@ fn devices() -> Vec<Device> {
 }
 
 /// Загруженный инстанс чата — как его показал бы `list_instances`.
-fn chat_instance(runtime: &PathBuf) -> Instance {
+fn chat_instance(runtime: &Path) -> Instance {
     Instance {
         id: 1,
         name: "chat".to_string(),
@@ -265,7 +270,10 @@ llm_server:
     );
     assert_eq!(report.vram_budget_mb, Some(4_000));
     assert_eq!(report.external_vram_mb, 500);
-    assert_eq!(report.used_by_us_mib, None, "без baseline наша занятость неизвестна");
+    assert_eq!(
+        report.used_by_us_mib, None,
+        "без baseline наша занятость неизвестна"
+    );
     assert!(
         report
             .warnings

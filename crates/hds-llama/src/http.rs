@@ -130,15 +130,14 @@ where
             Ok(None) => return Ok(()), // соединение закрыто клиентом
             Ok(Some(req)) => {
                 let keep_alive = req.keep_alive;
-                let resp =
-                    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&req)))
-                        .unwrap_or_else(|_| {
-                            Response::error(
-                                500,
-                                "внутренняя ошибка фасада (паника обработчика)",
-                                "server_error",
-                            )
-                        });
+                let resp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&req)))
+                    .unwrap_or_else(|_| {
+                        Response::error(
+                            500,
+                            "внутренняя ошибка фасада (паника обработчика)",
+                            "server_error",
+                        )
+                    });
                 write_response(&mut writer, &resp, keep_alive)?;
                 if !keep_alive {
                     return Ok(());
@@ -181,7 +180,7 @@ fn read_request<R: BufRead, W: Write>(
             break;
         }
     }
-    let mut parts = line.trim().split_whitespace();
+    let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("").to_ascii_uppercase();
     let raw_path = parts.next().unwrap_or("/").to_string();
     let (path, query) = match raw_path.split_once('?') {
@@ -218,10 +217,8 @@ fn read_request<R: BufRead, W: Write>(
                     expect_continue = true;
                 }
             }
-            "transfer-encoding" => {
-                if value.to_ascii_lowercase().contains("chunked") {
-                    chunked = true;
-                }
+            "transfer-encoding" if value.to_ascii_lowercase().contains("chunked") => {
+                chunked = true;
             }
             _ => {}
         }
@@ -274,7 +271,7 @@ fn write_response<W: Write>(w: &mut W, resp: &Response, keep_alive: bool) -> std
          Content-Length: {}\r\nConnection: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
         resp.status,
         resp.reason(),
-        body.as_bytes().len(),
+        body.len(),
         if keep_alive { "keep-alive" } else { "close" }
     );
     w.write_all(head.as_bytes())?;
@@ -339,7 +336,7 @@ pub fn client_json(
         "{} {path} HTTP/1.1\r\nHost: {host}:{port}\r\nContent-Type: application/json\r\n\
          Content-Length: {}\r\nConnection: close\r\n\r\n{payload}",
         method.to_ascii_uppercase(),
-        payload.as_bytes().len()
+        payload.len()
     );
     sock.write_all(request.as_bytes())
         .map_err(|e| EngineError::Other(format!("не отправить запрос в {url}: {e}")))?;

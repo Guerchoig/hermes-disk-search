@@ -87,7 +87,9 @@ fn run(args: &[String]) -> i32 {
                 2
             }
         },
-        "reindex-fts" => cmd::reindex_fts::cmd_reindex_fts(flag_u64(rest, "--progress-sec").unwrap_or(3)),
+        "reindex-fts" => {
+            cmd::reindex_fts::cmd_reindex_fts(flag_u64(rest, "--progress-sec").unwrap_or(3))
+        }
         "forget" => match rest.first() {
             Some(p) => cmd::forget::cmd_forget(p),
             None => {
@@ -114,7 +116,10 @@ fn run(args: &[String]) -> i32 {
             flag_u64(rest, "--port").map(|v| v as u16),
             flag_val(rest, "--path"),
         ),
-        "ui" => cmd::ui::cmd_ui(flag_val(rest, "--host"), flag_u64(rest, "--port").map(|v| v as u16)),
+        "ui" => cmd::ui::cmd_ui(
+            flag_val(rest, "--host"),
+            flag_u64(rest, "--port").map(|v| v as u16),
+        ),
         "mcp-http" => match rest.first() {
             Some(s) if !s.starts_with("--") => cmd::mcp_http::cmd_mcp_http(
                 s,

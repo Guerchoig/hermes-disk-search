@@ -36,7 +36,9 @@ fn crud_round_trip_matches_python() {
     assert_eq!(row.size, Some(120));
 
     // get_file_by_hash
-    assert!(db::get_file_by_hash(&conn, Some("hash2")).unwrap().is_some());
+    assert!(db::get_file_by_hash(&conn, Some("hash2"))
+        .unwrap()
+        .is_some());
     assert!(db::get_file_by_hash(&conn, Some("nope")).unwrap().is_none());
     assert!(db::get_file_by_hash(&conn, None).unwrap().is_none());
 
@@ -79,7 +81,10 @@ fn crud_round_trip_matches_python() {
     // stats
     let st = db::stats(&conn).unwrap();
     assert_eq!(st.chunks, 1);
-    assert!(st.by_kind.iter().any(|(k, c)| k.as_deref() == Some("text") && *c == 1));
+    assert!(st
+        .by_kind
+        .iter()
+        .any(|(k, c)| k.as_deref() == Some("text") && *c == 1));
 
     // remove_path: удаляет запись, чанки и FTS/vec (питоновская семантика)
     assert!(db::remove_path(&conn, "D:/x/b.md").unwrap());
@@ -105,7 +110,9 @@ fn finish_file_error_keeps_status_and_message() {
     let conn = db::connect(&p, 1024).expect("connect");
     let fid = db::upsert_file(&conn, "D:/x/bad.docx", ".docx", "docx", 1, 1.0, None).unwrap();
     db::finish_file(&conn, fid, "error", Some("BadZipFile"), None, 0.0).unwrap();
-    let row = db::get_file_by_path(&conn, "D:/x/bad.docx").unwrap().unwrap();
+    let row = db::get_file_by_path(&conn, "D:/x/bad.docx")
+        .unwrap()
+        .unwrap();
     assert_eq!(row.status.as_deref(), Some("error"));
     assert_eq!(row.error.as_deref(), Some("BadZipFile"));
     assert_eq!(row.indexed_at, None);

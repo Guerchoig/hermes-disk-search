@@ -28,7 +28,9 @@ fn model(role: &str, file: &str) -> Option<PathBuf> {
 }
 
 fn file_mib(p: &PathBuf) -> u64 {
-    std::fs::metadata(p).map(|m| m.len() / (1024 * 1024)).unwrap_or(0)
+    std::fs::metadata(p)
+        .map(|m| m.len() / (1024 * 1024))
+        .unwrap_or(0)
 }
 
 #[test]
@@ -77,7 +79,11 @@ fn chat_model_metadata_and_kv_estimate() {
         "у Qwen3.5-9B полный KV держат 8 слоёв из 32"
     );
     assert_eq!(meta.kv_layer_count(), 8);
-    assert_eq!(meta.kv_layer_count_within(8), 2, "при офлоаде 8 слоёв KV держат 2");
+    assert_eq!(
+        meta.kv_layer_count_within(8),
+        2,
+        "при офлоаде 8 слоёв KV держат 2"
+    );
     assert_eq!(meta.kv_layer_count_within(4), 1);
 
     let f16 = kv_cache_mib(&meta, 32768, 1, KvBits::F16);

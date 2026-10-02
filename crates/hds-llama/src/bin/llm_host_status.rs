@@ -51,10 +51,12 @@ fn parse_args() -> std::result::Result<Args, String> {
             }
             "--no-engine" => status.no_engine = true,
             "--help" | "-h" => {
-                return Err("использование: llm_host_status [--config FILE] [--runtime DIR] \
+                return Err(
+                    "использование: llm_host_status [--config FILE] [--runtime DIR] \
                             [--engine-dir DIR] [--json FILE] [--baseline-used-mib N] \
                             [--pause-dir DIR] [--nvml-index N] [--no-engine]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }

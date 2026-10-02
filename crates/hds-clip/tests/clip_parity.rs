@@ -30,7 +30,11 @@ fn fixtures() -> PathBuf {
 
 fn vec_of(v: &Value) -> Vec<f32> {
     v.as_array()
-        .map(|a| a.iter().filter_map(|x| x.as_f64().map(|f| f as f32)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_f64().map(|f| f as f32))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -65,5 +69,8 @@ fn vision_and_text_parity() {
         cos_min = cos_min.min(c);
     }
     println!("CLIP: cos_min={cos_min:.6} (порог 0,999)");
-    assert!(cos_min >= 0.999, "паритет CLIP не сошёлся: cos_min={cos_min}");
+    assert!(
+        cos_min >= 0.999,
+        "паритет CLIP не сошёлся: cos_min={cos_min}"
+    );
 }

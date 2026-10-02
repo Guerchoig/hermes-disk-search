@@ -61,9 +61,11 @@ fn parse_args() -> std::result::Result<Args, String> {
             "--engine-dir" => args.engine_dir = Some(PathBuf::from(take("--engine-dir")?)),
             "--json" => args.json = Some(PathBuf::from(take("--json")?)),
             "--help" | "-h" => {
-                return Err("использование: llm_host_plan [--config FILE] [--runtime DIR] \
+                return Err(
+                    "использование: llm_host_plan [--config FILE] [--runtime DIR] \
                             [--engine-dir DIR] [--json FILE]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -102,7 +104,11 @@ fn run() -> Result<()> {
         "gpu: device_index={} n_gpu_layers={}{} reserve={} МиБ evict_idle={} с budget={}",
         cfg.gpu.device_index,
         cfg.gpu.n_gpu_layers,
-        if cfg.gpu.n_gpu_layers_set { "" } else { " (дефолт)" },
+        if cfg.gpu.n_gpu_layers_set {
+            ""
+        } else {
+            " (дефолт)"
+        },
         cfg.gpu.reserve_mb,
         cfg.gpu.evict_idle_sec,
         cfg.gpu
@@ -156,7 +162,14 @@ fn run() -> Result<()> {
             }
         }
     }
-    save_json(json_path.as_ref(), &cfg, &paths, &engine, &devices, &planned)?;
+    save_json(
+        json_path.as_ref(),
+        &cfg,
+        &paths,
+        &engine,
+        &devices,
+        &planned,
+    )?;
     if failed > 0 {
         println!(
             "\nролей без модели: {failed} — положите файлы в общий рантайм \
@@ -224,4 +237,3 @@ fn save_json(
     println!("\nотчёт: {}", json_path.display());
     Ok(())
 }
-

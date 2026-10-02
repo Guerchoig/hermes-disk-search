@@ -47,10 +47,7 @@ impl Answer {
 /// Убрать inline-теги размышлений из `content` (порт `_strip_think`).
 fn strip_think(text: &str) -> String {
     let mut out = text.to_string();
-    loop {
-        let Some(open) = out.find(T_OPEN) else {
-            break;
-        };
+    while let Some(open) = out.find(T_OPEN) {
         match out[open + T_OPEN.len()..].find(T_CLOSE) {
             Some(rel) => {
                 let close = open + T_OPEN.len() + rel + T_CLOSE.len();
@@ -104,67 +101,6 @@ pub fn build_context(results: &[SearchResult], max_chars: usize) -> (String, usi
     (blocks.join("\n\n"), blocks.len())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn res(path: &str, page: Option<i64>, t: Option<f64>) -> SearchResult {
-        SearchResult {
-            path: path.into(),
-            ext: ".txt".into(),
-            kind: "text".into(),
-            page,
-            t_start: t,
-            t_end: None,
-            text: "текст".into(),
-            snippet: String::new(),
-            score: 0.0,
-        }
-    }
-
-    #[test]
-    fn strip_think_removes_paired_and_dangling() {
-        let paired = format!("до {T_OPEN}секрет{T_CLOSE} после");
-        assert_eq!(strip_think(&paired), "до  после");
-        let dangling_open = format!("{T_OPEN}остаток");
-        assert_eq!(strip_think(&dangling_open), "");
-        let dangling_close = format!("{T_CLOSE} финал");
-        // как Python `(T_CLOSE).*` с DOTALL: от закрывающего тега до конца — удаляется
-        assert_eq!(strip_think(&dangling_close), "");
-    }
-
-    #[test]
-    fn context_marks_page_and_timecode() {
-        let rows = vec![res("D:\\a.pdf", Some(1), None), res("D:\\b.wav", None, Some(65.0))];
-        let (ctx, n) = build_context(&rows, 10000);
-        assert_eq!(n, 2);
-        assert!(ctx.contains("[1] Файл: D:\\a.pdf, стр. 1"));
-        assert!(ctx.contains("[2] Файл: D:\\b.wav, время 00:01:05–00:01:05"));
-    }
-
-    #[test]
-    fn context_respects_budget() {
-        let rows = vec![res("D:\\a.txt", None, None), res("D:\\b.txt", None, None)];
-        let (ctx, n) = build_context(&rows, 5);
-        assert_eq!(n, 0);
-        assert!(ctx.is_empty());
-    }
-
-    #[test]
-    fn answer_json_has_answer_and_sources() {
-        let a = Answer {
-            answer: "готово".into(),
-            sources: vec![res("D:\\a.txt", None, None)],
-        };
-        let j = a.to_json();
-        assert_eq!(j["answer"], json!("готово"));
-        assert_eq!(j["sources"].as_array().unwrap().len(), 1);
-        assert_eq!(j["sources"][0]["path"], json!("D:\\a.txt"));
-    }
-}
-
-
 /// Тело `/chat/completions` (порт `_chat_payload`): thinking=off → шаблонно выключить.
 fn chat_payload(cfg: &Config, messages: serde_json::Value) -> serde_json::Value {
     let mut payload = json!({
@@ -173,7 +109,9 @@ fn chat_payload(cfg: &Config, messages: serde_json::Value) -> serde_json::Value 
         "max_tokens": dig(cfg, "chat.max_tokens").and_then(|v| v.as_i64()).unwrap_or(600),
         "messages": messages,
     });
-    let thinking = dig(cfg, "chat.thinking").and_then(|v| v.as_str()).unwrap_or("off");
+    let thinking = dig(cfg, "chat.thinking")
+        .and_then(|v| v.as_str())
+        .unwrap_or("off");
     if thinking.trim().to_lowercase() == "off" {
         payload["chat_template_kwargs"] = json!({ "enable_thinking": false });
     }
@@ -189,7 +127,9 @@ pub fn ask(
     question: &str,
     limit: usize,
 ) -> Answer {
-    let rerank_on = dig(cfg, "rerank.enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+    let rerank_on = dig(cfg, "rerank.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let pool = if rerank_on { 20 } else { limit };
     let mut results = search(conn, emb, lem, cfg, question, None, pool);
     if results.is_empty() {
@@ -204,8 +144,9 @@ pub fn ask(
             results = r;
         }
     }
-    let max_chars =
-        dig(cfg, "chat.max_context_chars").and_then(|v| v.as_i64()).unwrap_or(14000) as usize;
+    let max_chars = dig(cfg, "chat.max_context_chars")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(14000) as usize;
     let (context, n_used) = build_context(&results, max_chars);
     let messages = json!([
         { "role": "system", "content": SYSTEM_PROMPT },
@@ -219,12 +160,14 @@ pub fn ask(
         .unwrap_or("http://127.0.0.1:8010/v1")
         .trim_end_matches('/');
     let timeout = std::time::Duration::from_secs(
-        dig(cfg, "chat.timeout").and_then(|v| v.as_i64()).unwrap_or(240).max(1) as u64,
+        dig(cfg, "chat.timeout")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(240)
+            .max(1) as u64,
     );
 
     let post = |body: &serde_json::Value| -> Result<serde_json::Value, String> {
-        let (host, port, prefix) =
-            hds_index::embed::split_base(base).map_err(|e| e.message())?;
+        let (host, port, prefix) = hds_index::embed::split_base(base).map_err(|e| e.message())?;
         let path = format!("{prefix}/chat/completions");
         let resp = http::request(
             &host,
@@ -293,3 +236,65 @@ pub fn ask(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn res(path: &str, page: Option<i64>, t: Option<f64>) -> SearchResult {
+        SearchResult {
+            path: path.into(),
+            ext: ".txt".into(),
+            kind: "text".into(),
+            page,
+            t_start: t,
+            t_end: None,
+            text: "текст".into(),
+            snippet: String::new(),
+            score: 0.0,
+        }
+    }
+
+    #[test]
+    fn strip_think_removes_paired_and_dangling() {
+        let paired = format!("до {T_OPEN}секрет{T_CLOSE} после");
+        assert_eq!(strip_think(&paired), "до  после");
+        let dangling_open = format!("{T_OPEN}остаток");
+        assert_eq!(strip_think(&dangling_open), "");
+        let dangling_close = format!("{T_CLOSE} финал");
+        // как Python `(T_CLOSE).*` с DOTALL: от закрывающего тега до конца — удаляется
+        assert_eq!(strip_think(&dangling_close), "");
+    }
+
+    #[test]
+    fn context_marks_page_and_timecode() {
+        let rows = vec![
+            res("D:\\a.pdf", Some(1), None),
+            res("D:\\b.wav", None, Some(65.0)),
+        ];
+        let (ctx, n) = build_context(&rows, 10000);
+        assert_eq!(n, 2);
+        assert!(ctx.contains("[1] Файл: D:\\a.pdf, стр. 1"));
+        assert!(ctx.contains("[2] Файл: D:\\b.wav, время 00:01:05–00:01:05"));
+    }
+
+    #[test]
+    fn context_respects_budget() {
+        let rows = vec![res("D:\\a.txt", None, None), res("D:\\b.txt", None, None)];
+        let (ctx, n) = build_context(&rows, 5);
+        assert_eq!(n, 0);
+        assert!(ctx.is_empty());
+    }
+
+    #[test]
+    fn answer_json_has_answer_and_sources() {
+        let a = Answer {
+            answer: "готово".into(),
+            sources: vec![res("D:\\a.txt", None, None)],
+        };
+        let j = a.to_json();
+        assert_eq!(j["answer"], json!("готово"));
+        assert_eq!(j["sources"].as_array().unwrap().len(), 1);
+        assert_eq!(j["sources"][0]["path"], json!("D:\\a.txt"));
+    }
+}

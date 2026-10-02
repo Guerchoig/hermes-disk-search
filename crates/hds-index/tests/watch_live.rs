@@ -115,7 +115,11 @@ fn windows_watcher_six_scenarios() {
     let a = dir.join("a.txt");
     std::fs::write(&a, b"hello").unwrap();
     assert!(
-        wait_event(&rx, |e| matches!(e, WatchEvent::Modified(p) if p.ends_with("a.txt")), 15),
+        wait_event(
+            &rx,
+            |e| matches!(e, WatchEvent::Modified(p) if p.ends_with("a.txt")),
+            15
+        ),
         "событие создания a.txt не пришло"
     );
     // дожидаемся индексации (wait_stable ~2 с) — докидываем события
@@ -134,7 +138,10 @@ fn windows_watcher_six_scenarios() {
     let b = dir.join("b.txt");
     std::fs::rename(&a, &b).unwrap();
     pump(&rx, &conn, &cfg, &emb, &mut st, || row(&conn, &b), 20);
-    assert!(row(&conn, &b) && !row(&conn, &a), "rename не отразился в индексе");
+    assert!(
+        row(&conn, &b) && !row(&conn, &a),
+        "rename не отразился в индексе"
+    );
 
     // 4. delete b.txt
     std::fs::remove_file(&b).unwrap();
@@ -164,7 +171,11 @@ fn windows_watcher_six_scenarios() {
         60,
     );
     let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files WHERE path LIKE '%m%.txt'", [], |r| r.get(0))
+        .query_row(
+            "SELECT COUNT(*) FROM files WHERE path LIKE '%m%.txt'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(n, 10, "mass-write: проиндексировано {n} из 10");
 
@@ -174,7 +185,10 @@ fn windows_watcher_six_scenarios() {
     let rf = rec.join("gone.txt");
     std::fs::write(&rf, b"x").unwrap();
     std::thread::sleep(Duration::from_secs(2));
-    assert!(!row(&conn, &rf), "файл из корзины не должен индексироваться");
+    assert!(
+        !row(&conn, &rf),
+        "файл из корзины не должен индексироваться"
+    );
 
     stop.store(true, Ordering::Relaxed);
 }

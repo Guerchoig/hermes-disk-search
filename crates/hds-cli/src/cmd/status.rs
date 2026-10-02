@@ -39,7 +39,10 @@ pub fn stats_text(st: &Stats) -> String {
     out.push_str(&format!("Файлы по статусам: {statuses}\n"));
     out.push_str(&format!("Чанков всего: {}\n", st.chunks));
     if let Some(ts) = st.last_indexed_at {
-        out.push_str(&format!("Последняя индексация: {}\n", fmt_local_datetime(ts)));
+        out.push_str(&format!(
+            "Последняя индексация: {}\n",
+            fmt_local_datetime(ts)
+        ));
     }
     if !st.errors.is_empty() {
         out.push_str("Последние ошибки:\n");

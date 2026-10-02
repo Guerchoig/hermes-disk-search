@@ -49,7 +49,10 @@ fn snippet_whole_text_when_short() {
 
 #[test]
 fn location_formats_page_and_timecode() {
-    assert_eq!(format_location("D:\\a.pdf", Some(1), None), "D:\\a.pdf (стр. 1)");
+    assert_eq!(
+        format_location("D:\\a.pdf", Some(1), None),
+        "D:\\a.pdf (стр. 1)"
+    );
     assert_eq!(
         format_location("D:\\a.wav", None, Some(65.0)),
         "D:\\a.wav [00:01:05]"

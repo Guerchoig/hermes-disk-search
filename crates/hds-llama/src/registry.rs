@@ -49,6 +49,8 @@ impl PlannedInstance {
 }
 
 /// Результат планирования одной роли.
+// `Ready` крупнее `Failed`; боксить ради второго варианта не стоит (горячий план).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum RolePlan {
     /// Роль готова к подъёму.
@@ -109,7 +111,6 @@ pub fn plan_strict(
         .map(|rc| plan_role(config, rc, runtime_root, devices))
         .collect()
 }
-
 
 /// План одной роли.
 fn plan_role(

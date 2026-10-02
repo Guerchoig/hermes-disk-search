@@ -172,4 +172,3 @@ fn content_hash_matches_50_real_files() {
         "хэш расходится с Python — переиндексация БД недопустима"
     );
 }
-

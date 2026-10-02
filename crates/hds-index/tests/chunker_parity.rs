@@ -136,7 +136,10 @@ fn chunker_matches_golden() {
         })
         .collect();
     entries.sort();
-    assert!(!entries.is_empty(), "в golden нет ни одного *.segments.json");
+    assert!(
+        !entries.is_empty(),
+        "в golden нет ни одного *.segments.json"
+    );
 
     let mut checked_chunks = 0usize;
     let mut failures: Vec<String> = Vec::new();
@@ -221,4 +224,3 @@ fn chunker_matches_golden() {
     assert!(checked_chunks > 0, "ни одного чанка не сверено");
     println!("всего чанков сверено: {checked_chunks}");
 }
-

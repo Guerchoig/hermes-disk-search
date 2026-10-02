@@ -243,8 +243,7 @@ pub fn plan_query(
             "роль '{}' уже загружена ({}): новая VRAM не нужна (свободно {})",
             demand.role,
             state::name(inst.state),
-            free
-                .map(|f| format!("{f} МиБ"))
+            free.map(|f| format!("{f} МиБ"))
                 .unwrap_or_else(|| "неизвестно".to_string())
         ));
         return plan;
@@ -292,7 +291,9 @@ pub fn plan_query(
             plan.verdict = Verdict::NotEnough {
                 short_mib: total - free_u,
             };
-            plan.actions.push(Action::ReportShortage { message: msg.clone() });
+            plan.actions.push(Action::ReportShortage {
+                message: msg.clone(),
+            });
             plan.notes.push(msg);
             plan.notes
                 .push("роль не загружаем: решение за оператором (gpu.policy: manual)".to_string());
@@ -309,7 +310,9 @@ pub fn plan_query(
             plan.verdict = Verdict::NotEnough {
                 short_mib: total - free_u,
             };
-            plan.actions.push(Action::ReportShortage { message: msg.clone() });
+            plan.actions.push(Action::ReportShortage {
+                message: msg.clone(),
+            });
             plan.notes.push(msg);
             plan.notes.push(
                 "запрос ждёт: сейчас приоритет у индексации (gpu.policy: indexing_priority)"
@@ -370,7 +373,9 @@ pub fn plan_query(
                 plan.verdict = Verdict::NotEnough {
                     short_mib: total - (free_u + freed),
                 };
-                plan.actions.push(Action::ReportShortage { message: msg.clone() });
+                plan.actions.push(Action::ReportShortage {
+                    message: msg.clone(),
+                });
                 plan.notes.push(msg);
                 plan.notes.push(
                     "вытеснено всё, что можно (занятые и чужие инстансы не трогаем)".to_string(),
@@ -421,7 +426,7 @@ impl Action {
 }
 
 /// Итог решения — по нему `llm-host`/UI понимают, обслуживать запрос или нет.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Verdict {
     /// Свободной VRAM достаточно сразу.
     Fits,
@@ -430,6 +435,7 @@ pub enum Verdict {
     /// Не хватает: в действиях есть [`Action::ReportShortage`] с точными цифрами.
     NotEnough { short_mib: u64 },
     /// Замера свободной VRAM нет — решаем без гарантий (но это видно в отчёте).
+    #[default]
     Unknown,
 }
 
@@ -445,12 +451,6 @@ impl Verdict {
 
     pub fn is_ok(&self) -> bool {
         matches!(self, Verdict::Fits | Verdict::FitsAfterEviction)
-    }
-}
-
-impl Default for Verdict {
-    fn default() -> Self {
-        Verdict::Unknown
     }
 }
 
@@ -578,7 +578,9 @@ pub fn plan_indexing(
         plan.verdict = Verdict::NotEnough {
             short_mib: total - free_u,
         };
-        plan.actions.push(Action::ReportShortage { message: msg.clone() });
+        plan.actions.push(Action::ReportShortage {
+            message: msg.clone(),
+        });
         plan.notes.push(msg);
         return plan;
     }
@@ -616,11 +618,12 @@ pub fn plan_indexing(
         plan.verdict = Verdict::NotEnough {
             short_mib: total - (free_u + freed),
         };
-        plan.actions.push(Action::ReportShortage { message: msg.clone() });
+        plan.actions.push(Action::ReportShortage {
+            message: msg.clone(),
+        });
         plan.notes.push(msg);
-        plan.notes.push(
-            "индексация продолжится без этой роли (или на CPU), паузу не ставим".to_string(),
-        );
+        plan.notes
+            .push("индексация продолжится без этой роли (или на CPU), паузу не ставим".to_string());
     }
     plan
 }
@@ -757,7 +760,9 @@ pub fn apply(cluster: &Cluster, pause: &Arc<IndexPause>, plan: &Plan) -> Vec<Str
                                 "роль '{role}': load_instance отправлен (при LOAD_ON_DEMAND \
                                  достаточно самого запроса)"
                             )),
-                            Err(e) => log.push(format!("роль '{role}': load_instance не удался: {e}")),
+                            Err(e) => {
+                                log.push(format!("роль '{role}': load_instance не удался: {e}"))
+                            }
                         }
                     }
                 }

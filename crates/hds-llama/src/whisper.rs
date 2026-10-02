@@ -99,7 +99,12 @@ pub struct Whisper {
 
 impl Whisper {
     /// Собрать транскрибатор: создаёт **постоянный** bridge (audio-only) для роли whisper.
-    pub fn new(bridge_audio: BridgeAudio, model: &Path, gpu: i32, n_gpu_layers: i32) -> Result<Self> {
+    pub fn new(
+        bridge_audio: BridgeAudio,
+        model: &Path,
+        gpu: i32,
+        n_gpu_layers: i32,
+    ) -> Result<Self> {
         let bridge = bridge_audio.create(None, Some(gpu), n_gpu_layers)?;
         Ok(Whisper {
             bridge,

@@ -8,8 +8,8 @@ use serde_json::json;
 
 use hds_llama::facade::{
     build_chat_request, build_prompt, chat_response_json, default_port, error_json, health_json,
-    models_json, not_found_json, props_json, reasoning_flags, route, strip_think,
-    validate_embeddings, validate_rerank, thinking_for, ChatRequest, Route, Thinking, Usage,
+    models_json, not_found_json, props_json, reasoning_flags, route, strip_think, thinking_for,
+    validate_embeddings, validate_rerank, ChatRequest, Route, Thinking, Usage,
 };
 
 /// Порты совпадают с `llama-server` — клиенты (UI, MCP, внешние агенты) не меняются.
@@ -32,11 +32,21 @@ fn routing_matches_llama_server_paths() {
     assert_eq!(route("POST", "/chat/completions"), Route::Chat);
     assert_eq!(route("POST", "/v1/embeddings"), Route::Embeddings);
     assert_eq!(route("POST", "/v1/rerank"), Route::Rerank);
-    assert_eq!(route("GET", "/v1/chat/completions"), Route::NotFound, "нужен POST");
+    assert_eq!(
+        route("GET", "/v1/chat/completions"),
+        Route::NotFound,
+        "нужен POST"
+    );
     assert_eq!(route("POST", "/v1/unknown"), Route::NotFound);
     // W3: внутренняя транскрибация через владельца
-    assert_eq!(route("POST", "/internal/transcribe"), Route::InternalTranscribe);
-    assert_eq!(route("POST", "/v1/internal/transcribe"), Route::InternalTranscribe);
+    assert_eq!(
+        route("POST", "/internal/transcribe"),
+        Route::InternalTranscribe
+    );
+    assert_eq!(
+        route("POST", "/v1/internal/transcribe"),
+        Route::InternalTranscribe
+    );
     assert!(Route::InternalTranscribe.is_internal());
     assert!(Route::InternalTranscribe.needs_body());
     assert_eq!(Route::Chat.role(), Some("chat"));
@@ -51,15 +61,24 @@ fn routing_matches_llama_server_paths() {
 fn thinking_precedence_follows_body_then_alias_then_config() {
     // 1. `chat_template_kwargs.enable_thinking` — так выключает размышления Python-версия
     let body = json!({"chat_template_kwargs": {"enable_thinking": false}, "reasoning": "on"});
-    assert_eq!(thinking_for("chat-think", &body, Thinking::On), Thinking::Off);
+    assert_eq!(
+        thinking_for("chat-think", &body, Thinking::On),
+        Thinking::Off
+    );
     let body = json!({"chat_template_kwargs": {"enable_thinking": true}});
     assert_eq!(thinking_for("chat", &body, Thinking::Off), Thinking::On);
     // 2. поле `reasoning` (llama-server-совместимое)
     let body = json!({"reasoning": "auto"});
     assert_eq!(thinking_for("chat", &body, Thinking::Off), Thinking::Auto);
     // 3. алиас `chat-think`
-    assert_eq!(thinking_for("chat-think", &json!({}), Thinking::Off), Thinking::On);
-    assert_eq!(thinking_for("chat", &json!({}), Thinking::Off), Thinking::Off);
+    assert_eq!(
+        thinking_for("chat-think", &json!({}), Thinking::Off),
+        Thinking::On
+    );
+    assert_eq!(
+        thinking_for("chat", &json!({}), Thinking::Off),
+        Thinking::Off
+    );
     // 4. значение из конфига
     assert_eq!(thinking_for("chat", &json!({}), Thinking::On), Thinking::On);
 }
@@ -172,7 +191,9 @@ fn chat_response_shape_is_openai_compatible() {
     assert_eq!(v["usage"]["prompt_tokens"], 56);
     assert_eq!(v["usage"]["completion_tokens"], 2);
     assert_eq!(v["usage"]["total_tokens"], 58);
-    assert!(v["choices"][0]["message"].get("reasoning_content").is_none());
+    assert!(v["choices"][0]["message"]
+        .get("reasoning_content")
+        .is_none());
 
     // chat-think: размышления видны и в content, и в reasoning_content
     let v = chat_response_json("chat-think", &with_think, Thinking::On, Usage::default());
@@ -191,7 +212,10 @@ fn chat_response_shape_is_openai_compatible() {
 #[test]
 fn reasoning_flags_map_to_engine_contract() {
     assert_eq!(reasoning_flags(Thinking::Off), Some(("off", 0, None)));
-    assert_eq!(reasoning_flags(Thinking::On), Some(("on", -1, Some("none"))));
+    assert_eq!(
+        reasoning_flags(Thinking::On),
+        Some(("on", -1, Some("none")))
+    );
     assert_eq!(reasoning_flags(Thinking::Auto), None);
 }
 
@@ -199,16 +223,28 @@ fn reasoning_flags_map_to_engine_contract() {
 /// а UI показывает фактический контекст (`props_context`).
 #[test]
 fn props_shape_is_what_python_probe_expects() {
-    let v = props_json("chat", "C:\\llama-runtime\\models\\chat\\qwen.gguf", 32768, 1, "chat");
+    let v = props_json(
+        "chat",
+        "C:\\llama-runtime\\models\\chat\\qwen.gguf",
+        32768,
+        1,
+        "chat",
+    );
     assert_eq!(v["total_slots"], 1, "иначе probe вернёт FOREIGN");
-    assert_eq!(v["model_path"], "C:\\llama-runtime\\models\\chat\\qwen.gguf");
+    assert_eq!(
+        v["model_path"],
+        "C:\\llama-runtime\\models\\chat\\qwen.gguf"
+    );
     assert_eq!(v["default_generation_settings"]["n_ctx"], 32768);
     assert_eq!(v["n_ctx"], 32768);
     assert_eq!(v["alias"], "chat");
 
     assert_eq!(health_json()["status"], "ok");
 
-    let m = models_json(&["chat".to_string(), "chat-think".to_string()], 1_700_000_000);
+    let m = models_json(
+        &["chat".to_string(), "chat-think".to_string()],
+        1_700_000_000,
+    );
     assert_eq!(m["object"], "list");
     assert_eq!(m["data"][0]["id"], "chat");
     assert_eq!(m["data"][1]["id"], "chat-think");
@@ -236,6 +272,8 @@ fn engine_responses_are_validated() {
     let ok = r#"{"results":[{"index":0,"relevance_score":0.9}]}"#;
     assert!(validate_rerank(ok).is_ok());
     let bad = r#"{"data":[]}"#;
-    assert!(validate_rerank(bad).unwrap_err().to_string().contains("results"));
+    assert!(validate_rerank(bad)
+        .unwrap_err()
+        .to_string()
+        .contains("results"));
 }
-

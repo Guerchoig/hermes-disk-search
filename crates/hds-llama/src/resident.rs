@@ -88,8 +88,9 @@ impl PidFile {
     pub fn acquire(path: impl Into<PathBuf>) -> Result<PidFile> {
         let path = path.into();
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| EngineError::Other(format!("не удалось создать {}: {e}", dir.display())))?;
+            std::fs::create_dir_all(dir).map_err(|e| {
+                EngineError::Other(format!("не удалось создать {}: {e}", dir.display()))
+            })?;
         }
         let pid = std::process::id();
         for _ in 0..ACQUIRE_ATTEMPTS {

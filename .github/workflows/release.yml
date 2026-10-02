@@ -75,7 +75,7 @@ jobs:
           PYTHONIOENCODING: utf-8
         run: python3 -m unittest discover -s tests -v
 
-  # ---------- Rust: tests + lint (informative clippy; -D warnings is W5) ----------
+  # ---------- Rust: tests + lint (blocking: fmt/clippy -D warnings) ----------
   test-rust:
     runs-on: ubuntu-latest
     steps:
@@ -83,12 +83,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: clippy (информативно; -D warnings - задача W5)
-        run: cargo clippy --workspace --all-targets
+      - name: Форматирование (cargo fmt --check)
+        run: cargo fmt --all -- --check
+
+      - name: clippy (блокирующий, -D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Тесты Rust
         run: cargo test --workspace

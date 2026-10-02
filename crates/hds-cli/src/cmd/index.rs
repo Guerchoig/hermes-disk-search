@@ -7,7 +7,9 @@
 use hds_core::config::project_root;
 use hds_index::pipeline::{run_index, RunIndexArgs};
 
-use crate::support::{build_embedder, build_media_extractor, build_sidecar, open_conn, parse_kinds, parse_roots};
+use crate::support::{
+    build_embedder, build_media_extractor, build_sidecar, open_conn, parse_kinds, parse_roots,
+};
 
 /// Аргументы `hds index` (порт набора флагов `cmd_index`).
 #[derive(Debug, Clone)]
@@ -41,7 +43,9 @@ pub fn cmd_index(o: IndexOpts) -> i32 {
     };
     if let Some(k) = &o.kinds {
         if parse_kinds(k).is_some() {
-            println!("[warn] --kinds пока не применяется run_index (Rust B4): фильтр проигнорирован.");
+            println!(
+                "[warn] --kinds пока не применяется run_index (Rust B4): фильтр проигнорирован."
+            );
         }
     }
     let conn = match open_conn(&cfg) {
@@ -70,7 +74,14 @@ pub fn cmd_index(o: IndexOpts) -> i32 {
         progress_sec: o.progress_sec,
         quiet: o.quiet,
     };
-    let res = run_index(&conn, &cfg, &emb, &build_media_extractor(&cfg, &sidecar), &sidecar, &args);
+    let res = run_index(
+        &conn,
+        &cfg,
+        &emb,
+        &build_media_extractor(&cfg, &sidecar),
+        &sidecar,
+        &args,
+    );
     sidecar.shutdown();
     match res {
         Ok(_) => 0,

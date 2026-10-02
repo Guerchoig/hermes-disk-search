@@ -24,7 +24,8 @@ fn last_sent_end(chars: &[char], from: usize, to: usize) -> Option<usize> {
         let c = chars[i];
         if c == '\n' {
             last = Some(i + 1);
-        } else if matches!(c, '.' | '!' | '?' | '…') && i + 1 < to && chars[i + 1].is_whitespace() {
+        } else if matches!(c, '.' | '!' | '?' | '…') && i + 1 < to && chars[i + 1].is_whitespace()
+        {
             last = Some(i + 2);
         }
         i += 1;

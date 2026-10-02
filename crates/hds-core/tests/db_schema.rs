@@ -19,7 +19,9 @@ fn tmp_db(tag: &str) -> PathBuf {
 }
 
 fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 #[test]
@@ -69,11 +71,16 @@ fn pragmas_objects_and_vec0_match_python() {
         "idx_files_status",
         "idx_chunks_file",
     ] {
-        assert!(names.iter().any(|n| n == want), "нет объекта {want}: {names:?}");
+        assert!(
+            names.iter().any(|n| n == want),
+            "нет объекта {want}: {names:?}"
+        );
     }
 
     let dim: String = conn
-        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| r.get(0))
+        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(dim, "1024", "meta.vec_dim");
 }
@@ -86,9 +93,14 @@ fn second_connect_keeps_vec_table_and_dim() {
         db::upsert_file(&conn, "D:/x/a.txt", ".txt", "text", 10, 1.0, Some("h")).unwrap();
     }
     let conn = db::connect(&p, 1024).expect("connect #2");
-    assert!(db::has_vec(&conn), "chunks_vec не должен пропасть при повторном connect");
+    assert!(
+        db::has_vec(&conn),
+        "chunks_vec не должен пропасть при повторном connect"
+    );
     let dim: String = conn
-        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| r.get(0))
+        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(dim, "1024");
     let files: i64 = conn

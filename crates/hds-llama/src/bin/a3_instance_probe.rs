@@ -85,9 +85,11 @@ fn parse_args() -> std::result::Result<Args, String> {
                     .map_err(|e| format!("--texts: {e}"))?
             }
             "--help" | "-h" => {
-                return Err("использование: a3_instance_probe (--hold SEC | --list | --call NAME) \
+                return Err(
+                    "использование: a3_instance_probe (--hold SEC | --list | --call NAME) \
                             [--name NAME] [--model GGUF] [--engine-dir DIR]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -116,7 +118,11 @@ fn run() -> Result<()> {
     args.model = absolutize(&args.model);
 
     let engine = Engine::open(args.engine_dir.as_deref())?;
-    println!("[pid {}] движок: {}", std::process::id(), engine.dir().display());
+    println!(
+        "[pid {}] движок: {}",
+        std::process::id(),
+        engine.dir().display()
+    );
     let _cwd = engine.activate()?;
     let cluster = engine.create_cluster()?;
     let devices = cluster.devices()?;
@@ -173,7 +179,9 @@ fn run() -> Result<()> {
                             out.metrics.request_total_ms
                         );
                     }
-                    Err(e) => println!("[pid {}] embeddings вернул ошибку: {e}", std::process::id()),
+                    Err(e) => {
+                        println!("[pid {}] embeddings вернул ошибку: {e}", std::process::id())
+                    }
                 }
                 Ok(())
             }
@@ -212,4 +220,3 @@ fn run() -> Result<()> {
         Ok(())
     }
 }
-

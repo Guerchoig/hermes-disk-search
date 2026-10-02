@@ -65,4 +65,3 @@ pub fn cmd_clip_index() -> i32 {
     );
     0
 }
-

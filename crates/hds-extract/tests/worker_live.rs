@@ -33,9 +33,14 @@ fn spawn() -> Option<Worker> {
     match Worker::spawn(cfg) {
         Ok(w) => Some(w),
         Err(e) => {
-            let log = std::fs::read_to_string(std::env::temp_dir().join("hds-extract-worker.err.log"))
-                .unwrap_or_default();
-            println!("пропуск: воркер не запустился: {}\nstderr: {}", e.message(), log);
+            let log =
+                std::fs::read_to_string(std::env::temp_dir().join("hds-extract-worker.err.log"))
+                    .unwrap_or_default();
+            println!(
+                "пропуск: воркер не запустился: {}\nstderr: {}",
+                e.message(),
+                log
+            );
             None
         }
     }
@@ -48,8 +53,14 @@ fn worker_hello_extract_normalize_shutdown() {
         None => return,
     };
     assert_eq!(w.capabilities().protocol, 1);
-    assert!(w.capabilities().has("text"), "text должен быть в возможностях");
-    assert!(w.capabilities().has("normalize"), "normalize должен быть (pymorphy3)");
+    assert!(
+        w.capabilities().has("text"),
+        "text должен быть в возможностях"
+    );
+    assert!(
+        w.capabilities().has("normalize"),
+        "normalize должен быть (pymorphy3)"
+    );
     assert!(w.pid() > 0);
 
     // extract: md-фикстура → kind text, есть сегменты
@@ -107,6 +118,9 @@ fn worker_restart_after_max_requests() {
     let pid1 = w.pid();
     let _ = w.normalize(&["тест".to_string()]).unwrap();
     let pid2 = w.pid();
-    assert_ne!(pid1, pid2, "после max_requests воркер должен перезапуститься");
+    assert_ne!(
+        pid1, pid2,
+        "после max_requests воркер должен перезапуститься"
+    );
     w.shutdown();
 }

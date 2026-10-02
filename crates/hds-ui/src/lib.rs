@@ -70,7 +70,12 @@ fn body_list(body: &str, key: &str) -> Vec<String> {
     serde_json::from_str::<Value>(body)
         .ok()
         .and_then(|v| v.get(key).and_then(|a| a.as_array()).cloned())
-        .map(|arr| arr.iter().filter_map(|x| x.as_str()).map(|s| s.to_string()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -89,7 +94,9 @@ pub fn qp(query: &str, key: &str) -> Option<String> {
 }
 
 fn connect(cfg: &Config) -> Result<rusqlite::Connection, String> {
-    let dim = dig(cfg, "embedding.dim").and_then(|v| v.as_i64()).unwrap_or(1024);
+    let dim = dig(cfg, "embedding.dim")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1024);
     db::connect(&db_abs_path(cfg), dim).map_err(|e| e.message())
 }
 
@@ -112,8 +119,7 @@ pub fn status_json() -> Value {
         Ok(c) => c,
         Err(e) => return json!({ "error": e.message() }),
     };
-    let mut index =
-        json!({ "running": index_running(), "paused": project_root().join("index.pause").exists() });
+    let mut index = json!({ "running": index_running(), "paused": project_root().join("index.pause").exists() });
     if let Ok(conn) = connect(&cfg) {
         if let Ok(st) = db::stats(&conn) {
             index["chunks"] = json!(st.chunks);
@@ -156,7 +162,13 @@ fn csrf_ok(h: &ReqHeaders) -> bool {
     let ctype_ok = h
         .content_type
         .as_deref()
-        .map(|c| c.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("application/json"))
+        .map(|c| {
+            c.split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .eq_ignore_ascii_case("application/json")
+        })
         .unwrap_or(false);
     let marker_ok = h.x_hds_ui.as_deref() == Some("1");
     origin_ok && (ctype_ok || marker_ok)
@@ -170,7 +182,9 @@ fn csrf_ok(h: &ReqHeaders) -> bool {
 pub fn diagnostics_json() -> Value {
     let mut checks: Vec<Value> = match run_cli_check() {
         Ok(v) => v,
-        Err(msg) => vec![json!({ "id": "check", "status": "warn", "title": "hds check", "msg": msg })],
+        Err(msg) => {
+            vec![json!({ "id": "check", "status": "warn", "title": "hds check", "msg": msg })]
+        }
     };
 
     if let Ok(cfg) = load() {
@@ -204,10 +218,12 @@ fn run_cli_check() -> Result<Vec<Value>, String> {
         .output()
         .map_err(|e| format!("запуск {}: {e}", cand.display()))?;
     let text = String::from_utf8_lossy(&out.stdout);
-    let v: Value = serde_json::from_str(text.trim())
-        .map_err(|e| format!("разбор `check --json`: {e}"))?;
+    let v: Value =
+        serde_json::from_str(text.trim()).map_err(|e| format!("разбор `check --json`: {e}"))?;
     if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
-        return Ok(vec![json!({ "id": "config", "status": "fail", "title": "config.yaml", "msg": err })]);
+        return Ok(vec![
+            json!({ "id": "config", "status": "fail", "title": "config.yaml", "msg": err }),
+        ]);
     }
     Ok(v.get("checks")
         .and_then(|c| c.as_array())
@@ -292,7 +308,15 @@ pub fn search_json(query: &str, limit: i64, kinds: &str) -> Value {
         }
     };
     let lim = limit.clamp(1, 30) as usize;
-    let res = hds_search::search(&conn, Some(&emb), &side, &cfg, query, kinds_v.as_deref(), lim);
+    let res = hds_search::search(
+        &conn,
+        Some(&emb),
+        &side,
+        &cfg,
+        query,
+        kinds_v.as_deref(),
+        lim,
+    );
     side.shutdown();
     Value::Array(
         res.iter()
@@ -377,7 +401,6 @@ fn run_index_bg(full: bool) -> Result<(), String> {
     r.map(|_| ()).map_err(|e| e.message())
 }
 
-
 /// Маршрутизация (чистая функция — тестируется без сокетов).
 ///
 /// `path` — без query; `query` — часть после `?`; `h` — заголовки; `body` — тело POST.
@@ -388,13 +411,20 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             (200, "text/html; charset=utf-8", page::PAGE.to_string())
         }
         ("GET", "/api/status") => json_ok(status_json()),
-        ("GET", "/api/tree") => json_ok(tree::tree_json(qp(query, "walk").is_some(), qp(query, "refresh").is_some())),
+        ("GET", "/api/tree") => json_ok(tree::tree_json(
+            qp(query, "walk").is_some(),
+            qp(query, "refresh").is_some(),
+        )),
         ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
         ("GET", "/api/config") => json_ok(config_edit::get_config()),
         ("GET", "/api/search") => {
             let q = qp(query, "q").unwrap_or_default();
             if q.trim().is_empty() {
-                return (400, "application/json", json!({ "error": "нет параметра q" }).to_string());
+                return (
+                    400,
+                    "application/json",
+                    json!({ "error": "нет параметра q" }).to_string(),
+                );
             }
             let limit = qp(query, "limit").and_then(|v| v.parse().ok()).unwrap_or(8);
             let kinds = qp(query, "kinds").unwrap_or_default();
@@ -403,7 +433,11 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
         ("GET", "/api/ask") => {
             let q = qp(query, "q").unwrap_or_default();
             if q.trim().is_empty() {
-                return (400, "application/json", json!({ "error": "нет параметра q" }).to_string());
+                return (
+                    400,
+                    "application/json",
+                    json!({ "error": "нет параметра q" }).to_string(),
+                );
             }
             json_ok(ask_json(&q))
         }
@@ -417,7 +451,9 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             }
             match p {
                 "/api/index/start" => {
-                    let full = qp(query, "full").map(|v| v == "1" || v == "true").unwrap_or(false);
+                    let full = qp(query, "full")
+                        .map(|v| v == "1" || v == "true")
+                        .unwrap_or(false);
                     json_ok(index_action("start", full))
                 }
                 "/api/index/stop" => json_ok(index_action("stop", false)),
@@ -431,7 +467,11 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                     let paths = body_list(body, "paths");
                     json_ok(config_edit::set_exclude_paths(&paths))
                 }
-                _ => (404, "application/json", json!({ "error": "not found", "path": path }).to_string()),
+                _ => (
+                    404,
+                    "application/json",
+                    json!({ "error": "not found", "path": path }).to_string(),
+                ),
             }
         }
         _ => (
@@ -492,7 +532,13 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Some((method, path, query, h, String::from_utf8_lossy(&body).into_owned()))
+    Some((
+        method,
+        path,
+        query,
+        h,
+        String::from_utf8_lossy(&body).into_owned(),
+    ))
 }
 
 fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
@@ -529,4 +575,3 @@ pub fn run_http(host: &str, port: u16) -> Result<(), String> {
     }
     Ok(())
 }
-

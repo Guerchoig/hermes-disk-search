@@ -140,7 +140,6 @@ pub fn route(method: &str, path: &str) -> Route {
     }
 }
 
-
 /// Режим размышлений (план §11.4): `off` → движок форсирует `reasoning_budget = 0`,
 /// `on` → `reasoning_budget = -1` и видимый формат (`reasoning_format = none`),
 /// `auto` → решение за шаблоном модели (флаги не отправляем).
@@ -340,7 +339,11 @@ pub fn build_chat_request(
     default_max_tokens: i32,
     default_temperature: f32,
 ) -> Result<ChatRequest> {
-    if body.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Err(EngineError::Other(
             "stream=true не поддерживается фасадом: cluster chat API отдаёт ответ целиком, \
              клиент получит обычный JSON"
@@ -487,7 +490,9 @@ pub fn validate_embeddings(engine_json: &str) -> Result<Value> {
         EngineError::Other(format!("ответ эмбеддингов не JSON ({e}): {engine_json}"))
     })?;
     let data = v.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
-        EngineError::Other(format!("в ответе эмбеддингов нет массива data: {engine_json}"))
+        EngineError::Other(format!(
+            "в ответе эмбеддингов нет массива data: {engine_json}"
+        ))
     })?;
     let with_vec = data
         .iter()
@@ -503,9 +508,8 @@ pub fn validate_embeddings(engine_json: &str) -> Result<Value> {
 
 /// Проверить и вернуть JSON реранка (`results[]`, как у `llama-server`).
 pub fn validate_rerank(engine_json: &str) -> Result<Value> {
-    let v: Value = serde_json::from_str(engine_json).map_err(|e| {
-        EngineError::Other(format!("ответ реранка не JSON ({e}): {engine_json}"))
-    })?;
+    let v: Value = serde_json::from_str(engine_json)
+        .map_err(|e| EngineError::Other(format!("ответ реранка не JSON ({e}): {engine_json}")))?;
     if v.get("results").and_then(|r| r.as_array()).is_none() {
         return Err(EngineError::Other(format!(
             "в ответе реранка нет массива results: {engine_json}"
@@ -636,7 +640,6 @@ impl Default for ServerConfig {
     }
 }
 
-
 impl ServerConfig {
     pub fn port_of(&self, role: &str) -> Option<u16> {
         self.ports.iter().find(|(r, _)| r == role).map(|(_, p)| *p)
@@ -721,7 +724,11 @@ fn handle_internal(
                 Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
             }
         }
-        _ => Response::error(400, "маршрут не является внутренним", "invalid_request_error"),
+        _ => Response::error(
+            400,
+            "маршрут не является внутренним",
+            "invalid_request_error",
+        ),
     }
 }
 
@@ -736,9 +743,7 @@ fn internal_role(req: &crate::http::Request) -> Result<String> {
         .and_then(|r| r.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            crate::error::EngineError::Other("в теле запроса нет поля role".to_string())
-        })
+        .ok_or_else(|| crate::error::EngineError::Other("в теле запроса нет поля role".to_string()))
 }
 
 /// Ответ внешнего владельца **как есть** (режим `llm_server.mode: facade`).
@@ -766,7 +771,11 @@ fn proxy(req: &crate::http::Request, base: &str, r: Route) -> crate::http::Respo
                 .and_then(|m| m.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("upstream {url} ответил статусом {status}"));
-            Response::error(if status == 404 { 502 } else { status }, &msg, "server_error")
+            Response::error(
+                if status == 404 { 502 } else { status },
+                &msg,
+                "server_error",
+            )
         }
         Err(e) => Response::error(
             503,
@@ -813,9 +822,15 @@ pub fn handle(
         Route::Props => match props_role(cfg, backend) {
             Some((role, props)) => Response::ok(props_json(
                 &role,
-                props.get("model_path").and_then(|v| v.as_str()).unwrap_or(""),
+                props
+                    .get("model_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(""),
                 props.get("n_ctx").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
-                props.get("total_slots").and_then(|v| v.as_i64()).unwrap_or(1) as i32,
+                props
+                    .get("total_slots")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(1) as i32,
                 &cfg.aliases_of(&role)
                     .first()
                     .cloned()
@@ -832,11 +847,11 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
             };
-            let cr =
-                match build_chat_request(&body, cfg.thinking, cfg.max_tokens, cfg.temperature) {
-                    Ok(r) => r,
-                    Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
-                };
+            let cr = match build_chat_request(&body, cfg.thinking, cfg.max_tokens, cfg.temperature)
+            {
+                Ok(r) => r,
+                Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
+            };
             match backend.chat(&cr) {
                 Ok((text, usage)) => {
                     Response::ok(chat_response_json(&cr.model, &text, cr.thinking, usage))
@@ -911,4 +926,3 @@ pub fn serve(
     }
     Ok(handles)
 }
-

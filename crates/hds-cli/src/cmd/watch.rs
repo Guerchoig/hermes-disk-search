@@ -5,7 +5,9 @@
 use hds_core::config::project_root;
 use hds_index::run_watch;
 
-use crate::support::{build_embedder, build_media_extractor, build_sidecar, open_conn, parse_roots};
+use crate::support::{
+    build_embedder, build_media_extractor, build_sidecar, open_conn, parse_roots,
+};
 
 /// `cmd_watch(roots)`: `--roots a;b` или `index.roots`; возвращает код `run_watch`.
 pub fn cmd_watch(roots: Option<String>) -> i32 {
@@ -33,7 +35,14 @@ pub fn cmd_watch(roots: Option<String>) -> i32 {
         }
     };
     let r = roots.map(|s| parse_roots(&s)).filter(|v| !v.is_empty());
-    let res = run_watch(&conn, &cfg, &emb, &build_media_extractor(&cfg, &sidecar), &sidecar, r);
+    let res = run_watch(
+        &conn,
+        &cfg,
+        &emb,
+        &build_media_extractor(&cfg, &sidecar),
+        &sidecar,
+        r,
+    );
     sidecar.shutdown();
     match res {
         Ok(code) => code,

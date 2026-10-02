@@ -70,9 +70,12 @@ static VEC_INIT: Once = Once::new();
 /// Ловушка (спайк 1, `tools/parity/spikes/tests/spike1_db.rs`): прямой вызов
 /// `sqlite_vec::sqlite3_vec_init()` модуль vec0 не регистрирует; работает только
 /// auto-extension с `transmute`.
+// Типы fn-указателей sqlite-vec и rusqlite номинально разные; аннотацию опускаем
+// осознанно — приём документирован sqlite-vec (см. спайк 1).
+#[allow(clippy::missing_transmute_annotations)]
 pub fn register_vec0() {
     VEC_INIT.call_once(|| unsafe {
-        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute(
+        rusqlite::ffi::sqlite3_auto_extension(Some(std::mem::transmute::<*const (), _>(
             sqlite_vec::sqlite3_vec_init as *const (),
         )));
     });
@@ -128,7 +131,9 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
         [],
     )?;
     let stored_dim: Option<String> = conn
-        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| r.get(0))
+        .query_row("SELECT value FROM meta WHERE key='vec_dim'", [], |r| {
+            r.get(0)
+        })
         .optional()?;
     let want = dim.to_string();
     let mut mismatch = stored_dim.as_deref() != Some(want.as_str());
@@ -181,7 +186,10 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
              WHERE status='indexed' AND indexed_at IS NULL",
             [],
         )?;
-        println!("[db] indexed_at заполнен по mtime для {} старых записей", old);
+        println!(
+            "[db] indexed_at заполнен по mtime для {} старых записей",
+            old
+        );
     }
 
     if stored_dim.as_deref() != Some(want.as_str()) {
@@ -241,7 +249,11 @@ impl FileRow {
 /// Порт `db.get_file_by_path`.
 pub fn get_file_by_path(conn: &Connection, path: &str) -> Result<Option<FileRow>> {
     Ok(conn
-        .query_row("SELECT * FROM files WHERE path=?1", [path], FileRow::from_row)
+        .query_row(
+            "SELECT * FROM files WHERE path=?1",
+            [path],
+            FileRow::from_row,
+        )
         .optional()?)
 }
 
@@ -325,6 +337,8 @@ pub fn remove_path(conn: &Connection, path: &str) -> Result<bool> {
 /// Лемматизация вынесена наружу (Python зовёт `lemmatizer.normalize` внутри
 /// `add_chunk`; здесь текст FTS передаётся параметром — за него отвечает
 /// `Lemmatizer` в `hds-index`, вариант A из `SPIKES.md` §10).
+// Дословный порт Python-сигнатуры (8 полей чанка) — аргументы не сворачиваем.
+#[allow(clippy::too_many_arguments)]
 pub fn add_chunk(
     conn: &Connection,
     file_id: i64,
@@ -426,7 +440,9 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
     let mut by_kind = Vec::new();
     {
         let mut st = conn.prepare("SELECT kind, COUNT(*) FROM files GROUP BY kind")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for r in rows {
             by_kind.push(r?);
         }
@@ -434,7 +450,9 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
     let mut by_status = Vec::new();
     {
         let mut st = conn.prepare("SELECT status, COUNT(*) FROM files GROUP BY status")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?)))?;
+        let rows = st.query_map([], |r| {
+            Ok((r.get::<_, Option<String>>(0)?, r.get::<_, i64>(1)?))
+        })?;
         for r in rows {
             by_status.push(r?);
         }
@@ -460,4 +478,3 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         errors,
     })
 }
-

@@ -26,11 +26,15 @@ fn reindex_fts_rebuilds_and_sets_meta() {
     assert_eq!(n, 2, "перестроены оба чанка");
 
     let t1: String = conn
-        .query_row("SELECT text FROM chunks_fts WHERE rowid=?1", [cid1], |r| r.get(0))
+        .query_row("SELECT text FROM chunks_fts WHERE rowid=?1", [cid1], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(t1, tokens_joined("Привет мир"));
     let t2: String = conn
-        .query_row("SELECT text FROM chunks_fts WHERE rowid=?1", [cid2], |r| r.get(0))
+        .query_row("SELECT text FROM chunks_fts WHERE rowid=?1", [cid2], |r| {
+            r.get(0)
+        })
         .unwrap();
     assert_eq!(t2, tokens_joined("second CHUNK"));
 

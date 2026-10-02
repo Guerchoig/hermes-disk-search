@@ -49,25 +49,16 @@ pub struct ClusterApi {
         *mut JsonResultRaw,
     ) -> i32,
     pub default_rerank_request: unsafe extern "C" fn() -> RerankRequestRaw,
-    pub rerank: unsafe extern "C" fn(
-        *mut ClusterRaw,
-        *const RerankRequestRaw,
-        *mut JsonResultRaw,
-    ) -> i32,
+    pub rerank:
+        unsafe extern "C" fn(*mut ClusterRaw, *const RerankRequestRaw, *mut JsonResultRaw) -> i32,
     pub default_audio_raw_request: unsafe extern "C" fn() -> AudioRawRequestRaw,
-    pub audio_transcriptions_raw: unsafe extern "C" fn(
-        *mut ClusterRaw,
-        *const AudioRawRequestRaw,
-        *mut JsonResultRaw,
-    ) -> i32,
+    pub audio_transcriptions_raw:
+        unsafe extern "C" fn(*mut ClusterRaw, *const AudioRawRequestRaw, *mut JsonResultRaw) -> i32,
     pub empty_json_result: unsafe extern "C" fn() -> JsonResultRaw,
     pub json_result_free: unsafe extern "C" fn(*mut JsonResultRaw),
     pub default_chat_request: unsafe extern "C" fn() -> ChatRequestRaw,
-    pub chat_complete: unsafe extern "C" fn(
-        *mut ClusterRaw,
-        *const ChatRequestRaw,
-        *mut ChatResultRaw,
-    ) -> i32,
+    pub chat_complete:
+        unsafe extern "C" fn(*mut ClusterRaw, *const ChatRequestRaw, *mut ChatResultRaw) -> i32,
     pub empty_chat_result: unsafe extern "C" fn() -> ChatResultRaw,
     pub chat_result_free: unsafe extern "C" fn(*mut ChatResultRaw),
     load_notes: Vec<String>,
@@ -108,7 +99,11 @@ impl ClusterApi {
             cluster_last_error: resolve(&lib, n, "llama_server_cluster_last_error")?,
             list_devices: resolve(&lib, n, "llama_server_cluster_list_devices")?,
             free_devices: resolve(&lib, n, "llama_server_cluster_free_devices")?,
-            default_instance_params: resolve(&lib, n, "llama_server_cluster_default_instance_params")?,
+            default_instance_params: resolve(
+                &lib,
+                n,
+                "llama_server_cluster_default_instance_params",
+            )?,
             create_instance: resolve(&lib, n, "llama_server_cluster_create_instance")?,
             find_instance_by_name: resolve(&lib, n, "llama_server_cluster_find_instance_by_name")?,
             remove_instance: resolve(&lib, n, "llama_server_cluster_remove_instance")?,
@@ -221,7 +216,10 @@ impl Engine {
                 "llama_server_cluster_create вернул NULL".into(),
             ));
         }
-        Ok(crate::cluster::Cluster::from_raw(Arc::clone(&self.api), raw))
+        Ok(crate::cluster::Cluster::from_raw(
+            Arc::clone(&self.api),
+            raw,
+        ))
     }
 
     /// Адрес непрозрачного указателя кластера (для отладочного вывода/логов).
@@ -304,12 +302,17 @@ pub fn prepare_dll_search_path(dir: &Path) -> Result<Vec<String>> {
 #[cfg(not(windows))]
 pub fn prepare_dll_search_path(_dir: &Path) -> Result<Vec<String>> {
     // macOS/Linux: зависимости разрешаются через @loader_path/rpath
-    Ok(vec!["@loader_path/rpath (спец-шага не требуется)".to_string()])
+    Ok(vec![
+        "@loader_path/rpath (спец-шага не требуется)".to_string()
+    ])
 }
 
 fn to_wide(p: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    p.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    p.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 /// Текст последней ошибки WinAPI вместе с кодом.
@@ -340,7 +343,10 @@ pub fn diagnose_load(dir: &Path) -> Vec<String> {
     let wide = to_wide(&lib);
     let modes: [(&str, u32); 4] = [
         ("flags=0 (libloading)", 0),
-        ("LOAD_WITH_ALTERED_SEARCH_PATH", LOAD_WITH_ALTERED_SEARCH_PATH),
+        (
+            "LOAD_WITH_ALTERED_SEARCH_PATH",
+            LOAD_WITH_ALTERED_SEARCH_PATH,
+        ),
         (
             "DLL_LOAD_DIR|DEFAULT_DIRS",
             LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
@@ -373,7 +379,6 @@ pub fn diagnose_load(dir: &Path) -> Vec<String> {
     )]
 }
 
-
 /// Удерживает каталог движка текущим (`std::env::current_dir`) и возвращает
 /// прежний при `Drop`.
 ///
@@ -389,8 +394,9 @@ pub struct EngineCwd {
 impl EngineCwd {
     /// Переключить текущий каталог на каталог движка.
     pub fn enter(dir: &Path) -> Result<EngineCwd> {
-        let prev = std::env::current_dir()
-            .map_err(|e| EngineError::Other(format!("не удалось прочитать текущий каталог: {e}")))?;
+        let prev = std::env::current_dir().map_err(|e| {
+            EngineError::Other(format!("не удалось прочитать текущий каталог: {e}"))
+        })?;
         std::env::set_current_dir(dir).map_err(|e| {
             EngineError::Other(format!(
                 "не удалось сделать текущим каталог движка {}: {e}",
@@ -425,9 +431,5 @@ pub(crate) fn cstr_or_empty(p: *const std::os::raw::c_char) -> String {
     if p.is_null() {
         return String::new();
     }
-    unsafe { CStr::from_ptr(p) }
-        .to_string_lossy()
-        .into_owned()
+    unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
 }
-
-

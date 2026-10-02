@@ -54,9 +54,7 @@ fn parse_args() -> std::result::Result<Args, String> {
                         .map_err(|e| format!("--port-base: {e}"))?,
                 )
             }
-            "--ngl" => {
-                host.ngl = Some(take("--ngl")?.parse().map_err(|e| format!("--ngl: {e}"))?)
-            }
+            "--ngl" => host.ngl = Some(take("--ngl")?.parse().map_err(|e| format!("--ngl: {e}"))?),
             "--thinking" => {
                 host.thinking = Some(Thinking::parse(&take("--thinking")?));
             }
@@ -80,11 +78,13 @@ fn parse_args() -> std::result::Result<Args, String> {
             }
             "--json" => json = Some(PathBuf::from(take("--json")?)),
             "--help" | "-h" => {
-                return Err("использование: llm_host_facade [--config FILE] [--runtime DIR] \
+                return Err(
+                    "использование: llm_host_facade [--config FILE] [--runtime DIR] \
                             [--engine-dir DIR] [--host HOST] [--port-base N] [--ngl N] \
                             [--thinking off|on|auto] [--dispatcher on|off] [--hold SEC] \
                             [--json FILE] [--residency] [--pid FILE] [--log FILE] [--no-internal]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }

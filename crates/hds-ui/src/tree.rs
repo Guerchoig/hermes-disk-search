@@ -47,7 +47,11 @@ impl Node {
 
 /// Обход корня: `<dir> -> (файлов, max mtime)` для файлов «известных» видов.
 /// Останавливается по `deadline` (возвращает `true`, если обход прерван).
-fn disk_index(root: &Path, excl: &HashSet<String>, deadline: std::time::Instant) -> (BTreeMap<PathBuf, (i64, f64)>, bool) {
+fn disk_index(
+    root: &Path,
+    excl: &HashSet<String>,
+    deadline: std::time::Instant,
+) -> (BTreeMap<PathBuf, (i64, f64)>, bool) {
     let mut out: BTreeMap<PathBuf, (i64, f64)> = BTreeMap::new();
     let walk = walkdir::WalkDir::new(root).into_iter().filter_entry(|e| {
         !e.file_type().is_dir() || !excl.contains(&e.file_name().to_string_lossy().to_lowercase())
@@ -68,7 +72,11 @@ fn disk_index(root: &Path, excl: &HashSet<String>, deadline: std::time::Instant)
         if hds_index::kinds::kind_of(&ext).is_none() {
             continue;
         }
-        let dir = entry.path().parent().map(Path::to_path_buf).unwrap_or_default();
+        let dir = entry
+            .path()
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
         let mtime = entry
             .metadata()
             .ok()
@@ -98,7 +106,10 @@ fn db_info(cfg: &hds_core::config::Config) -> HashMap<PathBuf, (i64, i64, f64)> 
                 ))
             }) {
                 for row in rows.flatten() {
-                    let dir = Path::new(&row.0).parent().map(Path::to_path_buf).unwrap_or_default();
+                    let dir = Path::new(&row.0)
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_default();
                     let e = info.entry(dir).or_insert((0, 0, 0.0));
                     e.0 += 1;
                     if row.1.as_deref() == Some("indexed") {
@@ -145,7 +156,6 @@ fn status_of(
     out
 }
 
-
 /// Рекурсивно собрать `Node` из карт узлов/детей (дети — по имени).
 fn materialize(
     path: &Path,
@@ -155,7 +165,10 @@ fn materialize(
     let base = nodes.get(path)?;
     let mut kids = children.get(path).cloned().unwrap_or_default();
     kids.sort_by_key(|p| p.to_string_lossy().to_lowercase());
-    let child_nodes = kids.iter().filter_map(|p| materialize(p, nodes, children)).collect();
+    let child_nodes = kids
+        .iter()
+        .filter_map(|p| materialize(p, nodes, children))
+        .collect();
     Some(Node {
         name: base.name.clone(),
         path: base.path.clone(),
@@ -214,10 +227,14 @@ fn build_root(root: &Path, st: &HashMap<PathBuf, (String, i64, i64)>) -> Option<
             name: if is_root {
                 d.to_string_lossy().into_owned()
             } else {
-                d.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
+                d.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
             },
             path: d.to_string_lossy().into_owned(),
-            status: info.map(|v| v.0.clone()).unwrap_or_else(|| "none".to_string()),
+            status: info
+                .map(|v| v.0.clone())
+                .unwrap_or_else(|| "none".to_string()),
             files: info.map(|v| v.1).unwrap_or(0),
             indexed: info.map(|v| v.2).unwrap_or(0),
             children: Vec::new(),
@@ -244,7 +261,10 @@ fn build_root(root: &Path, st: &HashMap<PathBuf, (String, i64, i64)>) -> Option<
     }
     for p in &needed {
         if let Some(par) = p.parent() {
-            children.entry(par.to_path_buf()).or_default().push(p.clone());
+            children
+                .entry(par.to_path_buf())
+                .or_default()
+                .push(p.clone());
         }
     }
     let mut node = materialize(root, &nodes, &children)?;
@@ -289,7 +309,12 @@ fn build_tree(walk: bool) -> Value {
     };
     let excl: HashSet<String> = dig(&cfg, "index.exclude_dirs")
         .and_then(|v| v.as_sequence())
-        .map(|seq| seq.iter().filter_map(|x| x.as_str()).map(|s| s.to_lowercase()).collect())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.to_lowercase())
+                .collect()
+        })
         .unwrap_or_default();
     let roots: Vec<PathBuf> = dig(&cfg, "index.roots")
         .and_then(|v| v.as_sequence())
@@ -334,7 +359,10 @@ fn build_tree(walk: bool) -> Value {
         } else {
             "partial"
         };
-        st.insert(d.clone(), (status.to_string(), if walk { dn } else { *tot }, *idx));
+        st.insert(
+            d.clone(),
+            (status.to_string(), if walk { dn } else { *tot }, *idx),
+        );
     }
     if walk {
         for (d, (dn, _m)) in &disk {
@@ -354,4 +382,3 @@ fn build_tree(walk: bool) -> Value {
         "truncated": truncated,
     })
 }
-

@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hds_core::config::{Config, project_root};
+use hds_core::config::{project_root, Config};
 use hds_core::db;
 use hds_core::error::{CoreError, Result};
 use hds_index::chunker::Segment;
@@ -56,9 +56,11 @@ fn incremental_on_copy_of_prod_db() {
 
     let conn = db::connect(&copy, 1024).unwrap();
     let dim: i64 = conn
-        .query_row("SELECT CAST(value AS INTEGER) FROM meta WHERE key='vec_dim'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key='vec_dim'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(1024);
     let _ = dim;
 
@@ -88,6 +90,7 @@ fn incremental_on_copy_of_prod_db() {
     }
 
     // снимок чанков «до»
+    #[allow(clippy::type_complexity)]
     let before: Vec<Vec<(i64, Option<i64>, Option<f64>, String)>> =
         rows.iter().map(|(fid, _)| snapshot(&conn, *fid)).collect();
 
@@ -99,7 +102,10 @@ fn incremental_on_copy_of_prod_db() {
         let res = pipeline::reindex_path(&conn, &cfg, &emb, &ex, &lem, Path::new(path), false)
             .expect("reindex_path");
         for (status, _) in res {
-            assert_eq!(status, "unchanged", "файл {path}: ожидался unchanged, получено {status}");
+            assert_eq!(
+                status, "unchanged",
+                "файл {path}: ожидался unchanged, получено {status}"
+            );
             unchanged += 1;
         }
     }
@@ -112,7 +118,10 @@ fn incremental_on_copy_of_prod_db() {
     println!("инкремент: {} файлов unchanged, чанки совпали", rows.len());
 
     // БД остаётся читаемой Python-версией
-    let py = project_root().join(".venv").join("Scripts").join("python.exe");
+    let py = project_root()
+        .join(".venv")
+        .join("Scripts")
+        .join("python.exe");
     if py.exists() {
         let script = format!(
             "import sys; sys.path.insert(0, r'{root}')\n\

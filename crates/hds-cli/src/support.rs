@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hds_core::config::{self, dig, Config};
 use hds_core::error::{CoreError, Result};
 use hds_core::{db, http};
-use hds_index::{Embedder, Sidecar};
 use hds_index::transcribe::MediaRouter;
+use hds_index::{Embedder, Sidecar};
 use serde_json::Value;
 
 /// Таймаут сетевого зонда `check` (как `_PROBE_TIMEOUT = 3` в Python).
@@ -107,7 +107,7 @@ pub fn runtime_dir() -> PathBuf {
                 .join("Local")
                 .join("llama-runtime");
         }
-        return PathBuf::from("llama-runtime");
+        PathBuf::from("llama-runtime")
     }
     #[cfg(not(windows))]
     {
@@ -132,7 +132,11 @@ pub fn resolve_model(cfg: &Config, role: &str) -> PathBuf {
         .trim()
         .to_string();
     if let Some(rest) = spec.strip_prefix("shared:") {
-        let r = if rest.trim().is_empty() { role } else { rest.trim() };
+        let r = if rest.trim().is_empty() {
+            role
+        } else {
+            rest.trim()
+        };
         let dir = runtime_dir().join("models").join(r);
         if let Some(name) = manifest_file(&dir.join("current.json")) {
             let p = dir.join(&name);

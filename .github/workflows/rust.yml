@@ -3,9 +3,8 @@ name: Rust CI
 # Сборка и тесты Rust-воркспейса. Python-регрессия остаётся в ci.yml (пока Python
 # есть); по мере миграции эта матрица становится основной (W4/W5 плана).
 #
-# Замечание: clippy запускается информативно (без -D warnings), т.к. очистка
-# предупреждений и `cargo fmt` — отдельная задача W5 (очистка). Тесты и релизная
-# сборка — блокирующие.
+# W5: clippy и `cargo fmt` теперь **блокирующие** (`-D warnings`, `fmt --check`) —
+# предупреждения вычищены (61 -> 0). Тесты и релизная сборка — тоже блокирующие.
 
 on:
   push:
@@ -21,12 +20,15 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: clippy (информативно; -D warnings — задача W5)
-        run: cargo clippy --workspace --all-targets
+      - name: Форматирование (cargo fmt --check)
+        run: cargo fmt --all -- --check
+
+      - name: clippy (блокирующий, -D warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Тесты Rust
         run: cargo test --workspace

@@ -65,7 +65,11 @@ fn busy_and_foreign_instances_are_never_evicted() {
         .iter()
         .map(|i| i.name.clone())
         .collect();
-    assert_eq!(names, vec!["rerank"], "занятый embedding и чужой whisper — не трогаем");
+    assert_eq!(
+        names,
+        vec!["rerank"],
+        "занятый embedding и чужой whisper — не трогаем"
+    );
 }
 
 /// Выгруженный инстанс освобождать нечего.
@@ -79,7 +83,11 @@ fn unloaded_instances_are_skipped() {
         .iter()
         .map(|i| i.name.clone())
         .collect();
-    assert_eq!(names, vec!["rerank"], "GRACE ещё держит VRAM, UNLOADED — нет");
+    assert_eq!(
+        names,
+        vec!["rerank"],
+        "GRACE ещё держит VRAM, UNLOADED — нет"
+    );
 }
 
 /// Базовый набор, но роль `role` **выгружена** (например чат вытеснила индексация):
@@ -91,14 +99,25 @@ fn unloaded_instances_are_skipped() {
 fn roles_without(role: &str) -> Vec<InstanceUse> {
     all_roles()
         .into_iter()
-        .map(|i| if i.role == role { i.with_state(state::UNLOADED) } else { i })
+        .map(|i| {
+            if i.role == role {
+                i.with_state(state::UNLOADED)
+            } else {
+                i
+            }
+        })
         .collect()
 }
 
 /// Хватает сразу: ни паузы, ни вытеснения — ARB-3 (не трогаем индексные роли «на всякий»).
 #[test]
 fn query_fits_without_any_action() {
-    let plan = plan_query(&gpu(), Some(12_000), &Demand::new("chat", 5_000), &all_roles());
+    let plan = plan_query(
+        &gpu(),
+        Some(12_000),
+        &Demand::new("chat", 5_000),
+        &all_roles(),
+    );
     assert_eq!(plan.verdict, Verdict::Fits);
     assert!(!has_pause(&plan), "пауза не нужна: {:?}", plan.actions);
     assert!(unload_names(&plan).is_empty());
@@ -121,8 +140,15 @@ fn query_evicts_lowest_priority_first_and_pauses_index() {
         &roles_without("chat"),
     );
     assert_eq!(plan.verdict, Verdict::FitsAfterEviction);
-    assert!(has_pause(&plan), "при нехватке индексация обязана встать на паузу");
-    assert_eq!(unload_names(&plan), vec!["whisper"], "хватает одного самого младшего");
+    assert!(
+        has_pause(&plan),
+        "при нехватке индексация обязана встать на паузу"
+    );
+    assert_eq!(
+        unload_names(&plan),
+        vec!["whisper"],
+        "хватает одного самого младшего"
+    );
     assert_eq!(plan.freed_mib, 400);
     let pause_reason = plan
         .actions
@@ -252,7 +278,9 @@ fn pause_can_be_disabled_explicitly() {
     assert!(!has_pause(&plan));
     assert_eq!(unload_names(&plan), vec!["whisper", "rerank"]);
     assert!(
-        plan.notes.iter().any(|n| n.contains("pause_index_on_query = false")),
+        plan.notes
+            .iter()
+            .any(|n| n.contains("pause_index_on_query = false")),
         "{:?}",
         plan.notes
     );
@@ -264,28 +292,44 @@ fn indexing_may_evict_chat_but_not_its_own_role() {
     // просим память под whisper (он выгружен): его роль не вытесняем, embedding — тоже
     // (он нужен индексации), поэтому освобождаем только резидента — чат
     let instances = vec![
-        InstanceUse::new("chat", "chat", 7_000).keep_loaded().with_idle(30),
+        InstanceUse::new("chat", "chat", 7_000)
+            .keep_loaded()
+            .with_idle(30),
         InstanceUse::new("embedding", "embedding", 600),
         InstanceUse::new("whisper", "whisper", 400).with_state(state::UNLOADED),
     ];
-    let plan = plan_indexing(&gpu(), Some(1_000), &Demand::new("whisper", 3_000), &instances);
+    let plan = plan_indexing(
+        &gpu(),
+        Some(1_000),
+        &Demand::new("whisper", 3_000),
+        &instances,
+    );
     assert_eq!(plan.verdict, Verdict::FitsAfterEviction);
     assert_eq!(
         unload_names(&plan),
         vec!["chat"],
         "освобождаем резидента, а не index-роли"
     );
-    assert!(!has_pause(&plan), "индексация — это и есть работа, паузу не ставим");
+    assert!(
+        !has_pause(&plan),
+        "индексация — это и есть работа, паузу не ставим"
+    );
 }
 
 /// Простой: внешний предохранитель `gpu.evict_idle_sec` + grace роли (ARB-5).
 #[test]
 fn idle_evictions_respect_grace_and_fuse() {
     let instances = vec![
-        InstanceUse::new("embedding", "embedding", 600).with_grace(300).with_idle(400),
+        InstanceUse::new("embedding", "embedding", 600)
+            .with_grace(300)
+            .with_idle(400),
         InstanceUse::new("rerank", "rerank", 500).with_idle(700),
-        InstanceUse::new("chat", "chat", 5_000).keep_loaded().with_idle(300),
-        InstanceUse::new("whisper", "whisper", 400).with_idle(10_000).busy(1, 0),
+        InstanceUse::new("chat", "chat", 5_000)
+            .keep_loaded()
+            .with_idle(300),
+        InstanceUse::new("whisper", "whisper", 400)
+            .with_idle(10_000)
+            .busy(1, 0),
     ];
     let actions = idle_evictions(&gpu(), &instances);
     let names: Vec<String> = actions
@@ -308,11 +352,17 @@ fn idle_fuse_can_be_disabled() {
     let instances = vec![InstanceUse::new("embedding", "embedding", 600).with_idle(99_999)];
     let mut cfg = gpu();
     cfg.evict_idle_sec = 0;
-    assert!(idle_evictions(&cfg, &instances).is_empty(), "фьюз выключен нулём");
+    assert!(
+        idle_evictions(&cfg, &instances).is_empty(),
+        "фьюз выключен нулём"
+    );
 
     let mut cfg = gpu();
     cfg.policy = GpuPolicy::Manual;
-    assert!(idle_evictions(&cfg, &instances).is_empty(), "manual = ничего сами");
+    assert!(
+        idle_evictions(&cfg, &instances).is_empty(),
+        "manual = ничего сами"
+    );
 }
 
 /// **Регресс живого прогона (боевые порты 30.09.2026, §10.4 `W2_REPORT.md`):**
@@ -323,7 +373,10 @@ fn idle_fuse_can_be_disabled() {
 fn request_to_loaded_role_needs_no_new_vram() {
     let plan = plan_query(&gpu(), Some(206), &Demand::new("chat", 8_492), &all_roles());
     assert_eq!(plan.verdict, Verdict::Fits, "{:?}", plan.notes);
-    assert!(unload_names(&plan).is_empty(), "выгружать нечего: роль уже в памяти");
+    assert!(
+        unload_names(&plan).is_empty(),
+        "выгружать нечего: роль уже в памяти"
+    );
     assert!(!has_pause(&plan), "пауза индексации не нужна");
     assert!(
         plan.notes.iter().any(|n| n.contains("уже загружена")),
@@ -336,7 +389,12 @@ fn request_to_loaded_role_needs_no_new_vram() {
 #[test]
 fn indexing_with_loaded_role_needs_no_new_vram() {
     let instances = vec![InstanceUse::new("embedding", "embedding", 600)];
-    let plan = plan_indexing(&gpu(), Some(100), &Demand::new("embedding", 636), &instances);
+    let plan = plan_indexing(
+        &gpu(),
+        Some(100),
+        &Demand::new("embedding", 636),
+        &instances,
+    );
     assert_eq!(plan.verdict, Verdict::Fits, "{:?}", plan.notes);
     assert!(unload_names(&plan).is_empty());
 }
@@ -358,12 +416,7 @@ fn unloaded_role_still_needs_memory() {
         plan.verdict
     );
     assert!(
-        !plan
-            .notes
-            .iter()
-            .any(|n| n.contains("уже загружена"))
-            || !plan.verdict.is_ok(),
+        !plan.notes.iter().any(|n| n.contains("уже загружена")) || !plan.verdict.is_ok(),
         "ветка «уже загружена» здесь не должна срабатывать"
     );
 }
-

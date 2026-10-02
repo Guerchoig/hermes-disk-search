@@ -107,7 +107,6 @@ impl Sidecar {
         self.worker.lock().unwrap().capabilities().clone()
     }
 
-
     /// Завершение: `shutdown` → EOF на stdin → процесс выходит (§5.1).
     pub fn shutdown(&self) {
         self.worker.lock().unwrap().shutdown();

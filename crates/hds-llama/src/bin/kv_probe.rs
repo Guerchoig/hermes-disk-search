@@ -93,11 +93,7 @@ fn parse_args() -> std::result::Result<Args, String> {
                     .map(|s| s.trim().parse::<i64>().map_err(|e| format!("--n-ctx: {e}")))
                     .collect::<std::result::Result<Vec<_>, _>>()?
             }
-            "--ngl" => {
-                args.ngl = take("--ngl")?
-                    .parse()
-                    .map_err(|e| format!("--ngl: {e}"))?
-            }
+            "--ngl" => args.ngl = take("--ngl")?.parse().map_err(|e| format!("--ngl: {e}"))?,
             "--load-timeout" => {
                 args.load_timeout = take("--load-timeout")?
                     .parse()
@@ -119,10 +115,12 @@ fn parse_args() -> std::result::Result<Args, String> {
                     .map_err(|e| format!("--nvml-index: {e}"))?
             }
             "--help" | "-h" => {
-                return Err("использование: kv_probe --role chat [--ngl N] [--n-ctx A[,B]] \
+                return Err(
+                    "использование: kv_probe --role chat [--ngl N] [--n-ctx A[,B]] \
                             [--config FILE] [--runtime DIR] [--engine-dir DIR] [--json FILE] \
                             [--load-timeout SEC] [--settle SEC] [--nvml-index N]"
-                    .to_string())
+                        .to_string(),
+                )
             }
             other => return Err(format!("неизвестный аргумент: {other}")),
         }
@@ -155,7 +153,9 @@ fn run() -> Result<()> {
         None => RuntimePaths::from_env()?,
     };
     let model = hds_llama::runtime::resolve_model_checked(&paths.root, &rc.model_spec, &args.role)?;
-    let file_mib = std::fs::metadata(&model).map(|m| m.len() >> 20).unwrap_or(0);
+    let file_mib = std::fs::metadata(&model)
+        .map(|m| m.len() >> 20)
+        .unwrap_or(0);
     let meta = read_meta(&model)?;
     println!(
         "модель: {} ({file_mib} МиБ)\nроль '{}': слоёв {}, голов KV {}, key/value {} / {}, \
@@ -220,7 +220,15 @@ fn run() -> Result<()> {
         eprintln!("\nни один замер не выполнен — не хватает свободной VRAM (см. пропуски выше)");
         std::process::exit(1);
     }
-    analyze(&meta, &rows, file_mib, &cfg, &base, json_path.as_deref(), &model)
+    analyze(
+        &meta,
+        &rows,
+        file_mib,
+        &cfg,
+        &base,
+        json_path.as_deref(),
+        &model,
+    )
 }
 
 /// Дифференциальный анализ замеров + вывод для полного офлоада и `--json`.
@@ -305,7 +313,11 @@ fn analyze(
         "  вердикт для карты {} МиБ (резерв {} МиБ): {}",
         base.total_mib,
         cfg.gpu.reserve_mb,
-        if fits { "влезает" } else { "НЕ влезает" }
+        if fits {
+            "влезает"
+        } else {
+            "НЕ влезает"
+        }
     );
     println!(
         "  сверх модели+KV движок держит ещё два фиксированных (не зависящих от n_ctx) блока — \
@@ -441,7 +453,11 @@ fn measure(
         let _ = cluster.remove_instance(id);
         return Ok(None);
     }
-    let inst = cluster.wait_loaded(id, Duration::from_secs(args.load_timeout), Duration::from_millis(500))?;
+    let inst = cluster.wait_loaded(
+        id,
+        Duration::from_secs(args.load_timeout),
+        Duration::from_millis(500),
+    )?;
     std::thread::sleep(Duration::from_secs(args.settle_secs));
     let peak = sampler.stop().used_mib;
     let snap = probe.snapshot();
@@ -485,4 +501,3 @@ fn measure(
         notes,
     }))
 }
-

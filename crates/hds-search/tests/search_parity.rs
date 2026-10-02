@@ -15,7 +15,9 @@ use hds_search::search;
 use serde_json::Value as J;
 
 fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
 }
 
 /// `str(float)` в Python: целые — с `.0` (0.0), остальные — кратчайшая запись.
@@ -46,7 +48,11 @@ fn golden_key(r: &J) -> String {
 fn golden_search_parity() {
     let root = repo();
     let py = root.join(".venv").join("Scripts").join("python.exe");
-    let db = root.join("tools").join("parity").join("out").join("index.db");
+    let db = root
+        .join("tools")
+        .join("parity")
+        .join("out")
+        .join("index.db");
     let golden = root.join("tools").join("parity").join("golden");
     if !py.exists() || !db.exists() || !golden.join("search_01.json").exists() {
         println!("пропуск: нет .venv / out/index.db / golden");
@@ -82,11 +88,9 @@ fn golden_search_parity() {
     let lem: &dyn Lemmatizer = &sidecar;
 
     hds_core::db::register_vec0();
-    let conn = rusqlite::Connection::open_with_flags(
-        &db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )
-    .expect("open index.db");
+    let conn =
+        rusqlite::Connection::open_with_flags(&db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open index.db");
 
     let mut fails = Vec::new();
     for i in 1..=10 {
@@ -101,17 +105,28 @@ fn golden_search_parity() {
             .iter()
             .map(|r| rkey(&r.path, r.page, r.t_start))
             .collect();
-        let gr = g.get("results").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let gr = g
+            .get("results")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
         let kg: Vec<String> = gr.iter().map(golden_key).collect();
+
+        let mut ka_sorted = ka.clone();
+        ka_sorted.sort();
+        let mut kg_sorted = kg.clone();
+        kg_sorted.sort();
+        let same_set = ka_sorted == kg_sorted;
 
         if ka == kg {
             println!("Q{i:02} ok ({} результатов)", res.len());
-        } else if { let mut a = ka.clone(); a.sort(); let mut b = kg.clone(); b.sort(); a == b } {
+        } else if same_set {
             // состав совпал — проверим, что перестановка только среди равных скоров
             let mut bad = false;
             for (x, y) in gr.iter().zip(res.iter()) {
                 if golden_key(x) != rkey(&y.path, y.page, y.t_start)
-                    && (x.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) - y.score).abs() > 1e-9
+                    && (x.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0) - y.score).abs()
+                        > 1e-9
                 {
                     bad = true;
                 }
@@ -122,12 +137,20 @@ fn golden_search_parity() {
                 println!("Q{i:02} ok (состав совпал, порядок среди равных)");
             }
         } else {
-            fails.push(format!("Q{i:02}: разный состав топ-20 (got {}, want {})", ka.len(), kg.len()));
+            fails.push(format!(
+                "Q{i:02}: разный состав топ-20 (got {}, want {})",
+                ka.len(),
+                kg.len()
+            ));
         }
     }
     sidecar.shutdown();
     for f in &fails {
         println!("[FAIL] {f}");
     }
-    assert!(fails.is_empty(), "паритет поиска не сошёлся: {} ошибок", fails.len());
+    assert!(
+        fails.is_empty(),
+        "паритет поиска не сошёлся: {} ошибок",
+        fails.len()
+    );
 }

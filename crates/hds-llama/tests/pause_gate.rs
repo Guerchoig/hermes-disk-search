@@ -15,9 +15,11 @@ struct Tmp {
 
 impl Tmp {
     fn new(name: &str) -> Tmp {
-        let dir = std::env::temp_dir()
-            .join("hds-llama-tests")
-            .join(format!("pause-{}-{}", std::process::id(), name));
+        let dir = std::env::temp_dir().join("hds-llama-tests").join(format!(
+            "pause-{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         Tmp { dir }
@@ -89,7 +91,10 @@ fn user_pause_is_preserved() {
         "чужую паузу не снимаем — иначе запрос молча возобновит индексацию"
     );
 
-    assert!(gate.force_resume().expect("force"), "аварийное снятие работает");
+    assert!(
+        gate.force_resume().expect("force"),
+        "аварийное снятие работает"
+    );
     assert!(!gate.is_paused());
 }
 
@@ -110,7 +115,7 @@ fn resume_without_our_pause_keeps_user_file() {
     // то же после того, как наша аренда уже снялась (файл пользователя вернулся)
     let lease = gate.lease("наш запрос").expect("lease");
     drop(lease);
-    assert!(gate.resume().expect("resume") == false);
+    assert!(!gate.resume().expect("resume"));
     assert!(gate.is_paused());
 }
 
@@ -124,7 +129,10 @@ fn lease_over_user_pause_keeps_it_until_force() {
         let _lease = gate.lease("наш запрос").expect("lease");
         assert!(gate.is_paused() && gate.user_paused());
     }
-    assert!(gate.is_paused(), "чужую паузу аренда не снимает (Drop → resume → no-op)");
+    assert!(
+        gate.is_paused(),
+        "чужую паузу аренда не снимает (Drop → resume → no-op)"
+    );
     assert!(gate.force_resume().expect("force"));
     assert!(!gate.is_paused());
 }
@@ -167,7 +175,10 @@ fn heartbeat_reports_pause_and_counters() {
     .expect("heartbeat");
     let hb = read_heartbeat(&tmp.dir).expect("heartbeat");
     assert!(!hb.fresh);
-    assert_eq!(hb.label(), "нет свежего heartbeat (прогон завершён или завис)");
+    assert_eq!(
+        hb.label(),
+        "нет свежего heartbeat (прогон завершён или завис)"
+    );
 
     // мусорный файл без `ts` не должен выглядеть как пауза
     std::fs::write(tmp.dir.join(HEARTBEAT_FILE), br#"{"paused": true}"#).expect("heartbeat");

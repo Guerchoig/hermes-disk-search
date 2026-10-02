@@ -64,6 +64,9 @@
 > (`hds check --json`; общий модуль невозможен из-за цикла hds-cli→hds-ui), кэш `/api/tree`
 > (TTL 30 с, `?refresh=1`), `installers\install_ui_task.ps1` (+ опция автозапуска UI в setup.ps1)
 > — `W4_REPORT.md` §5. Тесты — 170/0 (+9 ignored). Дальше — W5 (fmt/clippy, `-D warnings`).
+> **W5 (очистка, 02.10.2026):** `cargo fmt --all` (104 файла) + clippy **61 → 0**; в CI
+> (`rust.yml`, `release.yml`) `cargo fmt --check` и `clippy -D warnings` — **блокирующие**.
+> Тесты — 170/0 (+9 ignored). `W4_REPORT.md` §6. **W4 закрыт** (шаги 1–4 + W5).
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

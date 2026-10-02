@@ -111,9 +111,16 @@ pub fn shared(cfg: &hds_core::config::Config) -> Option<&'static Clip> {
 pub fn default_onnx_dir() -> PathBuf {
     let root = hds_core::config::project_root();
     let installed = root.join("models").join("clip_onnx");
-    let dev = root.join("tools").join("parity").join("out").join("clip_onnx");
+    let dev = root
+        .join("tools")
+        .join("parity")
+        .join("out")
+        .join("clip_onnx");
     let installed_has = installed.join("vision").join("clip_vision.onnx").is_file()
-        || installed.join("text").join("clip_text_dense.onnx").is_file()
+        || installed
+            .join("text")
+            .join("clip_text_dense.onnx")
+            .is_file()
         || installed.join("text").join("tokenizer.json").is_file();
     if installed_has {
         installed

@@ -93,8 +93,8 @@ fn split_text(text: &str, size: usize, sep_idx: usize) -> Vec<String> {
     if chars(text) <= size {
         return vec![text.to_string()];
     }
-    for i in sep_idx..SEPS.len() {
-        let parts = split_keep(SEPS[i], text);
+    for (i, sep) in SEPS.iter().enumerate().skip(sep_idx) {
+        let parts = split_keep(sep, text);
         if parts.len() > 1 {
             return merge_parts(&parts, size, i);
         }
@@ -242,7 +242,9 @@ impl State {
                 Some(h) => format!("{h}\n{text}"),
                 None => text,
             };
-            let m = self.meta.expect("метаданные выставляются при открытии чанка");
+            let m = self
+                .meta
+                .expect("метаданные выставляются при открытии чанка");
             self.chunks.push(Chunk {
                 text,
                 page: m.page,
@@ -420,5 +422,3 @@ mod tests {
         s.chars().take(n).collect()
     }
 }
-
-

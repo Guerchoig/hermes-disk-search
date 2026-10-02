@@ -160,3 +160,39 @@ GET /api/tree        -> dirs=7797; повторный (кэш) -> dirs=7797
 (+9 ignored)**.
 
 **Дальше:** W5 — `cargo fmt` + clippy (сейчас 61 предупреждение), `-D warnings` в CI.
+
+## 6. W5 — очистка: `cargo fmt` + clippy, блокирующие в CI (02.10.2026)
+
+**Что сделано.**
+* `cargo fmt --all` — весь воркспейс (104 файла).
+* `cargo clippy --workspace --all-targets --fix` (авто) + ручные правки: **61 → 0** предупреждений.
+* CI (`rust.yml`, `release.yml`): `cargo fmt --all -- --check` и
+  `cargo clippy --workspace --all-targets -- -D warnings` — **блокирующие** (добавлен
+  компонент `rustfmt`, комментарии обновлены).
+
+**Правки clippy (суть).**
+
+| Линт | Где | Как |
+|---|---|---|
+| `too_many_arguments` | `hds-core::db::add_chunk`, `hds-index::pipeline::process_file` | дословные порты Python-сигнатур → `#[allow]` с комментарием |
+| `while_let_loop` | `hds-core::http::decode_chunked`, `hds-search::rag::strip_think` | переписано на `while let` |
+| `needless_range_loop` | `hds-index::chunker::split_text` | `.iter().enumerate().skip()` |
+| `manual_checked_ops` | `hds-llama::gguf::head_dim`, `hds-llama::status` | `checked_div(..).unwrap_or(0)` |
+| `large_enum_variant` | `hds-llama::registry::RolePlan` | `#[allow]` (горячий план, боксить не стоит) |
+| `missing_transmute_annotations` | `hds-core::db::register_vec0` | `#[allow]` (документированный приём sqlite-vec, спайк 1) |
+| `type_complexity` | `hds-index/tests/pipeline_incremental.rs`, `hds-llama/src/bin/chat_probe.rs` | `#[allow]` на statement |
+| `ptr_arg` | `hds-llama/tests/status_report.rs` | `&PathBuf` → `&Path` |
+| `blocks_in_conditions` | `hds-search/tests/search_parity.rs` | блок вынесен в `let same_set` |
+| авто (`--fix`) | разные | needless `as_bytes`, бесполезный cast, `div_ceil`, `OR`-диапазон и пр. |
+
+**Приёмка.**
+```
+cargo fmt --all -- --check                               # 0 diff
+cargo clippy --workspace --all-targets -- -D warnings     # 0 warnings / 0 errors
+cargo test --workspace                                    # 170 passed / 0 failed (+9 ignored)
+```
+
+**Остаётся по плану (вне W4/W5):** `NOTICE.md` (атрибуция движка/CUDA/FFmpeg/pdfium), джобы
+`build-sidecar`/`build-macos` (mac — «не проверено», §10.0), версионные каталоги `app\<ver>`
+(§10.6). `hdsw.exe`/`hds serve` не вводим — фактические имена (`hds.exe` + подкоманды,
+`llm_host.exe`, `hds_mcp.exe`).

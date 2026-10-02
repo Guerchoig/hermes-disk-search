@@ -162,4 +162,3 @@ fn fmt_t(t: Option<f64>) -> String {
         None => "?".to_string(),
     }
 }
-

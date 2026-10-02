@@ -21,9 +21,19 @@ impl ClipConfig {
     /// Собрать из конфига; пути по умолчанию — каталог экспорта спайка 4.
     pub fn from_config(cfg: &Config) -> Self {
         let base = super::default_onnx_dir();
-        let enabled = dig(cfg, "index.clip").and_then(|v| v.as_bool()).unwrap_or(true);
-        let vision_model = path_or(cfg, "index.clip_vision_model", base.join("vision").join("clip_vision.onnx"));
-        let text_model = path_or(cfg, "index.clip_text_model", base.join("text").join("clip_text_dense.onnx"));
+        let enabled = dig(cfg, "index.clip")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let vision_model = path_or(
+            cfg,
+            "index.clip_vision_model",
+            base.join("vision").join("clip_vision.onnx"),
+        );
+        let text_model = path_or(
+            cfg,
+            "index.clip_text_model",
+            base.join("text").join("clip_text_dense.onnx"),
+        );
         let tokenizer = path_or(cfg, "index.clip_tokenizer", resolve_tokenizer());
         ClipConfig {
             enabled,
@@ -52,7 +62,9 @@ fn path_or(cfg: &Config, dotted: &str, default: PathBuf) -> PathBuf {
 /// `tokenizer.json` мультиязычного энкодера: сначала рядом с репо
 /// (`tools/parity/out/clip_onnx/text/tokenizer.json`), затем в HF-кэше.
 fn resolve_tokenizer() -> PathBuf {
-    let local = super::default_onnx_dir().join("text").join("tokenizer.json");
+    let local = super::default_onnx_dir()
+        .join("text")
+        .join("tokenizer.json");
     if local.is_file() {
         return local;
     }
@@ -62,7 +74,9 @@ fn resolve_tokenizer() -> PathBuf {
             .join(".cache")
             .join("huggingface")
             .join("hub");
-        let dir = hub.join("models--sentence-transformers--clip-ViT-B-32-multilingual-v1").join("snapshots");
+        let dir = hub
+            .join("models--sentence-transformers--clip-ViT-B-32-multilingual-v1")
+            .join("snapshots");
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let cand = e.path().join("tokenizer.json");

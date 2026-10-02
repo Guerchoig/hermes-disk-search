@@ -23,9 +23,11 @@ struct Env {
 
 impl Env {
     fn new(name: &str) -> Env {
-        let root = std::env::temp_dir()
-            .join("hds-llama-tests")
-            .join(format!("{}-{}", std::process::id(), name));
+        let root = std::env::temp_dir().join("hds-llama-tests").join(format!(
+            "{}-{}",
+            std::process::id(),
+            name
+        ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("temp root");
         let runtime = root.join("llama-runtime");
@@ -145,17 +147,29 @@ fn legacy_config_resolves_roles_from_shared_runtime() {
     // модель rerank появилась в общем рантайме (единственный GGUF роли)
     env.model("rerank", "bge-reranker-v2-m3-q8_0.gguf");
     let plans = registry::plan(&cfg, &env.runtime, &fake_devices());
-    assert_eq!(plans.len(), 3, "chat + embedding + rerank (whisper без модели)");
+    assert_eq!(
+        plans.len(),
+        3,
+        "chat + embedding + rerank (whisper без модели)"
+    );
     assert!(plans.iter().all(|p| !p.is_failed()), "{plans:?}");
 
     let chat_p = ready(&plans, "chat");
     assert_eq!(chat_p.model_path, chat);
-    assert_eq!(chat_p.spec.manual_devices_csv.as_deref(), Some("0"), "CUDA0");
+    assert_eq!(
+        chat_p.spec.manual_devices_csv.as_deref(),
+        Some("0"),
+        "CUDA0"
+    );
     assert_eq!(chat_p.spec.allow_cpu, Some(false));
     assert_eq!(chat_p.spec.retention_mode, Some(retention::KEEP_LOADED));
     assert_eq!(chat_p.spec.model_kind, Some(model_kind::TEXT));
     assert_eq!(chat_p.spec.n_ctx, Some(32768));
-    assert_eq!(chat_p.spec.n_gpu_layers, Some(99), "-ngl 99 из legacy extra_args");
+    assert_eq!(
+        chat_p.spec.n_gpu_layers,
+        Some(99),
+        "-ngl 99 из legacy extra_args"
+    );
     assert_eq!(chat_p.port, 8010);
 
     let emb_p = ready(&plans, "embedding");
@@ -168,9 +182,16 @@ fn legacy_config_resolves_roles_from_shared_runtime() {
 
     // legacy -ngl 0 → роль на CPU: явное CPU-устройство и allow_cpu = true
     let rr = ready(&plans, "rerank");
-    assert_eq!(rr.spec.manual_devices_csv.as_deref(), Some("1"), "CPU-устройство");
+    assert_eq!(
+        rr.spec.manual_devices_csv.as_deref(),
+        Some("1"),
+        "CPU-устройство"
+    );
     assert_eq!(rr.spec.allow_cpu, Some(true));
-    assert_eq!(rr.spec.n_gpu_layers, None, "для CPU-роли слои на GPU не задаём");
+    assert_eq!(
+        rr.spec.n_gpu_layers, None,
+        "для CPU-роли слои на GPU не задаём"
+    );
     assert_eq!(rr.spec.reranking, Some(true));
     assert!(
         rr.notes.iter().any(|n| n.contains("на CPU")),
@@ -184,7 +205,6 @@ fn legacy_config_resolves_roles_from_shared_runtime() {
         cfg.warnings
     );
 }
-
 
 /// Новые ключи `llm.*`/`gpu.*` приоритетнее legacy.
 #[test]
@@ -308,9 +328,15 @@ fn resolve_model_matches_python() {
 fn runtime_paths_follow_env() {
     let env = Env::new("paths");
     let paths = hds_llama::runtime::RuntimePaths::new(env.runtime.clone());
-    assert_eq!(paths.models_for("chat"), env.runtime.join("models").join("chat"));
+    assert_eq!(
+        paths.models_for("chat"),
+        env.runtime.join("models").join("chat")
+    );
     assert_eq!(paths.bin, env.runtime.join("bin"));
-    assert!(!paths.has_llama_server(), "llama-server в тестовом рантайме нет");
+    assert!(
+        !paths.has_llama_server(),
+        "llama-server в тестовом рантайме нет"
+    );
     assert_eq!(
         hds_llama::runtime::RuntimePaths::llama_server_name(),
         if cfg!(windows) {
@@ -320,5 +346,3 @@ fn runtime_paths_follow_env() {
         }
     );
 }
-
-

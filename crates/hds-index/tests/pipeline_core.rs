@@ -123,8 +123,20 @@ fn unchanged_and_force() {
     let meta = std::fs::metadata(&p).unwrap();
     let size = meta.len() as i64;
     let mtime = pipeline::mtime_secs(&meta);
-    db::upsert_file(&conn, &pipeline::path_str(&p), ".txt", "text", size, mtime, Some("h")).unwrap();
-    let fid = db::get_file_by_path(&conn, &pipeline::path_str(&p)).unwrap().unwrap().id;
+    db::upsert_file(
+        &conn,
+        &pipeline::path_str(&p),
+        ".txt",
+        "text",
+        size,
+        mtime,
+        Some("h"),
+    )
+    .unwrap();
+    let fid = db::get_file_by_path(&conn, &pipeline::path_str(&p))
+        .unwrap()
+        .unwrap()
+        .id;
     db::finish_file(&conn, fid, "indexed", None, Some(1), 1.0).unwrap();
 
     match pipeline::extract_file(&conn, &cfg, &p, false, &ex).unwrap() {
@@ -158,15 +170,22 @@ fn moved_renames_when_old_path_gone() {
         Some(&chash),
     )
     .unwrap();
-    let fid = db::get_file_by_path(&conn, &pipeline::path_str(&old)).unwrap().unwrap().id;
+    let fid = db::get_file_by_path(&conn, &pipeline::path_str(&old))
+        .unwrap()
+        .unwrap()
+        .id;
     db::finish_file(&conn, fid, "indexed", None, Some(3), 1.0).unwrap();
 
     match pipeline::extract_file(&conn, &cfg, &new_path, false, &ex).unwrap() {
         pipeline::ExtractOutcome::Early { status, .. } => assert_eq!(status, "moved"),
         _ => panic!("ожидался moved"),
     }
-    assert!(db::get_file_by_path(&conn, &pipeline::path_str(&old)).unwrap().is_none());
-    assert!(db::get_file_by_path(&conn, &pipeline::path_str(&new_path)).unwrap().is_some());
+    assert!(db::get_file_by_path(&conn, &pipeline::path_str(&old))
+        .unwrap()
+        .is_none());
+    assert!(db::get_file_by_path(&conn, &pipeline::path_str(&new_path))
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -183,7 +202,9 @@ fn process_file_error_is_isolated_and_saved() {
         pipeline::process_file(&conn, &cfg, &emb, &p, false, &ex, &lem, None).unwrap();
     assert!(status.starts_with("error: BadZipFile"), "status={status}");
     assert_eq!(kind.as_deref(), Some("docx"));
-    let row = db::get_file_by_path(&conn, &pipeline::path_str(&p)).unwrap().unwrap();
+    let row = db::get_file_by_path(&conn, &pipeline::path_str(&p))
+        .unwrap()
+        .unwrap();
     assert_eq!(row.status.as_deref(), Some("error"));
     assert!(row.error.unwrap().contains("BadZipFile"));
 }
@@ -200,7 +221,9 @@ fn process_file_empty_chunks_indexed() {
     let (status, _kind) =
         pipeline::process_file(&conn, &cfg, &emb, &p, false, &ex, &lem, None).unwrap();
     assert_eq!(status, "indexed(0 чанков)");
-    let row = db::get_file_by_path(&conn, &pipeline::path_str(&p)).unwrap().unwrap();
+    let row = db::get_file_by_path(&conn, &pipeline::path_str(&p))
+        .unwrap()
+        .unwrap();
     assert!(row.is_indexed());
     assert_eq!(row.chunk_count, Some(0));
     assert!(row.indexed_at.is_some());
@@ -225,7 +248,16 @@ fn prune_blocks_over_20_percent_without_confirm() {
     }
     let live = dir.join("live.txt");
     std::fs::write(&live, b"x").unwrap();
-    db::upsert_file(&conn, &pipeline::path_str(&live), ".txt", "text", 1, 1.0, None).unwrap();
+    db::upsert_file(
+        &conn,
+        &pipeline::path_str(&live),
+        ".txt",
+        "text",
+        1,
+        1.0,
+        None,
+    )
+    .unwrap();
 
     let removed = pipeline::prune_deleted(&conn, &cfg, false).unwrap();
     assert_eq!(removed, 0, "без --confirm-delete prune заблокирован");

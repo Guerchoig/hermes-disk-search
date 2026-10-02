@@ -21,7 +21,9 @@ fn settings(cfg: &Config) -> (String, u16, String, u64) {
         .and_then(|v| v.as_str())
         .unwrap_or("127.0.0.1")
         .to_string();
-    let port = dig(cfg, "mcp_http.port").and_then(|v| v.as_u64()).unwrap_or(8787) as u16;
+    let port = dig(cfg, "mcp_http.port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8787) as u16;
     let mut path = dig(cfg, "mcp_http.path")
         .and_then(|v| v.as_str())
         .unwrap_or("/mcp")
@@ -33,7 +35,9 @@ fn settings(cfg: &Config) -> (String, u16, String, u64) {
     if !path.starts_with('/') {
         path = format!("/{path}");
     }
-    let timeout = dig(cfg, "mcp_http.start_timeout").and_then(|v| v.as_u64()).unwrap_or(30);
+    let timeout = dig(cfg, "mcp_http.start_timeout")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30);
     (host, port, path, timeout)
 }
 
@@ -69,7 +73,11 @@ fn pid_file() -> PathBuf {
 }
 
 fn read_pid() -> Option<u32> {
-    std::fs::read_to_string(pid_file()).ok()?.trim().parse().ok()
+    std::fs::read_to_string(pid_file())
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn write_pid(pid: u32) {
@@ -127,10 +135,19 @@ fn kill_pid(pid: u32) {
 fn spawn_instance(host: &str, port: u16, path: &str) -> Result<u32, String> {
     let exe = std::env::current_exe().map_err(|e| format!("current_exe: {e}"))?;
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(["mcp", "--http", "--host", host, "--port", &port.to_string(), "--path", path])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    cmd.args([
+        "mcp",
+        "--http",
+        "--host",
+        host,
+        "--port",
+        &port.to_string(),
+        "--path",
+        path,
+    ])
+    .stdin(std::process::Stdio::null())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -278,4 +295,3 @@ pub fn cmd_mcp_http(
         }
     }
 }
-

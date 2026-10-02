@@ -109,13 +109,10 @@ pub fn parse_response(raw: &[u8]) -> Result<Response> {
 /// Декодирование `Transfer-Encoding: chunked` (без trailers).
 fn decode_chunked(mut data: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    loop {
-        let nl = match data.windows(2).position(|w| w == b"\r\n") {
-            Some(i) => i,
-            None => break,
-        };
+    while let Some(nl) = data.windows(2).position(|w| w == b"\r\n") {
         let size_str = String::from_utf8_lossy(&data[..nl]);
-        let size = match usize::from_str_radix(size_str.trim().split(';').next().unwrap_or(""), 16) {
+        let size = match usize::from_str_radix(size_str.trim().split(';').next().unwrap_or(""), 16)
+        {
             Ok(s) => s,
             Err(_) => break,
         };

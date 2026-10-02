@@ -28,8 +28,14 @@ fn unknown_path_is_404() {
 
 #[test]
 fn search_and_ask_require_q() {
-    assert_eq!(route("GET", "/api/search", "", &ReqHeaders::default(), "").0, 400);
-    assert_eq!(route("GET", "/api/ask", "", &ReqHeaders::default(), "").0, 400);
+    assert_eq!(
+        route("GET", "/api/search", "", &ReqHeaders::default(), "").0,
+        400
+    );
+    assert_eq!(
+        route("GET", "/api/ask", "", &ReqHeaders::default(), "").0,
+        400
+    );
 }
 
 #[test]
@@ -54,4 +60,3 @@ fn query_params_decode() {
     assert_eq!(qp("limit=5", "limit").unwrap(), "5");
     assert_eq!(qp("q=1", "x"), None);
 }
-

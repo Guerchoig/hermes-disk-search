@@ -262,10 +262,7 @@ fn build_spec(
     allow_cpu: Option<bool>,
     args: &Args,
 ) -> InstanceSpec {
-    let mut spec = InstanceSpec::new(
-        &format!("a1_probe_{label}"),
-        &args.model.to_string_lossy(),
-    );
+    let mut spec = InstanceSpec::new(&format!("a1_probe_{label}"), &args.model.to_string_lossy());
     spec.manual_devices_csv = csv;
     spec.allow_cpu = allow_cpu;
     spec.embedding = Some(true);
@@ -635,7 +632,3 @@ fn timestamp() -> String {
         .unwrap_or(0);
     format!("unix={now}")
 }
-
-
-
-

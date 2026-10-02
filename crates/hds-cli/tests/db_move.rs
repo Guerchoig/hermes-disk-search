@@ -16,12 +16,21 @@ fn make_db(path: &std::path::Path) {
         ["a.txt"],
     )
     .unwrap();
-    conn.execute("INSERT INTO chunks(file_id, ord, text) VALUES(1, 0, 'x')", [])
-        .unwrap();
+    conn.execute(
+        "INSERT INTO chunks(file_id, ord, text) VALUES(1, 0, 'x')",
+        [],
+    )
+    .unwrap();
     drop(conn);
 }
 
-fn args(td: &TempDir, cfg_path: std::path::PathBuf, old: std::path::PathBuf, new: std::path::PathBuf, force: bool) -> MoveDbArgs {
+fn args(
+    td: &TempDir,
+    cfg_path: std::path::PathBuf,
+    old: std::path::PathBuf,
+    new: std::path::PathBuf,
+    force: bool,
+) -> MoveDbArgs {
     MoveDbArgs {
         cfg_path,
         old_db: old,
@@ -39,10 +48,18 @@ fn move_copies_db_and_preserves_config_comments() {
     let old = td.join("index.db");
     make_db(&old);
 
-    let cfg_path = td.write_config("# комментарий заказчика\nindex:\n  roots:\n    - \"D:\\\\\"\ndb_path: 'старый'\n");
+    let cfg_path = td.write_config(
+        "# комментарий заказчика\nindex:\n  roots:\n    - \"D:\\\\\"\ndb_path: 'старый'\n",
+    );
     let new = td.path.join("sub").join("new.db");
 
-    let res = move_db(&args(&td, cfg_path.clone(), old.clone(), new.clone(), false));
+    let res = move_db(&args(
+        &td,
+        cfg_path.clone(),
+        old.clone(),
+        new.clone(),
+        false,
+    ));
     assert!(res.ok, "перенос должен пройти: {}", res.msg);
     assert!(!res.watch_was_running);
     assert!(new.is_file(), "новая БД должна существовать");
@@ -59,7 +76,10 @@ fn move_copies_db_and_preserves_config_comments() {
 
     // config.yaml: комментарий сохранён, db_path обновлён
     let text = std::fs::read_to_string(&cfg_path).unwrap();
-    assert!(text.contains("# комментарий заказчика"), "комментарии должны остаться");
+    assert!(
+        text.contains("# комментарий заказчика"),
+        "комментарии должны остаться"
+    );
     assert!(
         text.contains(&format!("db_path: '{}'", new.to_string_lossy())),
         "db_path должен указывать на новую БД:\n{text}"

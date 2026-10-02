@@ -28,8 +28,9 @@ impl TextEncoder {
             .map_err(|e| CoreError::Other(format!("text builder: {e}")))?
             .commit_from_file(model)
             .map_err(|e| CoreError::Other(format!("text ONNX {}: {e}", model.display())))?;
-        let mut tokenizer = Tokenizer::from_file(tokenizer_path)
-            .map_err(|e| CoreError::Other(format!("tokenizer {}: {e}", tokenizer_path.display())))?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| {
+            CoreError::Other(format!("tokenizer {}: {e}", tokenizer_path.display()))
+        })?;
         tokenizer
             .with_truncation(Some(TruncationParams {
                 max_length: MAX_LEN,

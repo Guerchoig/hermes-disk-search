@@ -23,9 +23,7 @@ pub type Config = Value;
 
 /// Корень репозитория (лексическая нормализация `CARGO_MANIFEST_DIR/../..`).
 pub fn project_root() -> PathBuf {
-    let raw = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("..")
-        .join("..");
+    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
     lexical_normalize(&raw)
 }
 

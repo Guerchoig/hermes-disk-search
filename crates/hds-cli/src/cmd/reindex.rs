@@ -33,7 +33,8 @@ pub fn cmd_reindex(path: &str, no_force: bool) -> i32 {
         }
     };
     let p: PathBuf = std::path::absolute(path).unwrap_or_else(|_| PathBuf::from(path));
-    let res = hds_index::pipeline::reindex_path(&conn, &cfg, &emb, &sidecar, &sidecar, &p, !no_force);
+    let res =
+        hds_index::pipeline::reindex_path(&conn, &cfg, &emb, &sidecar, &sidecar, &p, !no_force);
     sidecar.shutdown();
     match res {
         Ok(items) => {

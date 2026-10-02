@@ -538,12 +538,8 @@ fn json_cstr(s: &str) -> Result<CString> {
     CString::new(s).map_err(|_| EngineError::Other("NUL в теле запроса".into()))
 }
 
-
-
 impl Drop for Cluster {
     fn drop(&mut self) {
         unsafe { (self.api.cluster_destroy)(self.raw) };
     }
 }
-
-

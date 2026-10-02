@@ -60,10 +60,7 @@ impl WatchState {
         m.insert("processed".into(), serde_json::json!(self.processed));
         m.insert("errors".into(), serde_json::json!(self.errors));
         m.insert("moved".into(), serde_json::json!(self.moved));
-        m.insert(
-            "last_event".into(),
-            serde_json::json!(self.last_event),
-        );
+        m.insert("last_event".into(), serde_json::json!(self.last_event));
         m
     }
 }
@@ -540,7 +537,10 @@ pub fn run_watch(
         };
         if let Err(e) = pipeline::run_index(conn, cfg, emb, extractor, lemmatizer, &args) {
             // сверка не должна убивать наблюдателя: события ФС важнее
-            eprintln!("[watch] ошибка сверки (наблюдение продолжается): {}", e.message());
+            eprintln!(
+                "[watch] ошибка сверки (наблюдение продолжается): {}",
+                e.message()
+            );
         }
     }
 
@@ -588,7 +588,10 @@ mod poll_watch {
     fn scan(root: &Path, seen: &mut HashMap<PathBuf, (u64, u64)>) -> Vec<WatchEvent> {
         let mut events = Vec::new();
         let mut now = HashMap::new();
-        for entry in walkdir::WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        for entry in walkdir::WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
             if !entry.file_type().is_file() {
                 continue;
             }
