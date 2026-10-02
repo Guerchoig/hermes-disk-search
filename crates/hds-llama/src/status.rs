@@ -504,7 +504,8 @@ pub fn state_label(code: Option<i32>) -> String {
 /// Одна строка описания устройства (как в `llm_host_plan`).
 pub fn device_line(d: &Device) -> String {
     format!(
-        "index={} backend={} name={} free={:.0} МиБ total={:.0} МиБ",
+        "index={} backend={} name={} free={:.0} МиБ (R29: `memory_free` движка недостоверен, \
+         решения — по NVML) total={:.0} МиБ",
         d.bridge_device_index,
         d.backend,
         d.name,

@@ -79,6 +79,11 @@
 > `cargo test --workspace` — **170 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W1_REPORT.md` §0 (передача, актуально на 02.10.2026);
 > W3 (медиа/CLIP) — `W3_REPORT.md`; W4 (упаковка/CI) — `W4_REPORT.md`; W0 — `SPIKES.md`.**
+> **L1 шаг 3 закрыт (02.10.2026):** `load_instance` больше не зовётся на каждый запрос
+> LOAD_ON_DEMAND (движок грузит по запросу), в `hds check`/UI появился пункт
+> **`gpu-observability`** («heartbeat … с назад; движок: занят/свободен; VRAM: наш процесс …
+> чужие …; лог …» — работает даже при молчащем HTTP), `memory_free` движка помечен R29
+> прямо в строке устройств. Живой `hds check --json` → `"ok": true`, пункт `ok`. Тесты 194/0.
 > **Патч установлен в боевой каталог движка (02.10.2026):** наши DLL (bridge/multi-node/audio/
 > llama/mtmd/ggml*) скопированы в `%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`, штатные
 > сохранены рядом как `*.orig` (9 файлов) — откат одной командой. Штатный резидент (без

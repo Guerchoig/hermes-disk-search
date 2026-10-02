@@ -579,10 +579,29 @@ VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host 
 `load_instance` на каждый запрос LOAD_ON_DEMAND, пункт `gpu-observability` в `hds check`/UI,
 пометка недостоверного `memory_free` движка (R29) в строке устройств.
 
-**Осталось по L1 (шаг 3).** Убрать триггер: `n_batch/n_ubatch` для embedding (было
-8192/8192 при 12 ГБ и загруженном чате), оценка compute-буферов в `budget.rs`, отказ от
-`load_instance` на каждый запрос LOAD_ON_DEMAND ролей; пункт `gpu-observability` в
-`hds check`/UI; пометка недостоверного `memory_free` движка (R29) в строке устройств.
+**L1 шаг 3 — остаток (02.10.2026).** Сделано:
+* `crates/hds-llama/src/dispatch.rs::apply` — для ролей с `retention_mode = LOAD_ON_DEMAND`
+  больше **не отправляем** `load_instance` на каждый запрос: движок сам поднимает модель по
+  запросу (в логе: «LOAD_ON_DEMAND — загрузку отдаём движку … load_instance не вызываем»).
+  Это убирает лишние заходы в путь загрузки, который и подвис в §14; для `KEEP_LOADED` (чат)
+  явная загрузка осталась.
+* `crates/hds-index/src/diag.rs::check_gpu_observability` — новый пункт **`gpu-observability`**
+  в `hds check` (и в UI: он зовёт `run_checks` in-process): «heartbeat N с назад; движок:
+  свободен/занят (кто, сколько); VRAM: наш процесс … чужие …; лог резидента N с назад».
+  Читает heartbeat-файл, то есть работает **даже когда HTTP резидента молчит** (тот самый
+  случай инцидента), и подсказывает `llm_host stop --force`.
+* `crates/hds-llama/src/status.rs::device_line` — `memory_free` движка помечен прямо в строке:
+  «(R29: `memory_free` движка недостоверен, решения — по NVML)».
+Приёмка: живой `hds check --json` → `{"id":"gpu-observability","status":"ok","msg":"heartbeat
+3 с назад; движок: свободен; VRAM: наш процесс 7263 МиБ, чужие 454 МиБ; лог резидента 600 с
+назад"}`, общий `"ok": true`; тесты 194/0 (+10), clippy 0/0, fmt 0.
+
+**Итог L1 (шаги 1–3 закрыты).** Наблюдаемость (шлюз с меткой занятости, атрибуция VRAM по
+процессам, heartbeat резидента, `stop --force`, пункт `gpu-observability`), устойчивость
+(шаговое ожидание загрузки, отложенное вытеснение, bounded-арбитр, `503` вместо ожидания) и
+чистка триггеров (embedding `--ubatch-size 512`, compute-буферы в бюджете, никакого
+`load_instance` на каждый запрос) — сделаны, закоммичены и проверены живьём. Осталось по L2b
+только поставка: апстрим-отчёт (EN), оверлей-ассет с откатом в `installers/`, `NOTICE.md`/README.
 
 **Следующее (L2b).** Свой патч движка (4 правки в `bridge/llama_server_cluster.cpp`) на базе
 тега **v1.15** (`2683eb69`) + сборка `-Backend cuda` (CUDA Toolkit 13.4, VS 18 с CMake/Ninja) →

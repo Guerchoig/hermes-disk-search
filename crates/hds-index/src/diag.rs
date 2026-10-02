@@ -10,7 +10,7 @@
 //! покрываем whisper/mpxj/vulkan — их проверяет Python-версия до W5.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hds_core::config::{self, dig, Config};
 use hds_core::error::{CoreError, Result};
@@ -546,6 +546,82 @@ fn check_rerank(cfg: &Config) -> Option<Check> {
     }
 }
 
+/// `gpu-observability` (L1, `W4_REPORT.md` §15): видно ли, **кто держит VRAM** и не
+/// завис ли движок.
+///
+/// Источник — heartbeat резидента (`data/llm-host.heartbeat.json`, его пишет отдельный
+/// поток `llm-host`), поэтому проверка работает **даже когда HTTP резидента молчит**
+/// (ровно тот случай, который в инциденте §14 выглядел как «резидент не отвечает»).
+/// Отдельно смотрим свежесть лога резидента: heartbeat живой, а лог молчит — движок
+/// держит вызов.
+pub fn check_gpu_observability() -> Check {
+    let root = hds_core::config::project_root();
+    let hb_path = root.join("data").join("llm-host.heartbeat.json");
+    let log_path = root.join("data").join("logs").join("llm-host.log");
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let log_age = std::fs::metadata(&log_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| now.saturating_sub(d.as_secs()));
+
+    let title = "GPU: кто держит VRAM и занят ли движок";
+    let hb: Option<serde_json::Value> = std::fs::read_to_string(&hb_path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+    let Some(hb) = hb else {
+        return Check::new("gpu-observability", "warn", title)
+            .msg(format!(
+                "heartbeat {} не найден — резидент не запущен или это сборка до L1",
+                hb_path.display()
+            ))
+            .fix("запустите `llm_host run` (наблюдаемость L1, `W4_REPORT.md` §15)");
+    };
+
+    let ts = hb.get("ts_unix").and_then(|v| v.as_u64()).unwrap_or(0);
+    let age = now.saturating_sub(ts);
+    let busy = hb
+        .get("busy")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let ours = hb.get("vram_ours_mib").and_then(|v| v.as_u64());
+    let foreign = hb.get("vram_foreign_mib").and_then(|v| v.as_u64());
+    let fresh = age <= 30;
+
+    let mut check = Check::new(
+        "gpu-observability",
+        if fresh { "ok" } else { "warn" },
+        title,
+    )
+    .msg(format!(
+        "heartbeat {} с назад; движок: {}; VRAM: наш процесс {} МиБ, чужие {} МиБ; лог резидента {} с назад",
+        age,
+        busy.clone().unwrap_or_else(|| "свободен".into()),
+        ours.map(|v| v.to_string())
+            .unwrap_or_else(|| "—".into()),
+        foreign
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "—".into()),
+        log_age
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "?".into()),
+    ));
+    if !fresh {
+        check = check.fix(
+            "резидент не пишет heartbeat: `llm_host status` покажет диагноз, \
+             `llm_host stop --force` снимает зависший (`W4_REPORT.md` §14)",
+        );
+    }
+    if busy.is_some() {
+        check =
+            check.fix("движок занят: если это долго — `llm_host stop --force` и `llm_host run`");
+    }
+    check
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![check_db(cfg), check_roots(cfg), check_chat(cfg)];
@@ -573,6 +649,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         checks.push(c);
     }
 
+    checks.push(check_gpu_observability());
     checks.push(
         Check::new(
             "gpu-manual",

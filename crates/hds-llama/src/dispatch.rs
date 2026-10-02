@@ -755,13 +755,28 @@ pub fn apply(cluster: &Cluster, pause: &Arc<IndexPause>, plan: &Plan) -> Vec<Str
                     if loaded {
                         log.push(format!("роль '{role}' уже загружена"));
                     } else {
-                        match cluster.load(id) {
-                            Ok(()) => log.push(format!(
-                                "роль '{role}': load_instance отправлен (при LOAD_ON_DEMAND \
-                                 достаточно самого запроса)"
-                            )),
-                            Err(e) => {
-                                log.push(format!("роль '{role}': load_instance не удался: {e}"))
+                        // L1 шаг 3 (`W4_REPORT.md` §15): у LOAD_ON_DEMAND движок грузит
+                        // модель по самому запросу — `load_instance` на каждом запросе
+                        // лишний (и это был лишний заход в хрупкий путь загрузки).
+                        let on_demand = cluster
+                            .instance_by_id(id)
+                            .ok()
+                            .flatten()
+                            .map(|i| i.retention_mode == retention::LOAD_ON_DEMAND)
+                            .unwrap_or(false);
+                        if on_demand {
+                            log.push(format!(
+                                "роль '{role}': LOAD_ON_DEMAND — загрузку отдаём движку \
+                                 (запрос поднимет сам), load_instance не вызываем"
+                            ));
+                        } else {
+                            match cluster.load(id) {
+                                Ok(()) => log.push(format!(
+                                    "роль '{role}': load_instance отправлен (KEEP_LOADED)"
+                                )),
+                                Err(e) => {
+                                    log.push(format!("роль '{role}': load_instance не удался: {e}"))
+                                }
                             }
                         }
                     }
