@@ -151,7 +151,8 @@ fn local_offset_secs() -> i64 {
     0
 }
 
-/// Дни с 1970-01-01 (Howard Hinnant `days_from_civil`).
+/// Дни с 1970-01-01 (Howard Hinnant `days_from_civil`). Нужен только Windows-ветке.
+#[cfg(windows)]
 fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
     let y = if m <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
