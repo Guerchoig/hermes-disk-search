@@ -23,7 +23,8 @@ fn usage() -> String {
      \x20 whisper-check [--file <медиа>] [--json]\n\
      \x20 db-move      --to <path> [--force]\n\
      \x20 watch        [--roots a;b]\n\
-     \x20 mcp          (stdio MCP-сервер)"
+     \x20 mcp          [--http --host H --port N --path /mcp] (stdio или streamable-http)\n\
+     \x20 mcp-http     check|start|stop|status|restart|run [--host --port --path]"
         .to_string()
 }
 
@@ -106,7 +107,24 @@ fn run(args: &[String]) -> i32 {
             }
         },
         "watch" => cmd::watch::cmd_watch(flag_val(rest, "--roots")),
-        "mcp" => cmd::mcp::cmd_mcp(),
+        "mcp" => cmd::mcp::cmd_mcp(
+            has(rest, "--http"),
+            flag_val(rest, "--host"),
+            flag_u64(rest, "--port").map(|v| v as u16),
+            flag_val(rest, "--path"),
+        ),
+        "mcp-http" => match rest.first() {
+            Some(s) if !s.starts_with("--") => cmd::mcp_http::cmd_mcp_http(
+                s,
+                flag_val(rest, "--host"),
+                flag_u64(rest, "--port").map(|v| v as u16),
+                flag_val(rest, "--path"),
+            ),
+            _ => {
+                eprintln!("mcp-http: нужна подкоманда (check|start|stop|status|restart|run)");
+                2
+            }
+        },
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0

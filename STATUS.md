@@ -35,7 +35,8 @@
 > + CLI `hds search`; паритет golden `search_*.json` — **10/10 топ-20** (`W1_REPORT.md` §1).
 > **RAG перенесён:** `rag::ask` + реранк + CLI `hds ask` (ответ со ссылками `[N]`) — §2.
 > **MCP (stdio) перенесён:** `crates/hds-mcp` (6 инструментов, JSON-RPC 2.0), `hds mcp`/`hds_mcp` — §3.
-> Далее: `mcp_http`-менеджер (streamable-http) и `hds-ui`. `cargo test --workspace` — **160 green (+8 `#[ignore]`)**.
+> **MCP streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http …`) — §4.
+> Далее: `hds-ui`. `cargo test --workspace` — **165 green (+8 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

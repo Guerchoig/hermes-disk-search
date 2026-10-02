@@ -8,6 +8,7 @@ pub mod db_move;
 pub mod forget;
 pub mod index;
 pub mod mcp;
+pub mod mcp_http;
 pub mod reindex;
 pub mod reindex_fts;
 pub mod search;

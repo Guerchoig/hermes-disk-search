@@ -7,8 +7,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod http;
 pub mod schema;
 pub mod server;
 pub mod tools;
 
+pub use http::run_http;
 pub use server::{handle, handle_line, run_stdio};

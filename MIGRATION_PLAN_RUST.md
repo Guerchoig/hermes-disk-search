@@ -34,9 +34,9 @@
 >    `llm-host` остановлен (см. `W3_REPORT.md` §4); замеры — `W2_REPORT.md` §11–§14,
 >    `W3_REPORT.md` §4–§6.
 > 3. Ближайшие задачи: **W1** (резидентный слой). Перенесены **поиск** (`hds-search`,
->    паритет golden 10/10), **RAG** (`ask`+реранк, `hds ask`) и **MCP** (stdio, `hds-mcp`,
->    `hds mcp`) — `W1_REPORT.md` §1–§3. Далее: `mcp_http` (streamable-http) и `hds-ui`.
->    **W4** — упаковка/CI.
+>    паритет golden 10/10), **RAG** (`ask`+реранк, `hds ask`), **MCP** stdio (`hds-mcp`,
+>    `hds mcp`) и **streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http`) —
+>    `W1_REPORT.md` §1–§4. Далее: `hds-ui`. **W4** — упаковка/CI.
 > 4. Решения заказчика — `PLAN_W2_LLM_HOST.md` §9 (в т.ч. **без авто-деградации кванта**,
 >    llama-server удаляется в конце W2, `anonymizer_proxy` — ждём переезда). **Вопрос
 >    `llm.chat.n_ctx` закрыт 30.09.2026 решением «замер фактического KV»**: замер сделан —

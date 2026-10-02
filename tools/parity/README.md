@@ -148,6 +148,9 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture  # пар
 
 # --- W1: MCP-сервер (stdio) ---
 target\debug\hds.exe mcp      # эквивалент `hds_mcp`; клиенты (Cline/Hermes) общаются по JSON-RPC 2.0
+# --- W1: MCP streamable-http (ОДИН инстанс на машину) ---
+target\debug\hds.exe mcp-http check|start|stop|status|restart|run [--host --port --path]
+target\debug\hds.exe mcp --http --port 8787   # сервер в foreground (endpoint /mcp, probe /health)
 
 # --- паритет с движком ---
 .\.venv\Scripts\python.exe tools\parity\probe6_devices.py        # memory_free vs nvidia-smi

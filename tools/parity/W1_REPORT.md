@@ -95,3 +95,32 @@ cargo test -p hds-search --test search_parity -- --ignored --nocapture   # Q01..
 
 **Далее по W1:** `mcp_http`-менеджер (streamable-http, ОДИН инстанс на машину) и `hds-ui`.
 
+
+## 4. streamable-http + менеджер (W1, 01.10.2026)
+
+**Что сделано.** Добавлен HTTP-транспорт MCP (ОДИН инстанс на машину) и менеджер —
+порт `hds/mcp_http.py`:
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-mcp/src/http.rs` | мини HTTP/1.1-сервер: `GET /health` (`{"app":"disk-search","transport":"streamable-http"}`), `POST <path>` (JSON-RPC → `application/json`, notification → 202), 404; чистая `route()` для тестов |
+| `crates/hds-cli/src/cmd/mcp.rs` | `hds mcp [--http --host --port --path]` — stdio или HTTP |
+| `crates/hds-cli/src/cmd/mcp_http.rs` | `hds mcp-http check\|start\|stop\|status\|restart\|run`: проба `/health` (mcp/foreign/down), PID-файл `data/mcp_http.pid`, запуск detached (`<exe> mcp --http …`) |
+
+**Ключевые решения.**
+* Опознание «наш» инстанс — по `GET /health` (`{"app":"disk-search"}`); чужой сервис
+  на порту **не** переиспользуется (`foreign`).
+* Свой мини-сервер (не `hds-llama::http`): `hds-mcp` не тянет движок/NVML.
+* Ответ POST — `application/json` (одиночный JSON-RPC), notification → 202 (без тела).
+* Запуск detached переживает перезапуск UI/агентов (флаги `DETACHED_PROCESS |
+  CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` на Windows).
+
+**Живой прогон:** `hds mcp-http check --port 8791` → `down` (1); `start` → `{state:mcp,
+pid, version}`; `GET /health` → `{"app":"disk-search",…}`; `POST /mcp initialize` →
+JSON-RPC-результат; `status` → mcp; `stop` → порт освобождён, `check` → `down`.
+
+**Тесты:** `tests/http_route.rs` — 5 (/health, /mcp result, notification 202, 404,
+parse-error). Итого `cargo test --workspace` — **165 passed / 0 failed (+8 ignored)**.
+
+**Далее по W1:** `hds-ui` (веб-интерфейс). **W4** — упаковка/CI.
+
