@@ -158,3 +158,23 @@ parse-error). Итого `cargo test --workspace` — **165 passed / 0 failed (+
 боевом индексе без Python-ролей. Для автозапуска ОС — `installers/install_llm_host_task.ps1`
 (проверка переносится в W4). Python-watcher/MCP/UI продолжают работать через фасад.
 
+
+## 6. Паритет поиска на БОЕВОЙ БД + запуск резидента из release (01.10.2026)
+
+**Паритет поиска на реальном индексе.** Контрольные запросы заказчика
+(`golden/real_db_queries.json`, W0 §12.3) прогнаны Rust-поиском по боевой БД
+(`D:\hermes-disk-search-db\index.db`, ~61k чанков): против **свежего** Python-эталона
+оба запроса совпали **точно** (топ-20, включая порядок).
+
+* Тест: `crates/hds-search/tests/real_db_parity.rs` (`#[ignore]`;
+  `.venv` + фасад `:8011` + боевая БД + golden).
+* Важно: **золотой файл дрейфует** — БД меняется (watcher), поэтому прежний
+  committed-golden давал расхождение (запрос 2: 12/20). После перегенерации
+  (`tools/parity/golden_queries.py`) Rust совпал 20/20 по обоим запросам. Golden
+  обновлён (коммит).
+
+**Резидент `llm-host` — из release.** Живая грабля: `cargo test` не может
+перезаписать `target\debug\llm_host.exe` (os error 5), пока резидент запущен из
+**debug**-сборки. Владельцем портов 8010–8012 держим **release**-резидента
+(`target\release\llm_host.exe run`) — debug-сборки/тесты разблокированы.
+

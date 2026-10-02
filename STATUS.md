@@ -38,7 +38,9 @@
 > **MCP streamable-http + менеджер** (`hds mcp --http`, `hds mcp-http …`) — §4.
 > **Порты 8010–8012 переведены на `llm-host`** (Python-роли остановлены): embeddings/chat/rerank
 > под Rust; `hds search`/`hds ask` работают на боевом индексе; тюнинг KV (`ctx_per_slot 16384`) —
-> `W1_REPORT.md` §5. Далее: `hds-ui`. `cargo test --workspace` — **165 green (+8 `#[ignore]`)**.
+> `W1_REPORT.md` §5. **Паритет поиска на боевой БД** — оба контрольных запроса совпали точно
+> (свежий golden) — §6; резидент `llm-host` держим из **release**. Далее: `hds-ui`.
+> `cargo test --workspace` — **165 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и
