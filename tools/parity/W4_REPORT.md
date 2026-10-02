@@ -229,3 +229,42 @@ cargo test --workspace                                    # 170 passed / 0 faile
 `hds.extractors → extract_av/extract_static` (faster-whisper, jpype/mpxj) — нужен сплит `hds/`
 (модули извлечения/лемматизации → `sidecar/`), затем джобы `build-sidecar`/`build-macos`;
 версионные каталоги `app\<ver>` (§10.6); `.mpp` (jpype/mpxj) пока нет в `requirements.lock`.
+
+## 8. Сплит `hds/`: самодостаточный Python-sidecar (02.10.2026)
+
+**Проблема.** Воркер `sidecar/hds_extract/worker.py` импортировал `hds.*`, а
+`hds.extractors` тянет `extract_av`/`extract_static` — в поставке (без Python-ядра) воркер
+не работал.
+
+**Решение (без переноса исходников — Python остаётся источником истины).** Воркер кладёт
+каталог `sidecar\` в `sys.path` **перед** корнем проекта; `build_sidecar.ps1` собирает
+самодостаточное дерево, куда входит **копия** нужных модулей под `sidecar/hds/`. Граф воркера
+закрыт ровно `config/extractors/extract_av/extract_static/lemmatizer/whisper_cpp` (импорты
+внутри пакета относительные, тяжёлые библиотеки — лениво внутри функций).
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `sidecar\hds_extract\worker.py` | `_HERE`/`_SIDE`; `sys.path`: `sidecar\` (копия в поставке) → корень проекта (dev). |
+| `installers\build_sidecar.ps1` | **новый** (ASCII): портативный CPython (`uv python install`), зависимости (`uv pip install --break-system-packages` — uv-managed интерпретатор «externally managed»), копия модулей `hds\`, воркер; `-SelfTest`/`-Force`, идемпотентно. |
+| `.gitignore` | `sidecar/python/`, `sidecar/hds/`. |
+| `installers\build_rust_release.ps1` | `-WithSidecar` (собрать в стейдж) / `-SidecarDir` (взять готовое дерево). |
+| `.github\workflows\release.yml` | джоба **`build-sidecar`** (uv, `-SelfTest`, артефакт) → `build-windows` берёт его (`-SidecarDir sidecar_runtime`). |
+| `tests\test_ensure_config.py` | 2 теста `RunUiLauncherTests` актуализированы под Rust-`run_ui.ps1`. |
+
+**Приёмка (живой прогон).**
+```
+installers\build_sidecar.ps1 -OutDir %TEMP%\hds-sc-build -SelfTest   # exit 0, "sidecar-ok"
+# воркер запущен ВСТРОЕННЫМ портативным Python 3.12.14 из собранного дерева:
+#   hello   -> capabilities [text, pdf, docx, xlsx, pptx, normalize]
+#   extract -> kind=text, сегмент с текстом (elapsed 5 мс)
+python -m unittest discover -s tests   # 269 OK (skipped=2)   (было 2 падения про старый run_ui.ps1 — поправлены)
+cargo test --workspace                 # 170 passed / 0 failed (+9 ignored)
+```
+Копия самодостаточна: импорт модулей из временного каталога **без корня проекта** — `OK`,
+`hds.__file__` указывает на копию.
+
+**Остаётся.** `.mpp` в sidecar требует `jpype1` + `mpxj` (нет в `requirements.lock`) и JDK —
+отдельная задача; джоба `build-macos` (mac — «не проверено», §10.0); версионные каталоги
+`app\<ver>` (§10.6).

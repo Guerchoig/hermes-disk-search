@@ -65,8 +65,9 @@ SemVer: `vMAJOR.MINOR.PATCH`.
   к обновлению (например «запустите `index --full` после обновления»).
 - Ассеты релиза:
   * **бинарный Windows-пакет** `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) —
-    `bin\` (Rust) + `installers\` + `runtime-manifests\` + `sidecar\` + `assets\` +
-    скрипты; ставится через `setup.cmd` (он же `setup.ps1`);
+    `bin\` (Rust) + `installers\` + `runtime-manifests\` + `sidecar\` (портативный
+    Python-воркер: CPython + deps + модули извлечения, джоба `build-sidecar`) +
+    `assets\` + скрипты; ставится через `setup.cmd` (он же `setup.ps1`);
   * **рантайм движка** `hds-engine-runtime-windows-x64-cuda.zip` (LLM-хост + ASR;
     вместо llama.cpp, который больше не ставится);
   * **архивы исходников** `hermes-disk-search-<версия>-windows.zip` и

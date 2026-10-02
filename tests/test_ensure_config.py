@@ -371,24 +371,25 @@ class UiVersionTests(unittest.TestCase):
 
 
 class RunUiLauncherTests(unittest.TestCase):
-    """РЕГРЕССИЯ: при запуске по ярлыку страница UI открывалась дважды —
-    браузер открывали и сервер (webbrowser.open в ui_server.run), и лаунчер
-    (Start-Process в run_ui.ps1). Теперь сервер стартует с --no-browser,
-    страницу открывает только лаунчер."""
+    """Ярлык запускает Rust-UI: `run_ui.ps1` стартует `bin\\hds.exe ui` и сам
+    открывает страницу. Rust-сервер браузер не открывает, поэтому регрессия
+    «страница открывалась дважды» (webbrowser в сервере + Start-Process в лаунчере)
+    структурно невозможна — проверяем контракт лаунчера."""
 
     def _text(self):
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         with open(os.path.join(root, "run_ui.ps1"), encoding="utf-8-sig") as f:
             return f.read()
 
-    def test_server_starts_without_browser(self):
-        self.assertIn("--no-browser", self._text(),
-                      "сервер должен стартовать с --no-browser из run_ui.ps1")
+    def test_launcher_starts_rust_ui(self):
+        t = self._text()
+        self.assertIn("bin\\hds.exe", t,
+                      "лаунчер должен запускать Rust-бинарник bin\\hds.exe")
+        self.assertIn("'ui'", t, "и подкоманду ui")
 
-    def test_single_page_opener(self):
-        self.assertEqual(self._text().count('Start-Process "http://'), 1,
-                         "страницу UI должен открывать только лаунчер "
-                         "(ровно одна вставка URL)")
+    def test_launcher_opens_page(self):
+        self.assertIn('Start-Process "http://127.0.0.1', self._text(),
+                      "страницу открывает лаунчер (сервер этого не делает)")
 
 
 class DefaultConfigTests(unittest.TestCase):

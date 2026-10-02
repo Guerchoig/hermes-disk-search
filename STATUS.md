@@ -71,6 +71,12 @@
 > **in-process** (убран запуск `hds.exe check --json`); добавлен `NOTICE.md`. Тесты — 170/0.
 > `W4_REPORT.md` §7. Остаток: сплит `hds/` для self-contained sidecar (`build-sidecar`),
 > версионные каталоги `app\<ver>` (§10.6).
+> **Сплит `hds/` (02.10.2026):** воркер самодостаточен — `installers\build_sidecar.ps1`
+> собирает `sidecar\` (портативный CPython + deps + **копия** модулей `hds\` под `sidecar/hds`;
+> воркер кладёт `sidecar\` в `sys.path`); джоба CI `build-sidecar` → `build-windows
+> -SidecarDir`. Живой прогон: сборка + воркер на встроенном Python 3.12.14 (hello/extract);
+> Python-тесты 269 OK, Rust 170/0. `W4_REPORT.md` §8. Остаток: `.mpp` (jpype/mpxj+JDK),
+> `build-macos`, версионные каталоги §10.6.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

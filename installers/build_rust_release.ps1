@@ -13,7 +13,9 @@
 # ASCII-only on purpose (PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 param(
     [string]$Version = "0.1.0",
-    [switch]$SkipZip
+    [switch]$SkipZip,
+    [switch]$WithSidecar,
+    [string]$SidecarDir = ""
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -42,14 +44,32 @@ foreach ($f in @("setup.cmd", "setup.ps1", "install_hermes.ps1", "install_cline.
     if (Test-Path $src) { Copy-Item $src (Join-Path $stage $f) -Force }
 }
 
-# directories copied as a whole
-foreach ($d in @("installers", "runtime-manifests", "assets", "hermes-skill", "sidecar")) {
+# directories copied as a whole (sidecar is handled separately below)
+foreach ($d in @("installers", "runtime-manifests", "assets", "hermes-skill")) {
     $src = Join-Path $root $d
     if (-not (Test-Path $src)) { continue }
     $dst = Join-Path $stage $d
     New-Item -ItemType Directory -Force -Path $dst | Out-Null
     Copy-Item (Join-Path $src "*") $dst -Recurse -Force
     Get-ChildItem -Path $dst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# sidecar: self-contained tree (`build-sidecar` job / -WithSidecar) or the repo copy
+$sidecarDst = Join-Path $stage "sidecar"
+if ($WithSidecar) {
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\build_sidecar.ps1") -OutDir $sidecarDst
+    if ($LASTEXITCODE -ne 0) { throw "build_sidecar.ps1 failed" }
+} else {
+    if (-not $SidecarDir) {
+        $SidecarDir = Join-Path $root "sidecar"
+    } elseif (-not [System.IO.Path]::IsPathRooted($SidecarDir)) {
+        $SidecarDir = Join-Path $root $SidecarDir
+    }
+    if (-not (Test-Path $SidecarDir)) { throw "sidecar dir not found: $SidecarDir" }
+    New-Item -ItemType Directory -Force -Path $sidecarDst | Out-Null
+    Copy-Item (Join-Path $SidecarDir "*") $sidecarDst -Recurse -Force
+    Get-ChildItem -Path $sidecarDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 

@@ -63,9 +63,15 @@ def _arg(name, default=None):
     return default
 
 
-ROOT = _arg("--root") or os.path.dirname(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-)
+_HERE = os.path.dirname(os.path.abspath(__file__))
+ROOT = _arg("--root") or os.path.dirname(os.path.dirname(_HERE))
+# Поставка: рядом с `hds_extract` лежит самодостаточная копия модулей извлечения
+# под `sidecar/hds` (собирает installers/build_sidecar.ps1). Кладём каталог sidecar
+# в path ПЕРЕД корнем проекта: в поставке `hds` резолвится из копии, в разработке
+# (`sidecar/hds` отсутствует) — из корня проекта (источник истины).
+_SIDE = os.path.dirname(_HERE)
+if _SIDE not in sys.path:
+    sys.path.insert(0, _SIDE)
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 

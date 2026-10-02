@@ -24,6 +24,21 @@ Rust-клиент (`crates/hds-extract`) ищет интерпретатор т�
 `HDS_EXTRACT_PYTHON` → `sidecar/python/**/python.exe` (вариант A, установщик) →
 `.venv\Scripts\python.exe` (вариант C, fallback) → ошибка с подсказкой.
 
+## Поставка (вариант A, самодостаточный)
+
+`installers/build_sidecar.ps1` собирает дерево, работающее **без** Python-ядра проекта:
+`hds_extract/` (воркер + lock), `python/` (портативный CPython из python-build-standalone +
+зависимости из `requirements.lock`), `hds/` (**копия** модулей извлечения/лемматизации из
+корневого `hds/*.py` — источник истины не переезжает), `README.md`. `worker.py` ставит
+каталог `sidecar/` в `sys.path` перед корнем проекта: в поставке `hds` резолвится из копии,
+в разработке (`sidecar/hds` отсутствует) — из корня проекта.
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
+```
+
+В релизе это делает джоба CI `build-sidecar`; `build-windows` кладёт готовое дерево в пакет.
+
 ## Контракт (§5 плана)
 
 * транспорт — stdio, NDJSON, UTF-8; аргумент `--root <проект>` (воркер не ищет `config.yaml` сам);

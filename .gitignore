@@ -32,6 +32,10 @@ data/
 target/
 # W4: релизная сборка (installers/build_rust_release.ps1)
 dist/
+# W4: собранный самодостаточный sidecar (installers/build_sidecar.ps1):
+# портативный CPython + зависимости + копия модулей извлечения
+sidecar/python/
+sidecar/hds/
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
 

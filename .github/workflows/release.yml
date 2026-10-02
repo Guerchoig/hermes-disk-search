@@ -96,9 +96,29 @@ jobs:
       - name: Тесты Rust
         run: cargo test --workspace
 
+  # ---------- Python sidecar: portable CPython + worker + extractor modules ----------
+  build-sidecar:
+    needs: [test-rust]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Сборка самодостаточного sidecar (python + deps + модули извлечения)
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1 -OutDir dist\sidecar -SelfTest
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: hds-sidecar-windows
+          path: dist/sidecar/**
+          if-no-files-found: error
+
   # ---------- Rust: Windows binaries + package (zip + sha256) ----------
   build-windows:
-    needs: [test-rust]
+    needs: [test-rust, build-sidecar]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -107,13 +127,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Сборка релиза и упаковка (bin + installers + sha256 + zip)
+      - name: Скачать sidecar
+        uses: actions/download-artifact@v5
+        with:
+          name: hds-sidecar-windows
+          path: sidecar_runtime
+
+      - name: Сборка релиза и упаковка (bin + sidecar + sha256 + zip)
         shell: pwsh
         env:
           VERSION: ${{ inputs.version }}
         run: |
           $ver = "$env:VERSION" -replace '^v', ''
-          powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version $ver
+          powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version $ver -SidecarDir sidecar_runtime
 
       - name: "Smoke: распакованный архив - hds запускается"
         shell: pwsh
