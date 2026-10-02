@@ -575,12 +575,11 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
 
     checks.push(
         Check::new(
-            "python-only",
+            "gpu-manual",
             "warn",
-            "whisper / Vulkan проверяются Python-версией (до W5)",
+            "whisper / Vulkan проверяются вручную (GPU-чек-лист W3)",
         )
-        .msg("В Rust эти компоненты не проверяются: извлечение медиа/`.mpp` остаётся в Python.")
-        .fix("Пока смотрите: python -m hds.cli check."),
+        .msg("Аппаратные пути (CUDA/Vulkan/Metal) в CI не проверяются: нет GPU/раннера."),
     );
     checks
 }

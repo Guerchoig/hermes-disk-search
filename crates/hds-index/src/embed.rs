@@ -179,23 +179,21 @@ impl Embedder {
         let low = last.to_lowercase();
         let hint = if low.contains("exceed_context") || low.contains("context size") {
             "llama-server отвечает ЯВНОЙ ошибкой контекста: модель загружена с ctx \
-             меньше длины входа. Запустите роль менеджером (контекст задаётся \
-             llm_server.embedding.ctx_per_slot = 8192): python -m hds.llama_server \
-             restart embedding."
+             меньше длины входа. Перезапустите роль (контекст задаётся \
+             llm_server.embedding.ctx_per_slot = 8192): bin\\llm_host.exe stop, затем bin\\llm_host.exe run."
         } else if low.contains("connection")
             || low.contains("max retries")
             || low.contains("failed to establish")
             || low.contains("connect")
         {
-            "Похоже, llama-server (роль embedding) не запущен: \
-             python -m hds.llama_server start embedding (или «Запустить» в группе \
-             «LLM-серверы» веб-интерфейса)."
+            "Похоже, llama-server (роль embedding) не запущен: запустите владельца \
+             ролей — bin\\llm_host.exe run (или задача HermesDiskSearchLlmHost)."
         } else if low.contains("model") && (low.contains("not found") || low.contains("no model")) {
             "GGUF-модель не найдена на диске (общий llama-рантайм). Скачайте её \
              кнопкой «Скачать модель» в веб-интерфейсе или установщиком рантайма."
         } else {
-            "Проверьте состояние сервера: python -m hds.llama_server status embedding \
-             (или карточка «Проверка компонентов» в UI)."
+            "Проверьте состояние сервера: карточка «Проверка компонентов» в UI \
+             (hds ui) или bin\\hds.exe check."
         };
         CoreError::Other(format!(
             "Эмбеддинги недоступны (модель '{}' на {}): {}. {}",

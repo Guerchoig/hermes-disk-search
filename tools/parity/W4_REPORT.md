@@ -379,3 +379,36 @@ installers\build_rust_release.ps1 -Version 0.1.0 -SkipBuild
 
 **Оговорка.** Локально `sidecar\` — dev-копия (без портативного Python): полный пакет собирает
 CI-джоба `build-sidecar` (или локально `-WithSidecar`, нужен `uv` ~280 МБ загрузки).
+
+## 13. W5-финал: Python уходит из CI и из продукта (02.10.2026)
+
+**Вывод Python-джоб из CI.**
+* Удалён `.github\workflows\ci.yml` (Python-only CI на `main`).
+* `release.yml`: удалены `test-py`, `test-macos`, `build-macos` (mac-архив исходников) и
+  mac-ассет; `release` теперь `needs: [build-windows, fetch-engine-runtime]`. Итоговые джобы:
+  `test-rust` (fmt/clippy/tests), `build-sidecar`, `build-windows`, `fetch-engine-runtime`, `release`.
+
+**Удаление legacy Python-обвязки** (продукт от неё не зависел — проверено grep'ом по Rust/PS1/sidecar):
+* `hds\` оставлен **только** под sidecar: `__init__.py, config.py, extractors.py, extract_av.py,
+  extract_static.py, lemmatizer.py, whisper_cpp.py`. Удалены ядровые модули: `cli.py,
+  clip_index.py, chunker.py, db.py, dbops.py, diag.py, embedder.py, indexer.py, llama_runtime.py,
+  llama_server.py, mcp_http.py, mcp_server.py, progress.py, rag.py, rerank.py, search.py,
+  ui_server.py, watcher.py`.
+* `mcp_start.py`, корневой `gen_fixtures.py`, `installers\ensure_llama_runtime.{ps1,sh}`.
+* `tests\` (23 файла Python-тестов удалённого ядра).
+* `tools\parity\`: удалены зависевшие от ядра генераторы (`golden.py`, `golden_queries.py`,
+  `hash_vectors.py`, `walk_parity.py`, `w3_clip_smoke.py`, `spike2_hash.py`).
+  **Следствие: golden-файлы заморожены** (регенерация невозможна); `compare.py` и golden остаются эталоном.
+
+**Правки пользовательских строк в Rust** (ссылались на удалённые команды): `hds-index::diag`
+(`python-only` → `gpu-manual`, без `python -m hds.cli check`), `hds-index::embed` (хинты →
+`bin\llm_host.exe`), `hds-search::rag` (ответ → `hds index`).
+
+**Приёмка.** `cargo fmt --check` 0; clippy `-D warnings` 0/0; `cargo test --workspace` **174 passed
+/ 0 failed (+9 ignored)**; урезанный `hds\` обслуживает воркер (temp-копия: `IMPORT-OK`, `hello` →
+`text,pdf,docx,xlsx,pptx,normalize,mpp`). Python-тесты удалены вместе с ядром — Python больше не
+участвует в CI.
+
+**Долг (осознанно не в этом шаге).** README/`MIGRATION_PLAN_RUST`/`config.example.yaml` и часть
+`tools/parity/*` ещё упоминают Python-команды; doc-комментарии Rust вида «порт `hds/…py`» —
+историческая провенанс-заметка. mac-артефакт (§10.0, «не проверено») выведен из релиза.

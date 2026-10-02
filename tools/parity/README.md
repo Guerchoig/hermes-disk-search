@@ -11,6 +11,14 @@
 > Rust-проверки — крейты воркспейса `crates/` (`cargo test`, `cargo run -p hds-llama …`).
 
 
+## Каталог parity (W5: Python-ядро удалено)
+
+> **W5 (02.10.2026):** Python-ядро удалено. Генераторы `golden.py`/`golden_queries.py` (и
+> зависевшие от ядра `hash_vectors.py`/`walk_parity.py`/`w3_clip_smoke.py`/`spike2_hash.py`)
+> удалены; **golden-файлы заморожены** (регенерация невозможна). Эталон для сверки —
+> `compare.py` + golden; Rust-паритет-тесты (`crates/*/tests/*`) остаются. Историю W0–W3 см.
+> `SPIKES.md`, `W1_REPORT.md`, `W2_REPORT.md`, `W3_REPORT.md`, `W4_REPORT.md`.
+
 ## 1. Состав каталога
 
 ### Генераторы и приёмка (главное)

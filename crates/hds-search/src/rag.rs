@@ -134,8 +134,7 @@ pub fn ask(
     let mut results = search(conn, emb, lem, cfg, question, None, pool);
     if results.is_empty() {
         return Answer {
-            answer: "В индексе ничего не найдено. Проиндексируйте диски: python -m hds.cli index"
-                .to_string(),
+            answer: "В индексе ничего не найдено. Проиндексируйте диски: hds index".to_string(),
             sources: Vec::new(),
         };
     }

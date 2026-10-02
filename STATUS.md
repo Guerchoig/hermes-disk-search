@@ -94,6 +94,11 @@
 > `target\release\*.exe`, не трогая резидента). Прогон 0.1.0 → `dist\hds-0.1.0-windows-x64\`
 > (46 файлов, все разделы §10.1) + zip + sha256; `bin\hds.exe --help` работает. `releasing.md`,
 > `W4_REPORT.md` §12.
+> **W5-финал (02.10.2026):** Python выведен из CI (`ci.yml` удалён; в `release.yml` убраны
+> `test-py`/`test-macos`/`build-macos`) и из продукта — `hds\` оставлен только под sidecar
+> (`config/extractors/extract_av/extract_static/lemmatizer/whisper_cpp`), удалены ядровые модули,
+> `mcp_start.py`, `ensure_llama_runtime.*`, `tests\`, генераторы golden. golden **заморожен**.
+> Rust-строки с `python -m hds.*` поправлены. Rust — 174/0 (+9), clippy 0/0. `W4_REPORT.md` §13.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

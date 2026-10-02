@@ -24,9 +24,11 @@ SemVer: `vMAJOR.MINOR.PATCH`.
    а они untracked (`git status` показывает `??`) — они не попадут в релиз и
    установка упадёт. Всё, на что ссылаются скрипты установки, должно быть
    закоммичено до запуска workflow.
-2. Прогнать тесты локально:
+2. Прогнать проверки локально (Rust-воркспейс):
    ```powershell
-   .\.venv\Scripts\python.exe -m unittest discover -s tests
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace
    ```
 3. Создать файл заметок `RELEASE_NOTES_<версия>.md` в корне (что нового, исправления,
    требования к обновлению — например «требуется index --full после смены модели»).
@@ -38,8 +40,8 @@ SemVer: `vMAJOR.MINOR.PATCH`.
      gh run watch   # следить за прогрессом
      ```
 5. Workflow сам:
-   - прогонит компиляцию и **регрессионные тесты** (job `test`, Windows; job
-     `test-macos`, macOS/Apple Silicon — проверка совместимости без CUDA);
+   - прогонит Rust-проверки (job `test-rust`: `fmt --check` + `clippy -D warnings` + `cargo test`)
+     и соберёт портативный sidecar (job `build-sidecar`);
    - при успехе — соберёт **бинарные ассеты** (Rust `hds`/`hds_mcp`/`llm_host` в zip +
      sha256), **рантайм движка** (`hds-engine-runtime-*-windows-x64-cuda.zip`, sha256 по
      манифесту) и архивы исходников (Windows/macOS), создаст релиз с заметками
@@ -60,7 +62,8 @@ SemVer: `vMAJOR.MINOR.PATCH`.
 
 ## Правила good-practice
 
-- **Не выпускать релиз с красными тестами** — job `test` блокирует выпуск автоматически.
+- **Не выпускать релиз с красными тестами** — job `test-rust` блокирует выпуск автоматически.
+  Python-ядро удалено (W5): Python-регрессии в релизе больше нет.
 - Заметки релиза пишутся на русском, включают: новые фичи, исправления, требования
   к обновлению (например «запустите `index --full` после обновления»).
 - Ассеты релиза:
@@ -70,9 +73,8 @@ SemVer: `vMAJOR.MINOR.PATCH`.
     `assets\` + скрипты; ставится через `setup.cmd` (он же `setup.ps1`);
   * **рантайм движка** `hds-engine-runtime-windows-x64-cuda.zip` (LLM-хост + ASR;
     вместо llama.cpp, который больше не ставится);
-  * **архивы исходников** `hermes-disk-search-<версия>-windows.zip` и
-    `-macos.zip` (Python-эталон/legacy; mac собирается через `git archive` на macOS —
-    `Compress-Archive` для него непригоден, теряет бит исполнения).
+  * **архив исходников** `hermes-disk-search-<версия>-windows.zip` (legacy); mac-артефакт
+    выведен из релиза (§10.0 — «не проверено», macOS-джобы удалены в W5).
   Ad-hoc подпись копии mac-приложения выполняет инсталлятор на целевой машине
   (codesign входит в macOS, подписи нельзя закоммитить в архив).
 - ONNX-модели CLIP в релиз не входят (≈850 МБ) — публикуются отдельным тегом
