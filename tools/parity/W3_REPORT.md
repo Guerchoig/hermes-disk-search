@@ -358,5 +358,12 @@ target\debug\hds.exe whisper-check --file 'tools\parity\out\приёмка W3\р
 Результат — сегмент `[0.83 -> 4.43] And so, my fellow Americans, ask` за 27,7 с
 (GPU было 2,4 с — подтверждает выбор CPU). Бюджет VRAM при этом не превышен.
 
+**Вытеснение по простою (ARB-5).** Арбитр следит за whisper отдельно (bridge — не
+инстанс кластера): после транскрибации отмечается активность (`note_used("whisper")`),
+и при простое ≥ `gpu.evict_idle_sec` транскрибатор **выгружается** (`WhisperCell.take()`
+→ `Drop` bridge → VRAM возвращается); пересоздаётся лениво. При `gpu.policy: manual`
+или `evict_idle_sec = 0` не трогаем. Ключ доступа к транскрибатору берётся под
+`Mutex`, транскрибация держит его целиком — вытеснение «в полёте» невозможно.
+
 `cargo test --workspace` — **145 passed / 0 failed (+7 ignored)**.
 

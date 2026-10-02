@@ -726,6 +726,29 @@ impl ClusterBackend {
     ///
     /// Ничего не делает при `gpu.policy: manual` и когда `gpu.evict_idle_sec = 0`
     /// (решения остаются за оператором) — это проверяет сама `dispatch`.
+    /// W3 ARB-5: выгрузить whisper-транскрибатор по простою — освободить VRAM.
+    ///
+    /// Транскрибатор не является инстансом кластера (bridge-API), поэтому арбитр
+    /// следит за ним отдельно; пересоздаётся лениво при следующем запросе.
+    /// При `gpu.policy: manual` или `evict_idle_sec = 0` не трогаем (за оператором).
+    fn whisper_idle_evict(&self) {
+        if self.gpu.policy == crate::config::GpuPolicy::Manual || self.gpu.evict_idle_sec == 0 {
+            return;
+        }
+        if let Some(sec) = self.idle_map().get("whisper").copied() {
+            if sec >= self.gpu.evict_idle_sec {
+                let mut slot = self.whisper.lock().unwrap();
+                if slot.take().is_some() {
+                    self.log.line(&format!(
+                        "[arbiter/idle] whisper: простой {sec} с ≥ {} — выгружен \
+                         (VRAM освобождена)",
+                        self.gpu.evict_idle_sec
+                    ));
+                }
+            }
+        }
+    }
+
     pub fn spawn_arbiter(self: &Arc<Self>, stop: Arc<AtomicBool>) -> std::thread::JoinHandle<()> {
         let me = Arc::clone(self);
         std::thread::spawn(move || {
@@ -753,6 +776,8 @@ impl ClusterBackend {
         if self.cl().is_err() {
             return; // режимы facade/off: инстансов нет
         }
+        // W3 ARB-5: простой whisper → выгружаем транскрибатор (VRAM возвращается)
+        self.whisper_idle_evict();
         let heartbeat = read_heartbeat(&self.pause_dir);
         let indexing_live = heartbeat.as_ref().map(|h| h.is_live()).unwrap_or(false);
         let mut plans: Vec<(&str, Plan)> = Vec::new();
@@ -1082,6 +1107,9 @@ impl Backend for ClusterBackend {
         }
         let w = slot.as_ref().unwrap().0.lock().unwrap();
         let tr = w.transcribe_file(Path::new(path), mode, &custom)?;
+        drop(w);
+        // активность роли whisper — для вытеснения по простою (ARB-5, W3)
+        self.note_used("whisper");
         let segments: Vec<Value> = tr
             .segments
             .iter()
