@@ -39,6 +39,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 
 В релизе это делает джоба CI `build-sidecar`; `build-windows` кладёт готовое дерево в пакет.
 
+## MS Project (.mpp)
+
+`.mpp`/`.mpt`/`.mpx` извлекаются через **mpxj** (Java, JPype). Нужна **Java 11+**: воркер сам
+находит `%LOCALAPPDATA%\jdk-21\<ver>\bin\server\jvm.dll` (macOS — Homebrew openjdk или
+`/Library/Java/JavaVirtualMachines/*`), `JAVA_HOME` не обязателен. Без Java файл
+**индексируется с пометкой** (не падает); `hello.capabilities` тогда не содержит `mpp`, и
+`hds check` показывает `mpp: warn`.
+
 ## Контракт (§5 плана)
 
 * транспорт — stdio, NDJSON, UTF-8; аргумент `--root <проект>` (воркер не ищет `config.yaml` сам);

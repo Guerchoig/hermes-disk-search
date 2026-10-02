@@ -324,5 +324,35 @@ cargo test --workspace                 # 170 passed / 0 failed (+9 ignored)
 `current` → `app\0.2.1`, `config.yaml` подхвачен из активной версии, обе версии на месте.
 Скрипты — `parse-ok`, `nonASCII=0`. Rust — 174/0 (+9); Python — 269 OK.
 
-**Остаётся.** `.mpp` в sidecar (jpype1+mpxj+JDK); `build-macos` (mac — «не проверено», §10.0);
-release-тег `clip-onnx-v1`.
+**Остаётся.** `build-macos` (mac — «не проверено», §10.0); release-тег `clip-onnx-v1`.
+
+## 11. `.mpp` (MS Project) в sidecar: `jpype1` + `mpxj` (02.10.2026)
+
+**Проблема.** Python-версия умеет `.mpp` (`hds/extract_static.py::extract_mpp` через mpxj/Java),
+но в `sidecar/hds_extract/requirements.lock` не было `jpype1`/`mpxj` — собранный sidecar не
+извлекал `.mpp` (паритет форматов неполный).
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `sidecar\hds_extract\requirements.lock` | добавлены `jpype1==1.7.1`, `mpxj==16.7.0` (+ комментарий: Java 11+; воркер сам находит `%LOCALAPPDATA%\jdk-21\*\bin\server\jvm.dll` без `JAVA_HOME`; без Java `extract_mpp` деградирует, не падает). |
+| `sidecar\hds_extract\worker.py` | `_capabilities()` репортит `mpp` (если `importlib.util.find_spec` видит `jpype`+`mpxj`) — чтобы `hds check`/UI видели деградацию. |
+| `installers\build_sidecar.ps1` | self-test импортирует и `jpype, mpxj` (CI ловит отсутствие зависимостей). |
+| `crates\hds-index\src\diag.rs` | одна проба воркера (`worker_caps`) → проверки `lemmatizer` и **`mpp`** (пункт 8 `diag.run_checks`); из заметки `python-only` убран `mpxj`. |
+
+**Приёмка (живой прогон).**
+```
+# .mpp (tools/parity/fixtures/план_проекта_копия.mpp) через воркер:
+#   caps: text,pdf,docx,xlsx,pptx,ocr,normalize,mpp
+#   kind=mpp, 1 сегмент: "msproj11; начало=2024-11-01T09:00; окончание=2025-02-28T18:00
+#                        Согласование договоров по Централизованным Закупкам (MVP); ..."
+# hds check --json: db:ok roots:ok chat:warn emb:fail ocr:ok ffmpeg:ok lemmatizer:ok mpp:ok rerank:ok python-only:warn
+cargo test --workspace   # 174 passed / 0 failed (+9 ignored)
+python -m unittest discover -s tests   # 269 OK (skipped=2)
+cargo clippy -D warnings / fmt --check # 0/0 / 0
+```
+
+**Оговорка.** В CI `windows-latest` Java может отсутствовать → `extract_mpp` отработает
+пункт-заглушкой (тест `.mpp` не должен требовать JVM). Полный паритет `.mpp` проверяется на
+машине с JDK (здесь — JDK 21).

@@ -29,7 +29,9 @@
 * **PyMuPDF** — AGPL-3.0 (или коммерческая лицензия Artifex) — важное условие;
 * python-docx / openpyxl / python-pptx / DAWG2-Python / et_xmlfile / xlsxwriter — MIT;
 * Pillow — HPND; pymorphy3 / pymorphy3-dicts-ru — MIT; PyYAML — MIT; lxml — BSD;
-* pytesseract — GPL-3.0 (обёртка над Tesseract).
+* pytesseract — GPL-3.0 (обёртка над Tesseract);
+* **mpxj** (MS Project, Java) и **JPype1** — Apache-2.0; для `.mpp` нужна **Java 11+**
+  (у нас JDK 21 в `%LOCALAPPDATA%\jdk-21`) — OpenJDK/Oracle JDK (GPLv2 + Classpath Exception).
 
 ## Базы данных
 * **SQLite** (bundled в `rusqlite`) — public domain;

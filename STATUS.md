@@ -86,6 +86,10 @@
 > и `installers\update.ps1` (отдельный процесс: stop задач/резидента → install → switch → start).
 > Живой прогон: junction `current`, write-through общих `data`/`models`, перенос config,
 > переключение версии (обе версии остаются — откат). Rust **174/0**, Python 269 OK. `W4_REPORT.md` §10.
+> **`.mpp`/jpype в sidecar (02.10.2026):** `requirements.lock` += `jpype1==1.7.1`, `mpxj==16.7.0`
+> (Java 11+; воркер сам находит JDK 21); `_capabilities` репортит `mpp`; `build_sidecar` self-test
+> импортирует jpype/mpxj; `hds check` получил пункт **`mpp`**. Живой `.mpp` из фикстуры извлечён
+> (задачи/даты). Rust 174/0, Python 269 OK. `W4_REPORT.md` §11. Остаток: `build-macos`, тег `clip-onnx-v1`.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

@@ -84,7 +84,7 @@ if ($Force -or -not (Test-Path $depsMarker)) {
 if ($SelfTest) {
     $code = "import sys; sys.path.insert(0, r'$OutDir'); " +
         "import hds.config, hds.extractors, hds.extract_av, hds.extract_static, " +
-        "hds.lemmatizer, hds.whisper_cpp; print('sidecar-ok')"
+        "hds.lemmatizer, hds.whisper_cpp, jpype, mpxj; print('sidecar-ok')"
     Write-Host "[..] self-test: importing the copied hds package from $OutDir"
     & $py.FullName -c $code
     if ($LASTEXITCODE -ne 0) { throw "sidecar self-test failed" }

@@ -464,35 +464,46 @@ fn check_ffmpeg() -> Check {
     }
 }
 
-/// Пункт 7c: лемматизатор — по `capabilities` воркера (`normalize`).
-fn check_lemmatizer() -> Check {
+/// Возможности воркера одним запуском: `(normalize, mpp)` (пункты 7c и 8 `diag.run_checks`).
+fn worker_caps() -> Result<(bool, bool)> {
     let root = config::project_root();
-    match build_sidecar(&root) {
-        Ok(sc) => {
-            let has = sc.capabilities().has("normalize");
-            sc.shutdown();
-            if has {
-                Check::new(
-                    "lemmatizer",
-                    "ok",
-                    "pymorphy3 установлен — русская морфология в ключевом поиске",
-                )
-            } else {
-                Check::new(
-                    "lemmatizer",
-                    "warn",
-                    "pymorphy3 не установлен — ключевой поиск без русской морфологии",
-                )
-                .fix("Установите pymorphy3 + pymorphy3-dicts-ru, затем hds reindex-fts.")
-            }
-        }
-        Err(e) => Check::new(
+    let sc = build_sidecar(&root)?;
+    let caps = sc.capabilities();
+    let norm = caps.has("normalize");
+    let mpp = caps.has("mpp");
+    sc.shutdown();
+    Ok((norm, mpp))
+}
+
+/// Пункт 7c: лемматизатор (`normalize`).
+fn check_lemmatizer(has: bool) -> Check {
+    if has {
+        Check::new(
+            "lemmatizer",
+            "ok",
+            "pymorphy3 установлен — русская морфология в ключевом поиске",
+        )
+    } else {
+        Check::new(
             "lemmatizer",
             "warn",
-            "Воркер лемматизации не запустился — морфология недоступна",
+            "pymorphy3 не установлен — ключевой поиск без русской морфологии",
         )
-        .msg(e.message())
-        .fix("Проверьте sidecar/python или .venv (интерпретатор воркера)."),
+        .fix("Установите pymorphy3 + pymorphy3-dicts-ru, затем hds reindex-fts.")
+    }
+}
+
+/// Пункт 8 (`diag.run_checks`): MS Project `.mpp` через mpxj/Java.
+fn check_mpp(has: bool) -> Check {
+    if has {
+        Check::new(
+            "mpp",
+            "ok",
+            "mpxj (MS Project) установлен — файлы .mpp индексируются",
+        )
+    } else {
+        Check::new("mpp", "warn", "mpxj/Java нет — файлы .mpp не индексируются")
+            .fix("Соберите sidecar с mpxj (installers\\build_sidecar.ps1) или установите Java 11+.")
     }
 }
 
@@ -548,7 +559,16 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
 
     checks.push(check_ocr(cfg));
     checks.push(check_ffmpeg());
-    checks.push(check_lemmatizer());
+    match worker_caps() {
+        Ok((norm, mpp)) => {
+            checks.push(check_lemmatizer(norm));
+            checks.push(check_mpp(mpp));
+        }
+        Err(e) => {
+            checks.push(check_lemmatizer(false).msg(e.message()));
+            checks.push(check_mpp(false).msg(e.message()));
+        }
+    }
     if let Some(c) = check_rerank(cfg) {
         checks.push(c);
     }
@@ -557,7 +577,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         Check::new(
             "python-only",
             "warn",
-            "whisper / mpxj / Vulkan проверяются Python-версией (до W5)",
+            "whisper / Vulkan проверяются Python-версией (до W5)",
         )
         .msg("В Rust эти компоненты не проверяются: извлечение медиа/`.mpp` остаётся в Python.")
         .fix("Пока смотрите: python -m hds.cli check."),

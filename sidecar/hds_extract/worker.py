@@ -131,6 +131,15 @@ def _capabilities():
             caps.append("normalize")
     except Exception:  # noqa: BLE001
         pass
+    try:
+        import importlib.util
+
+        # MS Project (.mpp) через mpxj/Java: репортим возможность, чтобы `hds check`
+        # и UI видели деградацию (без Java extract_mpp отдаёт пометку, не падает).
+        if importlib.util.find_spec("jpype") and importlib.util.find_spec("mpxj"):
+            caps.append("mpp")
+    except Exception:  # noqa: BLE001
+        pass
     return caps
 
 
