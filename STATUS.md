@@ -28,7 +28,9 @@
 > ASCII-стейджинг подтверждён) — `W3_REPORT.md` §4. **Шаг 4 (CLIP) сделан** — крейт
 > `crates/hds-clip` на `ort` (vision→`images_vec` dim 512, text резидентный, препроцессинг
 > как `CLIPImageProcessor`), боевой `clip_store` + `hds clip-index`; паритет cos_min 0,999950
-> ≥ 0,999 — `W3_REPORT.md` §5. `cargo test --workspace` — **141 green (+7 `#[ignore]`)**.
+> ≥ 0,999 — `W3_REPORT.md` §5. **Критерий VRAM (whisper) закрыт**: перед созданием
+> транскрибатора владелец проверяет бюджет «модель+буфер+резерв» и при нехватке уходит
+> на CPU (`whisper_no_gpu`) с сообщением — §6. `cargo test --workspace` — **145 green (+7 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W3_REPORT.md` §0 (передача).**
 > **Важно (снято ограничение):** «`crates.io` недоступен» — перепроверено живьём 01.10.2026:
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и

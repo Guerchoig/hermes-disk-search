@@ -113,10 +113,18 @@ impl Whisper {
         &self.model
     }
 
+    /// Устройство инференса (`>=0` — GPU-индекс, `<0` — CPU).
+    pub fn gpu(&self) -> i32 {
+        self.gpu
+    }
+
     /// Транскрибация файла.
     ///
     /// `mode`: `"subtitle"` (таймкоды → `.srt`) или `"speech"` (сплошной текст → `.md`).
     /// `custom`: `"default"`/`"auto"`/число (окно `subtitle`, сек).
+    ///
+    /// При `gpu < 0` движку выставляется `whisper_no_gpu: true` (CPU) — так требует
+    /// SDK (§8.3: не задавать оба, устройство задавать явно).
     pub fn transcribe_file(&self, src: &Path, mode: &str, custom: &str) -> Result<Transcript> {
         let ascii_dir = std::env::temp_dir().join("hds_whisper");
         let staged = stage_ascii(src, &ascii_dir)?;
@@ -127,15 +135,19 @@ impl Whisper {
             .to_string();
         let bytes =
             std::fs::read(&staged).map_err(|e| EngineError::Other(format!("{staged:?}: {e}")))?;
-        let meta = json!({
+        let mut meta = json!({
             "mode": mode,
             "custom": custom,
             "whisper_model": self.model.to_string_lossy(),
-            "whisper_gpu_device": self.gpu,
             "whisper_word_time_offset_sec": 0.73,
             "output_dir": ascii_dir.to_string_lossy(),
             "audio_source_path": staged.to_string_lossy(),
         });
+        if self.gpu >= 0 {
+            meta["whisper_gpu_device"] = json!(self.gpu);
+        } else {
+            meta["whisper_no_gpu"] = json!(true);
+        }
         let out = self
             .bridge
             .transcribe_raw(&bytes, &ext, &meta.to_string(), true)?;

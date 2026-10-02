@@ -1,0 +1,14 @@
+index:
+  transcribe: true
+  whisper_mode: subtitle
+  whisper_custom: "4.5"
+  whisper_gpu: 0
+# W3 CPU-fallback: огромный резерв → free < need → whisper уходит на CPU
+gpu:
+  reserve_mb: 20000
+llm_server:
+  host: "127.0.0.1"
+  embedding:
+    port: 8020
+    model: "shared:embedding"
+    ctx_per_slot: 8192

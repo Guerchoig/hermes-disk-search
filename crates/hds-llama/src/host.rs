@@ -462,6 +462,70 @@ struct WhisperCell(Mutex<crate::whisper::Whisper>);
 unsafe impl Send for WhisperCell {}
 unsafe impl Sync for WhisperCell {}
 
+/// Дополнительный буфер whisper на GPU (compute/KV сверх веса модели), МиБ —
+/// для проверки VRAM-бюджета перед созданием (критерий приёмки W3).
+const WHISPER_OVERHEAD_MIB: u64 = 256;
+
+/// Решение об устройстве whisper по VRAM (чистая логика — тестируется без движка).
+///
+/// `free == None` (NVML недоступен) — доверяем запросу (best effort). Иначе, если
+/// свободной VRAM меньше «модель + буфер + резерв», возвращаем CPU (`-1`) и причину.
+fn whisper_device(
+    gpu: i32,
+    model_mib: u64,
+    reserve_mb: u64,
+    free: Option<u64>,
+) -> (i32, Option<String>) {
+    if gpu < 0 {
+        return (gpu, None);
+    }
+    let need = model_mib + WHISPER_OVERHEAD_MIB + reserve_mb;
+    match free {
+        Some(f) if f < need => (
+            -1,
+            Some(format!(
+                "свободно {f} МиБ < {need} (модель {model_mib} + буфер \
+                 {WHISPER_OVERHEAD_MIB} + резерв {reserve_mb})"
+            )),
+        ),
+        _ => (gpu, None),
+    }
+}
+
+#[cfg(test)]
+mod whisper_device_tests {
+    use super::whisper_device;
+
+    #[test]
+    fn enough_vram_keeps_gpu() {
+        let (d, fb) = whisper_device(0, 1549, 1024, Some(11255));
+        assert_eq!(d, 0);
+        assert!(fb.is_none());
+    }
+
+    #[test]
+    fn tight_vram_falls_back_to_cpu() {
+        // 1549 + 256 + 1024 = 2829 > 2000 → CPU с причиной
+        let (d, fb) = whisper_device(0, 1549, 1024, Some(2000));
+        assert_eq!(d, -1);
+        assert!(fb.unwrap().contains("2829"));
+    }
+
+    #[test]
+    fn explicit_cpu_is_respected() {
+        let (d, fb) = whisper_device(-1, 1549, 1024, Some(10));
+        assert_eq!(d, -1);
+        assert!(fb.is_none(), "запрос на CPU не считается фолбэком");
+    }
+
+    #[test]
+    fn no_nvml_keeps_gpu() {
+        let (d, fb) = whisper_device(0, 1549, 1024, None);
+        assert_eq!(d, 0);
+        assert!(fb.is_none());
+    }
+}
+
 /// whisper-модель из общего каталога движка: `*.bin`/`*.gguf` в каталоге `*whisper*`.
 fn default_whisper_model() -> Option<PathBuf> {
     let base = directories::BaseDirs::new()?;
@@ -980,7 +1044,7 @@ impl Backend for ClusterBackend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "4.5".to_string());
-        let gpu = body.get("gpu").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let mut gpu = body.get("gpu").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let model = body
             .get("model")
             .and_then(|v| v.as_str())
@@ -990,11 +1054,27 @@ impl Backend for ClusterBackend {
                 EngineError::Other("не найдена whisper-модель (index.whisper_model)".to_string())
             })?;
 
+        // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
+        // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
+        let model_mib = std::fs::metadata(&model).map(|m| m.len() >> 20).unwrap_or(0);
+        let (dev, fallback) = whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.free_mib());
+        if let Some(reason) = fallback {
+            self.log.line(&format!(
+                "[whisper] {reason} — транскрибация на CPU (VRAM-бюджет)"
+            ));
+        }
+        gpu = dev;
+
         let mut slot = self.whisper.lock().unwrap();
         if slot.is_none() {
             self.log.line(&format!(
-                "[whisper] создаю транскрибатор: модель {} (gpu {gpu})",
-                model.display()
+                "[whisper] создаю транскрибатор: модель {} ({})",
+                model.display(),
+                if gpu >= 0 {
+                    format!("gpu {gpu}")
+                } else {
+                    "CPU".to_string()
+                }
             ));
             let api = crate::bridge_audio::BridgeAudio::load(engine_dir)?;
             let w = crate::whisper::Whisper::new(api, &model, gpu, -1)?;

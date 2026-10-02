@@ -331,3 +331,32 @@ target\debug\hds.exe whisper-check --file 'tools\parity\out\приёмка W3\р
 подключится вместе с портом поиска (W1) — `Clip::embed_text` уже готов; деградация без
 моделей (`index.clip: false` или нет `.onnx`) подтверждена тестом `clip_core::missing_models_degrade`.
 
+
+## 6. Бюджет VRAM whisper и CPU-fallback (критерий приёмки W3)
+
+**Проблема.** Клиент (индексатор) слал `gpu` из конфига, а владелец создавал whisper
+на GPU безусловно — при занятой VRAM это грозило ошибкой/OOM (критерий §4.2 W3:
+«VRAM не превышает бюджет; при нехватке — автоматический CPU-fallback с сообщением»).
+
+**Решение.** Перед созданием whisper владелец считает потребность
+`вес модели (MiB) + буфер 256 + gpu.reserve_mb` и сравнивает со свободной VRAM (NVML —
+источник истины, R29). Не влезает — транскрибация уходит **на CPU**
+(`whisper_no_gpu: true`, SDK §8.3) с записью в лог; NVML недоступен — best effort (GPU).
+
+| Файл | Что внутри |
+|---|---|
+| `crates/hds-llama/src/host.rs` | `whisper_device(...)` — чистая функция решения; вызов в `internal_transcribe`; константа `WHISPER_OVERHEAD_MIB=256`; 4 юнит-теста (`host::whisper_device_tests`) |
+| `crates/hds-llama/src/whisper.rs` | при `gpu < 0` в metadata кладётся `whisper_no_gpu: true` вместо `whisper_gpu_device`; аксессор `Whisper::gpu()` |
+
+**Живая проверка** (`gpu.reserve_mb: 20000` → заведомо не влезает; артефакт
+`out/w3_cpu_fallback.json`, конфиг `out/w3_host_cpu.yaml`):
+```
+[whisper] свободно 4477 МиБ < 21805 (модель 1549 + буфер 256 + резерв 20000)
+          — транскрибация на CPU (VRAM-бюджет)
+[whisper] создаю транскрибатор: …whisper-large-v3-turbo-GGML.bin (CPU)
+```
+Результат — сегмент `[0.83 -> 4.43] And so, my fellow Americans, ask` за 27,7 с
+(GPU было 2,4 с — подтверждает выбор CPU). Бюджет VRAM при этом не превышен.
+
+`cargo test --workspace` — **145 passed / 0 failed (+7 ignored)**.
+

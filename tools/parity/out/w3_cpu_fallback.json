@@ -1,0 +1,14 @@
+﻿{
+  "elapsed_sec": 27.7186597,
+  "engine": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\TranscribeOffline\\Engine",
+  "file": "C:\\Users\\Sasha\\hermes-disk-search\\tools\\parity\\fixtures\\╤А╨╡╤З╤М_jfk_╨╛╨▒╤А╨╡╨╖╨╛╨║.wav",
+  "model": "C:\\Users\\Sasha\\AppData\\Roaming\\OpenResearchTools\\models\\openresearchtools__whisper-large-v3-turbo-GGML\\whisper-large-v3-turbo-GGML.bin",
+  "ok": true,
+  "segments": [
+    {
+      "t_end": 4.43,
+      "t_start": 0.83,
+      "text": "And so, my fellow Americans, ask"
+    }
+  ]
+}
