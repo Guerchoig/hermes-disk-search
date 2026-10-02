@@ -46,7 +46,7 @@ index da72ef1..94f4015 100644
      int32_t seed;
      int32_t ctx_shift;
 diff --git a/bridge/llama_server_cluster.cpp b/bridge/llama_server_cluster.cpp
-index 63dce16..ab227a2 100644
+index 63dce16..4d84c68 100644
 --- a/bridge/llama_server_cluster.cpp
 +++ b/bridge/llama_server_cluster.cpp
 @@ -96,6 +96,9 @@ struct owned_instance_params {
@@ -482,7 +482,17 @@ index 63dce16..ab227a2 100644
  
      llama_server_bridge_rerank_request bridge_req = llama_server_bridge_default_rerank_request();
      bridge_req.body_json = req->body_json;
-@@ -3639,7 +3749,8 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+@@ -3628,6 +3738,9 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+     }
+ 
+     if (req->enable_diarization != 0) {
++        // HDS patch: cluster-лок берём ВНЕ instance-лока (в стоке ABBA-риск
++        // против `remove_instance`, который идёт cluster→instance).
++        lock.unlock();
+         set_cluster_error(
+             cluster,
+             "diarization is only supported for native single-device audio backends");
+@@ -3639,7 +3752,8 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
      const bool was_loaded = static_cast<bool>(instance->bridge);
      std::string load_error;
      const auto load_started = steady_clock::now();
@@ -492,7 +502,7 @@ index 63dce16..ab227a2 100644
          out->metrics.loaded_this_call = was_loaded ? 0 : 1;
          out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
          out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
-@@ -3649,6 +3760,7 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+@@ -3649,6 +3763,7 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
      }
      out->metrics.loaded_this_call = was_loaded ? 0 : 1;
      out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);

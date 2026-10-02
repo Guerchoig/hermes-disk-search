@@ -49,9 +49,10 @@ rustc/cargo 1.97.1. Миграция ядра на Rust **завершена (W1
 2. **Реальный релиз**: push ветки → `release.yml` (`test-rust` → `build-sidecar` → `build-windows`
    → `fetch-engine-runtime` → `release`). Локальный release-build требует остановки **двух**
    держателей `target\release\*.exe`: `llm_host stop` **и** `hds mcp-http stop` (либо `-SkipBuild`).
-3. **Хвосты патча движка (низкий риск):** в пяти путях запросов `set_cluster_error` ещё под
-   instance-локом (микросекундные окна ABBA против `remove_instance`) — снимается тем же приёмом,
-   что и P3.
+3. **Хвосты патча движка — закрыто (02.10.2026):** перепроверено — в хвостах пяти путей
+   `set_cluster_error` уже был вне instance-лока (со стока); снят единственный реальный вызов
+   под локом (guard `enable_diarization` в `audio_transcriptions_raw`), патч обновлён
+   (24 хунка) — `W4_REPORT.md` §16.
 4. Любая новая фича/фикс — с тестами и обновлением `tools/parity/W4_REPORT.md` + `STATUS.md`.
 
 ## Команды

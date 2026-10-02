@@ -58,8 +58,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 * **Эксплуатация:** прогнать реальный релиз (push ветки → `release.yml`); создать тег
   `clip-onnx-v1` (`installers\publish_clip_models.ps1`) до релиза; реальный release-build требует
   остановки **двух** держателей exe (`llm_host stop` **и** `hds mcp-http stop`) либо CI.
-* **Хвосты патча движка (низкий риск):** `set_cluster_error` ещё под instance-локом в пяти путях
-  запросов (микросекундные окна ABBA против `remove_instance`) — снимается приёмом P3.
+* **Хвосты патча движка — закрыто (02.10.2026, §16):** перепроверено по стоку: в хвостах пяти
+  путей запросов `set_cluster_error` уже был **вне** instance-лока (`finish_request_locked(...);
+  lock.unlock();` строкой выше — так и в v1.15). Реальный остаток P3-класса (guard `enable_diarization`
+  в `audio_transcriptions_raw`) снят приёмом P3 — ABBA против `remove_instance` закрыт полностью.
 * **Документный долг:** остаточные упоминания Python в `RELEASE_NOTES_*`; doc-комментарии Rust
   «порт `hds/…py`» (провенанс).
 * **macOS** — «не проверено» (§10.0): джобы выведены; `tools/parity/MAC_CHECKLIST.md` — постпроектно.
@@ -570,11 +572,11 @@ VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host 
   `set_instance_retention_mode` вынесен из-под instance-лока (ABBA против `remove_instance`);
   (KV) +2 поля в cluster+bridge параметрах, присвоение `bridge->params.cache_type_k/v`,
   включение Flash Attention при квантованном V. Патч: `engine-patch/hds-engine-patch-v1.15.patch`
-  (4 файла, 22 хунка), база — тег `v1.15` (`2683eb6`), воспроизведение и откат —
-  `engine-patch/README.md`. Остаточное ограничение (честно): в хвостах пяти путей запросов
-  `set_cluster_error` ещё под instance-локом (микросекундные окна) — тем же приёмом в
-  следующей итерации. После сборки: проверка на **копии** рантайма + замер KV
-  (`kv_probe`): ожидаем KV ≈ 256 МиБ вместо 512.
+  (4 файла; итерация 2 — 24 хунка), база — тег `v1.15` (`2683eb6`), воспроизведение и откат —
+  `engine-patch/README.md`. **Итерация 2 (§16):** остаток P3 закрыт — в хвостах пяти путей
+  `set_cluster_error` уже был вне instance-лока (перепроверено по стоку), снят единственный реальный
+  вызов под локом (guard `enable_diarization` в `audio_transcriptions_raw`). После сборки: проверка на
+  **копии** рантайма + замер KV (`kv_probe`): ожидаем KV ≈ 256 МиБ вместо 512.
 
 **L2b выполнен и проверен живьём (02.10.2026).** Патч собран нашим тулчейном (CUDA Toolkit
 13.4 + VS 18 Community + CMake 4.3 в комплекте, генератор **Ninja Multi-Config** после
@@ -694,3 +696,49 @@ cargo test --workspace -> 174 passed / 0 failed (+9 ignored); clippy 0/0; fmt 0 
   (либо CI, либо `-SkipBuild`).
 * «Пауза заказчика» — состояние **файла**, а не памяти чата: проверять `Test-Path .\index.pause`
   (в передаче число/факт разошлись).
+
+## 16. Итерация 2 патча движка: хвост P3 закрыт, пересборка, живая проверка (02.10.2026)
+
+**Задача (пункт из §0/§15).** «Хвосты патча движка»: снять `set_cluster_error` из-под instance-лока
+в пяти путях запросов (приём P3).
+
+**Находка (уточнение по коду, а не по памяти).** Формулировка «в хвостах пяти путей запросов
+`set_cluster_error` под instance-локом» **неверна**: в `chat_complete`, `vlm_complete`, `embeddings`,
+`rerank`, `audio_transcriptions_raw` хвостовые `set_cluster_error` вызываются **вне** instance-лока —
+`finish_request_locked(*instance); lock.unlock();` стоят строкой выше, и так было уже в **стоке**
+`v1.15` (сверено с `git show v1.15:bridge/llama_server_cluster.cpp`; в патче эти строки не менялись).
+Аудит (все взятия `instance->mutex` × все вызовы `set_cluster_error`) дал **единственное** реальное
+место P3-класса: guard `enable_diarization` в `audio_transcriptions_raw` (ветка не-нативного audio
+backend) — `set_cluster_error` исполнялся под `instance->mutex` (лок берётся в начале функции и в
+этой ветке не снимался) → ABBA против `remove_instance` (cluster→instance).
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `bridge/llama_server_cluster.cpp` (клон v1.15, `C:\Users\Sasha\engine-1.15`) | guard диаризации: `lock.unlock()` перед `set_cluster_error` (в стиле P3); под instance-локом `set_cluster_error` больше не остаётся нигде |
+| `engine-patch/hds-engine-patch-v1.15.patch` | **перегенерирован** из клона (`git diff` по 4 файлам `bridge/`, через `cmd` без BOM): теперь **24 хунка**, ~27 КБ; `--reverse --check` против клона — ок |
+| `runtime-manifests/engine-patch.json` | новые `sha256` для двух пересобранных DLL (размеры не менялись) |
+| `engine-patch/README.md`, `W4_REPORT.md` (§0/§15), `STATUS.md`, `tools/parity/HANDOFF_PROMPT.md` | формулировка исправлена, остаток отмечен закрытым |
+
+**Пересборка (наш тулчейн).** VS 18 `vcvarsall x64` + `Ninja Multi-Config`, `-Backend cuda
+-EnableBackendDl $true -DisableGgmlNative $true`, `-LlamaCppDir C:\Users\Sasha\ENGINEbuilds`,
+`-BuildDir …\build-bridge-cuda`; перед сборкой удалены stale `*cluster*.obj`/`*bridge*.obj` (грабля
+mtime из `engine-patch/README.md`). Пересобрались `llama_server_cluster.cpp`, `llama_server_bridge.cpp`,
+`llama_server_multi_node_server.cpp`. Итог — `bin\Release\llama-server-bridge.dll` (**5 432 320 Б**,
+sha256 `79d6ec73…`) и `multi-node-server.dll` (**294 400 Б**, sha256 `7593b176…`). Экспорты:
+`llama-server-bridge.dll` 113 = 113, `multi-node-server.dll` **39 = 39** → **ABI не менялся**.
+
+**Живая проверка на КОПИИ рантайма** (боевой каталог не тронут; резидент `llm_host` не останавливали —
+пробы на CPU/малом офлоаде). Боевой каталог движка скопирован в `tools\parity\out\engine-patched`
+(каталог в `.gitignore`), поверх — свежие 2 DLL:
+* `kv_probe --engine-dir <copy> --role chat --ngl 8 --n-ctx 4096,32768` → exit 0, модель `LOADED`,
+  `Flash Attention … set to enabled`, KV **1.68 КиБ/токен/слой** против формулы f16 4.00 (≈ −58 %) → KV q8_0.
+* `chat_probe --engine-dir <copy> --role chat --ngl 0 --n-ctx 4096 --n-predict 16` → exit 0, `ok=true`,
+  корректный ответ (`chatml` содержит '4').
+* `cargo test --workspace` — **194 passed / 0 failed (+10 ignored)**; `clippy -D warnings` 0/0; `fmt` 0 diff.
+
+**Остаётся.** Внедрение пересобранных DLL в боевой каталог (`fetch_engine_runtime.ps1 -PatchEngine`)
+и публикация ассетов (`publish_engine_patch.ps1`, тег `engine-patch-v1`) — по отдельному решению
+заказчика. Апстрим-отчёт (EN) — прежний незакрытый пункт L2b.
+

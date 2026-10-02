@@ -25,3 +25,5 @@ out/hash_vectors/
 # W3: CLIP live-проверка (временная БД) и throwaway-владелец
 out/w3_clip.db*
 out/w3_host_pause/
+# L2b iter-2: копия рантайма движка для живой проверки патча (боевой не трогаем)
+out/engine-patched/

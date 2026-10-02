@@ -5,3 +5,5 @@
 shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index text eol=lf
 *.yml text eol=lf
 *.yaml text eol=lf
+# Патчи движка (engine-patch/*.patch) должны храниться с LF — их применяет `git apply`
+*.patch text eol=lf

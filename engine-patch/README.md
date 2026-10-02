@@ -9,7 +9,7 @@
 > (`runtime-manifests/engine-manifest.json`). Не `main`/`v1.17`: код там тот же, но
 > партией поставляется v1.15.
 >
-> **Файл патча:** `hds-engine-patch-v1.15.patch` (4 файла, 22 хунка, ~26 КБ).
+> **Файл патча:** `hds-engine-patch-v1.15.patch` (4 файла, 24 хунка, ~27 КБ).
 
 ## Что меняет патч (по классам дефектов)
 
@@ -17,7 +17,7 @@
 |---|---|---|
 | P1 | `wait_for_instance_slot_locked` ждал слот **вечно** (`cv.wait` без дедлайна — в движке нет ни одного `wait_for`) | `cv.wait_until(deadline)` (600 с), таймаут виден в `instance.last_error` → попадает в `list_instances`/наш `status` |
 | P2 | Загрузка модели шла **под `instance->mutex`** → на всё время загрузки (секунды) блокировались `list_instances`, `unload_instance` и все роли | Загрузка вынесена в `create_bridge_detached()` (читает только `params`), сериализована отдельным `load_mutex`, а `ensure_instance_loaded()` сам берёт/отпускает request-лок (короткие критические секции + `cv.notify_all`) |
-| P3 | `set_cluster_error` (cluster-лок) вызывался под instance-локом → ABBA против `remove_instance` (cluster→instance) | Лок отпускается до `set_cluster_error` в `unload_instance` и `set_instance_retention_mode`; в путях запросов загрузка и ошибка больше не под локом |
+| P3 | `set_cluster_error` (cluster-лок) вызывался под instance-локом → ABBA против `remove_instance` (cluster→instance) | Лок отпускается до `set_cluster_error` в `unload_instance`, `set_instance_retention_mode` и в guard диаризации `audio_transcriptions_raw`; в путях запросов ни загрузка, ни ошибка не под локом |
 | KV | В cluster/bridge API **не было полей под тип KV** → `--cache-type-k/v` игнорировались, KV всегда f16 (512 МиБ у чата) | +2 поля (`cache_type_k/v`) в `llama_server_cluster_instance_params` и `llama_server_bridge_params`; присвоение `bridge->params.cache_type_k/v`; при квантованном V включается Flash Attention (llama.cpp требует FA для `type_v != F16`) |
 
 **Контракт API.** Два поля добавлены **в конец** структур, поэтому по указателю
@@ -105,10 +105,18 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 * Никаких изменений в конфиге заказчика патч не требует: `--cache-type-k/v` заработают
   только с патченой DLL, а без неё просто не дадут эффекта (предупреждения больше нет).
 
-## Известное ограничение (честно)
+## Хвосты путей запросов — уточнено и закрыто (итерация 2, 02.10.2026)
 
-В **хвостах** пяти путей запросов (`chat_complete`, `vlm_complete`, `embeddings`,
-`rerank`, `audio_transcriptions_raw`) `set_cluster_error` по-прежнему вызывается под
-instance-локом (микросекундные окна против `remove_instance`). Это тот же ABBA-класс, что
-и P3; снимается тем же приёмом в следующей итерации патча (или апстримом). Практический
-риск низкий: длинных операций под локом там больше нет (P2 это убрал).
+**Уточнение (перепроверено по коду, а не по памяти).** В **хвостах** пяти путей запросов
+(`chat_complete`, `vlm_complete`, `embeddings`, `rerank`, `audio_transcriptions_raw`)
+`set_cluster_error` вызывается **вне** instance-лока: `finish_request_locked(*instance);
+lock.unlock();` стоят строкой выше — и это было так уже в стоке v1.15 (сверено с
+`git show <tag>v1.15:bridge/llama_server_cluster.cpp`). Прежняя формулировка «в хвостах пяти
+путей `set_cluster_error` под instance-локом» относилась к тому, что эти вызовы происходят
+после снятия лока; ошибка была в прочтении, а не в коде.
+
+**Единственное реальное место** P3-класса, где `set_cluster_error` исполнялся под
+`instance->mutex`, — guard `enable_diarization` в `audio_transcriptions_raw` (ветка, где аудио
+идёт **не** нативным бэкендом): лок берётся в начале функции и в этой ветке не снимался.
+Итерация 2 патча отпускает лок до `set_cluster_error`. **ABBA-класс P3 закрыт полностью** —
+под instance-локом не остаётся ни одного вызова `set_cluster_error`.
