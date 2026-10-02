@@ -52,6 +52,10 @@
 > `llm-host` (`install_llm_host_task.ps1`, теперь `bin\llm_host.exe`) + watcher/MCP
 > (`install_autostart.ps1`), интеграции Hermes/Cline → `bin\hds_mcp.exe`/`mcp-http restart`,
 > ярлык, `hds check` — `W4_REPORT.md` §2.
+> **W4 шаг 2 (02.10.2026):** ONNX-модели CLIP — `runtime-manifests\clip-manifest.json`
+> (release-ассеты `clip-onnx-v1`, sha256) + `installers\fetch_clip_models.ps1`
+> (+`publish_clip_models.ps1` для мейнтейнера); `default_onnx_dir` → `models\clip_onnx`
+> (dev-фолбэк `tools\parity\out\clip_onnx`) — `W4_REPORT.md` §3. Тесты — 170/0 (+9 ignored).
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`

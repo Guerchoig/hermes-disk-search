@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "tag": "clip-onnx-v1",
+  "release_url": "https://github.com/Guerchoig/hermes-disk-search/releases/tag/clip-onnx-v1",
+  "assets": [
+    {
+      "id": "vision",
+      "file_name": "clip_vision.onnx",
+      "target": "vision/clip_vision.onnx",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/clip-onnx-v1/clip_vision.onnx",
+      "sha256": "6906583507d793c5bbc12eeedb3f634168ca4ecbe3122a27de36dac0a2a12ef9"
+    },
+    {
+      "id": "text",
+      "file_name": "clip_text_dense.onnx",
+      "target": "text/clip_text_dense.onnx",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/clip-onnx-v1/clip_text_dense.onnx",
+      "sha256": "fc85574115c16a759e97ce5ec56d29c70ea2aafe72a89e0f01f96caf955fd98c"
+    },
+    {
+      "id": "tokenizer",
+      "file_name": "tokenizer.json",
+      "target": "text/tokenizer.json",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/clip-onnx-v1/tokenizer.json",
+      "sha256": "5b4e1a8171c81dfd666ae40265b9530c6e0b3d53923fe8ac493dcc84229adf81"
+    }
+  ]
+}

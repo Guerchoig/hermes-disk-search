@@ -223,6 +223,15 @@ if (-not $SkipModels) {
     } else {
         Warn "skipped: the model is downloaded on first transcription."
     }
+
+    Step "CLIP ONNX models (image search, optional)"
+    $ans = Read-Host "[?] Download the CLIP models now (about 850 MB)? [y/N]"
+    if ($ans -match '^[Yy]') {
+        try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_clip_models.ps1") }
+        catch { Warn "CLIP models not downloaded: $_" }
+    } else {
+        Warn "skipped: CLIP image search stays disabled until the models are present."
+    }
 } else {
     Step "Models (skipped)"
 }

@@ -83,3 +83,28 @@ powershell -File installers\fetch_llm_models.ps1 -Models bogus
 **Дальше:** `clip-manifest.json` + `installers\fetch_clip_models.ps1` + `default_onnx_dir`
 → `models\clip_onnx` (шаг 2); `package` (zip+sha256) и `release.yml` с бинарными ассетами и
 джобой `fetch-engine-runtime` (шаг 3); UI-дополнения и W5 (шаг 4).
+
+## 3. Доставка ONNX-моделей CLIP (02.10.2026)
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `runtime-manifests\clip-manifest.json` | **новый, коммитится**: 3 ассета (`vision/clip_vision.onnx` 335 МБ, `text/clip_text_dense.onnx` 516 МБ, `text/tokenizer.json` 2 МБ) с `url` (release-ассеты `Guerchoig/hermes-disk-search@clip-onnx-v1`) и `sha256`, посчитанными с локального экспорта W3. |
+| `installers\fetch_clip_models.ps1` | **новый** (ASCII): скачивает по манифесту в `models\clip_onnx`, проверяет **sha256**, идемпотентен (по хэшу), `curl`-фолбэк. |
+| `installers\publish_clip_models.ps1` | **новый** (ASCII, для мейнтейнера): через `gh` создаёт тег `clip-onnx-v1` (если нет), сверяет локальные хэши с манифестом (падает при дрейфе) и загружает 3 ассета (`-Clobber` — замена существующих). |
+| `crates\hds-clip\src\lib.rs` | `default_onnx_dir()`: `models\clip_onnx` (поставка) → dev-фолбэк `tools\parity\out\clip_onnx` (экспорт W3) → `models\clip_onnx`. `ClipConfig::from_config`/`resolve_tokenizer` подхватывают автоматически. |
+| `setup.ps1` | шаг «CLIP ONNX models (image search, optional)» (по согласию, ~850 МБ). |
+| `config.example.yaml` | комментарий `index.clip_*` → `models\clip_onnx` + dev-фолбэк. |
+
+**Приёмка.** `.ps1` — `parse-ok`, `nonASCII=0`; `clip-manifest.json` — валиден;
+`cargo test --workspace` — **170 passed / 0 failed (+9 ignored)** (тест деградации
+`clip_core::missing_models_degrade` не затронут — он задаёт пути явно).
+
+**Оговорка (честно).** `sha256` в манифесте посчитаны с текущего локального экспорта;
+release-тег `clip-onnx-v1` ещё **не создан** — перед публикацией релиза выполнить
+`installers\publish_clip_models.ps1`. Скачивание end-to-end в этой сессии не прогонялось
+(нет опубликованного тега) — проверены синтаксис, манифест и сопоставление путей.
+
+**Дальше:** `package` (zip + sha256) и `release.yml` с бинарными ассетами и джобой
+`fetch-engine-runtime` (шаг 3); UI-дополнения и W5 (шаг 4).

@@ -25,7 +25,9 @@ index:
   whisper_gpu: 0            # индекс GPU движка (или -1 — CPU)
   transcribe_url: "http://127.0.0.1:8010"  # владелец GPU (POST /internal/transcribe)
   clip: true                # CLIP-поиск картинок по содержанию
-  # W3: пути к ONNX-моделям CLIP (по умолчанию tools/parity/out/clip_onnx/…)
+  # W4: пути к ONNX-моделям CLIP. По умолчанию ищутся в models\clip_onnx
+  # (кладёт установщик installers\fetch_clip_models.ps1); dev-фолбэк —
+  # tools/parity/out/clip_onnx (экспорт W3). Явные пути переопределяют:
   # clip_vision_model: "…/clip_vision.onnx"
   # clip_text_model:   "…/clip_text_dense.onnx"
   # clip_tokenizer:    "…/tokenizer.json"

@@ -103,11 +103,23 @@ pub fn shared(cfg: &hds_core::config::Config) -> Option<&'static Clip> {
     SHARED.get_or_init(|| Clip::load(cfg)).as_ref()
 }
 
-/// Путь по умолчанию внутри репозитория (`tools/parity/out/clip_onnx/...`).
+/// Базовый каталог ONNX-моделей CLIP.
+///
+/// Поставка: `models\clip_onnx` (кладёт `installers\fetch_clip_models.ps1`) —
+/// рядом с установкой, в git не хранится. Dev-фолбэк: `tools/parity/out/clip_onnx`
+/// (каталог экспорта W3, `tools/parity/clip_onnx_w3.py`).
 pub fn default_onnx_dir() -> PathBuf {
-    hds_core::config::project_root()
-        .join("tools")
-        .join("parity")
-        .join("out")
-        .join("clip_onnx")
+    let root = hds_core::config::project_root();
+    let installed = root.join("models").join("clip_onnx");
+    let dev = root.join("tools").join("parity").join("out").join("clip_onnx");
+    let installed_has = installed.join("vision").join("clip_vision.onnx").is_file()
+        || installed.join("text").join("clip_text_dense.onnx").is_file()
+        || installed.join("text").join("tokenizer.json").is_file();
+    if installed_has {
+        installed
+    } else if dev.is_dir() {
+        dev
+    } else {
+        installed
+    }
 }
