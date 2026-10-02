@@ -153,7 +153,8 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
     if mismatch {
         conn.execute_batch("DROP TABLE IF EXISTS chunks_vec")?;
         if vec_available {
-            println!(
+            // В stderr: stdout у `check --json`/`status --json` должен остаться чистым JSON.
+            eprintln!(
                 "[db] размерность эмбеддингов -> {}, векторная таблица пересоздана \
                  (запустите 'index --full' для повторной векторизации)",
                 dim

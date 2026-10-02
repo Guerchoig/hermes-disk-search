@@ -21,10 +21,56 @@ pub const EMB_CONTEXT: i64 = 8192;
 /// Разобранный `config.yaml` (в Python — `dict`; здесь `serde_yaml::Value`).
 pub type Config = Value;
 
-/// Корень репозитория (лексическая нормализация `CARGO_MANIFEST_DIR/../..`).
+/// Корень проекта (`config.yaml`, `sidecar/`, `models/`...).
+///
+/// Порядок (важно для **поставки**): `HDS_ROOT` → рядом с исполняемым файлом →
+/// build-time `CARGO_MANIFEST_DIR/../..` (dev-фолбэк).
+///
+/// Раньше корень был **только** build-time (путь машины сборки): распакованная на
+/// другой машине сборка брала несуществующий `config.yaml`. Теперь корень
+/// определяется по расположению `hds.exe`/`llm_host.exe`:
+/// `<root>\bin\x.exe` → `<root>`; `target\{debug,release}\x.exe` (в т.ч. `deps\`) →
+/// корень репозитория; иначе — каталог самого exe.
 pub fn project_root() -> PathBuf {
-    let raw = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-    lexical_normalize(&raw)
+    if let Some(v) = std::env::var_os("HDS_ROOT") {
+        if !v.is_empty() {
+            return PathBuf::from(v);
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(r) = root_from_exe(&exe) {
+            return lexical_normalize(&r);
+        }
+    }
+    lexical_normalize(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
+}
+
+/// Корень проекта по пути исполняемого файла (чистая функция — есть тест).
+fn root_from_exe(exe: &Path) -> Option<PathBuf> {
+    let mut dir = exe.parent()?.to_path_buf();
+    // `target\<profile>\deps\x.exe` → `target\<profile>`
+    if dir.file_name().map(|n| n == "deps").unwrap_or(false) {
+        dir = dir.parent()?.to_path_buf();
+    }
+    // `<root>\bin\x.exe` → `<root>`
+    if dir.file_name().map(|n| n == "bin").unwrap_or(false) {
+        return dir.parent().map(|p| p.to_path_buf());
+    }
+    // `target\{debug,release}\x.exe` → корень репозитория
+    let profile = matches!(
+        dir.file_name().and_then(|n| n.to_str()),
+        Some("debug") | Some("release")
+    );
+    if profile
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == "target")
+            .unwrap_or(false)
+    {
+        return dir.parent()?.parent().map(|p| p.to_path_buf());
+    }
+    Some(dir)
 }
 
 /// Лексическая нормализация пути (`a/b/../c` → `a/c`) без обращений к ФС.
@@ -112,4 +158,51 @@ pub fn replace_file_opts(src: &Path, dst: &Path, attempts: u32, delay: Duration)
 
 fn is_permission(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::PermissionDenied
+}
+
+#[cfg(test)]
+mod tests {
+    use super::root_from_exe;
+    use std::path::PathBuf;
+
+    /// Путь из частей с разделителем текущей ОС (тесты идут и на ubuntu-CI).
+    fn p(parts: &[&str]) -> PathBuf {
+        parts.iter().collect()
+    }
+
+    #[test]
+    fn root_from_shipped_bin_layout() {
+        assert_eq!(
+            root_from_exe(&p(&["inst", "bin", "hds.exe"])).unwrap(),
+            p(&["inst"])
+        );
+    }
+
+    #[test]
+    fn root_from_cargo_run_layout() {
+        assert_eq!(
+            root_from_exe(&p(&["repo", "target", "debug", "hds.exe"])).unwrap(),
+            p(&["repo"])
+        );
+        assert_eq!(
+            root_from_exe(&p(&["repo", "target", "release", "llm_host.exe"])).unwrap(),
+            p(&["repo"])
+        );
+    }
+
+    #[test]
+    fn root_from_cargo_test_layout() {
+        assert_eq!(
+            root_from_exe(&p(&["repo", "target", "debug", "deps", "some_test.exe"])).unwrap(),
+            p(&["repo"])
+        );
+    }
+
+    #[test]
+    fn root_from_portable_flat_layout() {
+        assert_eq!(
+            root_from_exe(&p(&["portable", "hds.exe"])).unwrap(),
+            p(&["portable"])
+        );
+    }
 }

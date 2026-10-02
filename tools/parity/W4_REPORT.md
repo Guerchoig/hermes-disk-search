@@ -268,3 +268,29 @@ cargo test --workspace                 # 170 passed / 0 failed (+9 ignored)
 **Остаётся.** `.mpp` в sidecar требует `jpype1` + `mpxj` (нет в `requirements.lock`) и JDK —
 отдельная задача; джоба `build-macos` (mac — «не проверено», §10.0); версионные каталоги
 `app\<ver>` (§10.6).
+
+## 9. Корень проекта в поставке: runtime-резолвинг `project_root()` (02.10.2026)
+
+**Найдено живьём — блокер поставки.** `hds_core::config::project_root()` был **build-time**
+(`CARGO_MANIFEST_DIR/../..`): распакованная на другой машине сборка искала `config.yaml`,
+`sidecar/`, `models/` по пути **машины сборки**. Проверка копии `bin\hds.exe` в temp:
+брался `D:\hermes-disk-search-db\index.db` из репозитория вместо собственного `config.yaml`.
+На рабочей машине не проявлялось (путь сборки = путь установки).
+
+**Решение.** `project_root()`: `HDS_ROOT` → **рядом с exe** → build-time (dev-фолбэк).
+Резолвинг — чистая `root_from_exe` (есть тесты): `<root>\bin\x.exe` → `<root>`;
+`target\{debug,release}\{deps\}x.exe` → корень репозитория; иначе — каталог exe.
+
+**Файлы.**
+
+| Файл | Что внутри |
+|---|---|
+| `crates\hds-core\src\config.rs` | `project_root()` (env → exe → build-time) + `root_from_exe` + 4 юнит-теста (кросс-платформенные). |
+| `crates\hds-core\src\db.rs` | `[db] размерность…` → `eprintln!` (stdout у `--json` остаётся чистым). |
+
+**Приёмка.** `cargo fmt --check` 0; clippy `-D warnings` 0/0; `cargo test --workspace` —
+**174 passed / 0 failed (+9 ignored**, +4 новых теста); Python-тесты 269 OK.
+```
+# dev (target\debug):        check --json -> db: D:\hermes-disk-search-db\index.db  (корень репозитория)
+# копия в bin\ (temp):       check --json -> db: %TEMP%\hds-ship-probe4\index.db    (корень = каталог поставки)
+```

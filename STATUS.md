@@ -77,6 +77,10 @@
 > -SidecarDir`. Живой прогон: сборка + воркер на встроенном Python 3.12.14 (hello/extract);
 > Python-тесты 269 OK, Rust 170/0. `W4_REPORT.md` §8. Остаток: `.mpp` (jpype/mpxj+JDK),
 > `build-macos`, версионные каталоги §10.6.
+> **Корень проекта в поставке (02.10.2026):** `project_root()` больше не build-time —
+> `HDS_ROOT` → рядом с exe (`bin\`/`target\{debug,release}\{deps\}`) → build-time (dev).
+> Иначе распакованная сборка искала `config.yaml` по пути машины сборки (блокер поставки).
+> Плюс `[db]`-сообщение → stderr (чистый `--json`). Rust-тесты **174/0 (+9)**. `W4_REPORT.md` §9.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`
