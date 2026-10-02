@@ -78,6 +78,10 @@ SemVer: `vMAJOR.MINOR.PATCH`.
 - ONNX-модели CLIP в релиз не входят (≈850 МБ) — публикуются отдельным тегом
   `clip-onnx-v1` (`installers\publish_clip_models.ps1`), скачиваются установщиком
   (`installers\fetch_clip_models.ps1` по `runtime-manifests\clip-manifest.json`).
+- Установка/обновление на Windows: `installers\install_app_version.ps1` раскладывает сборку в
+  `app\<версия>\` (+ junction-ы общих `data\`/`models\`, перенос `config.yaml`, указатель
+  `app\current`); обновление — `installers\update.ps1` (отдельный процесс: stop → install →
+  switch → start), прошлые версии сохраняются (откат — вернуть `app\current`).
 - Workflow **никогда не удаляет существующие релизы и теги** (раньше он стирал
   все прежние релизы при каждом выпуске — это поведение убрано). Следствие:
   перед повторным выпуском той же версии удалите конкретный релиз и его тег

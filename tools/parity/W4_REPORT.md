@@ -294,3 +294,35 @@ cargo test --workspace                 # 170 passed / 0 failed (+9 ignored)
 # dev (target\debug):        check --json -> db: D:\hermes-disk-search-db\index.db  (корень репозитория)
 # копия в bin\ (temp):       check --json -> db: %TEMP%\hds-ship-probe4\index.db    (корень = каталог поставки)
 ```
+
+## 10. Версионные каталоги `app\<ver>` + отдельный процесс обновления (02.10.2026)
+
+**Зачем (§10.6).** Запущенный `hds.exe`/`llm_host.exe` на Windows **нельзя перезаписать** —
+поэтому версия живёт в отдельном каталоге, а переключается только указатель `app\current`;
+обновление выполняет **отдельный** процесс (процесс не может заменить сам себя). Опёрся на
+`project_root()` из §9: exe в `app\<ver>\bin\` → корень = каталог версии.
+
+**Раскладка** (внутри `<root>`):
+
+    app\<ver>\        код версии + config.yaml (bin\, installers\, sidecar\, runtime-manifests\, ...)
+    app\current       junction -> app\<ver>
+    data\             общие данные  (junction из app\<ver>\data)
+    models\           общие модели  (junction из app\<ver>\models)
+
+**Файлы.**
+
+| Файл | Что внутри |
+|---|---|
+| `installers\install_app_version.ps1` | **новый** (ASCII): раскладка `app\<ver>`, junction-ы `data`/`models`, перенос `config.yaml` (активный → корневой → пример), переключение `app\current` (`-SetCurrent`, `-Force`); подсказка про `db_path` (должен быть абсолютным или `data\index.db`). |
+| `installers\update.ps1` | **новый** (ASCII): отдельный процесс — stop задач/резидента → `install_app_version.ps1 -SetCurrent` → старт задач; прошлые версии сохраняются (откат = вернуть `current`). |
+
+**Приёмка (живой прогон во временном root).** Собран stage (`bin\hds.exe`, `sidecar\`,
+`config.example.yaml`) → `install_app_version.ps1 -Version 0.2.0 -SetCurrent`:
+`current` junction → `app\0.2.0`; junction-ы `data`/`models` (write-through в общий `data\`
+подтверждён); `config.yaml` перенесён; `app\current\bin\hds.exe check --json` → db
+`…\app\current\index.db` (корень = каталог версии через junction). Затем `0.2.1 -SetCurrent`:
+`current` → `app\0.2.1`, `config.yaml` подхвачен из активной версии, обе версии на месте.
+Скрипты — `parse-ok`, `nonASCII=0`. Rust — 174/0 (+9); Python — 269 OK.
+
+**Остаётся.** `.mpp` в sidecar (jpype1+mpxj+JDK); `build-macos` (mac — «не проверено», §10.0);
+release-тег `clip-onnx-v1`.

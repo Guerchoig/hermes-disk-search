@@ -81,6 +81,11 @@
 > `HDS_ROOT` → рядом с exe (`bin\`/`target\{debug,release}\{deps\}`) → build-time (dev).
 > Иначе распакованная сборка искала `config.yaml` по пути машины сборки (блокер поставки).
 > Плюс `[db]`-сообщение → stderr (чистый `--json`). Rust-тесты **174/0 (+9)**. `W4_REPORT.md` §9.
+> **Версионные каталоги §10.6 (02.10.2026):** `installers\install_app_version.ps1` (раскладка
+> `app\<ver>` + junction-ы общих `data`/`models` + перенос `config.yaml` + указатель `app\current`)
+> и `installers\update.ps1` (отдельный процесс: stop задач/резидента → install → switch → start).
+> Живой прогон: junction `current`, write-through общих `data`/`models`, перенос config,
+> переключение версии (обе версии остаются — откат). Rust **174/0**, Python 269 OK. `W4_REPORT.md` §10.
 > **`hds-ui` перенесён (перепроектированный):** `crates/hds-ui` — свой HTTP-сервер +
 > страница (статус/поиск/ask/управление индексацией), роли — из фасада `llm-host`;
 > `hds ui`/`hds_ui`; `/api/tree` (по БД, 0 с), `/api/diagnostics`, CSRF; правка `config.yaml`
