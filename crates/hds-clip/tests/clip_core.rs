@@ -19,7 +19,16 @@ fn cfg(yaml: &str) -> hds_core::config::Config {
 
 #[test]
 fn preprocess_shape_and_range() {
-    let v = preprocess_image(&fixtures().join("цветы_без_exif.jpg")).unwrap();
+    let path = fixtures().join("цветы_без_exif.jpg");
+    if !path.is_file() {
+        // `tools/parity/fixtures/` в .gitignore — в CI фикстур нет.
+        eprintln!(
+            "skip: fixture missing ({}); сгенерируйте tools/parity/gen_fixtures.py",
+            path.display()
+        );
+        return;
+    }
+    let v = preprocess_image(&path).unwrap();
     assert_eq!(v.len(), 3 * IMAGE_SIZE * IMAGE_SIZE, "CHW [1,3,224,224]");
     // нормализованные значения: не NaN и в разумных пределах (не «сырые» 0..255)
     assert!(v.iter().all(|x| x.is_finite()));
