@@ -12,22 +12,30 @@
 > паритет** (тексты/FTS/хэши; +7,1 % по времени, §15); память B-4 в норме
 > (индексация +5,2 %/ws +13 %, простой commit −93 %, §16) (журнал — `tools/parity/W2_REPORT.md`:
 > §9 — передача в новый чат, §10 — A6, §11 — B4, §12 — B5, §13 — B6, **§14 — B7, §15 — B-2, §16 — B-4, §17 — crates.io**).
-> Решение go/no-go: **GO**. Дальше — **W3** (whisper/CLIP); **начат**: ASR из Rust работает
-> (bridge audio-only + whisper-модель в metadata; `mode: subtitle` → сегменты), `/internal/transcribe`
-> в фасаде. Контекст нового чата — **`tools/parity/W3_REPORT.md` §0** (передача).
+> Решение go/no-go: **GO**. **W3 (медиа: whisper/CLIP) выполнен 01.10.2026**: ASR из Rust
+> (bridge audio-only + whisper-модель в metadata; `/internal/transcribe` в фасаде),
+> медиа-ветка `hds-index` (`MediaRouter` → владелец GPU) + `hds whisper-check`, live-приёмка
+> 3 реальных медиа (вкл. русское имя в русском каталоге; ASCII-стейджинг), бюджет VRAM whisper
+> + CPU-fallback и вытеснение по простою, **CLIP на ONNX Runtime** (`hds-clip`: vision →
+> `images_vec` 512, text; `clip_store` + `clip-index`; паритет cos_min 0,999950).
+> `cargo test --workspace` — **145 passed / 0 failed (+7 ignored)**.
+> Контекст нового чата — **`tools/parity/W3_REPORT.md`** (§0 передача, §4 приёмка медиа,
+> §5 CLIP, §6 бюджет VRAM whisper).
 >
 > **Как продолжить в новом чате (краткая шпаргалка).**
 > 1. Прочитать: `tools/parity/README.md` (карта harness + команды) → `tools/parity/W2_REPORT.md`
 >    §9 «Передача в новый чат» (что сделано, где лежит, что дальше, грабли) →
 >    `PLAN_W2_LLM_HOST.md` (план W2: треки A/B, критерии, DoD, структуры движка) →
 >    при необходимости `tools/parity/SPIKES.md` (журнал W0).
-> 2. Состояние на 01.10.2026: закрыты **A1–A6 и B1–B7**; вся работа W2 — в ветке
->    `w2-llm-host` (**24 коммита**, `main` = `9ed8452` не тронут), `cargo test --workspace` —
->    **125 green** (+5 `#[ignore]`); боевой индекс не изменён, Python-версия продолжает
->    работать через наш `llm-host` (порты 8010–8012 — за ним), индексация заказчика на паузе
->    (`index.pause`), замеры — `W2_REPORT.md` §11–§14.
-> 3. Ближайшая задача — **W3** (whisper/CLIP: ONNX Runtime для CLIP, транскрипция движком,
->    удаление llama-server). Состояние задач — §9.2 `W2_REPORT.md`.
+> 2. Состояние на 01.10.2026: закрыты **A1–A6, B1–B7 и W3** (медиа/CLIP); вся работа — в ветке
+>    `w2-llm-host` (`main` = `9ed8452` не тронут), `cargo test --workspace` —
+>    **145 passed (+7 `#[ignore]`)**; боевой индекс не изменён, индексация заказчика на паузе
+>    (`index.pause`). Владелец портов 8010–8012 — на момент приёмки Python-`llama-server`,
+>    `llm-host` остановлен (см. `W3_REPORT.md` §4); замеры — `W2_REPORT.md` §11–§14,
+>    `W3_REPORT.md` §4–§6.
+> 3. Ближайшие задачи: **W1** (резидентный слой — порт поиска/MCP/UI, подключение CLIP
+>    text-энкодера в поисковую ветку) и **W4** (упаковка/установка/CI: доставка ONNX-моделей
+>    CLIP и рантайма ASR, `setup.ps1`). Состояние задач — §9.2 `W2_REPORT.md`, `W3_REPORT.md`.
 > 4. Решения заказчика — `PLAN_W2_LLM_HOST.md` §9 (в т.ч. **без авто-деградации кванта**,
 >    llama-server удаляется в конце W2, `anonymizer_proxy` — ждём переезда). **Вопрос
 >    `llm.chat.n_ctx` закрыт 30.09.2026 решением «замер фактического KV»**: замер сделан —
