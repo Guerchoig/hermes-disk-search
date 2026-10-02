@@ -1,0 +1,506 @@
+diff --git a/bridge/llama_server_bridge.cpp b/bridge/llama_server_bridge.cpp
+index ba111ab..7e8b095 100644
+--- a/bridge/llama_server_bridge.cpp
++++ b/bridge/llama_server_bridge.cpp
+@@ -4106,6 +4106,8 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
+     const int32_t requested_no_extra_bufts = choose_i32(params->no_extra_bufts, defaults.no_extra_bufts);
+     const int32_t requested_split_mode = choose_i32(params->split_mode, defaults.split_mode);
+     const int32_t requested_pooling_type = choose_i32(params->pooling_type, defaults.pooling_type);
++    const int32_t requested_cache_type_k = choose_i32(params->cache_type_k, defaults.cache_type_k);
++    const int32_t requested_cache_type_v = choose_i32(params->cache_type_v, defaults.cache_type_v);
+ 
+     const char * requested_devices = params->devices;
+     if (zero_init_params && is_devices_unset_or_none(requested_devices)) {
+@@ -4132,6 +4134,18 @@ struct llama_server_bridge * llama_server_bridge_create(const struct llama_serve
+     bridge->params.n_ubatch = requested_n_ubatch;
+     bridge->params.n_parallel = requested_n_parallel;
+     bridge->params.n_gpu_layers = requested_n_gpu_layers;
++    // HDS patch: KV-кэш q8_0. Квантованный V в llama.cpp требует Flash Attention —
++    // иначе тип V молча останется f16. Для embedding/rerank FA ниже принудительно
++    // выключается, но у них KV-кэша нет (энкодерные модели) — это безопасно.
++    if (requested_cache_type_k > 0) {
++        bridge->params.cache_type_k = static_cast<ggml_type>(requested_cache_type_k);
++    }
++    if (requested_cache_type_v > 0) {
++        bridge->params.cache_type_v = static_cast<ggml_type>(requested_cache_type_v);
++        if (bridge->params.cache_type_v != GGML_TYPE_F16) {
++            bridge->params.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_ENABLED;
++        }
++    }
+     bridge->params.main_gpu = requested_main_gpu;
+     bridge->params.no_kv_offload = requested_no_kv_offload != 0;
+     bridge->params.mmproj_use_gpu = requested_mmproj_use_gpu > 0;
+diff --git a/bridge/llama_server_bridge.h b/bridge/llama_server_bridge.h
+index da72ef1..94f4015 100644
+--- a/bridge/llama_server_bridge.h
++++ b/bridge/llama_server_bridge.h
+@@ -44,6 +44,10 @@ struct llama_server_bridge_params {
+     int32_t no_kv_offload;
+     int32_t mmproj_use_gpu;  // -1 auto, 0 CPU, 1 GPU
+     int32_t cache_ram_mib;
++    // HDS patch: тип KV-кэша (ggml_type; 0 = не задан → F16). Прокидывается из
++    // cluster-параметров инстанса; квантованный V требует Flash Attention.
++    int32_t cache_type_k;
++    int32_t cache_type_v;
+ 
+     int32_t seed;
+     int32_t ctx_shift;
+diff --git a/bridge/llama_server_cluster.cpp b/bridge/llama_server_cluster.cpp
+index 63dce16..82bea20 100644
+--- a/bridge/llama_server_cluster.cpp
++++ b/bridge/llama_server_cluster.cpp
+@@ -96,6 +96,9 @@ struct owned_instance_params {
+     int32_t n_threads_batch = 0;
+     int32_t n_gpu_layers = 0;
+     int32_t load_on_demand_grace_seconds = kDefaultLoadOnDemandGraceSeconds;
++    // HDS patch: тип KV-кэша (0 = не задан → F16 в мосте).
++    int32_t cache_type_k = 0;
++    int32_t cache_type_v = 0;
+ };
+ 
+ struct model_instance {
+@@ -1391,6 +1394,8 @@ owned_instance_params normalize_instance_params(
+     out.model_kind = normalize_instance_model_kind(input);
+     out.allow_cpu = input.allow_cpu;
+     out.allow_integrated_gpu = input.allow_integrated_gpu;
++    out.cache_type_k = std::max<int32_t>(0, input.cache_type_k);
++    out.cache_type_v = std::max<int32_t>(0, input.cache_type_v);
+ 
+     if (!out.manual_devices_csv.empty()) {
+         const std::vector<std::string> requested_devices = split_csv(out.manual_devices_csv);
+@@ -1781,6 +1786,9 @@ bridge_handle_ptr create_bridge_for_instance(
+     bridge_params.embedding = instance.params.embedding;
+     bridge_params.reranking = instance.params.reranking;
+     bridge_params.cache_ram_mib = 0;
++    // HDS patch: тип KV-кэша из параметров инстанса (0 = «не задан» → F16 в мосте).
++    bridge_params.cache_type_k = instance.params.cache_type_k;
++    bridge_params.cache_type_v = instance.params.cache_type_v;
+     bridge_params.use_mlock = 0;
+ 
+     if (instance.params.n_ctx > 0) {
+@@ -2143,45 +2151,26 @@ void clear_instance_grace_state(model_instance & instance) {
+     instance.grace_deadline_unix_ms = 0;
+ }
+ 
+-bool ensure_instance_loaded_locked(model_instance & instance, bool for_request, std::string * error_out) {
+-    if (instance.bridge) {
+-        clear_instance_grace_state(instance);
+-        if (for_request) {
+-            instance.active_request_count += 1;
+-            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
+-        } else if (instance.active_request_count == 0) {
+-            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
+-        }
+-        return true;
+-    }
+-    if (model_uses_native_audio_backend(instance.params.model_path)) {
+-        clear_instance_grace_state(instance);
+-        instance.last_error.clear();
+-        if (for_request) {
+-            instance.active_request_count += 1;
+-            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
+-        } else if (instance.active_request_count == 0) {
+-            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
+-        }
+-        return true;
+-    }
+-
+-    instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADING;
+-    instance.last_error.clear();
+-    clear_instance_grace_state(instance);
++// HDS patch: результат загрузки, который вызывающий применяет под request-локом.
++struct hds_loaded_bridge {
++    bridge_handle_ptr bridge;
++    std::string execution_group_id;
++    std::string error;
++};
+ 
+-    std::string load_error;
+-    bridge_handle_ptr bridge(nullptr);
++// HDS patch: собственно загрузка модели — БЕЗ записи в `instance` (params читаются только
++// на чтение) и БЕЗ request-лока. Это секунды работы, и держать на них `instance.mutex`
++// нельзя: в нашем инциденте загрузка держала мьютекс и одновременно блокировала
++// `list_instances` (наш `status`), `unload_instance` (вытеснение) и все роли.
++hds_loaded_bridge create_bridge_detached(model_instance & instance) {
++    hds_loaded_bridge out;
+     if (instance.params.execution_group_id == "cluster:auto") {
+         std::string device_error;
+-        const std::vector<owned_device_info> devices = query_devices(instance.params.rpc_servers, &device_error);
++        const std::vector<owned_device_info> devices =
++            query_devices(instance.params.rpc_servers, &device_error);
+         if (!device_error.empty()) {
+-            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_FAILED;
+-            instance.last_error = device_error;
+-            if (error_out != nullptr) {
+-                *error_out = device_error;
+-            }
+-            return false;
++            out.error = device_error;
++            return out;
+         }
+ 
+         const std::vector<owned_execution_group> groups =
+@@ -2209,35 +2198,112 @@ bool ensure_instance_loaded_locked(model_instance & instance, bool for_request,
+             }
+         }
+         if (chosen == nullptr) {
+-            load_error = "no GPU execution groups are currently available";
++            out.error = "no GPU execution groups are currently available";
+         } else {
+-            bridge = create_bridge_for_instance(instance, chosen->id, &load_error);
+-            if (bridge) {
+-                instance.params.execution_group_id = chosen->id;
+-            } else if (load_error.empty()) {
+-                load_error = "load failed for selected automatic execution group " + chosen->id;
++            out.bridge = create_bridge_for_instance(instance, chosen->id, &out.error);
++            if (out.bridge) {
++                out.execution_group_id = chosen->id;
++            } else if (out.error.empty()) {
++                out.error = "load failed for selected automatic execution group " + chosen->id;
+             }
+         }
+     } else {
+-        bridge = create_bridge_for_instance(instance, &load_error);
++        out.bridge = create_bridge_for_instance(instance, &out.error);
+     }
+-    if (!bridge) {
+-        instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_FAILED;
+-        instance.last_error = load_error.empty() ? "load failed" : load_error;
+-        if (error_out != nullptr) {
+-            *error_out = instance.last_error;
++    return out;
++}
++
++// HDS patch: единственный путь загрузки. Внутри сам берёт/отпускает request-лок:
++//  1) короткая секция: готовность роли или ЗАНЯТЬ состояние LOADING (либо дождаться
++//     чужой загрузки на `cv`);
++//  2) загрузка (секунды) — под `load_mutex` и БЕЗ request-лока;
++//  3) короткая секция: опубликовать bridge/ошибку и разбудить ожидающих.
++// Вызывать **без** удержания `instance.mutex` (иначе дедлок: внутри он берётся сам).
++bool ensure_instance_loaded(model_instance & instance, bool for_request, std::string * error_out) {
++    std::unique_lock<std::mutex> lock(instance.mutex);
++    if (instance.bridge) {
++        clear_instance_grace_state(instance);
++        if (for_request) {
++            instance.active_request_count += 1;
++            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
++        } else if (instance.active_request_count == 0) {
++            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
++        }
++        return true;
++    }
++    if (model_uses_native_audio_backend(instance.params.model_path)) {
++        clear_instance_grace_state(instance);
++        instance.last_error.clear();
++        if (for_request) {
++            instance.active_request_count += 1;
++            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
++        } else if (instance.active_request_count == 0) {
++            instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
++        }
++        return true;
++    }
++    // чужак уже грузит эту же модель — ждём его на cv (загрузчик ответит notify_all)
++    while (instance.state == LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADING) {
++        instance.cv.wait(lock);
++        if (instance.bridge) {
++            if (for_request) {
++                instance.active_request_count += 1;
++                instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
++            }
++            return true;
++        }
++        if (instance.state == LLAMA_SERVER_CLUSTER_INSTANCE_STATE_FAILED) {
++            if (error_out != nullptr) {
++                *error_out = instance.last_error;
++            }
++            return false;
+         }
+-        return false;
+     }
+ 
+-    instance.bridge = std::move(bridge);
++    instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADING;
++    instance.last_error.clear();
++    clear_instance_grace_state(instance);
+     if (for_request) {
++        // счётчик поднимаем ДО отпускания лока: он держит unload-защиту
+         instance.active_request_count += 1;
+-        instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING;
+-    } else {
+-        instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
+     }
+-    return true;
++    lock.unlock();
++
++    std::lock_guard<std::mutex> load_guard(instance.load_mutex);
++    {
++        // пока ждали load_mutex, модель мог загрузить другой поток — публикуем и выходим
++        std::lock_guard<std::mutex> publish(instance.mutex);
++        if (instance.bridge) {
++            instance.state = for_request ? LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING
++                                         : LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
++            instance.cv.notify_all();
++            return true;
++        }
++    }
++
++    hds_loaded_bridge loaded = create_bridge_detached(instance);
++
++    std::lock_guard<std::mutex> publish(instance.mutex);
++    if (loaded.bridge) {
++        instance.bridge = std::move(loaded.bridge);
++        if (!loaded.execution_group_id.empty()) {
++            instance.params.execution_group_id = loaded.execution_group_id;
++        }
++        instance.state = for_request ? LLAMA_SERVER_CLUSTER_INSTANCE_STATE_SERVING
++                                     : LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
++        instance.cv.notify_all();
++        return true;
++    }
++    instance.state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_FAILED;
++    instance.last_error = loaded.error.empty() ? "load failed" : loaded.error;
++    if (for_request && instance.active_request_count > 0) {
++        instance.active_request_count -= 1;
++    }
++    if (error_out != nullptr) {
++        *error_out = instance.last_error;
++    }
++    instance.cv.notify_all();
++    return false;
+ }
+ 
+ void finish_request_locked(model_instance & instance) {
+@@ -2266,16 +2332,31 @@ int32_t instance_parallel_limit(const model_instance & instance) {
+     return std::max<int32_t>(1, instance.params.n_parallel);
+ }
+ 
++// HDS patch: слот ждём с дедлайном. В движке не было ни одного `wait_for`/`wait_until`,
++// поэтому запрос, чей слот не освободился (потерянный wakeup, зависший вызов), ждал
++// ВЕЧНО и держал роль недоступной. Теперь ожидание ограничено, а факт таймаута виден
++// в `last_error` инстанса (это же читает `list_instances` → наш `status`).
++constexpr auto kHdsSlotWaitTimeout = std::chrono::seconds(600);
++
+ void wait_for_instance_slot_locked(
+     model_instance & instance,
+     std::unique_lock<std::mutex> & lock) {
+     bool counted_as_queued = false;
++    const auto deadline = std::chrono::steady_clock::now() + kHdsSlotWaitTimeout;
+     while (instance.active_request_count >= instance_parallel_limit(instance)) {
+         if (!counted_as_queued) {
+             instance.queued_request_count += 1;
+             counted_as_queued = true;
+         }
+-        instance.cv.wait(lock);
++        if (instance.cv.wait_until(lock, deadline) == std::cv_status::timeout &&
++            instance.active_request_count >= instance_parallel_limit(instance)) {
++            instance.last_error = "slot wait timeout: proceeding (queue)";
++            std::fprintf(
++                stderr,
++                "llama_server_cluster: slot wait timeout for instance %lld, proceeding via queue\n",
++                static_cast<long long>(instance.instance_id));
++            break;
++        }
+     }
+     if (counted_as_queued && instance.queued_request_count > 0) {
+         instance.queued_request_count -= 1;
+@@ -3036,26 +3117,30 @@ int32_t llama_server_cluster_set_instance_retention_mode(
+         return -1;
+     }
+ 
+-    std::lock_guard<std::mutex> lock(instance->mutex);
+-    instance->retention_mode = retention_mode;
+-    if (retention_mode == LLAMA_SERVER_CLUSTER_INSTANCE_KEEP_LOADED && instance->bridge) {
+-        clear_instance_grace_state(*instance);
+-        if (instance->active_request_count == 0) {
+-            instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
+-        }
+-    } else if (retention_mode == LLAMA_SERVER_CLUSTER_INSTANCE_LOAD_ON_DEMAND &&
+-               instance->active_request_count == 0) {
+-        if (instance_should_unload_immediately_on_demand(*instance)) {
+-            instance->bridge.reset();
+-            instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
+-            clear_instance_grace_state(*instance);
+-        } else if (instance->bridge) {
+-            set_instance_grace_state(*instance);
+-        } else {
+-            instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
++    {
++        std::lock_guard<std::mutex> lock(instance->mutex);
++        instance->retention_mode = retention_mode;
++        if (retention_mode == LLAMA_SERVER_CLUSTER_INSTANCE_KEEP_LOADED && instance->bridge) {
+             clear_instance_grace_state(*instance);
++            if (instance->active_request_count == 0) {
++                instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_LOADED;
++            }
++        } else if (retention_mode == LLAMA_SERVER_CLUSTER_INSTANCE_LOAD_ON_DEMAND &&
++                   instance->active_request_count == 0) {
++            if (instance_should_unload_immediately_on_demand(*instance)) {
++                instance->bridge.reset();
++                instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
++                clear_instance_grace_state(*instance);
++            } else if (instance->bridge) {
++                set_instance_grace_state(*instance);
++            } else {
++                instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
++                clear_instance_grace_state(*instance);
++            }
+         }
+     }
++    // HDS patch: cluster-лок берём ВНЕ instance-лока — в стоке это был ABBA-риск
++    // против `remove_instance` (тот идёт cluster→instance).
+     set_cluster_error(cluster, "");
+     return 0;
+ }
+@@ -3073,9 +3158,11 @@ int32_t llama_server_cluster_load_instance(
+         return -1;
+     }
+ 
+-    std::lock_guard<std::mutex> lock(instance->mutex);
++    // HDS patch: загрузку выполняет `ensure_instance_loaded` (сам управляет request-локом
++    // и грузит модель под `load_mutex`). Здесь лок НЕ держим — иначе `list_instances`
++    // (наш `status`) и `unload_instance` (вытеснение) ждали бы загрузку, как в инциденте.
+     std::string load_error;
+-    if (!ensure_instance_loaded_locked(*instance, false, &load_error)) {
++    if (!ensure_instance_loaded(*instance, false, &load_error)) {
+         set_cluster_error(cluster, load_error);
+         return -1;
+     }
+@@ -3097,14 +3184,22 @@ int32_t llama_server_cluster_unload_instance(
+         return -1;
+     }
+ 
+-    std::lock_guard<std::mutex> lock(instance->mutex);
+-    if (instance->active_request_count != 0) {
++    bool busy = false;
++    {
++        std::lock_guard<std::mutex> lock(instance->mutex);
++        busy = instance->active_request_count != 0;
++        if (!busy) {
++            instance->bridge.reset();
++            instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
++            clear_instance_grace_state(*instance);
++        }
++    }
++    if (busy) {
++        // HDS patch: cluster-лок берём ВНЕ instance-лока (в стоке это был ABBA-риск
++        // против `remove_instance`, который идёт cluster→instance)
+         set_cluster_error(cluster, "instance is busy");
+         return -1;
+     }
+-    instance->bridge.reset();
+-    instance->state = LLAMA_SERVER_CLUSTER_INSTANCE_STATE_UNLOADED;
+-    clear_instance_grace_state(*instance);
+     set_cluster_error(cluster, "");
+     return 0;
+ }
+@@ -3148,16 +3243,20 @@ int32_t llama_server_cluster_chat_complete(
+     const bool was_loaded = static_cast<bool>(instance->bridge);
+     std::string load_error;
+     const auto load_started = steady_clock::now();
+-    if (!ensure_instance_loaded_locked(*instance, true, &load_error)) {
++    lock.unlock();  // HDS patch: загрузка (секунды) идёт без request-лока
++    if (!ensure_instance_loaded(*instance, true, &load_error)) {
+         out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+         out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
+         out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
++        // лок не держим: `set_cluster_error` берёт cluster-лок (в стоке это был ABBA-риск
++        // против `remove_instance`, который идёт cluster→instance)
+         set_cluster_error(cluster, load_error);
+         out->error = dup_cstr(load_error);
+         return -1;
+     }
+     out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+     out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
++    lock.lock();  // дальше как было: bridge берём под локом
+ 
+     llama_server_bridge_chat_request bridge_req = llama_server_bridge_default_chat_request();
+     bridge_req.prompt = req->prompt;
+@@ -3268,7 +3367,8 @@ int32_t llama_server_cluster_vlm_complete(
+     const bool was_loaded = static_cast<bool>(instance->bridge);
+     std::string load_error;
+     const auto load_started = steady_clock::now();
+-    if (!ensure_instance_loaded_locked(*instance, true, &load_error)) {
++    lock.unlock();  // HDS patch: загрузка (секунды) идёт без request-лока
++    if (!ensure_instance_loaded(*instance, true, &load_error)) {
+         out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+         out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
+         out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
+@@ -3278,6 +3378,7 @@ int32_t llama_server_cluster_vlm_complete(
+     }
+     out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+     out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
++    lock.lock();  // дальше как было: bridge берём под локом
+ 
+     llama_server_bridge_vlm_request bridge_req = llama_server_bridge_default_vlm_request();
+     bridge_req.prompt = req->prompt != nullptr ? req->prompt : "";
+@@ -3389,7 +3490,8 @@ int32_t llama_server_cluster_embeddings(
+     const bool was_loaded = static_cast<bool>(instance->bridge);
+     std::string load_error;
+     const auto load_started = steady_clock::now();
+-    if (!ensure_instance_loaded_locked(*instance, true, &load_error)) {
++    lock.unlock();  // HDS patch: загрузка (секунды) идёт без request-лока
++    if (!ensure_instance_loaded(*instance, true, &load_error)) {
+         out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+         out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
+         out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
+@@ -3399,6 +3501,7 @@ int32_t llama_server_cluster_embeddings(
+     }
+     out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+     out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
++    lock.lock();  // дальше как было: bridge берём под локом
+ 
+     llama_server_bridge_embeddings_request bridge_req = llama_server_bridge_default_embeddings_request();
+     bridge_req.body_json = req->body_json;
+@@ -3478,7 +3581,8 @@ int32_t llama_server_cluster_rerank(
+     const bool was_loaded = static_cast<bool>(instance->bridge);
+     std::string load_error;
+     const auto load_started = steady_clock::now();
+-    if (!ensure_instance_loaded_locked(*instance, true, &load_error)) {
++    lock.unlock();  // HDS patch: загрузка (секунды) идёт без request-лока
++    if (!ensure_instance_loaded(*instance, true, &load_error)) {
+         out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+         out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
+         out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
+@@ -3488,6 +3592,7 @@ int32_t llama_server_cluster_rerank(
+     }
+     out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+     out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
++    lock.lock();  // дальше как было: bridge берём под локом
+ 
+     llama_server_bridge_rerank_request bridge_req = llama_server_bridge_default_rerank_request();
+     bridge_req.body_json = req->body_json;
+@@ -3639,7 +3744,8 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+     const bool was_loaded = static_cast<bool>(instance->bridge);
+     std::string load_error;
+     const auto load_started = steady_clock::now();
+-    if (!ensure_instance_loaded_locked(*instance, true, &load_error)) {
++    lock.unlock();  // HDS patch: загрузка (секунды) идёт без request-лока
++    if (!ensure_instance_loaded(*instance, true, &load_error)) {
+         out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+         out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
+         out->metrics.request_total_ms = duration_ms(steady_clock::now() - request_started);
+@@ -3649,6 +3755,7 @@ int32_t llama_server_cluster_audio_transcriptions_raw(
+     }
+     out->metrics.loaded_this_call = was_loaded ? 0 : 1;
+     out->metrics.load_ms = duration_ms(steady_clock::now() - load_started);
++    lock.lock();  // дальше как было: bridge берём под локом
+ 
+     llama_server_bridge_audio_raw_request bridge_req = llama_server_bridge_default_audio_raw_request();
+     bridge_req.audio_bytes = req->audio_bytes;
+diff --git a/bridge/llama_server_cluster.h b/bridge/llama_server_cluster.h
+index d356233..fbf488f 100644
+--- a/bridge/llama_server_cluster.h
++++ b/bridge/llama_server_cluster.h
+@@ -94,6 +94,11 @@ struct llama_server_cluster_instance_params {
+     int32_t n_threads;
+     int32_t n_threads_batch;
+     int32_t n_gpu_layers;
++    // HDS patch: тип KV-кэша (ggml_type: 1 = F16, 8 = Q8_0; 0 = «не задан»).
++    // В API движка этих полей не было, поэтому `--cache-type-k/v` из конфига
++    // применить было невозможно — KV всегда грузился как f16 (~512 МиБ у нашего чата).
++    int32_t cache_type_k;
++    int32_t cache_type_v;
+ };
+ 
+ struct llama_server_cluster_instance_info {

@@ -535,11 +535,19 @@ VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host 
   `InstanceParamsRaw` (всегда пишутся явно — `default_instance_params` движок возвращает по
   значению, у стоковой DLL хвост структуры неинициализирован); учёт `KvBits::Q8_0` в оценке
   бюджета. Предупреждение «флаг не распознан» ушло — боевой `config.yaml` заработает без правок.
-* **сторона движка (в работе, L2b):** 2 поля в cluster+bridge параметрах, присвоение
-  `bridge->params.cache_type_k/v` рядом с `n_ctx/n_batch`, включение Flash Attention при
-  квантованном V (llama.cpp требует FA для `type_v != F16`); у embedding/rerank FA выключен
-  движком, но там KV-кэша нет. После сборки замеряем (`kv_probe`): ожидаем KV ≈ 256 МиБ вместо
-  512, то есть −256 МиБ.
+* **сторона движка (текст готов, ждёт сборки/проверки — `engine-patch/`):** 4 класса правок:
+  (P1) `wait_for_instance_slot_locked` → `cv.wait_until(deadline)` (в движке не было ни одного
+  `wait_for`); (P2) загрузка модели **вне** `instance->mutex` — вынесена в
+  `create_bridge_detached()` + `load_mutex`, а `ensure_instance_loaded()` сам берёт/отпускает
+  request-лок короткими секциями; (P3) `set_cluster_error` в `unload_instance`/
+  `set_instance_retention_mode` вынесен из-под instance-лока (ABBA против `remove_instance`);
+  (KV) +2 поля в cluster+bridge параметрах, присвоение `bridge->params.cache_type_k/v`,
+  включение Flash Attention при квантованном V. Патч: `engine-patch/hds-engine-patch-v1.15.patch`
+  (4 файла, 22 хунка), база — тег `v1.15` (`2683eb6`), воспроизведение и откат —
+  `engine-patch/README.md`. Остаточное ограничение (честно): в хвостах пяти путей запросов
+  `set_cluster_error` ещё под instance-локом (микросекундные окна) — тем же приёмом в
+  следующей итерации. После сборки: проверка на **копии** рантайма + замер KV
+  (`kv_probe`): ожидаем KV ≈ 256 МиБ вместо 512.
 
 **Осталось по L1 (шаг 3).** Убрать триггер: `n_batch/n_ubatch` для embedding (было
 8192/8192 при 12 ГБ и загруженном чате), оценка compute-буферов в `budget.rs`, отказ от
