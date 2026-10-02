@@ -385,22 +385,68 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
 /// `Cluster` держит сырой указатель движка (FFI), поэтому сам по себе не `Send`;
 /// фасад обслуживает запросы в потоках сокетов — значит доступ сериализуем
 /// мьютексом: движок вызывается **из одного потока за раз**.
-pub struct ClusterShared(Mutex<Cluster>);
+///
+/// Обёртка над [`crate::gate::Gate`] добавлена после инцидента `W4_REPORT.md` §14:
+/// зависший вызов движка держал мьютекс, а снаружи это выглядело как «резидент не
+/// отвечает» (статус и роли ждали тот же мьютекс). Теперь видно **кто** держит
+/// движок и **сколько**, а «наблюдательные» вызовы умеют ждать с бюджетом
+/// ([`ClusterShared::try_with`]) и честно отдавать `Busy`.
+pub struct ClusterShared(crate::gate::Gate<Cluster>);
 
-// SAFETY: доступ к кластеру идёт только через `with()`, то есть под мьютексом —
-// параллельных вызовов одного объекта кластера не бывает.
+// SAFETY: доступ к кластеру идёт только через `with()`/`with_tagged()`/`try_with()`,
+// то есть под мьютексом гейта — параллельных вызовов одного объекта кластера не бывает.
 unsafe impl Send for ClusterShared {}
 unsafe impl Sync for ClusterShared {}
 
+/// Бюджет ожидания для «наблюдательных» вызовов (статус, `/props`, арбитр):
+/// дольше ждать нет смысла — лучше честно сказать «движок занят».
+pub const OBSERVE_BUDGET: Duration = Duration::from_millis(300);
+
+/// Порог «долгого» вызова движка (мс): при превышении вызывающий пишет строку в лог
+/// резидента и в heartbeat — чтобы инцидент вида «загрузка роли повисла» был виден
+/// постфактум (зависший вызов из `W4_REPORT.md` §14 шёл 3 часа и не оставлял следов).
+pub const SLOW_CALL_MS: u64 = 30_000;
+
 impl ClusterShared {
     pub fn new(cluster: Cluster) -> ClusterShared {
-        ClusterShared(Mutex::new(cluster))
+        ClusterShared(crate::gate::Gate::new(cluster))
     }
 
-    /// Вызвать движок под мьютексом (единственный путь к кластеру).
+    /// Вызвать движок под мьютексом (единственный блокирующий путь к кластеру).
     pub fn with<T>(&self, f: impl FnOnce(&Cluster) -> T) -> T {
-        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
-        f(&guard)
+        self.0.with_tagged("engine", f)
+    }
+
+    /// То же, но с меткой операции — она попадает в `busy`/`status`/heartbeat
+    /// (роль `embedding`, `wait_loaded`, `arbiter`…), поэтому зависший движок
+    /// больше не выглядит безымянным.
+    pub fn with_tagged<T>(&self, what: &str, f: impl FnOnce(&Cluster) -> T) -> T {
+        self.0.with_tagged(what, f)
+    }
+
+    /// Ожидание с бюджетом: `Err(Busy)` — движок занят (внутри — кто и сколько).
+    pub fn try_with<T>(
+        &self,
+        what: &str,
+        budget: Duration,
+        f: impl FnOnce(&Cluster) -> T,
+    ) -> std::result::Result<T, crate::gate::Busy> {
+        self.0.try_with(what, budget, f)
+    }
+
+    /// Кто держит движок сейчас (`None` — свободен).
+    pub fn busy(&self) -> Option<crate::gate::Busy> {
+        self.0.busy()
+    }
+
+    /// Последний долгий вызов `(что, мс)` — для `status`/heartbeat/логов.
+    pub fn last_slow(&self) -> Option<(String, u64)> {
+        self.0.last_slow()
+    }
+
+    /// Порог «долгого» вызова движка (мс) — при превышении пишем в лог и в heartbeat.
+    pub fn set_slow_ms(&self, ms: u64) {
+        self.0.set_slow_ms(ms);
     }
 }
 
@@ -563,7 +609,7 @@ impl ClusterBackend {
     fn ensure_loaded(&self, role: &str) -> Result<i64> {
         let cl = self.cl()?;
         let id = self.id_of(role)?;
-        let loaded = cl.with(|c| {
+        let loaded = cl.with_tagged("instances", |c| {
             c.instance_by_id(id)
                 .ok()
                 .flatten()
@@ -571,8 +617,12 @@ impl ClusterBackend {
                 .unwrap_or(false)
         });
         if !loaded {
-            cl.with(|c| c.load(id))?;
-            cl.with(|c| c.wait_loaded(id, Duration::from_secs(300), Duration::from_millis(500)))?;
+            let load_tag = format!("load:{role}");
+            cl.with_tagged(&load_tag, |c| c.load(id))?;
+            let wait_tag = format!("wait_loaded:{role}");
+            cl.with_tagged(&wait_tag, |c| {
+                c.wait_loaded(id, Duration::from_secs(300), Duration::from_millis(500))
+            })?;
         }
         self.note_used(role);
         Ok(id)
@@ -599,11 +649,19 @@ impl ClusterBackend {
     }
 
     /// Инстансы кластера глазами диспетчера (с оценками и простоем).
+    ///
+    /// Ожидание ограничено [`OBSERVE_BUDGET`]: если движок занят (загрузка/инференс
+    /// другой роли), арбитр и `status` получают пустой список и **busy**-метку, а не
+    /// встают в очередь за зависшим вызовом (инцидент `W4_REPORT.md` §14).
     fn uses(&self) -> Vec<InstanceUse> {
         let instances = self
             .cluster
             .as_ref()
-            .map(|c| c.with(|x| x.instances()).unwrap_or_default())
+            .and_then(|c| {
+                c.try_with("instances", OBSERVE_BUDGET, |x| x.instances())
+                    .ok()
+            })
+            .and_then(|r| r.ok())
             .unwrap_or_default();
         instance_uses(&instances, &self.needs, &self.idle_map())
     }
@@ -629,9 +687,9 @@ impl ClusterBackend {
             let uses = self.uses();
             plan_query(&self.gpu, self.free_mib(), &Demand::new(role, need), &uses)
         };
-        let log = self
-            .cl()?
-            .with(|cluster| dispatch::apply(cluster, &self.pause, &plan));
+        let log = self.cl()?.with_tagged("dispatcher", |cluster| {
+            dispatch::apply(cluster, &self.pause, &plan)
+        });
         for line in plan.lines().iter().chain(log.iter()) {
             self.log.line(&format!("[dispatcher] {line}"));
         }
@@ -682,6 +740,96 @@ impl ClusterBackend {
             }
         }
         v
+    }
+
+    /// Снимок состояния резидента для heartbeat-файла (L1, `W4_REPORT.md` §15).
+    ///
+    /// Собирается **без** обращения к движку: занятость читается с гейта
+    /// ([`ClusterShared::busy`]), VRAM — из NVML плюс атрибуция по процессам (PDH).
+    /// Именно поэтому heartbeat обновляется, даже когда движок занят и HTTP не отвечает.
+    pub fn heartbeat(&self, pid: u32, uptime_sec: u64, ts_unix: u64) -> resident::Heartbeat {
+        let used = self
+            .nvml
+            .as_ref()
+            .and_then(|p| p.snapshot())
+            .map(|s| s.used_mib)
+            .unwrap_or(0);
+        let attribution = crate::gpuattr::attribution_for_current_process(used);
+        let busy = self
+            .cluster
+            .as_ref()
+            .and_then(|cl| cl.busy())
+            .map(|b| b.to_string());
+        let (last_slow_what, last_slow_ms) =
+            match self.cluster.as_ref().and_then(|cl| cl.last_slow()) {
+                Some((what, ms)) => (Some(what), Some(ms)),
+                None => (None, None),
+            };
+        let has_vram = used > 0;
+        resident::Heartbeat {
+            pid,
+            uptime_sec,
+            ts_unix,
+            busy,
+            last_slow_what,
+            last_slow_ms,
+            vram_ours_mib: has_vram.then_some(attribution.ours_mib),
+            vram_foreign_mib: has_vram.then_some(attribution.foreign_mib),
+            vram_total_used_mib: has_vram.then_some(attribution.total_used_mib),
+        }
+    }
+
+    /// Поток heartbeat резидента: раз в [`resident::HEARTBEAT_EVERY_SECS`] пишет
+    /// `data/llm-host.heartbeat.json` (pid, uptime, занятость движка, атрибуция VRAM).
+    ///
+    /// Зачем отдельный поток: при занятом движке фасад может не ответить, и без файла
+    /// внешний наблюдатель (UI, `hds check`, `llm-host status`) остаётся с диагнозом
+    /// «резидент не отвечает» — ровно то, что мешало в инциденте §14.
+    pub fn spawn_heartbeat(
+        self: &Arc<Self>,
+        path: PathBuf,
+        stop: Arc<AtomicBool>,
+    ) -> std::thread::JoinHandle<()> {
+        let me = Arc::clone(self);
+        std::thread::spawn(move || {
+            let step = Duration::from_millis(250);
+            let every = Duration::from_secs(resident::HEARTBEAT_EVERY_SECS);
+            let mut reported_busy = false;
+            loop {
+                let hb = me.heartbeat(me.pid, me.started.elapsed().as_secs(), resident::unix_now());
+                if let Err(e) = hb.write(&path) {
+                    me.log
+                        .note(&format!("heartbeat: не записал {}: {e}", path.display()));
+                }
+                // Переходы «занят ↔ свободен» дублируем в лог: файла для разбора
+                // инцидента мало (его перезаписывает следующий снимок).
+                match (&hb.busy, reported_busy) {
+                    (Some(what), false) => {
+                        me.log.line(&format!(
+                            "[busy] движок занят: {what} (см. heartbeat {})",
+                            path.display()
+                        ));
+                        reported_busy = true;
+                    }
+                    (None, true) => {
+                        me.log.line("[busy] движок свободен");
+                        reported_busy = false;
+                    }
+                    _ => {}
+                }
+                // сон мелкими кусками: остановка не должна ждать такт целиком
+                let mut slept = Duration::ZERO;
+                while slept < every && !stop.load(Ordering::Relaxed) {
+                    std::thread::sleep(step);
+                    slept += step;
+                }
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+            }
+            me.log
+                .line("heartbeat: поток остановлен (файл оставлен как последний снимок)");
+        })
     }
 
     /// Поток фонового арбитра: ARB-3 (живой прогон индексации и нехватка VRAM →
@@ -862,23 +1010,26 @@ impl Backend for ClusterBackend {
             }
         }
         let id = self.ids.get(role).copied()?;
-        let state = self
-            .cluster
-            .as_ref()
-            .and_then(|c| {
-                c.with(|x| {
-                    x.instance_by_id(id)
-                        .ok()
-                        .flatten()
-                        .map(|i| i.state_name.clone())
-                })
-            })
-            .unwrap_or_default();
+        // L1: состояние роли читаем с бюджетом — при занятом движке честно сообщаем
+        // «busy» (кто держит и сколько), а не висим вместе с ним.
+        let (state, busy) = match self.cluster.as_ref() {
+            Some(cl) => match cl.try_with("props", OBSERVE_BUDGET, |x| {
+                x.instance_by_id(id)
+                    .ok()
+                    .flatten()
+                    .map(|i| i.state_name.clone())
+            }) {
+                Ok(state) => (state.unwrap_or_default(), Value::Null),
+                Err(b) => (String::new(), json!(b.to_string())),
+            },
+            None => (String::new(), Value::Null),
+        };
         Some(json!({
             "model_path": self.model_path.get(role).cloned().unwrap_or_default(),
             "n_ctx": self.n_ctx.get(role).copied().unwrap_or(0),
             "total_slots": self.parallel.max(1),
             "state": state,
+            "busy": busy,
         }))
     }
 
@@ -892,16 +1043,38 @@ impl Backend for ClusterBackend {
     /// Прогноза здесь нет: резидент знает **фактическое** последнее решение
     /// диспетчера (`decision`), а не «что было бы, если запрос придёт сейчас».
     fn internal_status(&self) -> Result<Value> {
-        let devices = self
-            .cluster
-            .as_ref()
-            .and_then(|c| c.with(|x| x.devices()).ok())
-            .unwrap_or_default();
-        let instances = self
-            .cluster
-            .as_ref()
-            .and_then(|c| c.with(|x| x.instances()).ok())
-            .unwrap_or_default();
+        // L1 (`W4_REPORT.md` §14): статус обязан отвечать быстро. Если движок занят,
+        // отдаём пустые списки и строку «кто держит и сколько» вместо ожидания
+        // за зависшим вызовом.
+        let mut busy: Option<String> = None;
+        let devices = match self.cluster.as_ref() {
+            Some(cl) => match cl.try_with("status:devices", OBSERVE_BUDGET, |x| x.devices()) {
+                Ok(Ok(devices)) => devices,
+                Ok(Err(e)) => {
+                    self.log.note(&format!("[internal] devices: {e}"));
+                    Vec::new()
+                }
+                Err(b) => {
+                    busy = Some(b.to_string());
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
+        let instances = match self.cluster.as_ref() {
+            Some(cl) => match cl.try_with("status:instances", OBSERVE_BUDGET, |x| x.instances()) {
+                Ok(Ok(instances)) => instances,
+                Ok(Err(e)) => {
+                    self.log.note(&format!("[internal] instances: {e}"));
+                    Vec::new()
+                }
+                Err(b) => {
+                    busy = Some(b.to_string());
+                    Vec::new()
+                }
+            },
+            None => Vec::new(),
+        };
         let vram = self.nvml.as_ref().and_then(|p| p.snapshot());
         let decision = self.last_plan.lock().ok().and_then(|p| p.clone());
         let report = StatusReport::build(StatusInput {
@@ -953,6 +1126,18 @@ impl Backend for ClusterBackend {
             map.insert(
                 "dispatcher_log".to_string(),
                 json!(self.decisions.lock().map(|d| d.clone()).unwrap_or_default()),
+            );
+            // L1: наблюдаемость движка — занят ли он, кем и что было долгим вызовом.
+            map.insert(
+                "engine_busy".to_string(),
+                busy.map_or(Value::Null, |b| json!(b)),
+            );
+            map.insert(
+                "engine_last_slow".to_string(),
+                self.cluster
+                    .as_ref()
+                    .and_then(|cl| cl.last_slow())
+                    .map_or(Value::Null, |(what, ms)| json!({ "what": what, "ms": ms })),
             );
         }
         Ok(json)
@@ -1303,6 +1488,8 @@ pub struct Host {
     handles: Vec<std::thread::JoinHandle<()>>,
     /// Поток фонового арбитра (ARB-3/ARB-5) — присоединяется в `stop`.
     arbiter: Option<std::thread::JoinHandle<()>>,
+    /// Поток heartbeat резидента (L1): `data/llm-host.heartbeat.json`.
+    heartbeat: Option<std::thread::JoinHandle<()>>,
     backend: Option<Arc<ClusterBackend>>,
     cluster: Option<Arc<ClusterShared>>,
     engine: Option<Engine>,
@@ -1511,7 +1698,10 @@ impl Host {
                     )?;
                     log.line(&format!("  чат: {}", inst.state_name));
                 }
-                cluster = Some(Arc::new(ClusterShared::new(cls)));
+                let shared = Arc::new(ClusterShared::new(cls));
+                // L1: порог «долгого» вызова движка — строка появится в логе/heartbeat.
+                shared.set_slow_ms(SLOW_CALL_MS);
+                cluster = Some(shared);
                 engine = Some(eng);
                 cwd = Some(guard);
             }
@@ -1579,6 +1769,15 @@ impl Host {
         };
         // фоновый арбитр: ARB-3 (при живой индексации резидент уступает VRAM) и ARB-5 (простой)
         let arbiter = backend.spawn_arbiter(Arc::clone(&stop));
+        // L1: heartbeat резидента — состояние видно снаружи даже когда движок занят и
+        // фасад не отвечает (`W4_REPORT.md` §14).
+        let heartbeat_path = resident::default_heartbeat_path(&cfg.pause_dir);
+        let heartbeat = backend.spawn_heartbeat(heartbeat_path.clone(), Arc::clone(&stop));
+        log.line(&format!(
+            "фон: heartbeat резидента (такт {} с, {}; «кто держит движок» видно и без HTTP)",
+            resident::HEARTBEAT_EVERY_SECS,
+            heartbeat_path.display()
+        ));
         log.line(&format!(
             "фон: арбитр простоя и индексации (такт 15 с, gpu.evict_idle_sec = {}, policy {})",
             resolved.gpu.evict_idle_sec,
@@ -1625,6 +1824,7 @@ impl Host {
             stop,
             handles,
             arbiter: Some(arbiter),
+            heartbeat: Some(heartbeat),
             backend: Some(backend),
             ids,
             cluster,
@@ -1780,6 +1980,9 @@ impl Host {
             let _ = h.join();
         }
         if let Some(h) = self.arbiter.take() {
+            let _ = h.join();
+        }
+        if let Some(h) = self.heartbeat.take() {
             let _ = h.join();
         }
 

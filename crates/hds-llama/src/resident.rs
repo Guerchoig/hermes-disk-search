@@ -23,6 +23,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
+
 use crate::error::{EngineError, Result};
 
 /// Каталог локальных данных проекта (`data/` — в git не входит, `.gitignore`).
@@ -52,10 +54,121 @@ pub fn default_log_path(root: &Path) -> PathBuf {
     data_dir(root).join(LOG_SUBDIR).join(LOG_FILE)
 }
 
+/// Текущее время в секундах Unix (`ts_unix` для heartbeat).
+pub fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Имя heartbeat-файла резидента (`data/llm-host.heartbeat.json`).
+///
+/// Отдельно от `index.heartbeat.json` (тот пишет индексатор в корне проекта):
+/// здесь — состояние **самого резидента**, чтобы внешний наблюдатель видел его даже
+/// когда HTTP не отвечает.
+pub const HEARTBEAT_FILE: &str = "llm-host.heartbeat.json";
+/// Свежесть heartbeat, с которой имеет смысл верить файлу (как у индексации — 30 с).
+pub const HEARTBEAT_FRESH_SECS: u64 = 30;
+/// Такт записи heartbeat резидента, с.
+pub const HEARTBEAT_EVERY_SECS: u64 = 5;
+
+/// Путь heartbeat-файла резидента (`<корень>/data/llm-host.heartbeat.json`).
+pub fn default_heartbeat_path(root: &Path) -> PathBuf {
+    data_dir(root).join(HEARTBEAT_FILE)
+}
+
+/// Снимок состояния резидента для внешнего наблюдателя (`status`, `hds check`, UI).
+///
+/// Зачем файл, а не только HTTP: в инциденте `W4_REPORT.md` §14 движок был занят и
+/// HTTP-ответа не было — единственным диагнозом оставалось «резидент не отвечает».
+/// Пишет файл **отдельный поток**, поэтому занятость движка и атрибуция VRAM видны
+/// всегда: `cargo run -p hds-llama --bin llm_host -- status` при мёртвом HTTP покажет
+/// «движок: занят (wait_loaded:embedding — 3600 с)».
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Heartbeat {
+    pub pid: u32,
+    pub uptime_sec: u64,
+    /// Когда записан файл (unix-сек): свежесть считает читатель.
+    pub ts_unix: u64,
+    /// Кто держит движок сейчас (`"wait_loaded:embedding — 3600 с"`); `None` — свободен.
+    pub busy: Option<String>,
+    /// Последний долгий вызов движка: что именно и сколько миллисекунд.
+    pub last_slow_what: Option<String>,
+    pub last_slow_ms: Option<u64>,
+    /// Атрибуция VRAM по процессам (PDH): наш процесс / чужие / всего занято.
+    pub vram_ours_mib: Option<u64>,
+    pub vram_foreign_mib: Option<u64>,
+    pub vram_total_used_mib: Option<u64>,
+}
+
+impl Heartbeat {
+    /// Возраст снимка в секундах (`ts_unix` в будущем → 0).
+    pub fn age_sec(&self, now_unix: u64) -> u64 {
+        now_unix.saturating_sub(self.ts_unix)
+    }
+
+    /// Свежий ли снимок (резидент жив и продолжает писать).
+    pub fn is_live(&self, now_unix: u64) -> bool {
+        self.age_sec(now_unix) <= HEARTBEAT_FRESH_SECS
+    }
+
+    /// Строка для `status`/`hds check`/UI.
+    pub fn line(&self) -> String {
+        let engine = match &self.busy {
+            Some(what) => format!("занят ({what})"),
+            None => "свободен".to_string(),
+        };
+        let vram = match (self.vram_ours_mib, self.vram_foreign_mib) {
+            (Some(ours), Some(foreign)) => {
+                format!("; VRAM: наш процесс {ours} МиБ, чужие {foreign} МиБ")
+            }
+            _ => String::new(),
+        };
+        let slow = match (&self.last_slow_what, self.last_slow_ms) {
+            (Some(what), Some(ms)) => format!("; последний долгий вызов: {what} {ms} мс"),
+            _ => String::new(),
+        };
+        format!(
+            "резидент pid {}, uptime {} с; движок: {engine}{vram}{slow}",
+            self.pid, self.uptime_sec
+        )
+    }
+}
+
+impl Heartbeat {
+    /// Записать снимок в файл (каталог создаётся).
+    ///
+    /// Ошибки записи не должны ронять резидент: heartbeat — вспомогательный канал,
+    /// как и лог, поэтому вызывающий их только логирует.
+    pub fn write(&self, path: &Path) -> std::io::Result<()> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let json = serde_json::to_string(self).map_err(|e| std::io::Error::other(e.to_string()))?;
+        std::fs::write(path, json)
+    }
+
+    /// Прочитать снимок (`None` — файла нет, он битый или чужого формата).
+    pub fn read(path: &Path) -> Option<Heartbeat> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    }
+}
+
 /// Прочитать pid из файла (`None` — файла нет или там не число).
 pub fn read_pid(path: &Path) -> Option<u32> {
     let text = std::fs::read_to_string(path).ok()?;
     text.trim().parse::<u32>().ok().filter(|p| *p != 0)
+}
+
+/// Принудительно завершить процесс (Windows: `taskkill /T /F`; иначе `kill -9`).
+///
+/// Нужно для `llm-host stop --force`: если движок завис, штатная уборка
+/// (`remove_instance` под мьютексом движка) не выполняется, и резидент остаётся
+/// с занятой VRAM (`W4_REPORT.md` §14) — завершить процесс и поднять заново
+/// остаётся единственным выходом.
+pub fn terminate(pid: u32) -> bool {
+    platform::terminate(pid)
 }
 
 /// Живой владелец pid-файла (`None` — файла нет, содержимое битое или процесс умер).
@@ -255,6 +368,17 @@ mod platform {
             ok != 0 && code == STILL_ACTIVE
         }
     }
+
+    /// Завершить процесс вместе с потомками (`taskkill /T /F`).
+    pub fn terminate(pid: u32) -> bool {
+        use std::os::windows::process::CommandExt;
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW: без мигающей консоли
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(unix)]
@@ -267,6 +391,15 @@ mod platform {
     pub fn alive(pid: u32) -> bool {
         pid != 0 && unsafe { kill(pid as i32, 0) == 0 }
     }
+
+    /// Завершить процесс (`kill -9`).
+    pub fn terminate(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 #[cfg(not(any(windows, unix)))]
@@ -275,5 +408,77 @@ mod platform {
     /// второй владелец GPU опаснее, чем «не смог запуститься»).
     pub fn alive(_pid: u32) -> bool {
         true
+    }
+
+    /// Завершить процесс мы не умеем — сообщаем честно (вызывающий покажет ошибку).
+    pub fn terminate(_pid: u32) -> bool {
+        false
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_tests {
+    use super::*;
+
+    fn sample() -> Heartbeat {
+        Heartbeat {
+            pid: 4242,
+            uptime_sec: 3600,
+            ts_unix: 1_000_000,
+            busy: Some("wait_loaded:embedding — 3600 с".to_string()),
+            last_slow_what: Some("load:chat".to_string()),
+            last_slow_ms: Some(42_000),
+            vram_ours_mib: Some(10_416),
+            vram_foreign_mib: Some(349),
+            vram_total_used_mib: Some(10_765),
+        }
+    }
+
+    #[test]
+    fn line_reports_busy_vram_and_slow_call() {
+        let line = sample().line();
+        assert!(line.contains("pid 4242"), "{line}");
+        assert!(line.contains("занят (wait_loaded:embedding"), "{line}");
+        assert!(line.contains("наш процесс 10416 МиБ"), "{line}");
+        assert!(
+            line.contains("последний долгий вызов: load:chat 42000 мс"),
+            "{line}"
+        );
+        let idle = Heartbeat::default().line();
+        assert!(idle.contains("движок: свободен"), "{idle}");
+    }
+
+    #[test]
+    fn fresh_and_stale_are_distinguished() {
+        let hb = sample();
+        assert!(hb.is_live(1_000_020), "20 с — ещё свежо");
+        assert!(!hb.is_live(1_000_060), "60 с — уже нет");
+        assert_eq!(hb.age_sec(1_000_010), 10);
+        assert_eq!(
+            hb.age_sec(999_000),
+            0,
+            "время «назад» не даёт отрицательный возраст"
+        );
+    }
+
+    #[test]
+    fn roundtrip_through_file() {
+        let dir = std::env::temp_dir().join(format!("hds-hb-{}", std::process::id()));
+        let path = dir.join(HEARTBEAT_FILE);
+        let hb = sample();
+        hb.write(&path).expect("запись heartbeat");
+        assert_eq!(Heartbeat::read(&path), Some(hb));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_missing_or_broken_is_none() {
+        let dir = std::env::temp_dir().join(format!("hds-hb-broken-{}", std::process::id()));
+        assert!(Heartbeat::read(&dir.join("нет-такого.json")).is_none());
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("broken.json");
+        std::fs::write(&path, "{ не json").unwrap();
+        assert!(Heartbeat::read(&path).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

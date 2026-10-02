@@ -19,7 +19,9 @@
 //!   включая внутренний API `/internal/*` для CLI (A6);
 //! * [`host`] — резидентный `llm-host`: инстансы + фасад + диспетчер + режимы
 //!   `embedded`/`facade`/`off` (A6);
-//! * [`resident`] — `data/llm-host.pid` и `data/logs/llm-host.log` (A6).
+//! * [`resident`] — `data/llm-host.pid` и `data/logs/llm-host.log` (A6);
+//! * [`gate`] — шлюз к движку: метка занятости (`кто держит и с какого времени`)
+//!   и ожидание по бюджету вместо бесконечного (L1, `W4_REPORT.md` §15).
 //!
 //! Запуск (из корня репозитория): `cargo run -p hds-llama --release --bin llm_host -- run`
 //! (подробности — `tools/parity/W2_REPORT.md` §9.10).
@@ -35,7 +37,9 @@ pub mod engine_dir;
 pub mod error;
 pub mod facade;
 pub mod ffi;
+pub mod gate;
 pub mod gguf;
+pub mod gpuattr;
 pub mod host;
 pub mod http;
 pub mod pause;

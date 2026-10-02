@@ -470,7 +470,51 @@ CI-джоба `build-sidecar` (или локально `-WithSidecar`, нуже�
 `tools/parity/*` ещё упоминают Python-команды; doc-комментарии Rust вида «порт `hds/…py`» —
 историческая провенанс-заметка. mac-артефакт (§10.0, «не проверено») выведен из релиза.
 
-## 14. Живой порядок на машине: legacy Python остановлен, `:8787` → Rust (02.10.2026)
+## 15. L1 — наблюдаемость движка и порядок «кто держит VRAM» (шаг 1, 02.10.2026)
+
+**Зачем (из инцидента §14).** Зависший вызов движка держал единственный мьютекс
+(`ClusterShared`), поэтому «резидент не отвечает» стало единственным диагнозом: `status`,
+`/internal/status`, арбитр и роли ждали тот же мьютекс, а 10,4 ГБ VRAM держал наш же процесс —
+и этого не было видно ни в `status`, ни в `nvidia-smi` (в WDDM per-process память = `N/A`).
+
+**Что сделано (по файлам).**
+
+| Файл | Что внутри |
+|---|---|
+| `crates\hds-llama\src\gate.rs` (**новый**) | Шлюз к движку: `Busy` (кто/сколько), `with_tagged` (метка занятости, RAII — снимается даже при панике), `try_with(бюджет)` (вместо бесконечного ожидания), восстановление после poisoned-мьютекса, порог «долгого» вызова + `last_slow()` |
+| `crates\hds-llama\src\gpuattr.rs` (**новый**) | Атрибуция VRAM по процессам: PDH-счётчики Windows (`PdhAddEnglishCounterW` + `PdhExpandWildCardPathW` через `libloading("pdh.dll")`, без новых зависимостей), `VramAttribution` (наш процесс / чужие / доля), `process_vram_mib(pid)` |
+| `crates\hds-llama\src\resident.rs` | Heartbeat резидента: `data\llm-host.heartbeat.json` (`Heartbeat`: pid, uptime, `busy`, `last_slow`, атрибуция VRAM), `read/write/age/is_live/line`, `unix_now()`, `terminate(pid)` (taskkill /T /F — для `stop --force`) |
+| `crates\hds-llama\src\host.rs` | `ClusterShared` → обёртка над `Gate<Cluster>`; метки на горячих вызовах (`instances`, `load:<role>`, `wait_loaded:<role>`, `dispatcher`); `uses()`/`props`/`internal_status` с бюджетом 300 мс; в `/internal/status` — `engine_busy` и `engine_last_slow`; поток heartbeat (`spawn_heartbeat`, такт 5 с) + `busy`-переходы в лог; `SLOW_CALL_MS = 30 с` |
+| `crates\hds-llama\src\status.rs` | Строка атрибуции в отчёте: «VRAM по процессам: наш процесс X МиБ (Y %), чужие Z МиБ, всего занято W». Считается по запросу (вход отчёта не менялся) |
+| `crates\hds-llama\src\bin\llm_host.rs` | `status` при «не отвечает» читает heartbeat и печатает диагноз («кто держит движок, сколько») + подсказку; **`stop --force`** — вежливый `/internal/stop`, затем `taskkill` по pid-файлу и ожидание освобождения (штатный `stop` не может убрать зависший резидент: уборка зовёт `remove_instance` под тем же мьютексом) |
+
+**Приёмка.**
+```
+cargo test --workspace   -> 190 passed / 0 failed (+10 ignored)   (было 174/+9)
+cargo clippy --workspace --all-targets -- -D warnings -> 0/0
+cargo fmt --all -- --check -> 0 diff
+# живой счётчик (сверка с PowerShell PDH, байт-в-байт):
+#   HDS_ATTR_PID=36704 cargo test -p hds-llama --lib gpuattr:: -- --ignored --nocapture
+#   -> pid 36704: Some(10922041344) bytes dedicated VRAM
+#   Get-Counter '\GPU Process Memory(*)\Dedicated Usage' -> pid_36704: 10922041344 bytes = 10416 МиБ
+```
+
+**Что это даёт в инциденте.** Вместо «резидент не отвечает» + слепого прогноза:
+`status` покажет «heartbeat не свежий …; движок: занят (wait_loaded:embedding — 3600 с);
+VRAM: наш процесс 10416 МиБ, чужие 349 МиБ», а `llm_host stop --force` поднимет машину
+без ручного `taskkill`.
+
+**Осталось по L1 (шаги 2–3).** Шаг 2 — устойчивость: `try_with` в `prepare` (диспетчер не
+должен залипать на чужом вызове), `Plan.deferred` (файловые действия выполняются, кластерные
+откладываются с записью в лог), `503` вместо ожидания для `/internal/*` при занятом движке,
+watchdog `stuck_warn_sec`; шаг 3 — убрать триггер: `n_batch/n_ubatch` для embedding (было
+8192/8192 при 12 ГБ), оценка compute-буферов в `budget.rs`, отказ от `load_instance` на каждый
+запрос LOAD_ON_DEMAND ролей. Пункт `gpu-observability` в `hds check`/UI — там же.
+
+**Следующее (L2b).** Свой патч движка (4 правки в `bridge/llama_server_cluster.cpp`) на базе
+тега **v1.15** (`2683eb69`) + сборка `-Backend cuda` (CUDA Toolkit 13.4, VS 18 с CMake/Ninja) →
+оверлей-ассет `engine-patch.json` + `-RollbackEnginePatch`; апстрим-отчёт по-английски.
+
 
 **Найдено при входе в новый чат (расхождение с передачей).** В §0/`HANDOFF_PROMPT` числилось
 «`index.pause` заказчика стоит», но **файла не было**: боевую `D:\hermes-disk-search-db\index.db`

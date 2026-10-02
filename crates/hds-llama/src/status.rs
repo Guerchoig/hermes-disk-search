@@ -249,6 +249,17 @@ impl StatusReport {
         }
     }
 
+    /// Атрибуция занятой VRAM по процессам (L1, `W4_REPORT.md` §15).
+    ///
+    /// Считается по запросу, а не в `build`: PDH-замер (наш процесс vs чужие) нужен
+    /// только там, где цифру показывают — в человеческой строке и JSON. `None` —
+    /// NVML/PDH недоступны (тогда честнее промолчать, чем нарисовать разбивку).
+    fn attribution(&self) -> Option<crate::gpuattr::VramAttribution> {
+        self.vram
+            .map(|v| crate::gpuattr::attribution_for_current_process(v.used_mib))
+            .filter(|a| a.total_used_mib > 0)
+    }
+
     /// Человекочитаемый отчёт (то, что печатает `hdsw llm-host status`).
     pub fn lines(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -289,6 +300,11 @@ impl StatusReport {
                 "VRAM: замер недоступен (источник {}), бюджет не проверяется",
                 self.vram_source
             )),
+        }
+        // L1: «занято 10765 МиБ» без имени — бесполезно (`W4_REPORT.md` §14): показываем,
+        // сколько держим мы, а сколько чужие (PDH-счётчик Windows).
+        if let Some(attribution) = self.attribution() {
+            out.push(attribution.line());
         }
         if let Some(used) = self.used_by_us_mib {
             out.push(format!(

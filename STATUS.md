@@ -79,6 +79,12 @@
 > `cargo test --workspace` — **170 green (+9 `#[ignore]`)**.
 > **Контекст нового чата — `tools/parity/W1_REPORT.md` §0 (передача, актуально на 02.10.2026);
 > W3 (медиа/CLIP) — `W3_REPORT.md`; W4 (упаковка/CI) — `W4_REPORT.md`; W0 — `SPIKES.md`.**
+> **L1 шаг 1 — наблюдаемость движка (02.10.2026):** по следам инцидента §14 добавлены шлюз
+> движка с меткой занятости и ожиданием по бюджету (`crates\hds-llama\src\gate.rs`),
+> атрибуция VRAM по процессам через PDH (`gpuattr.rs`; сверено с `Get-Counter` байт-в-байт:
+> 10 416 МиБ у нашего pid), heartbeat резидента (`data\llm-host.heartbeat.json` — состояние
+> видно даже при мёртвом HTTP), строка атрибуции в `status`, диагноз + **`stop --force`**
+> (taskkill по pid-файлу) в CLI. Тесты — **190/0 (+10 ignored)**, clippy 0/0. `W4_REPORT.md` §15.
 > **Живой порядок на машине (02.10.2026):** `index.pause` в передаче числился стоящим, но **файла
 > не было** — боевую `D:\hermes-disk-search-db\index.db` продолжал индексировать legacy-Python
 > (`watch.lock` = 8028, `pythonw -m hds.cli watch`), а `:8787` держал `pythonw -m hds.cli mcp-http`

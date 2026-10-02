@@ -23,11 +23,12 @@
 //! ```
 
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use hds_llama::config;
 use hds_llama::facade::Thinking;
 use hds_llama::host::{self, Host, HostConfig, LocalStatusArgs};
+use hds_llama::resident;
 use hds_llama::{client_json, EngineError, Result};
 
 /// Подкоманда CLI.
@@ -52,6 +53,9 @@ struct Args {
     /// Локальный отчёт: не открывать движок.
     no_engine: bool,
     baseline_used_mib: Option<u64>,
+    /// `stop --force`: завершить резидент по pid-файлу, не полагаясь на HTTP
+    /// (движок мог зависнуть и не отдать уборку — `W4_REPORT.md` §14).
+    force: bool,
 }
 
 fn usage() -> String {
@@ -59,7 +63,8 @@ fn usage() -> String {
      флаги: [--config FILE] [--runtime DIR] [--engine-dir DIR] [--host HOST] [--port N]\n\
      \x20      [--port-base N] [--ngl N] [--thinking off|on|auto] [--dispatcher on|off]\n\
      \x20      [--hold SEC] [--json FILE] [--local] [--no-engine] [--baseline-used-mib N]\n\
-     \x20      [--no-residency] [--no-log] [--no-internal]"
+     \x20      [--no-residency] [--no-log] [--no-internal]\n\
+     \x20      [--force]  # stop: завершить резидент по pid-файлу, если HTTP/движок завис"
         .to_string()
 }
 
@@ -71,6 +76,7 @@ fn parse_args() -> std::result::Result<Args, String> {
     let mut local = false;
     let mut no_engine = false;
     let mut baseline_used_mib = None;
+    let mut force = false;
     let mut it = std::env::args().skip(1);
     let first = it.next().ok_or_else(usage)?;
     let cmd = match first.as_str() {
@@ -136,6 +142,7 @@ fn parse_args() -> std::result::Result<Args, String> {
                 host.pid_file = None;
             }
             "--no-log" => host.log_file = None,
+            "--force" => force = true,
             "--pid" => host.pid_file = Some(PathBuf::from(take("--pid")?)),
             "--log" => host.log_file = Some(PathBuf::from(take("--log")?)),
             other => return Err(format!("неизвестный аргумент: {other}")),
@@ -150,6 +157,7 @@ fn parse_args() -> std::result::Result<Args, String> {
         local,
         no_engine,
         baseline_used_mib,
+        force,
     })
 }
 
@@ -174,7 +182,13 @@ fn run() -> Result<()> {
         Cmd::Devices => cmd_internal(&args, "devices", None),
         Cmd::Load(role) => cmd_internal(&args, "load", Some(role.clone())),
         Cmd::Unload(role) => cmd_internal(&args, "unload", Some(role.clone())),
-        Cmd::Stop => cmd_internal(&args, "stop", None),
+        Cmd::Stop => {
+            if args.force {
+                cmd_stop_force(&args)
+            } else {
+                cmd_internal(&args, "stop", None)
+            }
+        }
     }
 }
 
@@ -288,6 +302,28 @@ fn cmd_status(args: &Args) -> Result<()> {
              (запуск: `llm_host run`)",
             urls.join(", ")
         );
+        // L1: HTTP молчит — читаем heartbeat резидента: его пишет отдельный поток, поэтому
+        // «кто держит движок и сколько» видно и при мёртвом HTTP (`W4_REPORT.md` §14).
+        let hb_path = resident::default_heartbeat_path(&args.host.pause_dir);
+        let now = resident::unix_now();
+        match resident::Heartbeat::read(&hb_path) {
+            Some(hb) if hb.is_live(now) => {
+                println!("heartbeat ({} с назад): {}", hb.age_sec(now), hb.line())
+            }
+            Some(hb) => println!(
+                "heartbeat не свежий ({} с назад) — {}; похоже, резидент завис на вызове движка",
+                hb.age_sec(now),
+                hb.line()
+            ),
+            None => println!(
+                "heartbeat {} не найден — резидент либо старой сборки, либо не писал состояние",
+                hb_path.display()
+            ),
+        }
+        println!(
+            "подсказка: если движок занят давно, штатный stop не сработает — \
+             используйте `llm_host stop --force` (завершит процесс по pid-файлу)"
+        );
     }
 
     let local = host::local_status(&LocalStatusArgs {
@@ -312,6 +348,69 @@ fn cmd_status(args: &Args) -> Result<()> {
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `llm-host stop --force` — завершить резидент по pid-файлу, не полагаясь на HTTP.
+///
+/// Зачем: штатный `stop` идёт через `/internal/stop`, а уборка в `Host::stop` зовёт
+/// `remove_instance` под мьютексом движка — при зависшем движке (`W4_REPORT.md` §14)
+/// резидент остаётся с занятой VRAM и не отвечает. Здесь сначала просим по-хорошему
+/// (короткий таймаут, без ожидания уборки), затем завершаем процесс и ждём, пока
+/// освободится pid-файл.
+fn cmd_stop_force(args: &Args) -> Result<()> {
+    let pid_path = args.host.pid_path();
+    let pid = resident::owner_pid(&pid_path).ok_or_else(|| {
+        EngineError::Other(format!(
+            "резидент не найден: {} пуст или процесс уже мёртв — `stop --force` нечего делать",
+            pid_path.display()
+        ))
+    })?;
+    let cfg = config::load(&args.host.config)?;
+    let host_addr = args.host.host.clone().unwrap_or_else(|| cfg.host.clone());
+    for url in candidate_urls(args, &cfg, &host_addr) {
+        let target = format!("{url}/internal/stop");
+        if client_json("POST", &target, None, Duration::from_secs(3)).is_ok() {
+            println!("штатный stop отправлен ({url}) — жду завершения до 10 с");
+            break;
+        }
+    }
+    if wait_pid_file_free(&pid_path, Duration::from_secs(10)) {
+        println!("резидент остановлен штатно (pid {pid})");
+        return Ok(());
+    }
+    println!(
+        "штатная уборка не завершилась (движок занят и не отдаёт мьютекс) — завершаю pid {pid} \
+         принудительно"
+    );
+    if !resident::terminate(pid) {
+        return Err(EngineError::Other(format!(
+            "не удалось завершить pid {pid} (taskkill); завершите вручную и повторите"
+        )));
+    }
+    if wait_pid_file_free(&pid_path, Duration::from_secs(15)) {
+        println!("резидент завершён (pid {pid}); VRAM освобождена, `llm_host run` поднимет заново");
+        return Ok(());
+    }
+    // процесс убит, а pid-файл остался: снимаем как устаревший, иначе следующий старт
+    // откажется подниматься («второй владелец GPU»)
+    let _ = std::fs::remove_file(&pid_path);
+    println!(
+        "резидент завершён (pid {pid}); устаревший pid-файл {} снят",
+        pid_path.display()
+    );
+    Ok(())
+}
+
+/// Дождаться, пока pid-файл перестанет указывать на живой процесс.
+fn wait_pid_file_free(path: &std::path::Path, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if resident::owner_pid(path).is_none() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    false
 }
 
 /// `llm-host load|unload|devices|stop` — через внутренний API резидента.
