@@ -5,8 +5,10 @@
 веб-интерфейс. Python остаётся **только там, где он нужен по делу** — извлечение текста
 из офисных форматов/PDF/OCR и русская лемматизация (автономный воркер `sidecar`).
 
-> Приватный проект (`Guerchoig/hermes-disk-search`). Состояние и журналы волн миграции:
-> `STATUS.md`, `tools/parity/W4_REPORT.md` (передача + §1–§13), `MIGRATION_PLAN_RUST.md`.
+> Приватный проект (`Guerchoig/hermes-disk-search`). **Установка:** скачайте архив со
+> [страницы релизов](https://github.com/Guerchoig/hermes-disk-search/releases/latest) и следуйте
+> разделу «Установка на Windows: по шагам» (или «Установка — macOS»). Состояние и журналы волн
+> миграции: `STATUS.md`, `tools/parity/W4_REPORT.md`, `MIGRATION_PLAN_RUST.md`.
 
 ## Как это работает
 
@@ -52,13 +54,179 @@
 * **Tesseract OCR** — по желанию (текст на картинках/сканах); ставится по согласию.
 * Сеть — для разовой загрузки: рантайм движка (по манифесту), GGUF-модели, модели CLIP.
 
-## Установка — Windows
+## Установка на Windows: по шагам (от скачивания до первого поиска)
 
-1. Распакуйте архив релиза `hds-<версия>-windows-x64.zip` в любую папку (например `D:\hds`).
-2. Запустите **`setup.cmd`** (двойным щелчком) — он снимет пометку «скачано из интернета» (MotW)
-   и вызовет `setup.ps1` с `-ExecutionPolicy Bypass`.
+Порядок для **обычного пользователя**: скачали два файла → распаковали → запустили
+`setup.cmd` → ответили на 5 вопросов → задали корни и запустили индексацию.
 
-`setup.ps1` (ASCII-only) делает по шагам:
+**Что понадобится:** Windows 10/11 x64, ~12 ГБ свободного места (движок + модели) плюс место
+под индекс, интернет для разовых загрузок. **GPU не обязателен**: без NVIDIA-карты движок
+работает на Vulkan/CPU (медленнее). Права администратора не нужны; для автозапуска
+установщик спросит согласие (создаёт задачи Планировщика).
+
+### Шаг 1. Скачайте файлы со страницы релиза
+
+Откройте `https://github.com/Guerchoig/hermes-disk-search/releases/latest` и скачайте:
+
+| Файл | Нужен? | Что это |
+|---|---|---|
+| `hds-<версия>-windows-x64.zip` (~210 МБ) | **да** | само приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
+| `hds-<версия>-windows-x64.zip.sha256.txt` | по желанию | контрольная сумма архива (шаг 2) |
+| `hds-engine-runtime-windows-x64-cuda.zip` (~90 МБ) | нет\* | рантайм движка (LLM + ASR). \*Установщик скачивает его сам по манифесту из upstream; ассет нужен только для установки **без интернета** (шаг 5′) |
+| `hds-<версия>-macos-arm64.zip` | только для Mac | версия для Apple Silicon (см. «Установка — macOS») |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет | архивы исходников (для сборки из кода) |
+
+> **Модели в релиз не входят.** Установщик докачает их с HuggingFace: чат Qwen3.5-9B,
+> эмбеддинги bge-m3, реранкер bge-reranker — вместе ≈9 ГБ (плюс, по желанию, whisper ≈1.5 ГБ
+> и CLIP ≈850 МБ). Они ложатся в общий рантайм машины `%LOCALAPPDATA%\llama-runtime\models\`.
+
+### Шаг 2 (необязательно). Проверьте, что архив скачался целиком
+
+Подставьте свою версию вместо `0.14.0`:
+
+```powershell
+Get-FileHash .\hds-0.14.0-windows-x64.zip -Algorithm SHA256   # хеш архива
+Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемый хеш из релиза
+```
+
+Строка из файла `.sha256.txt` начинается с ожидаемого хеша — сверьте с выводом первой команды.
+
+### Шаг 3. Распакуйте архив в локальную папку
+
+Например `D:\hds` (ПКМ по zip → «Извлечь всё…»). Подойдёт любая папка на диске; правами
+администратора ничего устанавливать не нужно. **Не распаковывайте поверх уже работающей
+установки** — Windows не даёт заменить запущенный `hds.exe`; для обновления есть `update.ps1`
+(см. «Установка с версионированием»).
+
+### Шаг 4. Запустите `setup.cmd` (двойной щелчок)
+
+Скрипт снимет пометку «скачано из интернета» (иначе политика PowerShell попросит подпись) и
+запустит `setup.ps1`. Он задаст несколько вопросов — можно просто нажимать Enter (значения по
+умолчанию указаны в скобках):
+
+| Вопрос установщика | Что это даёт |
+|---|---|
+| `Install Tesseract OCR … [y/N]` | текст на картинках и сканах |
+| `Download the whisper model now (about 1.5 GB)? [y/N]` | расшифровка речи в видео/аудио |
+| `Download the CLIP models now (about 850 MB)? [y/N]` | поиск картинок по содержанию |
+| `Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]` | содержимое индекса, MCP-сервер и llm-host поднимаются сами при входе |
+| `Start the web UI automatically at logon (port 8765)? [y/N]` | веб-интерфейс всегда под рукой (иначе — по ярлыку) |
+
+Что установщик делает за вас: runtime Visual C++, `ffmpeg`, рантайм движка (≈90–200 МБ,
+проверка sha256), GGUF-модели чат/эмбеддинги/реранк (≈9 ГБ), `config.yaml` из образца, задачи
+автозапуска, интеграции Hermes/Cline, ярлык «Hermes Disk Search» и диагностику `hds check`.
+Первый прогон занимает **10–40 минут** (почти всё время — скачивание моделей).
+
+### Шаг 5. Проверьте результат
+
+```powershell
+cd D:\hds
+.\bin\hds.exe check
+```
+
+Ожидаемый вид: `[ok]` для базы данных, корней индексации, чата, эмбеддингов, OCR/ffmpeg/
+pymorphy3/mpxj, реранкера и GPU; строка про whisper/Vulkan помечена как «проверяется вручную» —
+это норма. Если чат/эмбеддинги помечены как недоступные — значит не запущен `llm_host.exe`
+(шаг 6).
+
+### Шаг 5′. Установка без интернета (офлайн)
+
+Скачайте на другой машине `hds-<версия>-windows-x64.zip` **и**
+`hds-engine-runtime-windows-x64-cuda.zip`, распакуйте приложение (шаг 3), затем положите рантайм
+движка туда, где его ищет `llm-host`, и запустите установщик с `-SkipEngine`:
+
+```powershell
+# распаковать рантайм движка туда, где его ищет llm-host
+$engine = Join-Path $env:APPDATA 'OpenResearchTools\TranscribeOffline\Engine'
+New-Item -ItemType Directory -Force $engine | Out-Null
+Expand-Archive .\hds-engine-runtime-windows-x64-cuda.zip -DestinationPath $engine -Force
+
+# поставить всё, кроме скачиваемого движка и моделей
+powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -SkipEngine -SkipModels
+```
+
+Модели GGUF можно принести на флешке и разложить вручную в
+`%LOCALAPPDATA%\llama-runtime\models\<роль>\` (`chat\`, `embedding\`, `rerank\`); для чата
+дополнительно нужен `chat\current.json` с именем файла — проще всего запустить
+`installers\fetch_llm_models.ps1` там, где интернет есть.
+
+### Шаг 6. Резидент `llm-host` (если отказались от автозапуска)
+
+`llm-host.exe` держит модели на портах 8010–8012 и владеет GPU. Запустить в отдельном окне:
+
+```powershell
+.\bin\llm_host.exe run
+```
+
+Или поставить автозапуск: `powershell -File installers\install_llm_host_task.ps1 -Start`.
+Модели загружаются лениво — первый ответ после старта будет с задержкой.
+
+
+### Шаг 7. Задайте, что индексировать, и запустите индексацию
+
+Корни индексации берутся из `config.yaml` (`index.roots`; в образце — `D:\`). Задать их удобнее
+всего в веб-интерфейсе (шаг 8), но можно сразу запустить ярлык **«Индексация дисков»** на рабочем
+столе (или `.\run_index.ps1`) — тогда индексируется то, что уже прописано в конфиге.
+
+Первичная индексация диска с сотнями тысяч файлов идёт **часами** (извлечение текста, OCR,
+эмбеддинги) — её принято запускать «на ночь». Прогресс виден в веб-интерфейсе; прервать можно
+кнопкой «Стоп» или файлом `index.stop`. Повторные запуски докачивают только изменения
+(инкрементально), а watcher следит за файлами в фоне.
+
+### Шаг 8. Откройте веб-интерфейс и доведите настройку
+
+Ярлык **«Hermes Disk Search»** на рабочем столе (или `.\run_ui.ps1`) → откроется
+`http://127.0.0.1:8765`. Порядок действий:
+
+1. **Настройки (config.yaml)** → корни (например `D:\`) → **Сохранить корни**;
+2. там же — исключения (мусорные каталоги) → **Сохранить исключения**;
+3. **Состояние** → **Старт** (или **Полная** для переиндексации с нуля); **Пауза/Продолжить** —
+   чтобы временно не нагружать диск;
+4. **Поиск** — найти файлы по имени/содержимому; **Вопрос (ответ по файлам)** — ответ со ссылками
+   `[N]`; **Настройки Cline** → «Синхронизировать настройки Cline» — если пользуетесь агентом Cline.
+
+Если интерфейс не открылся — смотрите журнал `%LOCALAPPDATA%\hermes-disk-search\ui.err.log`.
+
+### Шаг 9. Подключение агента (Hermes Desktop / Cline) — по желанию
+
+Установщик уже выполнил `install_hermes.ps1` и `install_cline.ps1`, если эти программы есть на
+машине. Поставили их **позже** — просто повторите:
+
+```powershell
+cd D:\hds
+.\install_hermes.ps1
+.\install_cline.ps1
+```
+
+После подключения к Cline перезапустите приложение: он читает настройки моделей и MCP при старте.
+Синхронизировать всё в любой момент — кнопка «Синхронизировать настройки Cline» в веб-интерфейсе
+или команда `.\bin\hds.exe cline-sync`.
+
+### Шаг 10. Обновление и удаление
+
+* **Обновление** — только отдельным процессом: `installers\update.ps1`
+  (см. «Установка с версионированием» ниже). Он сам остановит задачи и резидента, поставит новую
+  версию и запустит всё обратно; прежние версии сохраняются.
+* **Удаление** — удалите папку с программой и, при желании, данные:
+  `%LOCALAPPDATA%\llama-runtime` (модели ≈9 ГБ), `%APPDATA%\OpenResearchTools` (движок),
+  файл индекса `index.db`, задачи Планировщика `HermesDiskSearch*` (или ярлыки в
+  `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`).
+
+### Если что-то не получилось
+
+| Симптом | Причина и решение |
+|---|---|
+| SmartScreen: «Windows protected your PC» при запуске `hds.exe` | сборка не подписана: «More info» → «Run anyway» |
+| PowerShell: «выполнение сценариев отключено / требуется подпись» | запускайте через `setup.cmd`, либо `powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1` |
+| `hds check`: чат/эмбеддинги недоступны | не запущен резидент: `.\bin\llm_host.exe run` (шаг 6) |
+| Индексация стоит на месте | стоит `index.pause` (кнопка «Продолжить» в UI) или `index.stop`; проверьте «Состояние» |
+| В UI «Tesseract OCR не найден» | включите OCR и запустите `installers\configure_ocr.py` (нужен Python воркера), либо переустановите установщиком |
+| `.mpp` не индексируются | нужна Java 11+ (см. «Требования») |
+| MCP-сервер не отвечает, порт 8787 занят | `.\bin\hds.exe mcp-http status`; «чужой» сервис на порту нужно освободить, затем `mcp-http restart` |
+| ffmpeg не найден после установки | откройте **новое** окно PowerShell (PATH обновится) |
+| Нет NVIDIA-карты | движок уйдёт на Vulkan/CPU: работает, но медленнее; чат-модель можно положить меньше |
+
+### Подробный журнал: что именно делает `setup.ps1`
 
 1. **Проверка артефакта** — есть ли `bin\hds.exe` (иначе понятное сообщение: это не Rust-сборка).
 2. **Системные зависимости через winget** — `ffmpeg` (авто), `Tesseract OCR` (по согласию),
@@ -113,9 +281,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 
 ## Установка — macOS (Apple Silicon, best-effort)
 
-1. Распакуйте архив `hds-<версия>-macos-arm64.zip`.
-2. Запустите **`install_macos.command`** (двойной щелчок; при карантине — ПКМ → «Открыть»
+1. Скачайте со страницы релиза архив `hds-<версия>-macos-arm64.zip`
+   (`https://github.com/Guerchoig/hermes-disk-search/releases/latest`). Рантайм движка
+   (`hds-engine-runtime-macos-arm64-metal.zip`) скачивать не нужно — `install_macos.command`
+   заберёт его сам по манифесту (проверка sha256).
+2. Распакуйте архив, например в `~/hds`.
+3. Запустите **`install_macos.command`** (двойной щелчок; при карантине — ПКМ → «Открыть»
    либо `bash install_macos.command`).
+4. Дальше — как на Windows: модели докачиваются установщиком, затем `~/.local/bin/hds check`,
+   ярлыки на рабочем столе («Hermes Disk Search» — UI, «Индексация дисков» — индекс),
+   корни задаются в UI `http://127.0.0.1:8765`.
 
 `install_macos.command` (ASCII-only) делает по шагам:
 
@@ -138,13 +313,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 
 ## Архивы релиза
 
-| Ассет | Содержимое |
-|---|---|
-| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) | `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, скрипты, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
-| `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`) | `bin/` (Rust), `install_macos.command`, `installers/`, `runtime-manifests/`, `sidecar/`, `shortcuts/` — **best-effort** |
-| `hds-engine-runtime-windows-x64-cuda.zip` | рантайм движка (LLM-хост + ASR) по манифесту (CI-джоба `fetch-engine-runtime`) |
-| `hds-engine-runtime-macos-arm64-metal.zip` | рантайм движка для macOS (Metal) — **best-effort** |
-| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | архивы исходников (legacy) |
+> Пошаговая инструкция «что скачать и в каком порядке запускать» — разделы выше:
+> «Установка на Windows: по шагам» и «Установка — macOS». Ниже — технический состав ассетов:
+> какой файл обязателен, а какой лишь запасной вариант.
+
+| Ассет | Нужен? | Содержимое |
+|---|---|---|
+| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) | **да (Windows)** | основной архив: `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`) | **да (macOS)** | то же для Apple Silicon — **best-effort** |
+| `hds-engine-runtime-windows-x64-cuda.zip` | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима по `runtime-manifests\engine-manifest.json`; установщик скачивает его сам |
+| `hds-engine-runtime-macos-arm64-metal.zip` | офлайн-установка | то же для macOS (Metal) — **best-effort** |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет | архивы исходников (`git archive`), только для сборки из кода |
+
 
 Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
 `runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
