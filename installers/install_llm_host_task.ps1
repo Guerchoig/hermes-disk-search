@@ -20,16 +20,20 @@ param(
     [switch]$Start,
     [switch]$Status,
     [switch]$Remove,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$StartupFolder
 )
 
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $taskName = "HermesDiskSearchLlmHost"
+$startup = [Environment]::GetFolderPath('Startup')
+$startupLnk = Join-Path $startup "$taskName.lnk"
 
 if ($Remove) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
-    Write-Host "[ok] task removed: $taskName"
+    if (Test-Path -LiteralPath $startupLnk) { Remove-Item -LiteralPath $startupLnk -Force -ErrorAction SilentlyContinue }
+    Write-Host "[ok] removed: $taskName (scheduled task and/or Startup shortcut)"
     exit 0
 }
 
@@ -52,11 +56,29 @@ if ($Status) {
     exit 0
 }
 
-if (-not $Exe) { $Exe = Join-Path $root "bin\llm_host.exe" }
-if (-not (Test-Path $Exe)) {
-    Write-Error "llm-host binary not found: $Exe`nBuild the release first: installers\build_rust_release.ps1 (or cargo build --release -p hds-llama --bin llm_host for a dev tree)"
+if (-not $Exe) {
+    # Prefer the binary of OUR running resident: it is the build that already owns
+    # ports 8010-8012, so autostart keeps using the exact same deployment. This also
+    # avoids a newer debug build silently replacing a release resident.
+    $residentPidFile = Join-Path $root "data\llm-host.pid"
+    if (Test-Path -LiteralPath $residentPidFile) {
+        $residentPid = (Get-Content -LiteralPath $residentPidFile -ErrorAction SilentlyContinue | Select-Object -First 1)
+        if ($residentPid -match '^\d+$') {
+            $proc = Get-Process -Id ([int]$residentPid) -ErrorAction SilentlyContinue
+            if ($proc -and $proc.Path -and (Test-Path -LiteralPath $proc.Path)) { $Exe = $proc.Path }
+        }
+    }
+    if (-not $Exe) {
+        . (Join-Path $root 'hds_bin.ps1')
+        # bin\ (packaged release) or target\{release,debug}\ (source checkout).
+        $Exe = Get-HdsBinPath -Root $root -Name "llm_host.exe"
+    }
+}
+if (-not $Exe -or -not (Test-Path -LiteralPath $Exe)) {
+    Write-Error "llm-host binary not found (looked in bin\llm_host.exe, target\release\llm_host.exe, target\debug\llm_host.exe)`nBuild the release first: installers\build_rust_release.ps1 (or cargo build --release -p hds-llama --bin llm_host for a dev tree)"
     exit 1
 }
+Write-Host "[..] llm-host binary: $Exe"
 
 if (-not $Force) {
     # If OUR resident already serves the ports (pid file + /health), this is not the
@@ -92,37 +114,48 @@ if (-not $Force) {
 $argList = "run"
 if ($Config) { $argList = "$argList --config `"$Config`"" }
 
-try {
-    $action = New-ScheduledTaskAction -Execute $Exe -Argument $argList -WorkingDirectory $root
-    $trigger = New-ScheduledTaskTrigger -AtLogOn
-    # no execution time limit (resident process), restart on failure
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
-    Write-Host "[ok] task registered: $taskName (start at logon)"
-    Write-Host "     binary: $Exe $argList"
-    Write-Host "     working dir: $root"
-    Write-Host "     status: installers\install_llm_host_task.ps1 -Status"
-    if ($Start) {
-        Start-ScheduledTask -TaskName $taskName
-        Write-Host "[ok] task started: $taskName"
-    } else {
-        Write-Host "     start now: Start-ScheduledTask -TaskName $taskName"
+$ok = $false
+if (-not $StartupFolder) {
+    try {
+        $action = New-ScheduledTaskAction -Execute $Exe -Argument $argList -WorkingDirectory $root
+        $trigger = New-ScheduledTaskTrigger -AtLogOn
+        # no execution time limit (resident process), restart on failure
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+        Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
+        # mutual exclusion: with a scheduled task in place, drop a leftover Startup shortcut
+        if (Test-Path -LiteralPath $startupLnk) { Remove-Item -LiteralPath $startupLnk -Force -ErrorAction SilentlyContinue }
+        Write-Host "[ok] task registered: $taskName (start at logon)"
+        Write-Host "     binary: $Exe $argList"
+        Write-Host "     working dir: $root"
+        Write-Host "     status: installers\install_llm_host_task.ps1 -Status"
+        if ($Start) {
+            Start-ScheduledTask -TaskName $taskName
+            Write-Host "[ok] task started: $taskName"
+        } else {
+            Write-Host "     start now: Start-ScheduledTask -TaskName $taskName"
+        }
+        $ok = $true
+    } catch {
+        Write-Host "[--] scheduler is not available ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
     }
-} catch {
-    Write-Host "[--] scheduler is not available ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
-    $startup = [Environment]::GetFolderPath('Startup')
-    $lnk = Join-Path $startup "$taskName.lnk"
+} else {
+    Write-Host "[..] -StartupFolder: skipping the scheduler, writing the Startup shortcut" -ForegroundColor DarkGray
+}
+if (-not $ok) {
+    # mutual exclusion: with a Startup shortcut in place, drop a leftover scheduled task
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
     $ws = New-Object -ComObject WScript.Shell
-    $sc = $ws.CreateShortcut($lnk)
+    $sc = $ws.CreateShortcut($startupLnk)
     $sc.TargetPath = $Exe
     $sc.Arguments = $argList
     $sc.WorkingDirectory = $root
+    $sc.IconLocation = (Join-Path $root 'assets\icon.ico') + ',0'
     $sc.Description = "hermes-disk-search: llm-host (Rust GPU owner, ports 8010-8012)"
     $sc.Save()
-    Write-Host "[ok] startup shortcut: $lnk"
+    Write-Host "[ok] startup shortcut: $startupLnk"
     Write-Host "     it starts the resident at logon (no admin rights needed);"
-    Write-Host "     remove it with: Remove-Item '$lnk'"
+    Write-Host "     remove it with: Remove-Item '$startupLnk'"
     if ($Start) {
         Write-Host "     start now: $Exe $argList"
     } else {

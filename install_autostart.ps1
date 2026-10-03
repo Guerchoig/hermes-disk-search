@@ -2,13 +2,29 @@
 # Scheduler tasks need rights; on failure the script falls back to the Startup
 # folder (no admin rights). llm-host is registered separately by
 # installers\install_llm_host_task.ps1 (called from setup.ps1).
+#
+# Usage:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File install_autostart.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File install_autostart.ps1 -StartupFolder
+# (-StartupFolder skips the scheduler and always writes Startup-folder shortcuts.)
+#
+# Migration: legacy Python autostart entries (scheduled tasks / Startup shortcuts
+# named HermesDiskSearchWatch|HermesDiskSearchMcp pointing at pythonw.exe -m hds.cli)
+# are removed and replaced with the Rust binary resolved by hds_bin.ps1.
 # ASCII-only on purpose (Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
+param(
+    [switch]$StartupFolder
+)
 $root = $PSScriptRoot
-$hdsExe = Join-Path $root "bin\hds.exe"
-if (-not (Test-Path $hdsExe)) {
-    Write-Host "[!!] bin\hds.exe not found - run setup.cmd first" -ForegroundColor Red
+. (Join-Path $root 'hds_bin.ps1')
+# bin\ (packaged release) or target\{release,debug}\ (source checkout).
+$hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
+if (-not $hdsExe) {
+    Write-Host "[!!] hds.exe not found. Looked in: $(Get-HdsBinHint 'hds.exe')" -ForegroundColor Red
+    Write-Host "     Run setup.cmd (release) or build it: cargo build --release -p hds-cli" -ForegroundColor Red
     exit 1
 }
+Write-Host "[..] autostart binary: $hdsExe"
 
 $startupDir = [Environment]::GetFolderPath('Startup')
 # remove legacy Python tasks/shortcuts so that two watchers never run together
@@ -23,19 +39,30 @@ $tasks = @(
     @{ Name = "HermesDiskSearchMcp";   Args = "mcp-http run" }
 )
 $ok = $false
-try {
-    foreach ($t in $tasks) {
-        $action   = New-ScheduledTaskAction -Execute $hdsExe -Argument $t.Args -WorkingDirectory $root
-        $trigger  = New-ScheduledTaskTrigger -AtLogOn
-        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-        Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
-        Write-Host "[ok] scheduled task $($t.Name) created (starts at logon)"
-        Write-Host "     start now: Start-ScheduledTask -TaskName $($t.Name)"
+$created = @()
+if (-not $StartupFolder) {
+    try {
+        foreach ($t in $tasks) {
+            $action   = New-ScheduledTaskAction -Execute $hdsExe -Argument $t.Args -WorkingDirectory $root
+            $trigger  = New-ScheduledTaskTrigger -AtLogOn
+            $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+                -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+            Register-ScheduledTask -TaskName $t.Name -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
+            $created += $t.Name
+            Write-Host "[ok] scheduled task $($t.Name) created (starts at logon)"
+            Write-Host "     start now: Start-ScheduledTask -TaskName $($t.Name)"
+        }
+        $ok = $true
+    } catch {
+        Write-Host "[--] scheduler unavailable ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
+        # never leave a half-registered set (e.g. Watch task + Mcp shortcut): drop what
+        # was created in THIS run, then fall back to the Startup folder for both roles.
+        foreach ($n in $created) {
+            Unregister-ScheduledTask -TaskName $n -Confirm:$false -ErrorAction SilentlyContinue
+        }
     }
-    $ok = $true
-} catch {
-    Write-Host "[--] scheduler unavailable ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
+} else {
+    Write-Host "[..] -StartupFolder: skipping the scheduler, writing Startup-folder shortcuts" -ForegroundColor DarkGray
 }
 if (-not $ok) {
     $ws = New-Object -ComObject WScript.Shell
@@ -49,4 +76,4 @@ if (-not $ok) {
         Write-Host "[ok] startup shortcut: $startupDir\$($t.Name).lnk"
     }
 }
-Write-Host "Tasks: HermesDiskSearchWatch (hds.exe watch) and HermesDiskSearchMcp (hds.exe mcp-http run)."
+Write-Host "Autostart: HermesDiskSearchWatch ($hdsExe watch) and HermesDiskSearchMcp ($hdsExe mcp-http run)."

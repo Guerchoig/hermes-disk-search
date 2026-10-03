@@ -376,6 +376,163 @@ fn run_index_bg(full: bool) -> Result<(), String> {
     r.map(|_| ()).map_err(|e| e.message())
 }
 
+/// Базовый `(host, port)` фасада `llm-host` из `chat.base_url`.
+fn llm_host_addr(cfg: &Config) -> Option<(String, u16)> {
+    let base = dig(cfg, "chat.base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("http://127.0.0.1:8010/v1");
+    hds_index::embed::split_base(base)
+        .ok()
+        .map(|(h, p, _)| (h, p))
+}
+
+fn llm_host_healthy(host: &str, port: u16, timeout: std::time::Duration) -> bool {
+    matches!(
+        http::request(host, port, "GET", "/health", &[], None, timeout),
+        Ok(r) if (200..300).contains(&r.status)
+    )
+}
+
+/// Путь к бинарю резидента `llm_host(.exe)`: рядом с текущим `hds`, иначе
+/// `bin/` → `target/release/` → `target/debug/` (dev-дерево).
+fn llm_host_exe() -> Option<std::path::PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["llm_host.exe", "llm_host"]
+    } else {
+        &["llm_host", "llm_host.exe"]
+    };
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(cur) = std::env::current_exe() {
+        if let Some(d) = cur.parent() {
+            dirs.push(d.to_path_buf());
+        }
+    }
+    let root = project_root();
+    dirs.push(root.join("bin"));
+    dirs.push(root.join("target").join("release"));
+    dirs.push(root.join("target").join("debug"));
+    for d in dirs {
+        for n in names {
+            let c = d.join(n);
+            if c.is_file() {
+                return Some(c);
+            }
+        }
+    }
+    None
+}
+
+/// `POST /api/llm-host/restart`: остановить резидент `llm-host` и поднять заново.
+///
+/// Свой процесс нельзя перезапустить «сам в себе», но резидент — отдельный, поэтому
+/// UI (`hds ui`): (1) просит фасад `:8010` завершиться (`/internal/stop`),
+/// (2) ждёт освобождения портов и pid-файла, (3) запускает `llm_host run` заново
+/// (detached, без окна) и (4) ждёт `/health`. Модель грузится лениво — первый ответ
+/// после перезапуска будет с задержкой.
+pub fn llm_host_restart() -> Value {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "msg": e.message() }),
+    };
+    let (host, port) = match llm_host_addr(&cfg) {
+        Some(a) => a,
+        None => return json!({ "ok": false, "msg": "не разобрать chat.base_url" }),
+    };
+    let exe = match llm_host_exe() {
+        Some(p) => p,
+        None => {
+            return json!({ "ok": false,
+                "msg": "не найден бинарь llm_host (рядом с hds / bin / target/{release,debug})" })
+        }
+    };
+    let root = project_root();
+    let pid_file = root.join("data").join("llm-host.pid");
+
+    // 1. Остановка, если резидент отвечает (или остался pid-файл).
+    let was_up = llm_host_healthy(&host, port, std::time::Duration::from_secs(2));
+    if was_up || pid_file.exists() {
+        let _ = http::request(
+            &host,
+            port,
+            "POST",
+            "/internal/stop",
+            &[],
+            None,
+            std::time::Duration::from_secs(10),
+        );
+    }
+    // 2. Ждём остановки: порт не отвечает И pid-файл снят (макс ~60 c).
+    let mut stopped = !was_up && !pid_file.exists();
+    for _ in 0..120 {
+        if stopped {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        stopped =
+            !pid_file.exists() && !llm_host_healthy(&host, port, std::time::Duration::from_secs(1));
+    }
+    if !stopped {
+        return json!({ "ok": false,
+            "msg": "резидент не завершился за 60 с — перезапуск отменён (см. data/logs/llm-host.log)" });
+    }
+
+    // 3. Запуск заново (detached, без окна).
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("run")
+        .current_dir(&root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let pid = match cmd.spawn() {
+        Ok(c) => c.id(),
+        Err(e) => {
+            return json!({ "ok": false, "msg": format!("не запустить {}: {e}", exe.display()) })
+        }
+    };
+
+    // 4. Ждём готовности фасада (макс ~180 c: резидент поднимает роли).
+    let mut up = false;
+    for _ in 0..360 {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        if llm_host_healthy(&host, port, std::time::Duration::from_secs(1)) {
+            up = true;
+            break;
+        }
+    }
+    if up {
+        json!({ "ok": true, "msg": format!("llm-host перезапущен (pid {pid})"), "pid": pid })
+    } else {
+        json!({ "ok": false,
+            "msg": format!("llm-host запущен (pid {pid}), но /health не ответил за 180 с — см. data/logs/llm-host.log") })
+    }
+}
+
+/// `POST /api/cline/sync`: привести настройки Cline под `config.yaml` — окна
+/// контекста моделей (`~/.cline/data/settings/models.json`), MCP-сервер
+/// (`cline_mcp_settings.json`, `mcp.json`), правило и скилл disk-search.
+///
+/// Логика одна на UI, CLI (`hds cline-sync`) и инсталляторы — `hds_core::cline::sync`.
+pub fn cline_sync_json() -> Value {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "error": e.message() }),
+    };
+    hds_core::cline::sync(&cfg, &project_root(), false).to_json()
+}
+
 /// Маршрутизация (чистая функция — тестируется без сокетов).
 ///
 /// `path` — без query; `query` — часть после `?`; `h` — заголовки; `body` — тело POST.
@@ -438,6 +595,8 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                     let roots = body_list(body, "roots");
                     json_ok(config_edit::set_roots(&roots))
                 }
+                "/api/llm-host/restart" => json_ok(llm_host_restart()),
+                "/api/cline/sync" => json_ok(cline_sync_json()),
                 "/api/config/excludes" => {
                     let paths = body_list(body, "paths");
                     json_ok(config_edit::set_exclude_paths(&paths))

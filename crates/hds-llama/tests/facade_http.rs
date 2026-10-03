@@ -330,14 +330,15 @@ fn facade_reports_errors_with_clear_messages() {
     assert_eq!(status, 400, "{body}");
     assert!(body.contains("messages"), "{body}");
 
-    // stream не поддерживаем — честная ошибка вместо пустого потока
+    // stream поддержан: SSE-поток (text/event-stream) с чанками и [DONE]
     let (status, body) = post(
         port,
         "/v1/chat/completions",
         r#"{"messages":[{"role":"user","content":"x"}],"stream":true}"#,
     );
-    assert_eq!(status, 400, "{body}");
-    assert!(body.contains("stream"), "{body}");
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("chat.completion.chunk"), "{body}");
+    assert!(body.contains("data: [DONE]"), "{body}");
 
     // роль не поднята → /props честно отвечает 503
     let (status, body) = get(port, "/props");

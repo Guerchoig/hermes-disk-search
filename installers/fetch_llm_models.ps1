@@ -2,8 +2,8 @@
 #
 # The engine runtime (fetch_engine_runtime.ps1) replaces llama.cpp/llama-server, but
 # the chat/embedding/rerank GGUF weights still live in the machine-wide shared runtime
-# directory (%LLAMA_RUNTIME_DIR% or %LOCALAPPDATA%\llama-runtime\models\<role>) so that
-# other projects (anonymizer_proxy) reuse exactly the same files. This is the model-only
+# directory (%LLAMA_RUNTIME_DIR% or %LOCALAPPDATA%\llama-runtime\models\<role>): the
+# machine keeps ONE copy of the weights for all roles. This is the model-only
 # part of the old installers\ensure_llama_runtime.ps1 (no binary, no llama-server).
 #
 # Idempotent: existing files larger than the sanity threshold are skipped (unless -Force).

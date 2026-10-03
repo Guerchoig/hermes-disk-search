@@ -35,8 +35,8 @@ SemVer: `vMAJOR.MINOR.PATCH`.
 
 | Ассет | Что внутри |
 |---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | `bin\` (Rust: `hds`/`hds_mcp`/`llm_host`), `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, скрипты установки; ставится `setup.cmd` |
-| `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | `bin/` (Rust), `install_macos.command`, `installers/`, `runtime-manifests/`, `sidecar/`, `shortcuts/` — **best-effort** |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | `bin\` (Rust: `hds`/`hds_mcp`/`llm_host`), скрипты установки (`setup.cmd`/`setup.ps1`, `install_hermes.ps1`, `install_cline.ps1`, `install_autostart.ps1`, `run_ui.ps1`, `run_index.ps1`, `hds_bin.ps1`), `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `hermes-skill\`, `shortcuts\windows\`, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | `bin/` (Rust: `hds`/`hds_mcp`/`llm_host`), `install_macos.command`, `installers/`, `runtime-manifests/`, `sidecar/`, `assets/`, `hermes-skill/`, `shortcuts/` (лаунчеры выставляются `+x` при стейджинге), `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` — **best-effort** |
 | `hds-engine-runtime-windows-x64-cuda.zip` | рантайм движка (LLM-хост + ASR) для Windows |
 | `hds-engine-runtime-macos-arm64-metal.zip` | рантайм движка для macOS (Metal) — **best-effort** |
 | `hermes-disk-search-<ver>-windows.zip` / `-macos.zip` | `git archive HEAD` (исходники) |
@@ -66,7 +66,7 @@ SemVer: `vMAJOR.MINOR.PATCH`.
    Ветку указывать обязательно, если релиз делается не из `main` (например `w2-llm-host`):
    `release.yml` должен существовать на дефолтной ветке — он там есть.
 5. Джобы workflow:
-   - `test-rust` (Ubuntu, блокирующий: fmt + clippy + тесты) → `test-rust-macos` (best-effort);
+   - `test-rust` (Ubuntu, блокирующий: fmt + clippy + тесты — он же покрывает Rust-код для mac);
    - `build-sidecar-windows` / `build-sidecar-macos` — портативный Python-sidecar;
    - `build-windows` (блокирующий) / `build-macos` (best-effort) — бинарники + упаковка + smoke;
    - `fetch-engine-runtime-windows` / `fetch-engine-runtime-macos` — рантайм движка по манифесту (sha256);
@@ -91,6 +91,8 @@ gh release create v0.13.0 --title "v0.13.0 - hermes-disk-search" --notes-file RE
 - Заметки на русском: новые фичи, исправления, требования к обновлению
   (например «запустите `index --full` после смены модели»).
 - Workflow **никогда не удаляет** прежние релизы и теги.
-- macOS-подпись — ad-hoc на целевой машине (`codesign` в `install_macos.command`);
-  подписи не коммитятся.
+- macOS-подпись — **ad-hoc на целевой машине**: `install_macos.command` снимает карантин
+  (`xattr -dr com.apple.quarantine` с архива и рантайма движка) и ставит ad-hoc подпись на
+  `.app`-обёртку `~/Applications/HermesDiskSearchIndex.app` (`codesign --force --deep -s -`).
+  Нотации/Developer ID нет; подписи не коммитятся (их нельзя положить в архив).
 - Откат: `git revert` + повторный запуск workflow с новым PATCH.

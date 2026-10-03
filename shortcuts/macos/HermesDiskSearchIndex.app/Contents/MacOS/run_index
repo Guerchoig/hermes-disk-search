@@ -1,19 +1,33 @@
 #!/bin/bash
-# Исполняемый файл .app-бандла: то же, что Индексация дисков.command
+# Исполняемый файл .app-бандла: то же, что «Индексация дисков.command».
+# Запускает Rust-бинарник hds (Python в поставке — только воркер-экстрактор sidecar/).
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT=""
-for CAND in "$SELF_DIR/../../../.." "$HOME/hermes-disk-search"; do
-    if [ -f "$CAND/config.yaml" ]; then ROOT="$(cd "$CAND" && pwd)"; break; fi
-done
+# Корень можно задать заранее через HDS_ROOT (так делают обёртки установщика).
+ROOT="${HDS_ROOT:-}"
 if [ -z "$ROOT" ]; then
-    osascript -e 'display dialog "Проект hermes-disk-search не найден. Установите его в ~/hermes-disk-search" buttons {"OK"}'
+    for CAND in "$SELF_DIR/../../../../.." "$SELF_DIR/../../../.." "$HOME/hermes-disk-search"; do
+        if [ -f "$CAND/config.yaml" ] || [ -x "$CAND/bin/hds" ] || [ -f "$CAND/config.example.yaml" ]; then
+            ROOT="$(cd "$CAND" && pwd)"; break
+        fi
+    done
+fi
+if [ -z "$ROOT" ]; then
+    osascript -e 'display dialog "Проект hermes-disk-search не найден. Распакуйте релизный архив или установите в ~/hermes-disk-search" buttons {"OK"}'
     exit 1
 fi
-PY="$ROOT/.venv/bin/python"
-if [ ! -x "$PY" ]; then
-    osascript -e 'display dialog "venv не найден. Сначала запустите install_macos.command" buttons {"OK"}'
+
+# Rust-бинарник: bin/hds (архив) -> ~/.local/bin/hds (установка) -> PATH -> dev-сборка.
+find_hds() {
+    for CAND in "$ROOT/bin/hds" "$HOME/.local/bin/hds" "$ROOT/target/release/hds" "$ROOT/target/debug/hds"; do
+        [ -x "$CAND" ] && { printf '%s\n' "$CAND"; return 0; }
+    done
+    command -v hds 2>/dev/null && return 0
+    return 1
+}
+HDS="$(find_hds)" || {
+    osascript -e 'display dialog "bin/hds не найден. Сначала запустите install_macos.command" buttons {"OK"}'
     exit 1
-fi
+}
 cd "$ROOT"
-"$PY" -m hds.cli index 2>&1 | tee /tmp/hds_index.log
+HDS_ROOT="$ROOT" "$HDS" index 2>&1 | tee /tmp/hds_index.log
 osascript -e "display dialog \"Индексация завершена\" buttons {\"OK\"} with title \"hermes-disk-search\""

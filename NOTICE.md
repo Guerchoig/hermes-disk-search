@@ -15,7 +15,11 @@
 * `LICENSE-ENGINE.txt`, `LICENSES.md`, `Third-Party-Notices.md` — лицензии движка и
   входящих llama.cpp / whisper.cpp / ggml;
 * `NVIDIA-CUDA-EULA.txt`, `NVIDIA-CUDA-RUNTIME-NOTICE.txt` — для сборок `*-cuda`
-  (`cudart64_*`, `cublas*64_*`, `ggml-cuda.dll`).
+  (`cudart64_*`, `cublas*64_*`, `ggml-cuda.dll`);
+* для macOS берётся сборка `*-metal` (Metal — системный фреймворк Apple; файлов CUDA в ней
+  нет, отдельного стороннего уведомления Metal не требует). Рантайм кладёт
+  `install_macos.command` (на Windows — `installers/fetch_engine_runtime.ps1`; вариант на
+  PowerShell требует `pwsh`).
 
 ### Патч движка (наш, временный — до апстрима)
 Мы поставляем **собственный патч** сборки v1.15 (каталог `engine-patch/`, файлы и sha256 —
@@ -25,8 +29,9 @@ V). База — тот же MIT-лицензированный движок; и
 `bridge/llama_server_cluster.{h,cpp}` и `bridge/llama_server_bridge.{h,cpp}`
 (`engine-patch/hds-engine-patch-v1.15.patch`). Установка/откат —
 `installers/fetch_engine_runtime.ps1 -PatchEngine` / `-RollbackEnginePatch` (штатные DLL
-сохраняются рядом как `*.orig`). До апстрим-фикса ставим свой вариант, после — переходим на
-стоковый (`engine-patch/README.md`).
+сохраняются рядом как `*.orig`). Патч применяется на **Windows-пути**; macOS-установщик
+(`install_macos.command`) ставит **стоковый** движок `*-metal` без патча. До апстрим-фикса
+ставим свой вариант, после — переходим на стоковый (`engine-patch/README.md`).
 
 ## Медиа и OCR
 * **FFmpeg** (`avcodec-*`/`avformat-*`/`avutil-*`/`swresample-*` в `vendor/ffmpeg` рантайма,
@@ -42,7 +47,8 @@ V). База — тот же MIT-лицензированный движок; и
 * Pillow — HPND; pymorphy3 / pymorphy3-dicts-ru — MIT; PyYAML — MIT; lxml — BSD;
 * pytesseract — GPL-3.0 (обёртка над Tesseract);
 * **mpxj** (MS Project, Java) и **JPype1** — Apache-2.0; для `.mpp` нужна **Java 11+**
-  (у нас JDK 21 в `%LOCALAPPDATA%\jdk-21`) — OpenJDK/Oracle JDK (GPLv2 + Classpath Exception).
+  (Windows: `%LOCALAPPDATA%\jdk-21`; macOS: `/opt/homebrew/opt/openjdk` или
+  `/Library/Java/JavaVirtualMachines`) — OpenJDK/Oracle JDK (GPLv2 + Classpath Exception).
 
 ## Базы данных
 * **SQLite** (bundled в `rusqlite`) — public domain;
@@ -56,6 +62,12 @@ V). База — тот же MIT-лицензированный движок; и
   `openai/clip-vit-base-patch32` и
   `sentence-transformers/clip-ViT-B-32-multilingual-v1`
   (экспорт — `tools/parity/clip_onnx_w3.py`).
+
+## macOS: карантин и подпись (эксплуатация, не лицензия)
+Сборка для macOS **не подписана**. `install_macos.command` при установке снимает карантин
+Gatekeeper (`xattr -dr com.apple.quarantine`) с архива и рантайма движка и ставит **ad-hoc**
+подпись на `.app`-обёртку (`codesign --force --deep -s -`). Нотаризации/Developer ID нет;
+скачанный артефакт открывайте через «ПКМ → Открыть» либо снимите карантин вручную `xattr -dr`.
 
 ## Прочее
 Лицензии Rust-крейтов и прочих зависимостей — в их пакетах. При выпуске релиза приложите

@@ -4,10 +4,13 @@
 # Server logs: %LOCALAPPDATA%\hermes-disk-search\ui.log and ui.err.log
 # ASCII-only on purpose (Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 $root = $PSScriptRoot
+. (Join-Path $root 'hds_bin.ps1')
 $uiPort = 8765
-$hdsExe = Join-Path $root "bin\hds.exe"
-if (-not (Test-Path $hdsExe)) {
-    Write-Host "== bin\hds.exe not found. Run setup.cmd first ==" -ForegroundColor Yellow
+# bin\ (packaged release) or target\{release,debug}\ (source checkout).
+$hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
+if (-not $hdsExe) {
+    Write-Host "== hds.exe not found. Looked in: $(Get-HdsBinHint 'hds.exe') ==" -ForegroundColor Yellow
+    Write-Host "   Run setup.cmd (release) or build it: cargo build --release -p hds-cli" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit 1
 }
@@ -29,8 +32,10 @@ if (Test-UiUp $uiPort) {
 }
 
 Write-Host "[..] starting UI server on port $uiPort..."
+# -WindowStyle Hidden: иначе у консольного hds.exe появляется отдельное окно, которое
+# висит, пока жив сервер. Лаунчерское окно при успехе закрывается, при ошибке остаётся.
 Start-Process $hdsExe -ArgumentList 'ui','--port',"$uiPort" `
-    -WorkingDirectory $root `
+    -WorkingDirectory $root -WindowStyle Hidden `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
 $up = $false

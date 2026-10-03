@@ -39,8 +39,9 @@
 
 ## Требования (Windows x64)
 
-* **Windows 10/11 x64**. macOS (Apple Silicon) — код есть, но **артефакт не проверен**
-  (`MIGRATION_PLAN_RUST.md` §10.0; из релиза выведен).
+* **Windows 10/11 x64** — основная (блокирующая) цель релиза.
+* **macOS 14+ (Apple Silicon)** — собирается и **публикуется best-effort**, но на реальной
+  машине **не проверен** (`MIGRATION_PLAN_RUST.md` §10.0); установка — `install_macos.command`.
 * **GPU** — не обязательна: без CUDA-карты движок работает на Vulkan/CPU (медленнее).
   Рекомендуется NVIDIA ≥8 ГБ VRAM (проверено на RTX 3060 12 ГБ: чат 9B + эмбеддинги + ASR).
 * **Microsoft Visual C++ Redistributable (x64)** — установщик поставит при отсутствии.
@@ -110,13 +111,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
   потребует цифровую подпись для `.ps1`;
 * SmartScreen может показать «Windows protected your PC» для `hds.exe` — «More info → Run anyway».
 
+## Установка — macOS (Apple Silicon, best-effort)
+
+1. Распакуйте архив `hds-<версия>-macos-arm64.zip`.
+2. Запустите **`install_macos.command`** (двойной щелчок; при карантине — ПКМ → «Открыть»
+   либо `bash install_macos.command`).
+
+`install_macos.command` (ASCII-only) делает по шагам:
+
+1. **Карантин** — `xattr -dr com.apple.quarantine` (сборка из загрузки не подписана).
+2. **Бинарники** — `bin/{hds,hds_mcp,llm_host}` → `~/.local/bin` (+ подсказка про `PATH`).
+3. **`config.yaml`** — из `config.example.yaml`, если нет.
+4. **Рантайм движка** — по `runtime-manifests/engine-manifest.json` (ассет `macos-arm64`/`metal`,
+   проверка **sha256**; `~/Library/Application Support/OpenResearchTools/TranscribeOffline/Engine`).
+5. **Ярлыки** — на рабочем столе «Hermes Disk Search» (веб-UI) и «Индексация дисков» (индекс);
+   `.app`-бандл «HDS Индексация» → `~/Applications` с **ad-hoc подписью** (`codesign --force --deep -s -`).
+6. **Автозапуск (LaunchAgent)** — `local.hds.watch` (`hds watch`), `local.hds.mcp`
+   (`hds mcp-http run`), `local.hds.llmhost` (`llm_host run`) в `~/Library/LaunchAgents`
+   (логи — `~/Library/Logs/hermes-disk-search/`). Отключить: `HDS_NO_AUTOSTART=1`.
+7. **Диагностика** — `hds check`.
+
+Лаунчеры ищут корень и бинарник `hds` в порядке `bin/` → `~/.local/bin/` → `PATH` → dev-сборка
+(`HDS_ROOT` переопределяет корень). Логи веб-UI/автозапуска — `~/Library/Logs/hermes-disk-search/`.
+
+> macOS-артефакт **не проверен на реальной машине**: чек-лист `tools/parity/MAC_CHECKLIST.md`.
+
 ## Архивы релиза
 
 | Ассет | Содержимое |
 |---|---|
 | `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) | `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, скрипты, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`) | `bin/` (Rust), `install_macos.command`, `installers/`, `runtime-manifests/`, `sidecar/`, `shortcuts/` — **best-effort** |
 | `hds-engine-runtime-windows-x64-cuda.zip` | рантайм движка (LLM-хост + ASR) по манифесту (CI-джоба `fetch-engine-runtime`) |
-| `hermes-disk-search-<версия>-windows.zip` | архив исходников (legacy) |
+| `hds-engine-runtime-macos-arm64-metal.zip` | рантайм движка для macOS (Metal) — **best-effort** |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | архивы исходников (legacy) |
 
 Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
 `runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
@@ -169,7 +197,8 @@ hds mcp-http check|start|stop|status|restart|run
 ## MCP-сервер
 
 * **stdio** — `bin\hds_mcp.exe` (он же `hds mcp`): каждый клиент поднимает свой процесс.
-  Инструменты: `search_files`, `ask_my_files`, `get_file`, `index_status`, `start_indexing`, `stop_indexing`.
+  Инструменты (6): `search_local_files`, `ask_my_files`, `index_status`, `start_indexing`,
+  `stop_indexing`, `reindex_path`.
 * **streamable-http** — ОДИН инстанс на машину: `hds mcp --http` (URL по умолчанию
   `http://127.0.0.1:8787/mcp`); управление — `hds mcp-http check|start|stop|status|restart|run`
   (`restart` переиспользует живой инстанс, но перезапускает устаревший).
@@ -178,15 +207,67 @@ hds mcp-http check|start|stop|status|restart|run
 
 ## Интеграция с Hermes / Cline
 
+**Windows:**
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install_hermes.ps1   # Hermes Desktop
 powershell -NoProfile -ExecutionPolicy Bypass -File install_cline.ps1    # Cline Desktop/CLI
 ```
 
-Идемпотентно: регистрируют MCP-сервер (URL `:8787`, иначе stdio `bin\hds_mcp.exe`), кладут скилл,
-при необходимости правят `.env` Hermes — блок `NO_PROXY=localhost,127.0.0.1,::1` (иначе httpx2
-шлёт локальные запросы в системный прокси, и MCP отвечает 503). Можно запускать до установки
-клиента и повторить позже.
+**macOS:**
+```bash
+bash installers/install_hermes_macos.sh    # Hermes Desktop
+bash installers/install_cline_macos.sh     # Cline Desktop/CLI
+```
+
+Идемпотентно: регистрируют MCP-сервер disk-search (URL общего инстанса `:8787`, определённый из
+`config.yaml`; для Hermes — с фолбэком на stdio `bin\hds_mcp.exe`), поднимают сервер
+(`hds mcp-http restart`) и кладут скилл (`hermes-skill/`). При необходимости правят `.env` Hermes —
+блок `NO_PROXY=localhost,127.0.0.1,::1` (иначе httpx2/движок шлёт локальные запросы в системный
+прокси, и MCP отвечает 503). Настройки Cline обновляет общий хелпер `installers/cline_mcp_merge.py`
+(на macOS берётся python воркера `sidecar/`). Можно запускать до установки клиента и повторить позже.
+
+### Что доходит до модели и как настройки Cline синхронизируются
+
+Сервер отдаёт «системный промпт» в ответе на `initialize` (поле `instructions` — спека MCP), но
+клиенты вправе его игнорировать: **Cline 0.0.43 его не подмешивает**. Поэтому для Cline та же суть
+продублирована двумя артефактами, и оба ставит одна команда:
+
+| Что | Куда ставится | Когда попадает в промпт |
+|---|---|---|
+| Правило `cline-rules/disk-search.md` | `~/.cline/rules/disk-search.md` | **всегда**: правила инжектятся в системный промпт каждой сессии |
+| Скилл `hermes-skill/disk-search.md` | `~/.cline/skills/disk-search/SKILL.md` | лениво: только если модель вызовет `use_skill` |
+
+Локальная 9B-модель скилл сама не активирует и отвечает по одному запросу — «найди ТЗ» отвечает
+первой выдачей из 8 фрагментов. Правило доносит до модели главное: одна выдача — это фрагменты, а
+не список файлов, и на обзорные вопросы нужно несколько запросов разными формулировками.
+
+**Синхронизация настроек Cline** (`hds cline-sync`, кнопка «Синхронизировать настройки Cline» в
+веб-интерфейсе, а также `install_cline.ps1` / `installers/install_cline_macos.sh` при установке
+релиза — один и тот же код `hds_core::cline::sync`):
+
+1. **окна контекста моделей** (`~/.cline/data/settings/models.json`): `contextWindow` и
+   `maxInputTokens` моделей нашего провайдера (`baseUrl` = `chat.base_url`) приравниваются
+   реальному слоту `llm-host` (`llm_server.<role>.ctx_per_slot`, при необходимости —
+   `llm.<role>.n_ctx`); алиасы разводятся по ролям (`chat`/`chat-think` → чат, `embedding*`,
+   `rerank*`). Без этого Cline сжимает историю раньше заполнения слота и теряет контекст поиска;
+2. **MCP-сервер** disk-search в `data/settings/cline_mcp_settings.json` и в `mcp.json`
+   (URL из `mcp_http.*`, `autoApprove` на 6 инструментов, `timeout: 300`), чужие серверы
+   сохраняются;
+3. **правило и скилл** (см. таблицу выше).
+
+Отчёт (в UI — списком, в CLI — строками или `--json`, есть `--dry-run`) говорит, что изменилось, и
+**предупреждает о перезапуске Cline**: `models.json` и настройки MCP читаются при его старте, правило
+и скилл — при старте новой сессии.
+
+Потолок вывода роли `chat` задаётся `chat.max_tokens` (см. «Конфиг»): у агентов он был 600 токенов
+вместе с размышлениями, и ответы обрывались на полуслове. Ответ `ask_my_files` — отдельный,
+короткий бюджет `chat.rag_max_tokens`.
+
+
+
+Агенты подключаются **по URL** — своих процессов не запускают (иначе плодятся сироты). Инструменты
+MCP — 6 (см. «MCP-сервер»). На macOS лаунчеры веб-UI и индексации ставит `install_macos.command`
+на рабочий стол; автозапуск — LaunchAgent-ы `local.hds.*`.
 
 ## llm-host — резидент (владелец GPU и портов 8010–8012)
 
@@ -243,7 +324,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 * **`db_path`** — путь к `index.db` (относительный — от корня проекта).
 * **`chunk`** — `size`/`overlap` (структурный чанкер).
 * **`embedding`** — `base_url` (`:8011/v1`), `model` (`text-embedding-bge-m3`), `batch_size`, `dim` (1024).
-* **`chat`** — `base_url` (`:8010/v1`), `model`, `thinking` (`off|auto`), `temperature`, `max_context_chars`.
+* **`chat`** — `base_url` (`:8010/v1`), `model`, `thinking` (`off|auto`), `temperature`,
+  `max_tokens` (потолок вывода одного ответа; дефолт llm-host для клиентов без своего
+  `max_tokens`), `rag_max_tokens` (отдельный, более короткий бюджет ответа `ask_my_files`),
+  `max_context_chars`.
 * **`llm_server`** — `host`, `autostart`, порты/модели/`ctx_per_slot`/`extra_args` по ролям
   (`chat`/`embedding`/`rerank`). Модель роли — `shared:<role>` (из общего рантайма) или путь.
 * **`gpu`** — `policy`, `device_index` (0=CPU, 1=первый GPU), `n_gpu_layers`, `reserve_mb`,

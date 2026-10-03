@@ -16,7 +16,9 @@ param(
 $ErrorActionPreference = "Stop"
 $root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 $taskName = "HermesDiskSearchUi"
-$hdsExe = Join-Path $root "bin\hds.exe"
+. (Join-Path $root 'hds_bin.ps1')
+# bin\ (packaged release) or target\{release,debug}\ (source checkout).
+$hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
 $startupDir = [Environment]::GetFolderPath('Startup')
 
 if ($Remove) {
@@ -36,8 +38,9 @@ if ($Status) {
     }
     exit 0
 }
-if (-not (Test-Path $hdsExe)) {
-    Write-Host "[!!] bin\hds.exe not found - run setup.cmd first" -ForegroundColor Red
+if (-not $hdsExe) {
+    Write-Host "[!!] hds.exe not found. Looked in: $(Get-HdsBinHint 'hds.exe')" -ForegroundColor Red
+    Write-Host "     Run setup.cmd (release) or build it: cargo build --release -p hds-cli" -ForegroundColor Red
     exit 1
 }
 
@@ -48,7 +51,7 @@ try {
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
         -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Settings $settings -Force | Out-Null
-    Write-Host "[ok] task registered: $taskName (bin\hds.exe $argList)"
+    Write-Host "[ok] task registered: $taskName ($hdsExe $argList)"
 } catch {
     Write-Host "[--] scheduler unavailable ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
     $lnk = Join-Path $startupDir "$taskName.lnk"

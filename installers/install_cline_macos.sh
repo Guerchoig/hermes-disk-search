@@ -5,8 +5,17 @@
 #   1) MCP-сервер disk-search (подключение по URL общего http-инстанса :8787)
 #      в ~/.cline/data/settings/cline_mcp_settings.json
 #      (Desktop/CLI) и в ~/.cline/mcp.json, если файл используется (вариант CLI);
-#   2) скилл disk-search: hermes-skill/disk-search.md ->
-#      ~/.cline/skills/disk-search/SKILL.md
+#   2) правило disk-search: cline-rules/disk-search.md -> ~/.cline/rules/disk-search.md
+#      Правила, в отличие от скиллов, попадают в системный промпт КАЖДОЙ сессии, без
+#      вызова use_skill: локальная агентная модель сама скилл не активирует и
+#      отвечает по одному запросу — это и выглядит как «неполные результаты»;
+#   3) скилл disk-search: hermes-skill/disk-search.md ->
+#      ~/.cline/skills/disk-search/SKILL.md;
+#   4) окна контекста моделей в ~/.cline/data/settings/models.json: contextWindow/
+#      maxInputTokens = реальный слот llm-host (ctx_per_slot). Без этого Cline сжимает
+#      историю раньше заполнения слота и агент теряет контекст поиска.
+# Всё это делает ОДНА команда `hds cline-sync` (тот же код, что у кнопки в UI).
+# После правки моделей/MCP Cline нужно перезапустить — команда об этом сообщает.
 # Идемпотентно: повторный запуск обновляет записи, не дублируя их.
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -23,37 +32,36 @@ if [ ! -d "$CLINE_DIR" ] && ! command -v cline >/dev/null 2>&1; then
 fi
 echo "== Подключение disk-search к Cline ($CLINE_DIR) =="
 
-PY="$ROOT/.venv/bin/python"
-[ -x "$PY" ] || { echo "[--] venv не найден ($PY) — сначала запустите install_macos.command"; exit 1; }
-
-# Один общий http-инстанс MCP (:8787): Cline подключается по URL и НЕ запускает
-# собственный процесс (при stdio каждая сессия плодила процесс, а hub — сирот).
-# restart-if-stale вместо start: живой инстанс переиспользуется, но если на порту
-# работает СТАРЫЙ код (проект обновили) — сервер перезапускается.
-MCP_URL="$("$PY" -c "import sys; sys.path.insert(0, '$ROOT'); from hds import mcp_http; from hds.config import load; print(mcp_http.url(load()))" 2>/dev/null)"
-if [ -z "$MCP_URL" ]; then
-    echo "[--] Не удалось определить URL MCP-сервера — настройки Cline не изменены"
+# Rust-бинарник hds: bin/hds (архив) -> ~/.local/bin/hds -> PATH -> dev-сборка.
+find_hds() {
+    for CAND in "$ROOT/bin/hds" "$HOME/.local/bin/hds" "$ROOT/target/release/hds" "$ROOT/target/debug/hds"; do
+        [ -x "$CAND" ] && { printf '%s\n' "$CAND"; return 0; }
+    done
+    command -v hds 2>/dev/null && return 0
+    return 1
+}
+# Настройки Cline пишет `hds cline-sync` (тот же код, что у кнопки в UI):
+# models.json + оба файла MCP + правило + скилл. Python для этого не нужен.
+HDS="$(find_hds)" || HDS=""
+if [ -z "$HDS" ]; then
+    echo "[--] hds не найден — соберите/установите релиз и повторите; настройки Cline не изменены"
     exit 1
 fi
-MCP_RAW="$( cd "$ROOT" && "$PY" -m hds.cli mcp-http restart-if-stale 2>&1 )" || true
-if printf '%s' "$MCP_RAW" | grep -q '"action": *"started"'; then
-    echo "[ok] Общий MCP-сервер ($MCP_URL) поднят"
-elif printf '%s' "$MCP_RAW" | grep -q '"action": *"restarted"'; then
-    echo "[ok] Общий MCP-сервер ($MCP_URL) перезапущен (на порту был старый код)"
-elif printf '%s' "$MCP_RAW" | grep -q '"action": *"reused"'; then
-    echo "[ok] Общий MCP-сервер ($MCP_URL) уже актуален — переиспользован"
+# Сервер должен быть поднят ДО подключения агента. restart переиспользует живой
+# инстанс и перезапускает устаревший (старый код на порту) — как на Windows.
+MCP_RAW="$(HDS_ROOT="$ROOT" "$HDS" mcp-http restart 2>&1)" || true
+if printf '%s' "$MCP_RAW" | grep -q '"state"'; then
+    echo "[ok] Общий MCP-сервер: поднят/переиспользован"
 else
     echo "[!!] MCP-сервер: $MCP_RAW"
 fi
-"$PY" "$ROOT/installers/cline_mcp_merge.py" \
-    --mode http --url "$MCP_URL" \
-    --targets "$CLINE_DIR/data/settings/cline_mcp_settings.json" "$CLINE_DIR/mcp.json" \
-    || { echo "[--] Ошибка правки настроек MCP Cline — см. сообщение выше"; exit 1; }
+HDS_ROOT="$ROOT" "$HDS" cline-sync \
+    || echo "[!!] cline-sync сообщил о предупреждениях — см. строки выше"
 
 # --- Контроль глазами самого Cline (если CLI в PATH) ---
 # Cline валидирует файл настроек ЦЕЛИКОМ: одна неверная запись = теряются ВСЕ
-# MCP-серверы, поэтому проверяем не только форму (её контролирует
-# cline_mcp_merge.py), но и то, что клиент принимает файл.
+# MCP-серверы, поэтому проверяем не только форму (её контролирует `hds cline-sync`),
+# но и то, что клиент принимает файл.
 if command -v cline >/dev/null 2>&1; then
     CLINE_CHECK="$(cline config mcp --json 2>&1 || true)"
     if printf '%s' "$CLINE_CHECK" | grep -q 'Invalid MCP settings\|"type": *"error"'; then
@@ -67,13 +75,6 @@ if command -v cline >/dev/null 2>&1; then
     fi
 fi
 
-# --- Скилл disk-search ---
-if [ -f "$ROOT/hermes-skill/disk-search.md" ]; then
-    mkdir -p "$CLINE_DIR/skills/disk-search"
-    cp "$ROOT/hermes-skill/disk-search.md" "$CLINE_DIR/skills/disk-search/SKILL.md"
-    echo "[ok] Скилл установлен: $CLINE_DIR/skills/disk-search/SKILL.md"
-else
-    echo "[--] hermes-skill/disk-search.md не найден в проекте — скилл пропущен"
-fi
-
+# Правило и скилл установил `hds cline-sync` выше (один код с кнопкой в UI);
+# предупреждения выводятся там же.
 echo "Перезапустите Cline Desktop (или начните новую сессию), чтобы изменения вступили в силу."

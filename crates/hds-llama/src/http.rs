@@ -36,16 +36,31 @@ pub struct Request {
     pub keep_alive: bool,
 }
 
-/// Ответ: статус + JSON-тело.
+/// Ответ: статус + JSON-тело либо готовое SSE-тело (`text/event-stream`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Response {
     pub status: u16,
     pub json: Value,
+    /// Если задано — тело отдаётся как `text/event-stream` (например, стрим чата).
+    pub sse: Option<String>,
 }
 
 impl Response {
     pub fn ok(json: Value) -> Response {
-        Response { status: 200, json }
+        Response {
+            status: 200,
+            json,
+            sse: None,
+        }
+    }
+
+    /// Ответ-поток SSE (`Content-Type: text/event-stream`).
+    pub fn sse(body: String) -> Response {
+        Response {
+            status: 200,
+            json: Value::Null,
+            sse: Some(body),
+        }
     }
 
     pub fn error(status: u16, message: &str, kind: &str) -> Response {
@@ -54,6 +69,7 @@ impl Response {
             json: serde_json::json!({
                 "error": { "message": message, "type": kind, "code": Value::Null }
             }),
+            sse: None,
         }
     }
 
@@ -263,14 +279,21 @@ fn read_request<R: BufRead, W: Write>(
     }))
 }
 
-/// Записать ответ (JSON + `Content-Length`, keep-alive по запросу).
+/// Записать ответ (JSON либо SSE + `Content-Length`, keep-alive по запросу).
 fn write_response<W: Write>(w: &mut W, resp: &Response, keep_alive: bool) -> std::io::Result<()> {
-    let body = serde_json::to_string(&resp.json).unwrap_or_else(|_| "{}".to_string());
+    let (content_type, body) = match &resp.sse {
+        Some(s) => ("text/event-stream; charset=utf-8", s.clone()),
+        None => (
+            "application/json; charset=utf-8",
+            serde_json::to_string(&resp.json).unwrap_or_else(|_| "{}".to_string()),
+        ),
+    };
     let head = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: application/json; charset=utf-8\r\n\
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\n\
          Content-Length: {}\r\nConnection: {}\r\nAccess-Control-Allow-Origin: *\r\n\r\n",
         resp.status,
         resp.reason(),
+        content_type,
         body.len(),
         if keep_alive { "keep-alive" } else { "close" }
     );

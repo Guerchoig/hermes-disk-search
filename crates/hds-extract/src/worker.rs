@@ -306,6 +306,16 @@ fn start_process(cfg: &WorkerConfig) -> Result<(Child, ChildStdin, Receiver<Stri
         .current_dir(&cfg.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());
+    // Windows: консольный `python.exe` не должен вспыхивать окном. Родитель
+    // (детачед MCP-сервер/UI) может не иметь консоли — тогда Windows создаёт
+    // ребёнку НОВУЮ консоль, и каждый запуск воркера мигал окном на экране
+    // (замечено: Cline → каждый поиск поднимал видимую консоль).
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     match &cfg.stderr_log {
         Some(p) => {
             let f = std::fs::File::create(p)

@@ -40,11 +40,18 @@ if [ -f "$ROOT/installers/install_macos.command" ]; then
 fi
 
 # --- directories copied as a whole -------------------------------------------
-for d in installers runtime-manifests assets hermes-skill shortcuts; do
+for d in installers runtime-manifests assets hermes-skill cline-rules shortcuts; do
     if [ ! -d "$ROOT/$d" ]; then
         continue
     fi
     cp -R "$ROOT/$d" "$STAGE/$d"
+done
+# macOS launchers must be executable (the git checkout may not carry the +x bit on
+# every platform): force it in the staged tree.
+for f in "shortcuts/macos/Hermes Disk Search.command" \
+         "shortcuts/macos/Индексация дисков.command" \
+         "shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index"; do
+    [ -f "$STAGE/$f" ] && chmod +x "$STAGE/$f"
 done
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
 

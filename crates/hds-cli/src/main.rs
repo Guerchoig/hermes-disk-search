@@ -25,6 +25,7 @@ fn usage() -> String {
      \x20 watch        [--roots a;b]\n\
      \x20 mcp          [--http --host H --port N --path /mcp] (stdio или streamable-http)\n\
      \x20 mcp-http     check|start|stop|status|restart|run [--host --port --path]\n\
+     \x20 cline-sync   [--json] [--dry-run] (настройки Cline под config.yaml: модели/MCP/правило)\n\
      \x20 ui           [--host H] [--port N] (веб-интерфейс; по умолчанию 127.0.0.1:8765)"
         .to_string()
 }
@@ -116,6 +117,9 @@ fn run(args: &[String]) -> i32 {
             flag_u64(rest, "--port").map(|v| v as u16),
             flag_val(rest, "--path"),
         ),
+        "cline-sync" => {
+            cmd::cline_sync::cmd_cline_sync(has(rest, "--json"), has(rest, "--dry-run"))
+        }
         "ui" => cmd::ui::cmd_ui(
             flag_val(rest, "--host"),
             flag_u64(rest, "--port").map(|v| v as u16),

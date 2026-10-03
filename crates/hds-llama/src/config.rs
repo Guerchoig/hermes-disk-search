@@ -103,8 +103,8 @@ pub struct GpuConfig {
     pub policy: GpuPolicy,
     /// `gpu.pause_index_on_query` (A4 шаг 2): ставить `index.pause` на время запроса.
     pub pause_index_on_query: bool,
-    /// `gpu.external_vram_mb`: вычет на чужих потребителей GPU (пока `anonymizer_proxy`
-    /// не переехал на движок — из бюджета не вычитаем, ключ оставлен как ручка).
+    /// `gpu.external_vram_mb`: вычет на чужих потребителей GPU (по умолчанию 0 —
+    /// из бюджета не вычитаем; ключ-ручка для диагностики).
     pub external_vram_mb: u64,
     /// `gpu.vram_source`: источник истины по свободной VRAM (`nvml` по умолчанию).
     pub vram_source: VramSource,

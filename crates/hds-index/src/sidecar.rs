@@ -107,6 +107,11 @@ impl Sidecar {
         self.worker.lock().unwrap().capabilities().clone()
     }
 
+    /// Живой ли процесс воркера (idle-timeout/сбой убили его?).
+    pub fn is_alive(&self) -> bool {
+        self.worker.lock().unwrap().is_alive()
+    }
+
     /// Завершение: `shutdown` → EOF на stdin → процесс выходит (§5.1).
     pub fn shutdown(&self) {
         self.worker.lock().unwrap().shutdown();

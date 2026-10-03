@@ -16,11 +16,13 @@
 //! Отклонение от §2.4: `chunker` оставлен в `hds-index` (задача B3 уже принята),
 //! чтобы не двигать проверенный код; перенос в `hds-core` — отдельная задача.
 
+pub mod cline;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
 
+pub use cline::{cline_dir, mcp_entry, mcp_url, role_ctx_tokens, sync, Report, Step};
 pub use config::{
     config_path, db_abs_path, dig, load, load_from, project_root, replace_file, Config, APP_NAME,
     EMB_CONTEXT,

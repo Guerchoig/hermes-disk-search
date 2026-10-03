@@ -46,13 +46,13 @@ foreach ($b in @("hds", "hds_mcp", "llm_host")) {
 
 # installation scripts at the archive root (setup.ps1 resolves paths relative to itself)
 foreach ($f in @("setup.cmd", "setup.ps1", "install_hermes.ps1", "install_cline.ps1",
-                 "install_autostart.ps1", "run_ui.ps1", "run_index.ps1")) {
+                 "install_autostart.ps1", "run_ui.ps1", "run_index.ps1", "hds_bin.ps1")) {
     $src = Join-Path $root $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $stage $f) -Force }
 }
 
 # directories copied as a whole (sidecar is handled separately below)
-foreach ($d in @("installers", "runtime-manifests", "assets", "hermes-skill")) {
+foreach ($d in @("installers", "runtime-manifests", "assets", "hermes-skill", "cline-rules")) {
     $src = Join-Path $root $d
     if (-not (Test-Path $src)) { continue }
     $dst = Join-Path $stage $d

@@ -46,14 +46,16 @@ if [ -f "$MANIFEST" ]; then
     if [ -f "$ENGINE_DIR/.hds-engine.json" ]; then
         echo "[ok] engine runtime already present: $ENGINE_DIR"
     else
-        vals="$(python3 - "$MANIFEST" <<'PY'
-import json, sys
-m = json.load(open(sys.argv[1]))
-for a in m.get("assets", []):
-    if a.get("platform") == "macos-arm64" and a.get("backend") == "metal":
-        print(a["url"], a["sha256"]); break
-PY
-)"
+        # Разбор engine-manifest.json без Python (аналог ConvertFrom-Json в Windows):
+        # берём url+sha256 ассета platform=macos-arm64, backend=metal.
+        vals="$(awk '
+            /"platform"[[:space:]]*:[[:space:]]*"macos-arm64"/ { mac=1 }
+            mac && /"backend"[[:space:]]*:[[:space:]]*"metal"/ { metal=1 }
+            mac && /"url"[[:space:]]*:/    { l=$0; sub(/.*"url"[[:space:]]*:[[:space:]]*"/, "", l); sub(/".*/, "", l); url=l }
+            mac && /"sha256"[[:space:]]*:/ { l=$0; sub(/.*"sha256"[[:space:]]*:[[:space:]]*"/, "", l); sub(/".*/, "", l); sha=l }
+            mac && metal && url != "" && sha != "" { print url " " sha; exit }
+            /}/ { mac=0; metal=0; url=""; sha="" }
+        ' "$MANIFEST")"
         url="$(echo "$vals" | awk '{print $1}')"
         sha="$(echo "$vals" | awk '{print $2}')"
         if [ -n "${url:-}" ]; then
@@ -97,5 +99,134 @@ else
     echo "[--] bin/hds missing in the archive"
 fi
 
+# --- 5. Launchers (Desktop + ~/Applications) ----------------------------------
+# Аналог Windows: setup.ps1 (шаг 10) ставит ярлык «Hermes Disk Search» (run_ui.ps1).
+# На macOS кладём на Desktop .command-обёртки (UI и индексация) с зашитым корнем и
+# копию .app-бандла в ~/Applications с ad-hoc подписью (план §10.4).
+LAUNCHER_DIR="$ROOT/shortcuts/macos"
+DESKTOP="$HOME/Desktop"
+mkdir -p "$DESKTOP"
+# Исполняемость лаунчеров (git может не сохранить +x на некоторых платформах).
+{ [ -f "$LAUNCHER_DIR/Hermes Disk Search.command" ] && chmod +x "$LAUNCHER_DIR/Hermes Disk Search.command"; } 2>/dev/null || true
+{ [ -f "$LAUNCHER_DIR/Индексация дисков.command" ] && chmod +x "$LAUNCHER_DIR/Индексация дисков.command"; } 2>/dev/null || true
+{ [ -f "$LAUNCHER_DIR/HermesDiskSearchIndex.app/Contents/MacOS/run_index" ] && chmod +x "$LAUNCHER_DIR/HermesDiskSearchIndex.app/Contents/MacOS/run_index"; } 2>/dev/null || true
+write_desktop_launcher() {  # dest  archive-launcher  title
+    dest="$1"; src="$2"; title="$3"
+    cat > "$dest" <<EOS
+#!/bin/bash
+# Создано hermes-disk-search (install_macos.command): $title
+export HDS_ROOT="$ROOT"
+exec "$src"
+EOS
+    chmod +x "$dest"
+    echo "[ok] Desktop launcher: $dest ($title)"
+}
+if [ -f "$LAUNCHER_DIR/Hermes Disk Search.command" ]; then
+    write_desktop_launcher "$DESKTOP/Hermes Disk Search.command" "$LAUNCHER_DIR/Hermes Disk Search.command" "web UI"
+else
+    echo "[--] shortcuts/macos/Hermes Disk Search.command not found - desktop UI launcher skipped"
+fi
+if [ -f "$LAUNCHER_DIR/Индексация дисков.command" ]; then
+    write_desktop_launcher "$DESKTOP/Индексация дисков.command" "$LAUNCHER_DIR/Индексация дисков.command" "index"
+fi
+
+APP_SRC="$LAUNCHER_DIR/HermesDiskSearchIndex.app"
+APP_DST="$HOME/Applications/HermesDiskSearchIndex.app"
+if [ -d "$APP_SRC" ]; then
+    mkdir -p "$HOME/Applications"
+    rm -rf "$APP_DST"
+    cp -R "$APP_SRC" "$APP_DST"
+    # Зашиваем корень в исполняемый файл бандла (иначе из ~/Applications он не найдёт архив).
+    cat > "$APP_DST/Contents/MacOS/run_index" <<EOS
+#!/bin/bash
+# Создано hermes-disk-search (install_macos.command).
+export HDS_ROOT="$ROOT"
+exec "$APP_SRC/Contents/MacOS/run_index"
+EOS
+    chmod +x "$APP_DST/Contents/MacOS/run_index"
+    if command -v codesign >/dev/null 2>&1; then
+        if codesign --force --deep -s - "$APP_DST" >/dev/null 2>&1; then
+            echo "[ok] app installed & ad-hoc signed: $APP_DST"
+        else
+            echo "[--] app copied, but codesign failed: $APP_DST"
+        fi
+    else
+        echo "[ok] app installed: $APP_DST (codesign unavailable)"
+    fi
+else
+    echo "[--] shortcuts/macos/HermesDiskSearchIndex.app not found - app skipped"
+fi
+
+# --- 6. LaunchAgents (watcher + MCP + llm-host) -------------------------------
+# Аналог Windows-автозапуска (install_autostart.ps1 + install_llm_host_task.ps1):
+# LaunchAgent-ы поднимают watcher, общий MCP (:8787) и резидент llm-host при входе.
+# Отключить автозапуск: HDS_NO_AUTOSTART=1 перед запуском установщика.
+AGENTS_DIR="$HOME/Library/LaunchAgents"
+LOG_DIR="$HOME/Library/Logs/hermes-disk-search"
+if [ "${HDS_NO_AUTOSTART:-}" = "1" ]; then
+    echo "[--] HDS_NO_AUTOSTART=1 - LaunchAgents skipped"
+else
+    mkdir -p "$AGENTS_DIR" "$LOG_DIR"
+    write_agent() {  # label  logname  program  args...
+        label="$1"; logname="$2"; shift 2
+        plist="$AGENTS_DIR/$label.plist"
+        {
+            echo '<?xml version="1.0" encoding="UTF-8"?>'
+            echo '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+            echo '<plist version="1.0">'
+            echo '<dict>'
+            echo "  <key>Label</key><string>$label</string>"
+            echo '  <key>ProgramArguments</key>'
+            echo '  <array>'
+            for a in "$@"; do printf '    <string>%s</string>\n' "$a"; done
+            echo '  </array>'
+            echo '  <key>EnvironmentVariables</key>'
+            echo "  <dict><key>HDS_ROOT</key><string>$ROOT</string></dict>"
+            echo "  <key>WorkingDirectory</key><string>$ROOT</string>"
+            echo '  <key>RunAtLoad</key><true/>'
+            echo '  <key>KeepAlive</key><true/>'
+            echo "  <key>StandardOutPath</key><string>$LOG_DIR/$logname.log</string>"
+            echo "  <key>StandardErrorPath</key><string>$LOG_DIR/$logname.err.log</string>"
+            echo '</dict>'
+            echo '</plist>'
+        } > "$plist"
+        if command -v launchctl >/dev/null 2>&1; then
+            launchctl unload "$plist" >/dev/null 2>&1 || true
+            if launchctl load -w "$plist" >/dev/null 2>&1; then
+                echo "[ok] LaunchAgent loaded: $label"
+            else
+                echo "[--] LaunchAgent written (load failed): $plist"
+            fi
+        else
+            echo "[ok] LaunchAgent written: $plist"
+        fi
+    }
+    if [ -x "$BIN_DIR/hds" ]; then
+        write_agent local.hds.watch watch "$BIN_DIR/hds" watch
+        write_agent local.hds.mcp mcp "$BIN_DIR/hds" mcp-http run
+    else
+        echo "[--] $BIN_DIR/hds missing - watcher/MCP LaunchAgents skipped"
+    fi
+    if [ -x "$BIN_DIR/llm_host" ]; then
+        write_agent local.hds.llmhost llmhost "$BIN_DIR/llm_host" run
+    else
+        echo "[--] $BIN_DIR/llm_host missing - llm-host LaunchAgent skipped"
+    fi
+fi
+
 echo ""
-echo "== Done. Index a disk:  HDS_CONFIG=\"$ROOT/config.yaml\" hds index  =="
+# --- 7. Cline integration: MCP + model context windows + rule + skill ----------
+# Windows does this from setup.ps1 -> install_cline.ps1. On macOS the same single
+# code path (`hds cline-sync`, also the UI button) is run by install_cline_macos.sh:
+# models.json contextWindow/maxInputTokens are aligned with llm-host ctx_per_slot,
+# both MCP settings files get the disk-search server, the always-on rule and the
+# skill are installed. Cline must be restarted afterwards (the command says so).
+if [ -f "$ROOT/installers/install_cline_macos.sh" ]; then
+    bash "$ROOT/installers/install_cline_macos.sh" || echo "[--] Cline integration skipped/failed"
+fi
+
+echo ""
+echo "== Done. =="
+echo "   Web UI:  double-click 'Hermes Disk Search' on the Desktop (or: HDS_ROOT=\"$ROOT\" hds ui)"
+echo "   Index:   'Индексация дисков' on the Desktop (or: HDS_ROOT=\"$ROOT\" hds index)"
+echo "   Check:   HDS_CONFIG=\"$ROOT/config.yaml\" hds check"

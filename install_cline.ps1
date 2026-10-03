@@ -1,15 +1,26 @@
 # Connect disk-search to Cline Desktop / Cline CLI - can be run at ANY time: before
-# Cline is installed (re-run later) or after. Registers:
-#   1) the disk-search MCP server in the Cline settings:
+# Cline is installed (re-run later) or after. One call of `hds cline-sync` (the same
+# code as the UI button "Synchronize Cline settings") sets up everything:
+#   1) the disk-search MCP server in BOTH Cline settings files:
 #      %USERPROFILE%\.cline\data\settings\cline_mcp_settings.json (Desktop/CLI)
 #      and %USERPROFILE%\.cline\mcp.json (the CLI variant from docs.cline.bot/mcp);
-#   2) the disk-search skill: hermes-skill\disk-search.md ->
-#      %USERPROFILE%\.cline\skills\disk-search\SKILL.md
+#   2) model context windows in %USERPROFILE%\.cline\data\settings\models.json:
+#      contextWindow/maxInputTokens = the real llm-host slot (ctx_per_slot). Without
+#      this Cline compacts the history before the slot is full and the agent loses
+#      the search context;
+#   3) the disk-search RULE: cline-rules\disk-search.md -> ~/.cline/rules/disk-search.md
+#      (rules go into the system prompt of EVERY session);
+#   4) the disk-search skill: hermes-skill\disk-search.md -> ~/.cline/skills/disk-search/SKILL.md
+#      (skills load lazily - only after the model calls use_skill; a local 9B agent
+#      does not, which reads as "incomplete results" - hence the rule above).
+# Cline must be restarted after models/MCP changes (the report says so).
 # Idempotent: a repeated run updates the entries without duplicating them.
 # ASCII-only on purpose (Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$hdsExe = Join-Path $root "bin\hds.exe"
+. (Join-Path $root 'hds_bin.ps1')
+# bin\ (packaged release) or target\{release,debug}\ (source checkout).
+$hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
 
 $clineDir = Join-Path $env:USERPROFILE ".cline"
 $clineCmd = Get-Command cline -ErrorAction SilentlyContinue
@@ -23,44 +34,15 @@ if (-not (Test-Path $clineDir) -and -not $clineCmd) {
 }
 Write-Host "== Connecting disk-search to Cline ($clineDir) =="
 
-# Python for the JSON merge helper: bundled sidecar -> HDS_EXTRACT_PYTHON -> .venv
-$py = $null
-if ($env:HDS_EXTRACT_PYTHON -and (Test-Path $env:HDS_EXTRACT_PYTHON)) { $py = $env:HDS_EXTRACT_PYTHON }
-if (-not $py) {
-    $bundled = Join-Path $root "sidecar\python"
-    if (Test-Path $bundled) {
-        $exe = Get-ChildItem -Path $bundled -Recurse -Filter python.exe -ErrorAction SilentlyContinue |
-            Sort-Object { $_.FullName.Length } | Select-Object -First 1
-        if ($exe) { $py = $exe.FullName }
-    }
+# Settings are written by the SAME code the UI button uses (`hds cline-sync`):
+# models.json context windows, both MCP settings files, the rule and the skill.
+if (-not $hdsExe) {
+    throw "hds.exe not found ($(Get-HdsBinHint -Name 'hds.exe')) - run setup.ps1 / build the release first"
 }
-if (-not $py) {
-    $venv = Join-Path $root ".venv\Scripts\python.exe"
-    if (Test-Path $venv) { $py = $venv }
-}
-if (-not $py) { throw "no Python found for the Cline settings merge (set HDS_EXTRACT_PYTHON or install the sidecar)" }
-
-$targets = @(
-    (Join-Path $clineDir "data\settings\cline_mcp_settings.json"),
-    (Join-Path $clineDir "mcp.json")
-)
-# Shared HTTP MCP instance (:8787): Cline connects by URL and does NOT spawn its own
-# process (per-session processes were left orphaned by the long-lived hub daemon).
-# The URL is read from config.yaml (mcp_http.*), without Python.
-$mcpUrl = ""
-$cfg = Join-Path $root "config.yaml"
-if (Test-Path $cfg) {
-    $cfgText = [System.IO.File]::ReadAllText($cfg, (New-Object System.Text.UTF8Encoding($false)))
-    $mHost = "127.0.0.1"; $mPort = "8787"; $mPath = "/mcp"
-    if ($cfgText -match '(?m)^mcp_http:[^\r\n]*\r?\n((?:[ \t]+[^\r\n]*(?:\r?\n|$))*)') {
-        $blk = $Matches[1]
-        if ($blk -match '(?m)^[ \t]+host:[ \t]*["'']?([^"''\s#]+)') { $mHost = $Matches[1] }
-        if ($blk -match '(?m)^[ \t]+port:[ \t]*(\d+)') { $mPort = $Matches[1] }
-        if ($blk -match '(?m)^[ \t]+path:[ \t]*["'']?([^"''\s#]+)') { $mPath = $Matches[1] }
-    }
-    $mcpUrl = "http://${mHost}:${mPort}${mPath}"
-}
-if (-not $mcpUrl) { throw "cannot derive the MCP URL (config.yaml mcp_http missing) - Cline settings unchanged" }
+# project_root() of the Rust core resolves config.yaml, cline-rules\ and hermes-skill\
+# from the exe location; pin it to this root explicitly (the installer may run from
+# another directory, e.g. an unpacked archive).
+$env:HDS_ROOT = $root
 
 if (Test-Path $hdsExe) {
     $eap = $ErrorActionPreference
@@ -69,20 +51,23 @@ if (Test-Path $hdsExe) {
     $ErrorActionPreference = $eap
     $mcpInfo = $null
     try { $mcpInfo = ($mcpRaw | Out-String) | ConvertFrom-Json } catch { }
-    if ($mcpInfo -and $mcpInfo.action) {
-        Write-Host "[ok] shared MCP server ($mcpUrl): $($mcpInfo.action)"
+    if ($mcpInfo -and $mcpInfo.state) {
+        Write-Host "[ok] shared MCP server ($($mcpInfo.url)): pid $($mcpInfo.pid)"
     } elseif ($mcpInfo -and $mcpInfo.error) {
         Write-Host "[!!] MCP server: $($mcpInfo.error)" -ForegroundColor Yellow
     } else {
         Write-Host ($mcpRaw | Out-String).Trim() -ForegroundColor Yellow
     }
 }
-& $py (Join-Path $root "installers\cline_mcp_merge.py") --mode http --url $mcpUrl --targets $targets
-if ($LASTEXITCODE -ne 0) { throw "Cline MCP settings update failed - see the message above" }
+# --- settings sync: models.json + both MCP files + rule + skill ---
+& $hdsExe cline-sync
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[!!] cline-sync reported warnings - see the lines above" -ForegroundColor Yellow
+}
 
 # --- verify the settings with the Cline CLI itself (if available) ---
 # Cline validates the whole settings file: one bad entry drops ALL MCP servers, so we
-# not only check the shape (done by cline_mcp_merge.py) but that the client accepts it.
+# do not only check the shape (done by `hds cline-sync`) but that the client accepts it.
 if ($clineCmd) {
     $eap = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
@@ -91,7 +76,7 @@ if ($clineCmd) {
     if ($clineCheck -match 'Invalid MCP settings' -or $clineCheck -match '"type"\s*:\s*"error"') {
         Write-Host "[!!] Cline considers the MCP settings invalid (it will drop the whole file):" -ForegroundColor Yellow
         Write-Host "     $clineCheck" -ForegroundColor Yellow
-        Write-Host "     File: $($targets[0])" -ForegroundColor Yellow
+        Write-Host "     File: $clineDir\data\settings\cline_mcp_settings.json" -ForegroundColor Yellow
     } elseif ($clineCheck -match 'disk-search') {
         Write-Host "[ok] Cline sees the disk-search server"
     } else {
@@ -99,15 +84,6 @@ if ($clineCmd) {
     }
 }
 
-# --- disk-search skill ---
-$skillSrc = Join-Path $root "hermes-skill\disk-search.md"
-$skillDst = Join-Path $clineDir "skills\disk-search\SKILL.md"
-if (Test-Path $skillSrc) {
-    New-Item (Split-Path $skillDst) -ItemType Directory -Force | Out-Null
-    Copy-Item $skillSrc $skillDst -Force
-    Write-Host "[ok] skill installed: $skillDst"
-} else {
-    Write-Host "[--] hermes-skill\disk-search.md not found - skill skipped" -ForegroundColor Yellow
-}
-
+# The rule and the skill were installed by `hds cline-sync` above (one source of truth
+# with the UI button); failures/warnings are reported there.
 Write-Host "Restart Cline Desktop (or start a new session) for the changes to take effect."

@@ -12,8 +12,11 @@
 param([string]$HermesDir = "")
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
-$hdsExe = Join-Path $root "bin\hds.exe"
-$mcpExe = Join-Path $root "bin\hds_mcp.exe"
+. (Join-Path $root 'hds_bin.ps1')
+# bin\ (packaged release) or target\{release,debug}\ (source checkout).
+$hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
+$mcpExe = Get-HdsBinPath -Root $root -Name "hds_mcp.exe"
+if (-not $mcpExe) { $mcpExe = Join-Path $root "bin\hds_mcp.exe" }
 
 if (-not $HermesDir) {
     $HermesDir = Join-Path $env:LOCALAPPDATA "hermes"
@@ -128,7 +131,7 @@ if ($mcpUrl) {
             Write-Host ($mcpRaw | Out-String).Trim() -ForegroundColor Yellow
         }
     } else {
-        Write-Host "[--] bin\hds.exe not found - start MCP manually: hds mcp-http start" -ForegroundColor Yellow
+        Write-Host "[--] hds.exe not found - start MCP manually: hds mcp-http start" -ForegroundColor Yellow
     }
 }
 if ($text -match '(?ms)^  tool_search:.*?enabled:\s*["'']?off') {

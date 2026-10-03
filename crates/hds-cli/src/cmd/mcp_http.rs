@@ -148,19 +148,54 @@ fn spawn_instance(host: &str, port: u16, path: &str) -> Result<u32, String> {
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::null())
     .stderr(std::process::Stdio::null());
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
         cmd.creation_flags(0x0000_0008 | 0x0000_0200 | 0x0800_0000);
+        // Снять наследование std-хендлов на время spawn: иначе detached-сервер
+        // унаследует write-конец пайпа вызывающего, и ЛЮБОЙ захват вывода
+        // (`$x = hds mcp-http restart`, `| Out-String`, `$(...)`, Start-Job) не
+        // завершится, пока жив сервер (зависание). После spawn флаг возвращаем.
+        unsafe { set_std_inherit(false) };
+        let res = cmd
+            .spawn()
+            .map(|c| c.id())
+            .map_err(|e| format!("spawn: {e}"));
+        unsafe { set_std_inherit(true) };
+        res
     }
     #[cfg(not(windows))]
     {
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
+        let child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
+        Ok(child.id())
     }
-    let child = cmd.spawn().map_err(|e| format!("spawn: {e}"))?;
-    Ok(child.id())
+}
+
+/// Включить/снять `HANDLE_FLAG_INHERIT` на стандартных хендлах процесса
+/// (`GetStdHandle` + `SetHandleInformation`; свои extern-объявления — как в других
+/// модулях проекта, без новых крейтов).
+#[cfg(windows)]
+unsafe fn set_std_inherit(on: bool) {
+    use std::os::raw::c_void;
+    extern "system" {
+        fn GetStdHandle(n_std_handle: u32) -> *mut c_void;
+        fn SetHandleInformation(handle: *mut c_void, mask: u32, flags: u32) -> i32;
+    }
+    const STD_INPUT_HANDLE: u32 = -10i32 as u32;
+    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
+    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 0x0000_0001;
+    for n in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
+        let h = GetStdHandle(n);
+        if !h.is_null() && (h as isize) != -1 {
+            let flags = if on { HANDLE_FLAG_INHERIT } else { 0 };
+            let _ = SetHandleInformation(h, HANDLE_FLAG_INHERIT, flags);
+        }
+    }
 }
 
 /// Дождаться `STATE_MCP` до `timeout` секунд.

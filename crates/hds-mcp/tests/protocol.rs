@@ -17,6 +17,23 @@ fn initialize_reports_server_info() {
 }
 
 #[test]
+fn initialize_carries_server_instructions() {
+    // «Системный промпт» сервера (поле instructions — спека MCP): без него модель
+    // видит только описания инструментов и делает один запрос вместо выборки.
+    let r = v(r#"{"jsonrpc":"2.0","id":7,"method":"initialize","params":{}}"#);
+    let ins = r["result"]["instructions"]
+        .as_str()
+        .expect("instructions в ответе initialize");
+    assert!(ins.contains("search_local_files"));
+    assert!(ins.contains("ask_my_files"));
+    assert!(ins.contains("НЕСКОЛЬКО"));
+    assert_eq!(
+        r["result"]["instructions"],
+        serde_json::json!(hds_mcp::server::INSTRUCTIONS)
+    );
+}
+
+#[test]
 fn tools_list_has_six_named_tools() {
     let r = v(r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#);
     let names: Vec<String> = r["result"]["tools"]
@@ -43,6 +60,16 @@ fn tools_list_has_six_named_tools() {
         .find(|t| t["name"] == "search_local_files")
         .unwrap();
     assert_eq!(search["inputSchema"]["required"][0], "query");
+    // ask_my_files принимает limit: иначе обзорные вопросы упираются в 8 фрагментов.
+    let ask = r["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|t| t["name"] == "ask_my_files")
+        .unwrap();
+    assert_eq!(ask["inputSchema"]["required"][0], "question");
+    assert_eq!(ask["inputSchema"]["properties"]["limit"]["type"], "integer");
+    assert_eq!(ask["inputSchema"]["properties"]["limit"]["default"], 8);
 }
 
 #[test]

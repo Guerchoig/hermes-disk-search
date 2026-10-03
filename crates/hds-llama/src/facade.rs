@@ -184,33 +184,35 @@ fn think_markers() -> (String, String) {
     (format!("{lt}think{gt}"), format!("{lt}/think{gt}"))
 }
 
-/// Порт `hds/rag.py::_strip_think`: убрать inline-размышления из `content`
-/// (бывает при `thinking = auto`, когда сервер не вынес их в `reasoning_content`).
-pub fn strip_think(text: &str) -> String {
+/// Разделить вывод модели на размышления и ответ по маркерам ``…`` .
+///
+/// Движок при `reasoning=on` отдаёт закрывающий маркер `</think>` даже **без**
+/// открывающего (открывающий добавляет шаблон модели): поэтому всё до последнего
+/// `</think>` — размышления, а после — ответ (порт `hds/rag.py::_strip_think`;
+/// его regex тоже резал вывод до закрывающего маркера).
+pub fn split_reasoning(text: &str) -> (Option<String>, String) {
     let (open, close) = think_markers();
-    let mut out = String::new();
-    let mut rest = text;
-    loop {
-        match rest.find(&open) {
-            Some(i) => {
-                out.push_str(&rest[..i]);
-                let after = &rest[i + open.len()..];
-                match after.find(&close) {
-                    // блок без закрытия — режем до конца (модель не дописала)
-                    None => return out.trim().to_string(),
-                    Some(j) => rest = &after[j + close.len()..],
-                }
-            }
-            None => {
-                // одинокий закрывающий маркер: режем от него до конца (как `_THINK_RX`)
-                match rest.find(&close) {
-                    Some(j) => out.push_str(&rest[..j]),
-                    None => out.push_str(rest),
-                }
-                return out.trim().to_string();
-            }
-        }
+    if let Some(j) = text.rfind(&close) {
+        let before = &text[..j];
+        let start = before.rfind(&open).map(|i| i + open.len()).unwrap_or(0);
+        let reasoning = before[start..].trim().to_string();
+        let answer = text[j + close.len()..].trim().to_string();
+        return (Some(reasoning), answer);
     }
+    if let Some(i) = text.find(&open) {
+        // открыли, не закрыли: до маркера — ответ, после — обрыв размышлений
+        return (
+            Some(text[i + open.len()..].trim().to_string()),
+            text[..i].trim().to_string(),
+        );
+    }
+    (None, text.trim().to_string())
+}
+
+/// Порт `hds/rag.py::_strip_think`: убрать inline-размышления из `content`
+/// (бывает при `thinking = auto`/`on`, когда сервер оставил их прямо в тексте).
+pub fn strip_think(text: &str) -> String {
+    split_reasoning(text).1
 }
 
 /// Решение о режиме размышлений по телу запроса и алиасу модели.
@@ -230,6 +232,29 @@ pub fn thinking_for(model_alias: &str, body: &Value, default: Thinking) -> Think
     }
     if let Some(s) = body.get("reasoning").and_then(|v| v.as_str()) {
         return Thinking::parse(s);
+    }
+    // `reasoning_effort` (OpenAI-совместимые агенты, в т.ч. Cline) и `reasoning: {effort|enabled}` —
+    // включённые размышления. Явное `none`/`off` — выключаем.
+    if let Some(e) = body.get("reasoning_effort").and_then(|v| v.as_str()) {
+        let e = e.trim().to_lowercase();
+        return if !e.is_empty() && e != "none" && e != "off" {
+            Thinking::On
+        } else {
+            Thinking::Off
+        };
+    }
+    if let Some(obj) = body.get("reasoning").and_then(|v| v.as_object()) {
+        if let Some(e) = obj.get("effort").and_then(|v| v.as_str()) {
+            let e = e.trim().to_lowercase();
+            return if !e.is_empty() && e != "none" && e != "off" {
+                Thinking::On
+            } else {
+                Thinking::Off
+            };
+        }
+        if obj.get("enabled").and_then(|v| v.as_bool()) == Some(true) {
+            return Thinking::On;
+        }
     }
     if model_alias.trim().to_lowercase().ends_with("-think") {
         return Thinking::On;
@@ -257,6 +282,8 @@ pub struct ChatRequest {
     pub thinking: Thinking,
     /// Алиас модели из запроса (для ответа) — фасад роль не различает, она одна.
     pub model: String,
+    /// В запросе были `tools` (агентный вызов) → ответ собираем с `tool_calls`.
+    pub tools_enabled: bool,
 }
 
 impl ChatRequest {
@@ -328,6 +355,338 @@ pub fn build_prompt(messages: &[Value]) -> Result<String> {
     Ok(prompt)
 }
 
+/// Угловая обёртка тега без литеральных `<>` (как `think_markers` — чтобы маркеры
+/// не «съедал» инструментарий).
+fn angle(tag: &str) -> String {
+    format!("{}{}{}", '\u{3c}', tag, '\u{3e}')
+}
+
+/// Маркеры блока вызова инструмента.
+fn tool_markers() -> (String, String) {
+    (angle("tool_call"), angle("/tool_call"))
+}
+
+/// Блок с описанием доступных функций (формат Qwen `<tool_call>`). Добавляется в
+/// промпт ТОЛЬКО когда в запросе есть `tools` (агентный вызов): MCP/RAG `tools`
+/// не передают, поэтому обычный чат остаётся прежним текстовым.
+fn tools_section(tools: &[Value]) -> String {
+    let open_tools = angle("tools");
+    let close_tools = angle("/tools");
+    let (tc_open, tc_close) = tool_markers();
+    let mut s = String::new();
+    s.push_str("# Tools\n\n");
+    s.push_str("You may call one or more functions to assist with the user query.\n\n");
+    s.push_str(&format!(
+        "You are provided with function signatures within {open_tools}{close_tools} XML tags:\n{open_tools}\n"
+    ));
+    for t in tools {
+        let f = t.get("function").unwrap_or(t);
+        s.push_str(&serde_json::to_string(f).unwrap_or_default());
+        s.push('\n');
+    }
+    s.push_str(&format!("{close_tools}\n\n"));
+    s.push_str(&format!(
+        "For each function call, return a json object with the function name and arguments within {tc_open}{tc_close} XML tags:\n"
+    ));
+    s.push_str(&format!(
+        "{tc_open}\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n{tc_close}\n"
+    ));
+    s
+}
+
+/// Собрать `prompt` из сообщений, добавив описание инструментов и свернув историю
+/// (в т.ч. прошлые `tool_calls` и результаты роли `tool`) в тот же плоский текст.
+pub fn build_prompt_tools(messages: &[Value], tools: &[Value]) -> Result<String> {
+    let (tc_open, tc_close) = tool_markers();
+    let tr_open = angle("tool_response");
+    let tr_close = angle("/tool_response");
+    let mut system_parts: Vec<String> = Vec::new();
+    let mut turns: Vec<(String, String)> = Vec::new(); // (роль, текст)
+    for m in messages {
+        let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("user");
+        let text = message_text(m.get("content").unwrap_or(&Value::Null));
+        match role {
+            "system" | "developer" => {
+                if !text.trim().is_empty() {
+                    system_parts.push(text.trim().to_string());
+                }
+            }
+            "assistant" => {
+                let mut t = text.trim().to_string();
+                if let Some(calls) = m.get("tool_calls").and_then(|v| v.as_array()) {
+                    for c in calls {
+                        if let Some(f) = c.get("function") {
+                            let name = f.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                            let args = f.get("arguments").cloned().unwrap_or_else(|| json!({}));
+                            let args = match args {
+                                Value::String(s) => {
+                                    serde_json::from_str::<Value>(&s).unwrap_or_else(|_| json!({}))
+                                }
+                                other => other,
+                            };
+                            if !name.is_empty() {
+                                t.push_str(&format!(
+                                    "\n{tc_open}\n{{\"name\": \"{name}\", \"arguments\": {args}}}\n{tc_close}"
+                                ));
+                            }
+                        }
+                    }
+                }
+                turns.push(("assistant".to_string(), t));
+            }
+            "tool" => turns.push(("tool".to_string(), text.trim().to_string())),
+            _ => turns.push(("user".to_string(), text)),
+        }
+    }
+    if !turns.iter().any(|(r, _)| r == "user") {
+        return Err(EngineError::Other(
+            "в запросе нет ни одного пользовательского сообщения (messages[].content)".to_string(),
+        ));
+    }
+    let mut prompt = String::new();
+    if !system_parts.is_empty() {
+        prompt.push_str(&system_parts.join("\n\n"));
+        prompt.push_str("\n\n");
+    }
+    prompt.push_str(&tools_section(tools));
+    prompt.push('\n');
+    let last = turns.len() - 1;
+    for (i, (role, text)) in turns.iter().enumerate() {
+        match role.as_str() {
+            "tool" => {
+                prompt.push_str(&format!("\n{tr_open}\n{}\n{tr_close}\n", text.trim()));
+            }
+            "assistant" => {
+                prompt.push_str("Ассистент: ");
+                prompt.push_str(text.trim());
+                prompt.push('\n');
+            }
+            _ => {
+                if i == last {
+                    prompt.push_str(text);
+                } else {
+                    prompt.push_str("Пользователь: ");
+                    prompt.push_str(text.trim());
+                    prompt.push('\n');
+                }
+            }
+        }
+    }
+    Ok(prompt)
+}
+
+/// Извлечь из ответа модели блоки `<tool_call>{json}</tool_call>` (формат Qwen) и
+/// вернуть `(текст без блоков, tool_calls в форме OpenAI)`.
+///
+/// Разбор ТЕРПИМ к «почти-JSON» локальной модели (см. [`parse_tool_payload`]):
+/// раньше строгий `serde_json` на таком блоке падал, блок оставался ТЕКСТОМ, агент
+/// не получал `tool_calls` и молча завершал ход — наблюдалось 03.10.2026:
+/// `{"name": disk-search__ask_my_files", "arguments": {...}}` (потеряна открывающая
+/// кавычка значения имени). Закрывающий тег тоже может отсутствовать — тогда блок
+/// читаем до следующего `<tool_call>` или до конца ответа.
+pub fn parse_tool_calls(text: &str) -> (String, Vec<Value>) {
+    let (open, close) = tool_markers();
+    let mut content = String::new();
+    let mut calls: Vec<Value> = Vec::new();
+    let mut rest = text;
+    loop {
+        let i = match rest.find(&open) {
+            Some(i) => i,
+            None => {
+                content.push_str(rest);
+                break;
+            }
+        };
+        content.push_str(&rest[..i]);
+        let after = &rest[i + open.len()..];
+        let (inner_end, consumed) = match after.find(&close) {
+            Some(j) => (j, j + close.len()),
+            None => match after.find(&open) {
+                Some(j) => (j, j), // модель забыла закрыть тег
+                None => (after.len(), after.len()),
+            },
+        };
+        match parse_tool_payload(after[..inner_end].trim()) {
+            Some((name, args)) => calls.push(json!({
+                "id": format!("call_{}", calls.len() + 1),
+                "type": "function",
+                "function": { "name": name, "arguments": args }
+            })),
+            // не разобрали — оставляем как есть (не глотаем текст молча)
+            None => content.push_str(&after[..consumed]),
+        }
+        rest = &after[consumed..];
+    }
+    (content.trim().to_string(), calls)
+}
+
+/// Разобрать тело блока вызова: `{"name":…,"arguments":…}` (или `{"function":{…}}`).
+///
+/// Порядок попыток: строгий JSON → починка типовых сбоев → ручное извлечение имени
+/// и аргументов (даже если объект целиком битый). `arguments` возвращаем СТРОКОЙ —
+/// так требует форма OpenAI (`function.arguments` — JSON-текст).
+fn parse_tool_payload(inner: &str) -> Option<(String, String)> {
+    if let Ok(v) = serde_json::from_str::<Value>(inner) {
+        if let Some(p) = payload_from_value(&v) {
+            return Some(p);
+        }
+    }
+    let fixed = repair_json(inner);
+    if let Ok(v) = serde_json::from_str::<Value>(&fixed) {
+        if let Some(p) = payload_from_value(&v) {
+            return Some(p);
+        }
+    }
+    let name = extract_value_after(inner, "\"name\"")?;
+    if is_placeholder(&name) {
+        return None;
+    }
+    let args = extract_object_after(inner, "\"arguments\"")
+        .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        .map(|v| match v {
+            Value::String(s) => s,
+            other => other.to_string(),
+        })
+        .unwrap_or_else(|| "{}".to_string());
+    Some((name, args))
+}
+
+/// `(имя, аргументы-строкой)` из разобранного значения (принимаем и обёртку
+/// `{"function": {...}}`, как в OpenAI-форме).
+fn payload_from_value(v: &Value) -> Option<(String, String)> {
+    let f = v.get("function").unwrap_or(v);
+    let name = f.get("name")?.as_str()?.trim().to_string();
+    if name.is_empty() || is_placeholder(&name) {
+        return None;
+    }
+    let args = match f.get("arguments") {
+        Some(Value::String(s)) => s.clone(),
+        Some(other) => other.to_string(),
+        None => "{}".to_string(),
+    };
+    Some((name, args))
+}
+
+/// Модель может скопировать плейсхолдеры из промпта (`<function-name>`) — не вызов.
+fn is_placeholder(name: &str) -> bool {
+    name.contains('<') || name.contains('>')
+}
+
+/// Починить типовые сбои JSON от локальной модели: висячие запятые и «голые»
+/// строковые значения (`"name": foo"` → `"name": "foo"`).
+fn repair_json(s: &str) -> String {
+    let mut out = s.to_string();
+    for (a, b) in [(", }", "}"), (",}", "}"), (", ]", "]"), (",]", "]")] {
+        out = out.replace(a, b);
+    }
+    quote_bare_values(&out)
+}
+
+/// Обернуть «голые» строковые значения в кавычки. Действуем только на `:` ВНЕ строк
+/// (иначе `:` в тексте вопроса испортил бы значение) и не трогаем числа и литералы.
+fn quote_bare_values(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len() + 16);
+    let mut i = 0usize;
+    let mut in_str = false;
+    while i < b.len() {
+        let c = b[i];
+        out.push(c);
+        i += 1;
+        if c == b'\\' && in_str {
+            if i < b.len() {
+                out.push(b[i]);
+                i += 1;
+            }
+            continue;
+        }
+        if c == b'"' {
+            in_str = !in_str;
+            continue;
+        }
+        if in_str || c != b':' {
+            continue;
+        }
+        let mut j = i;
+        while j < b.len() && (b[j] as char).is_whitespace() {
+            j += 1;
+        }
+        if j >= b.len() {
+            break;
+        }
+        let first = b[j];
+        if first == b'"' || first == b'{' || first == b'[' {
+            continue;
+        }
+        let rest = &s[j..];
+        if first.is_ascii_digit()
+            || first == b'-'
+            || rest.starts_with("true")
+            || rest.starts_with("false")
+            || rest.starts_with("null")
+        {
+            continue;
+        }
+        let end = rest.find([',', '}', ']', '\n']).unwrap_or(rest.len());
+        let mut val = rest[..end].trim();
+        if let Some(v) = val.strip_suffix('"') {
+            val = v.trim_end();
+        }
+        if val.is_empty() {
+            continue;
+        }
+        out.extend_from_slice(&b[i..j]);
+        out.push(b'"');
+        out.extend_from_slice(val.as_bytes());
+        out.push(b'"');
+        i = j + end;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Значение-слово после ключа (`"name": disk-search__ask_my_files"` → `disk-search__ask_my_files`).
+fn extract_value_after(s: &str, key: &str) -> Option<String> {
+    let at = s.find(key)? + key.len();
+    let after = s[at..].trim_start().strip_prefix(':')?.trim_start();
+    let val: String = after
+        .trim_start_matches('"')
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+        .collect();
+    if val.is_empty() {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+/// Первый JSON-объект после ключа (баланс скобок с учётом строк).
+fn extract_object_after(s: &str, key: &str) -> Option<String> {
+    let at = s.find(key)? + key.len();
+    let after = s[at..].trim_start().strip_prefix(':')?.trim_start();
+    let start = after.find('{')?;
+    let b = after.as_bytes();
+    let mut depth = 0i32;
+    let mut in_str = false;
+    let mut i = start;
+    while i < b.len() {
+        match b[i] {
+            b'\\' if in_str => i += 1,
+            b'"' => in_str = !in_str,
+            b'{' if !in_str => depth += 1,
+            b'}' if !in_str => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(after[start..=i].to_string());
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Собрать запрос чата из тела `/v1/chat/completions`.
 ///
 /// `default_thinking` — из конфига (`chat.thinking`), `default_max_tokens` — из
@@ -339,22 +698,21 @@ pub fn build_chat_request(
     default_max_tokens: i32,
     default_temperature: f32,
 ) -> Result<ChatRequest> {
-    if body
-        .get("stream")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        return Err(EngineError::Other(
-            "stream=true не поддерживается фасадом: cluster chat API отдаёт ответ целиком, \
-             клиент получит обычный JSON"
-                .to_string(),
-        ));
-    }
     let messages = body
         .get("messages")
         .and_then(|m| m.as_array())
         .ok_or_else(|| EngineError::Other("в теле нет массива messages".to_string()))?;
     let prompt = build_prompt(messages)?;
+    // `tools` есть → агентный вызов: собираем промпт с описанием функций и ждём
+    // `<tool_call>`. MCP/RAG `tools` не передают — обычный текстовый промпт.
+    let tools = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .filter(|a| !a.is_empty());
+    let (prompt, tools_enabled) = match tools {
+        Some(tools) => (build_prompt_tools(messages, tools)?, true),
+        None => (prompt, false),
+    };
     let n_predict = body
         .get("max_tokens")
         .or_else(|| body.get("n_predict"))
@@ -379,6 +737,7 @@ pub fn build_chat_request(
         temperature,
         thinking,
         model,
+        tools_enabled,
     })
 }
 
@@ -459,13 +818,14 @@ pub fn not_found_json(path: &str) -> Value {
 ///   `chat-think`), в `reasoning_content` дублируем их отдельно, чтобы клиенты,
 ///   умеющие показывать размышления, могли это делать.
 pub fn chat_response_json(model: &str, text: &str, thinking: Thinking, usage: Usage) -> Value {
-    let content = match thinking {
-        Thinking::Off => strip_think(text),
-        _ => text.trim().to_string(),
-    };
+    let (reasoning, content) = split_reasoning(text);
     let mut message = json!({ "role": "assistant", "content": content });
     if thinking == Thinking::On {
-        message["reasoning_content"] = json!(text.trim());
+        if let Some(r) = reasoning {
+            if !r.is_empty() {
+                message["reasoning_content"] = json!(r);
+            }
+        }
     }
     json!({
         "id": "chatcmpl-hds",
@@ -479,6 +839,142 @@ pub fn chat_response_json(model: &str, text: &str, thinking: Thinking, usage: Us
         }],
         "usage": usage.to_json(),
     })
+}
+
+/// Ответ `/v1/chat/completions` с поддержкой `tool_calls` (агентный вызов).
+///
+/// Если в запросе были `tools` и модель выдала блоки `<tool_call>`, возвращаем
+/// `message.tool_calls` и `finish_reason = "tool_calls"` (размышления из `content`
+/// вырезаются). Иначе — обычный ответ (`chat_response_json`).
+pub fn chat_response_json_tools(
+    model: &str,
+    text: &str,
+    thinking: Thinking,
+    usage: Usage,
+    tools_enabled: bool,
+) -> Value {
+    if !tools_enabled {
+        return chat_response_json(model, text, thinking, usage);
+    }
+    let (content, calls) = parse_tool_calls(&strip_think(text));
+    if calls.is_empty() {
+        return chat_response_json(model, text, thinking, usage);
+    }
+    let content = if content.is_empty() {
+        Value::Null
+    } else {
+        json!(content)
+    };
+    let message = json!({ "role": "assistant", "content": content, "tool_calls": calls });
+    json!({
+        "id": "chatcmpl-hds",
+        "object": "chat.completion",
+        "created": unix_now(),
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": message,
+            "finish_reason": "tool_calls",
+        }],
+        "usage": usage.to_json(),
+    })
+}
+
+/// SSE-поток `/v1/chat/completions` в формате OpenAI.
+///
+/// Движок отдаёт ответ целиком (стриминга в C-API нет), поэтому «стримим» его
+/// несколькими чанками: роль+контент → `tool_calls` (если есть) → финальный
+/// `finish_reason` → `usage` → `[DONE]`. Клиенту (Cline и др.) важен формат SSE,
+/// а не покадровая генерация.
+pub fn chat_sse(
+    model: &str,
+    text: &str,
+    thinking: Thinking,
+    usage: Usage,
+    tools_enabled: bool,
+) -> String {
+    fn chunk(out: &mut String, model: &str, delta: Value, finish: Value) {
+        let v = json!({
+            "id": "chatcmpl-hds",
+            "object": "chat.completion.chunk",
+            "created": unix_now(),
+            "model": model,
+            "choices": [{ "index": 0, "delta": delta, "finish_reason": finish }],
+        });
+        out.push_str("data: ");
+        out.push_str(&v.to_string());
+        out.push_str("\n\n");
+    }
+
+    let (reasoning, answer) = split_reasoning(text);
+    let (content, calls) = if tools_enabled {
+        let (c, calls) = parse_tool_calls(&answer);
+        if calls.is_empty() {
+            (answer, Vec::new())
+        } else {
+            (c, calls)
+        }
+    } else {
+        (answer, Vec::new())
+    };
+
+    let mut out = String::new();
+    if thinking == Thinking::On {
+        if let Some(r) = &reasoning {
+            if !r.is_empty() {
+                chunk(
+                    &mut out,
+                    model,
+                    json!({ "reasoning_content": r }),
+                    Value::Null,
+                );
+            }
+        }
+    }
+    chunk(
+        &mut out,
+        model,
+        json!({ "role": "assistant", "content": content }),
+        Value::Null,
+    );
+    if !calls.is_empty() {
+        let tc: Vec<Value> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                json!({
+                    "index": i,
+                    "id": c.get("id").cloned().unwrap_or(Value::Null),
+                    "type": "function",
+                    "function": {
+                        "name": c["function"]["name"].clone(),
+                        "arguments": c["function"]["arguments"].clone(),
+                    }
+                })
+            })
+            .collect();
+        chunk(&mut out, model, json!({ "tool_calls": tc }), Value::Null);
+    }
+    let finish = if calls.is_empty() {
+        "stop"
+    } else {
+        "tool_calls"
+    };
+    chunk(&mut out, model, json!({}), json!(finish));
+    // usage-чанк (клиенты с stream_options.include_usage его читают)
+    let u = json!({
+        "id": "chatcmpl-hds",
+        "object": "chat.completion.chunk",
+        "created": unix_now(),
+        "model": model,
+        "choices": [],
+        "usage": usage.to_json(),
+    });
+    out.push_str("data: ");
+    out.push_str(&u.to_string());
+    out.push_str("\n\n");
+    out.push_str("data: [DONE]\n\n");
+    out
 }
 
 /// Проверить и вернуть JSON эмбеддингов от движка.
@@ -763,7 +1259,11 @@ fn proxy(req: &crate::http::Request, base: &str, r: Route) -> crate::http::Respo
         std::time::Duration::from_secs(120)
     };
     match crate::http::client_json(&req.method, &url, Some(&req.body), timeout) {
-        Ok((status, json)) if (200..300).contains(&status) => Response { status: 200, json },
+        Ok((status, json)) if (200..300).contains(&status) => Response {
+            status: 200,
+            json,
+            sse: None,
+        },
         Ok((status, json)) => {
             let msg = json
                 .get("error")
@@ -804,6 +1304,7 @@ pub fn handle(
         Route::NotFound => Response {
             status: 404,
             json: not_found_json(&req.path),
+            sse: None,
         },
         // внутренние маршруты разобраны выше (`handle_internal`); эта ветка —
         // страховка на случай, если `Route` расширят и забудут обработку
@@ -860,6 +1361,10 @@ pub fn handle(
                 Ok(v) => v,
                 Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
             };
+            let want_stream = body
+                .get("stream")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let cr = match build_chat_request(&body, cfg.thinking, cfg.max_tokens, cfg.temperature)
             {
                 Ok(r) => r,
@@ -867,7 +1372,23 @@ pub fn handle(
             };
             match backend.chat(&cr) {
                 Ok((text, usage)) => {
-                    Response::ok(chat_response_json(&cr.model, &text, cr.thinking, usage))
+                    if want_stream {
+                        Response::sse(chat_sse(
+                            &cr.model,
+                            &text,
+                            cr.thinking,
+                            usage,
+                            cr.tools_enabled,
+                        ))
+                    } else {
+                        Response::ok(chat_response_json_tools(
+                            &cr.model,
+                            &text,
+                            cr.thinking,
+                            usage,
+                            cr.tools_enabled,
+                        ))
+                    }
                 }
                 Err(e) => Response::error(503, &e.to_string(), "server_error"),
             }

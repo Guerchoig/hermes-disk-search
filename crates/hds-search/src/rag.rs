@@ -103,10 +103,17 @@ pub fn build_context(results: &[SearchResult], max_chars: usize) -> (String, usi
 
 /// Тело `/chat/completions` (порт `_chat_payload`): thinking=off → шаблонно выключить.
 fn chat_payload(cfg: &Config, messages: serde_json::Value) -> serde_json::Value {
+    // Бюджет ответа RAG отделён от общего `chat.max_tokens`: последний стал потолком
+    // вывода роли chat для АГЕНТОВ (Cline и др.), которым нужны длинные ответы, а
+    // RAG-ответ намеренно короткий — его ждёт MCP-клиент (таймаут 300 с).
+    let max_tokens = dig(cfg, "chat.rag_max_tokens")
+        .or_else(|| dig(cfg, "chat.max_tokens"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(600);
     let mut payload = json!({
         "model": dig(cfg, "chat.model").and_then(|v| v.as_str()).unwrap_or("qwen3.5-9b"),
         "temperature": dig(cfg, "chat.temperature").and_then(|v| v.as_f64()).unwrap_or(0.2),
-        "max_tokens": dig(cfg, "chat.max_tokens").and_then(|v| v.as_i64()).unwrap_or(600),
+        "max_tokens": max_tokens,
         "messages": messages,
     });
     let thinking = dig(cfg, "chat.thinking")

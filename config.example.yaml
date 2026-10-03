@@ -42,16 +42,25 @@ chunk:
 
 embedding:
   base_url: "http://127.0.0.1:8011/v1"   # роль embedding (владелец портов — llm-host)
-  model: "text-embedding-bge-m3"
+  model: "text-embedding-bge-m3"         # имя модели в теле запроса /v1/embeddings (не путь)
   batch_size: 64
   dim: 1024                 # bge-m3 = 1024
 
 chat:
   base_url: "http://127.0.0.1:8010/v1"
-  model: "qwen3.5-9b"
+  model: "chat"             # имя модели в теле запроса (фасад /v1/models отдаёт chat|chat-think)
   thinking: "off"           # off|auto: off — RAG-ответы без размышлений (быстро)
   temperature: 0.2
-  max_context_chars: 14000
+  max_tokens: 2048          # потолок вывода ОДНОГО ответа роли chat: дефолт llm-host, когда
+                            # клиент (агент Cline и др.) не прислал свой max_tokens. У агента
+                            # в этот потолок входят и размышления — при 600 токенов ответы
+                            # обрывались на полуслове. Верхняя граница — ctx_per_slot слота.
+  rag_max_tokens: 600       # отдельный потолок ответа ask_my_files (RAG): короче намеренно,
+                            # этот ответ ждёт MCP-клиент (таймаут 300 с)
+  max_context_chars: 14000  # бюджет символов на фрагменты в RAG-промпте (build_context):
+                            # сколько найденных блоков войдёт в сообщение пользователю.
+                            # В токенах ≈ /2.5; должно быть < ctx_per_slot минус запас
+                            # на вопрос+ответ, иначе движок вернёт явную ошибку 400
 
 llm_server:                 # роли LLM (движок openresearchtools); владелец портов — bin\llm_host.exe
   bin: ""
@@ -59,25 +68,44 @@ llm_server:                 # роли LLM (движок openresearchtools); в�
   autostart: true
   start_timeout: 300
   parallel: 1
+  # model — GGUF-файл инстанса роли. "shared:<role>" = модель из ОБЩЕГО llama-рантайма
+  # машины (%LOCALAPPDATA%\llama-runtime\models\<role>\, манифест current.json):
+  # один набор моделей и одна сборка движка на машину, смена активной модели
+  # одной кнопкой. Явный путь тоже можно; относительный резолвится от
+  # РАБОЧЕГО КАТАЛОГА процесса llm_host, поэтому надёжнее абсолютный.
   chat:
     port: 8010
-    model: "models/chat/qwen3.5-9b-Q6_K.gguf"
+    model: "shared:chat"
+    # ctx_per_slot — контекст одного слота движка в ТОКЕНАХ (n_ctx llama-server):
+    # физический KV-кэш (VRAM) и потолок «промпт + ответ» одного запроса.
     ctx_per_slot: 32768       # 32K подтверждено замером (W2_REPORT §7.2): модель гибридная,
                               #   KV держат 8 слоёв из 32 → 1024 МиБ при f16; «модель + KV»
                               #   ≈ 8492 МиБ → в 12 ГБ влезает (плюс SSM ≈50 МиБ и compute-буфер)
     extra_args: "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99"
   embedding:
     port: 8011
-    model: "models/embedding/bge-m3-Q8_0.gguf"
-    ctx_per_slot: 8192
+    model: "shared:embedding"
+    ctx_per_slot: 8192        # контекст одного текста эмбеддинга (токены):
+                              # чанки ~800 символов (~350 токенов) — с большим запасом
     # `--ubatch-size` — compute-буфер движка (n_ubatch × hidden × слои). 8192 при 12 ГБ
     # неразумен (≈1,4 ГиБ у bge-m3), 512 — дефолт llama.cpp и ~16× меньше.
     extra_args: "--batch-size 8192 --ubatch-size 512 -ngl 99"
   rerank:
     port: 8012
-    model: "models/rerank/bge-reranker-v2-m3-Q8_0.gguf"
-    ctx_per_slot: 8192
+    model: "shared:rerank"
+    ctx_per_slot: 8192        # контекст одной пары «запрос + фрагмент» при реранкинге (токены)
     extra_args: "-ngl 0"
+
+# Слой резидента llm-host: llm.<role>.* приоритетнее llm_server.<role>.*
+# (model, port, n_ctx, retention, grace_seconds, n_batch, n_ubatch, n_threads,
+#  cache_type_k/v; llm.model_policy — fixed|auto). Без llm.<role>.n_batch/n_ubatch
+# батчи берутся дефолтом движка (2048) — compute-буфер чата ≈ +1,5 ГиБ VRAM
+# (замер W2_REPORT §10.2a: 2048 → 9384 МиБ, 512 → 7881 МиБ), поэтому 512.
+llm:
+  chat:
+    n_batch: 512
+    n_ubatch: 512
+  # embedding: { n_ctx: 8192, retention: load_on_demand, cache_type_k: "q8_0" }
 
 # GPU и диспетчер VRAM (W2, A4; все ключи необязательные — ниже значения по умолчанию)
 gpu:
@@ -93,7 +121,7 @@ gpu:
   pause_index_on_query: true # ставить index.pause, пока обслуживается запрос
   # vram_source: nvml        # источник истины по VRAM (R29); `engine` = list_devices, недостоверно
   # vram_budget_mb: 11000    # опционально: сузить бюджет (диагностика/критерий A-7)
-  # external_vram_mb: 0      # вычет на чужих потребителей GPU (например, anonymizer_proxy)
+  # external_vram_mb: 0      # вычет на чужих потребителей GPU (браузер, игры, другие LLM)
   priorities: { chat: 100, embedding: 40, rerank: 30, whisper: 20 }
                              # меньше число = выгружается раньше; роли вне списка → 0
 
@@ -119,7 +147,7 @@ search:
 rerank:                     # реранкер ask_my_files (роль rerank; владелец — llm-host)
   enabled: false            # по умолчанию выключен
   url: "http://localhost:8012/v1"
-  model: "bge-reranker-v2-m3"
+  model: "bge-reranker-v2-m3"  # имя модели в теле запроса /v1/rerank (GGUF-файл — llm_server.rerank.model)
   timeout: 30
   max_latency: 15
 

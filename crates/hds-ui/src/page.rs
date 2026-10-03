@@ -23,10 +23,16 @@ pub const PAGE: &str = r#"<!doctype html>
  .muted{color:#8aa0b6}.ok{color:#6ee7a8}.err{color:#ff9a9a}
  .res{border-top:1px solid #24384f;padding:8px 0}
  .loc{color:#9fd0ff;word-break:break-all}
+ .warnbox{color:#ffd479;margin-top:8px;line-height:1.4}
 </style></head><body>
 <header><h1>Hermes Disk Search — Rust UI</h1></header>
 <main>
  <section><h2>Состояние</h2><div id="status" class="muted">…</div></section>
+
+ <section><h2>Резидент llm-host</h2>
+  <div class="row"><button onclick="restartLlmHost()">Перезапустить llm-host</button>
+   <span id="lhmsg" class="muted"></span></div>
+  <div class="muted">Останавливает и поднимает заново резидент (порты 8010–8012, владелец GPU). Модель перезагрузится — первый ответ будет с задержкой.</div></section>
 
  <section><h2>Проверка компонентов</h2>
   <div class="row"><button onclick="loadDiag()">Обновить</button>
@@ -58,6 +64,15 @@ pub const PAGE: &str = r#"<!doctype html>
   <textarea id="excl" spellcheck="false"></textarea>
   <div class="row"><button onclick="saveExcl()">Сохранить исключения</button></div>
  </section>
+
+ <section><h2>Настройки Cline</h2>
+  <div class="row"><button onclick="clineSync()">Синхронизировать настройки Cline</button>
+   <span id="clmsg" class="muted"></span></div>
+  <div class="muted">Приводит Cline к этому конфигу: окна контекста моделей = слоты llm-host
+   (<code>ctx_per_slot</code>), MCP-сервер disk-search, правило и скилл. Установка/перезапуск
+   Cline не нужны, но после правки моделей или MCP Cline надо перезапустить — об этом будет
+   предупреждение. Правило подхватится в новой сессии.</div>
+  <div id="clres" class="muted"></div></section>
 
  <section><h2>Индексация</h2>
   <div class="row">
@@ -141,6 +156,23 @@ async function saveRoots(){ const m=document.getElementById('cmsg'); m.textConte
   try{ const r=await jpost('/api/roots/save',{roots:linesOf('roots')}); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; } }
 async function saveExcl(){ const m=document.getElementById('cmsg'); m.textContent='…';
   try{ const r=await jpost('/api/config/excludes',{paths:linesOf('excl')}); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; } }
+async function restartLlmHost(){
+  const m=document.getElementById('lhmsg');
+  m.textContent='перезапускаю… (может занять до минуты)';
+  try{ const r=await jpost('/api/llm-host/restart'); m.textContent=(r.ok?'':'ошибка: ')+(r.msg||(r.ok?'ok':'')); }
+  catch(e){ m.textContent='ошибка: '+e; }
+  refresh();
+}
+function clineIcon(s){ return s==='ok'?'&#9989;':(s==='skip'?'&#11036;':'&#9888;&#65039;'); }
+async function clineSync(){
+  const m=document.getElementById('clmsg'), b=document.getElementById('clres');
+  m.textContent='синхронизирую…'; b.innerHTML='';
+  try{ const r=await jpost('/api/cline/sync');
+    m.textContent=r.error?(r.error):(r.ok?'готово':'есть предупреждения');
+    b.innerHTML=(r.steps||[]).map(s=>'<div>'+clineIcon(s.status)+' <b>'+esc(s.title)+'</b>: '+esc(s.msg)+'</div>').join('')
+      +(r.restart_required?'<div class="warnbox">&#9888;&#65039; '+esc(r.restart_note||'Перезапустите Cline.')+'</div>':'');
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
 refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
 </script></body></html>
 "#;

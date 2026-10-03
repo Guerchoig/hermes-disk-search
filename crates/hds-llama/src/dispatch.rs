@@ -38,7 +38,7 @@ pub struct InstanceUse {
     pub active_requests: i32,
     pub queued_requests: i32,
     /// Владеет ли инстансом HDS. Чужой инстанс не вытесняем: им может
-    /// пользоваться `anonymizer_proxy` (§8.4).
+    /// пользоваться любой сторонний процесс на GPU.
     pub owned: bool,
     /// Сколько секунд инстанс без запросов (для `gpu.evict_idle_sec`).
     pub idle_secs: u64,

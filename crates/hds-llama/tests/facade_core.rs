@@ -7,9 +7,10 @@
 use serde_json::json;
 
 use hds_llama::facade::{
-    build_chat_request, build_prompt, chat_response_json, default_port, error_json, health_json,
-    models_json, not_found_json, props_json, reasoning_flags, route, strip_think, thinking_for,
-    validate_embeddings, validate_rerank, ChatRequest, Route, Thinking, Usage,
+    build_chat_request, build_prompt, build_prompt_tools, chat_response_json,
+    chat_response_json_tools, chat_sse, default_port, error_json, health_json, models_json,
+    not_found_json, parse_tool_calls, props_json, reasoning_flags, route, strip_think,
+    thinking_for, validate_embeddings, validate_rerank, ChatRequest, Route, Thinking, Usage,
 };
 
 /// Порты совпадают с `llama-server` — клиенты (UI, MCP, внешние агенты) не меняются.
@@ -138,9 +139,9 @@ fn chat_request_parses_options_with_config_defaults() {
     assert_eq!(req.thinking, Thinking::On, "алиас chat-think → размышления");
     assert_eq!(req.reasoning(), Some(("on", -1, Some("none"))));
 
-    let body = json!({"messages": [], "stream": true});
-    let err = build_chat_request(&body, Thinking::Off, 600, 0.2).unwrap_err();
-    assert!(err.to_string().contains("stream"), "{err}");
+    // stream теперь поддержан (SSE-ветка в handle) — не ошибка сборки запроса
+    let body = json!({"messages": [{"role":"user","content":"x"}], "stream": true});
+    assert!(build_chat_request(&body, Thinking::Off, 600, 0.2).is_ok());
     let err = build_chat_request(&json!({}), Thinking::Off, 600, 0.2).unwrap_err();
     assert!(err.to_string().contains("messages"), "{err}");
 }
@@ -158,9 +159,10 @@ fn strip_think_parity_with_python() {
     // блок без закрытия — режем до конца
     let text = format!("Ответ{open}обрыв");
     assert_eq!(strip_think(&text), "Ответ");
-    // одинокий закрывающий маркер (модель начала с середины размышлений)
+    // одинокий закрывающий маркер: до него — размышления (движок добавляет
+    // открывающий сам), после — ответ
     let text = format!("середина{close}\n\nОтвет: 5");
-    assert_eq!(strip_think(&text), "середина");
+    assert_eq!(strip_think(&text), "Ответ: 5");
     // без маркеров — только trim
     assert_eq!(strip_think("  Ответ: 6  "), "Ответ: 6");
     // два блока подряд
@@ -195,12 +197,9 @@ fn chat_response_shape_is_openai_compatible() {
         .get("reasoning_content")
         .is_none());
 
-    // chat-think: размышления видны и в content, и в reasoning_content
+    // chat-think: размышления — отдельно (reasoning_content), content — только ответ
     let v = chat_response_json("chat-think", &with_think, Thinking::On, Usage::default());
-    assert!(v["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap()
-        .contains("секрет"));
+    assert_eq!(v["choices"][0]["message"]["content"], "Ответ: 4");
     assert!(v["choices"][0]["message"]["reasoning_content"]
         .as_str()
         .unwrap()
@@ -276,4 +275,153 @@ fn engine_responses_are_validated() {
         .unwrap_err()
         .to_string()
         .contains("results"));
+}
+
+/// Tool calling: активируется ТОЛЬКО при наличии `tools` (агент), ответ собирается
+/// с `tool_calls` (формат Qwen `<tool_call>`); MCP/RAG `tools` не шлют.
+#[test]
+fn tool_calling_is_prompt_based_and_opt_in() {
+    let lt = '\u{3c}';
+    let gt = '\u{3e}';
+    let tc_open = format!("{lt}tool_call{gt}");
+    let tc_close = format!("{lt}/tool_call{gt}");
+
+    // без tools — обычный текстовый промпт
+    let body = json!({"messages": [{"role": "user", "content": "привет"}]});
+    let req = build_chat_request(&body, Thinking::Off, 600, 0.2).unwrap();
+    assert!(!req.tools_enabled);
+    assert_eq!(req.prompt, "привет");
+
+    // с tools — промпт с описаниями функций и правилом формата
+    let tools = json!([{
+        "type": "function",
+        "function": {"name": "get_weather", "description": "Погода",
+                     "parameters": {"type": "object", "properties": {"city": {"type": "string"}}}}
+    }]);
+    let body = json!({
+        "messages": [{"role": "user", "content": "Погода в Париже?"}],
+        "tools": tools.clone(),
+    });
+    let req = build_chat_request(&body, Thinking::Off, 600, 0.2).unwrap();
+    assert!(req.tools_enabled);
+    assert!(req.prompt.contains("# Tools"));
+    assert!(req.prompt.contains("get_weather"));
+    assert!(req.prompt.contains(&tc_open));
+
+    let prompt = build_prompt_tools(
+        &[json!({"role": "user", "content": "q"})],
+        tools.as_array().unwrap(),
+    )
+    .unwrap();
+    assert!(prompt.contains("get_weather"));
+
+    // разбор вызова из ответа модели
+    let answer = format!(
+        "Думаю...\n{tc_open}\n{{\"name\": \"get_weather\", \"arguments\": {{\"city\": \"Paris\"}}}}\n{tc_close}"
+    );
+    let (content, calls) = parse_tool_calls(&answer);
+    assert_eq!(content, "Думаю...");
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0]["type"], "function");
+    assert_eq!(calls[0]["function"]["name"], "get_weather");
+    assert_eq!(calls[0]["function"]["arguments"], "{\"city\":\"Paris\"}");
+    assert!(calls[0]["id"].as_str().unwrap().starts_with("call_"));
+
+    // ответ OpenAI-формы с tool_calls
+    let v = chat_response_json_tools("chat", &answer, Thinking::Off, Usage::default(), true);
+    assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+    assert_eq!(
+        v["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+        "get_weather"
+    );
+
+    // tools есть, но модель не вызвала — обычный ответ
+    let v = chat_response_json_tools(
+        "chat",
+        "просто ответ",
+        Thinking::Off,
+        Usage::default(),
+        true,
+    );
+    assert_eq!(v["choices"][0]["finish_reason"], "stop");
+    assert!(v["choices"][0]["message"].get("tool_calls").is_none());
+
+    // reasoning_effort (агент) → размышления включены; none/off → выключены
+    let b = json!({"messages": [{"role":"user","content":"x"}], "reasoning_effort": "high"});
+    assert_eq!(thinking_for("chat", &b, Thinking::Off), Thinking::On);
+    let b = json!({"messages": [{"role":"user","content":"x"}], "reasoning_effort": "none"});
+    assert_eq!(thinking_for("chat", &b, Thinking::On), Thinking::Off);
+}
+
+/// SSE-поток чата: валидные OpenAI-чанки, `finish_reason` и `[DONE]`; tool_calls тоже.
+#[test]
+fn chat_sse_streams_openai_chunks() {
+    let s = chat_sse("chat", "Ответ", Thinking::Off, Usage::default(), false);
+    assert!(s.starts_with("data: "));
+    assert!(s.contains("chat.completion.chunk"));
+    assert!(s.contains("\"finish_reason\":\"stop\""));
+    assert!(s.ends_with("data: [DONE]\n\n"));
+
+    let lt = '\u{3c}';
+    let gt = '\u{3e}';
+    let answer =
+        format!("{lt}tool_call{gt}{{\"name\":\"f\",\"arguments\":{{}}}}{lt}/tool_call{gt}");
+    let s = chat_sse("chat", &answer, Thinking::Off, Usage::default(), true);
+    assert!(s.contains("tool_calls"));
+    assert!(s.contains("\"finish_reason\":\"tool_calls\""));
+}
+
+/// Терпимый разбор `<tool_call>`: реальный сбой 03.10.2026 — потерянная открывающая
+/// кавычка у значения `name` (`{"name": disk-search__ask_my_files", …}`). Раньше блок
+/// оставался ТЕКСТОМ, агент не получал `tool_calls` и молча завершал ход.
+#[test]
+fn tool_calls_survive_broken_json() {
+    let lt = '\u{3c}';
+    let gt = '\u{3e}';
+    let open = format!("{lt}tool_call{gt}");
+    let close = format!("{lt}/tool_call{gt}");
+
+    // 1. боевой случай: битое имя + нормальные аргументы, два блока подряд
+    let answer = format!(
+        "Беру инструменты.\n{open}\n{{\"name\": disk-search__ask_my_files\", \"arguments\": {{\"limit\": 25, \"question\": \"какие есть ТЗ: требования\"}}}}\n{close}\n\
+         {open}\n{{\"name\": disk-search__search_local_files\", \"arguments\": {{\"kinds\": \"text,docx\", \"limit\": 15, \"query\": \"техническое задание\"}}}}\n{close}"
+    );
+    let (content, calls) = parse_tool_calls(&answer);
+    assert_eq!(content, "Беру инструменты.");
+    assert_eq!(calls.len(), 2, "оба блока должны стать вызовами");
+    assert_eq!(calls[0]["function"]["name"], "disk-search__ask_my_files");
+    // аргументы не испорчены: двоеточие ВНУТРИ строки «починка» не трогает
+    assert_eq!(
+        calls[0]["function"]["arguments"],
+        "{\"limit\":25,\"question\":\"какие есть ТЗ: требования\"}"
+    );
+    assert_eq!(
+        calls[1]["function"]["name"],
+        "disk-search__search_local_files"
+    );
+
+    // 2. модель забыла закрывающий тег у блока
+    let answer = format!(
+        "{open}{{\"name\":\"f\",\"arguments\":{{\"a\":1}}}}\n{open}{{\"name\":\"g\",\"arguments\":{{}}}}"
+    );
+    let (content, calls) = parse_tool_calls(&answer);
+    assert_eq!(calls.len(), 2);
+    assert_eq!(calls[1]["function"]["name"], "g");
+    assert!(content.is_empty());
+
+    // 3. обёртка {"function": …} и аргументы строкой (форма OpenAI)
+    let answer = format!(
+        "{open}{{\"function\": {{\"name\": \"h\", \"arguments\": \"{{\\\"b\\\": 2}}\"}}}}{close}"
+    );
+    let calls = parse_tool_calls(&answer).1;
+    assert_eq!(calls[0]["function"]["name"], "h");
+    assert_eq!(calls[0]["function"]["arguments"], "{\"b\": 2}");
+
+    // 4. плейсхолдеры из промпта — это НЕ вызов (текст сохраняем для диагностики)
+    let answer = format!(
+        "{open}\n{{\"name\": <function-name>, \"arguments\": <args-json-object>}}\n{close}"
+    );
+    let (content, calls) = parse_tool_calls(&answer);
+    assert!(calls.is_empty());
+    assert!(content.contains("function-name"));
 }
