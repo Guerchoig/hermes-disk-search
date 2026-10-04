@@ -60,6 +60,51 @@ if (-not $EngineDir) {
 # attention for quantized V. Files and sha256 live in
 # runtime-manifests/engine-patch.json; stock files are kept next to them as *.orig
 # so that -RollbackEnginePatch restores the upstream runtime.
+function Apply-HdsEnginePatch {
+    param(
+        [string]$PatchManifestFile,
+        [string]$TargetEngineDir
+    )
+    $pm = Get-Content -Raw -Path $PatchManifestFile | ConvertFrom-Json
+    Write-Host "[patch] applying HDS engine patch (base $($pm.base_tag), tag $($pm.tag)) to $TargetEngineDir"
+    $tmpPatch = Join-Path ([System.IO.Path]::GetTempPath()) ("hds-engine-patch-" + [Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $tmpPatch | Out-Null
+    try {
+        $ProgressPreference = "SilentlyContinue"
+        foreach ($f in @($pm.files)) {
+            $dst = Join-Path $tmpPatch $f.file_name
+            Write-Host "[..] $($f.file_name)"
+            try {
+                Invoke-WebRequest -Uri $f.url -OutFile $dst -UseBasicParsing -TimeoutSec 3600
+            } catch {
+                if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                    & curl.exe -L --fail -o $dst $f.url
+                    if ($LASTEXITCODE -ne 0) { throw "curl failed with exit code $LASTEXITCODE" }
+                } else {
+                    throw
+                }
+            }
+            $got = (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower()
+            $want = ([string]$f.sha256).Trim().ToLower()
+            if ($got -ne $want) {
+                throw "sha256 mismatch for $($f.file_name): expected $want, got $got"
+            }
+            $target = Join-Path $TargetEngineDir $f.file_name
+            if ((Test-Path $target) -and -not (Test-Path "$target.orig")) {
+                Copy-Item -LiteralPath $target -Destination "$target.orig" -Force
+            }
+            Copy-Item -LiteralPath $dst -Destination $target -Force
+            if (-not $NoUnblock) {
+                try { Unblock-File -LiteralPath $target -ErrorAction Stop } catch { }
+            }
+        }
+        Write-Host "[ok] engine patch applied: $($pm.files.Count) file(s) (originals kept as *.orig)"
+        Write-Host "[i] rollback: fetch_engine_runtime.ps1 -RollbackEnginePatch"
+    } finally {
+        Remove-Item -LiteralPath $tmpPatch -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 if ($RollbackEnginePatch -or $PatchEngine) {
     $patchMf = $PatchManifest
     if (-not $patchMf) { $patchMf = Join-Path $root "runtime-manifests\engine-patch.json" }
@@ -80,48 +125,15 @@ if ($RollbackEnginePatch -or $PatchEngine) {
     }
 
     if (-not (Test-Path $patchMf)) { throw "engine patch manifest not found: $patchMf" }
-    $pm = Get-Content -Raw -Path $patchMf | ConvertFrom-Json
     if (-not (Test-Path (Join-Path $EngineDir $libName))) {
-        Write-Host "[patch] engine runtime is missing in $EngineDir - installing it first"
+        # Runtime is missing: fall through to the download flow below and apply the
+        # patch right after the runtime is installed (setup.ps1 passes -PatchEngine
+        # on fresh installs so one run yields a patched engine).
+        Write-Host "[patch] engine runtime is missing in $EngineDir - installing it first, then applying the patch"
+        $script:PatchPending = $true
     } else {
-        Write-Host "[patch] applying HDS engine patch (base $($pm.base_tag)) to $EngineDir"
-        $tmpPatch = Join-Path ([System.IO.Path]::GetTempPath()) ("hds-engine-patch-" + [Guid]::NewGuid().ToString("N"))
-        New-Item -ItemType Directory -Force -Path $tmpPatch | Out-Null
-        try {
-            $ProgressPreference = "SilentlyContinue"
-            foreach ($f in @($pm.files)) {
-                $dst = Join-Path $tmpPatch $f.file_name
-                Write-Host "[..] $($f.file_name)"
-                try {
-                    Invoke-WebRequest -Uri $f.url -OutFile $dst -UseBasicParsing -TimeoutSec 3600
-                } catch {
-                    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
-                        & curl.exe -L --fail -o $dst $f.url
-                        if ($LASTEXITCODE -ne 0) { throw "curl failed with exit code $LASTEXITCODE" }
-                    } else {
-                        throw
-                    }
-                }
-                $got = (Get-FileHash $dst -Algorithm SHA256).Hash.ToLower()
-                $want = ([string]$f.sha256).Trim().ToLower()
-                if ($got -ne $want) {
-                    throw "sha256 mismatch for $($f.file_name): expected $want, got $got"
-                }
-                $target = Join-Path $EngineDir $f.file_name
-                if ((Test-Path $target) -and -not (Test-Path "$target.orig")) {
-                    Copy-Item -LiteralPath $target -Destination "$target.orig" -Force
-                }
-                Copy-Item -LiteralPath $dst -Destination $target -Force
-                if (-not $NoUnblock) {
-                    try { Unblock-File -LiteralPath $target -ErrorAction Stop } catch { }
-                }
-            }
-            Write-Host "[ok] engine patch applied: $($pm.files.Count) file(s) (originals kept as *.orig)"
-            Write-Host "[i] rollback: fetch_engine_runtime.ps1 -RollbackEnginePatch"
-            exit 0
-        } finally {
-            Remove-Item -LiteralPath $tmpPatch -Recurse -Force -ErrorAction SilentlyContinue
-        }
+        Apply-HdsEnginePatch -PatchManifestFile $patchMf -TargetEngineDir $EngineDir
+        exit 0
     }
 }
 
@@ -249,4 +261,10 @@ try {
     Write-Host "[ok] engine runtime installed: $EngineDir"
 } finally {
     Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# -PatchEngine on a machine without the runtime: apply the overlay now that the
+# stock runtime is in place (see the fall-through above).
+if ($script:PatchPending) {
+    Apply-HdsEnginePatch -PatchManifestFile $patchMf -TargetEngineDir $EngineDir
 }

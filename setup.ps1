@@ -194,7 +194,10 @@ if (Test-Path $cfg) {
 if (-not $SkipEngine) {
     Step "Engine runtime (llm-host + ASR)"
     try {
-        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_engine_runtime.ps1")
+        # -PatchEngine: our overlay is applied right after the stock runtime is
+        # installed (idempotent; the script also handles the missing-runtime case
+        # by installing it first and then patching).
+        & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_engine_runtime.ps1") -PatchEngine
         if ($LASTEXITCODE -ne 0) { throw "fetch_engine_runtime.ps1 exited with code $LASTEXITCODE" }
     } catch {
         Warn "engine runtime not ready: $_"
