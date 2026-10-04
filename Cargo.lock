@@ -594,6 +594,7 @@ name = "hds-index"
 version = "0.1.0"
 dependencies = [
  "blake2",
+ "directories",
  "flate2",
  "hds-clip",
  "hds-core",

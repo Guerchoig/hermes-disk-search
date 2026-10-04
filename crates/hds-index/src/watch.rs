@@ -170,7 +170,18 @@ impl WatchLock {
     /// (там `_lock_pid_is_watcher`), а считаем живой PID владельцем — пессимистично,
     /// как Python без `psutil` (`return True`). Дубль watcher'а опаснее пропуска старта.
     pub fn acquire(project_root: &Path, attempts: u32) -> Result<Option<WatchLock>> {
-        let lock = project_root.join("watch.lock");
+        WatchLock::acquire_named(project_root, "watch.lock", attempts)
+    }
+
+    /// То же для **своего** имени lock-файла: демон автотранскрибации берёт
+    /// `transcribe.lock` (§4) — два демона не мешают друг другу и не мешают
+    /// боевому `watch.lock`.
+    pub fn acquire_named(
+        project_root: &Path,
+        name: &str,
+        attempts: u32,
+    ) -> Result<Option<WatchLock>> {
+        let lock = project_root.join(name);
         for _ in 0..attempts.max(1) {
             match std::fs::OpenOptions::new()
                 .create_new(true)
@@ -535,12 +546,23 @@ pub fn run_watch(
             quiet: true,
             ..Default::default()
         };
-        if let Err(e) = pipeline::run_index(conn, cfg, emb, extractor, lemmatizer, &args) {
-            // сверка не должна убивать наблюдателя: события ФС важнее
-            eprintln!(
-                "[watch] ошибка сверки (наблюдение продолжается): {}",
-                e.message()
-            );
+        match pipeline::run_index(conn, cfg, emb, extractor, lemmatizer, &args) {
+            // `run_index` при кооперативной остановке сам **снимает** `index.stop`
+            // (сигнал отработан) — цикл ниже решил бы, что остановки не было, и
+            // наблюдатель продолжил бы работу. Поэтому выходим здесь; `watch.lock`
+            // снимается через `Drop`.
+            Ok(v) if v.get("stopped").and_then(|x| x.as_bool()) == Some(true) => {
+                println!("[watch] index.stop: сверка прервана — завершаюсь (сигнал уже отработан)");
+                return Ok(0);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                // сверка не должна убивать наблюдателя: события ФС важнее
+                eprintln!(
+                    "[watch] ошибка сверки (наблюдение продолжается): {}",
+                    e.message()
+                );
+            }
         }
     }
 

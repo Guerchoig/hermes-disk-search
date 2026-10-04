@@ -27,3 +27,8 @@ out/w3_clip.db*
 out/w3_host_pause/
 # L2b iter-2: копия рантайма движка для живой проверки патча (боевой не трогаем)
 out/engine-patched/
+# T0.1 (PLAN_AUTO_TRANSCRIBE): спайк офлайн-диаризации движка (сырые логи/дампы)
+out/spike7_*
+# T2 (PLAN_AUTO_TRANSCRIBE): живой прогон конвейера автотранскрибации (inbox/out/state)
+out/at_*
+

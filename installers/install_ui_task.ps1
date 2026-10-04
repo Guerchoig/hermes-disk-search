@@ -55,10 +55,12 @@ try {
 } catch {
     Write-Host "[--] scheduler unavailable ($($_.Exception.Message.Trim())) - using the Startup folder" -ForegroundColor Yellow
     $lnk = Join-Path $startupDir "$taskName.lnk"
+    # wscript.exe + hidden_launch.vbs: starts the console binary with no window
+    $vbs = Join-Path $root 'hidden_launch.vbs'
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($lnk)
-    $sc.TargetPath = $hdsExe
-    $sc.Arguments = $argList
+    $sc.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $sc.Arguments = "`"$vbs`" `"$hdsExe`"" + (($argList -split '\s+' | ForEach-Object { " `"$_`"" }) -join '')
     $sc.WorkingDirectory = $root
     $sc.IconLocation = (Join-Path $root 'assets\icon.ico') + ',0'
     $sc.Save()

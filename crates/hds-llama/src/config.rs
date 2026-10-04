@@ -25,6 +25,14 @@ use crate::vram::VramSource;
 /// Роли, которые поднимает `llm-host` (порядок важен для логов/`status`).
 pub const ROLES: [&str; 4] = ["chat", "embedding", "rerank", "whisper"];
 
+/// Псевдо-роль автотранскрибации (`PLAN_AUTO_TRANSCRIBE` §10 T1.4).
+///
+/// Своего инстанса движка у неё нет — демон `hds transcribe-watch` ходит в bridge
+/// роли `whisper`. Но приоритет вытеснения у неё **свой**: выше индексации и всех
+/// вспомогательных ролей, ниже поиска/чата (порядок ролей по ТЗ:
+/// 1) поиск и чат → 2) автотранскрибация → 3) индексация).
+pub const TRANSCRIBE_ROLE: &str = "transcribe";
+
 /// Режим работы LLM (`llm_server.mode`, §8.7 плана).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -97,7 +105,8 @@ pub struct GpuConfig {
     pub reserve_mb: u64,
     pub vram_budget_mb: Option<u64>,
     pub evict_idle_sec: u64,
-    /// Приоритеты вытеснения: chat 100, embedding 40, rerank 30, whisper 20.
+    /// Приоритеты вытеснения: chat 100, transcribe 60, embedding 40, rerank 30,
+    /// whisper 20 (см. [`TRANSCRIBE_ROLE`]).
     pub priorities: BTreeMap<String, i32>,
     /// `gpu.policy` (A4 шаг 2): что делать при нехватке VRAM.
     pub policy: GpuPolicy,
@@ -114,6 +123,7 @@ impl Default for GpuConfig {
     fn default() -> Self {
         let mut priorities = BTreeMap::new();
         priorities.insert("chat".to_string(), 100);
+        priorities.insert(TRANSCRIBE_ROLE.to_string(), 60);
         priorities.insert("embedding".to_string(), 40);
         priorities.insert("rerank".to_string(), 30);
         priorities.insert("whisper".to_string(), 20);
@@ -731,6 +741,30 @@ llm_server:
         );
         assert_eq!(parse_kv_type("не-тип"), None);
         assert_eq!(parse_kv_type(""), None);
+    }
+
+    /// T1.4 (PLAN_AUTO_TRANSCRIBE): `transcribe` — выше индексации и index-ролей,
+    /// ниже чата; порядок «1) поиск/чат → 2) автотранскрибация → 3) индексация».
+    #[test]
+    fn transcribe_priority_sits_between_chat_and_index_roles() {
+        let gpu = GpuConfig::default();
+        assert_eq!(gpu.priority_of(TRANSCRIBE_ROLE), 60);
+        assert!(
+            gpu.priority_of("chat") > gpu.priority_of(TRANSCRIBE_ROLE),
+            "чат вытесняется позже автотранскрибации"
+        );
+        for index_role in ["embedding", "rerank", "whisper"] {
+            assert!(
+                gpu.priority_of(TRANSCRIBE_ROLE) > gpu.priority_of(index_role),
+                "'{index_role}' должен вытесняться раньше автотранскрибации"
+            );
+        }
+    }
+
+    /// Роль вне `gpu.priorities` получает 0 — вытесняется первой (защита чата).
+    #[test]
+    fn unknown_role_priority_is_zero() {
+        assert_eq!(GpuConfig::default().priority_of("не-роль"), 0);
     }
 
     /// Новые ключи `llm.<role>.{n_batch,n_ubatch,n_threads}` приоритетнее legacy

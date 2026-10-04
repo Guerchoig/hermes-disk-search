@@ -348,6 +348,27 @@ VC++ Redistributable. Бинарник при этом рабочий: посл�
 | `chat` Qwen3.5-9B-Q4_K_M (без `--devices`) | 91,4 с | 5,4 | +0 МиБ | **CPU** (output 4,8 ток/с) |
 | `whisper` turbo (по умолчанию) | 62–70 с | 3,9 | +0 МиБ | **CPU** |
 | **`chat --devices CUDA0 --n-gpu-layers 99`** | **2,9 с** | — | **+4 907 МиБ** | **GPU** (infer 0,28 с против 2,4 с) |
+
+## 9. Спайк 7 (PLAN_AUTO_TRANSCRIBE T0.1): офлайн-диаризация — ✅ формат зафиксирован
+
+Вызов: **наша** проба `cargo run -p hds-llama --release --bin diar_probe -- <audio>`
+(bridge-audio с metadata `mode:"transcript"` + `diarization_model_path` sortformer).
+Скрипт-обёртка — `spike7_diarization.py`, отчёт — `T0_1_DIARIZATION_FORMAT.md`.
+
+* **Формат реплики: `### SPEAKER_NN [HH:MM:SS - HH:MM:SS]`** + текст; реплики
+  разделены пустой строкой; спикер нумеруется с нуля; таймкод **без мс**.
+* **`UNASSIGNED` подтверждён** реальным выводом (хвост `speech_2min.wav`).
+* Выход — **`.md`** (`output.format="md"`, `output.speaker_turns=true`), имя
+  `<stem>.md`; содержимое читается из `output.path`.
+* **Почему не `example-cli.exe`** (как спайки 5–6): стоковый CLI несовместим с
+  патченным рантаймом (`0xC0000005` с нашими DLL, `0xC06D007E` со стоковыми `*.orig`)
+  — патч меняет раскладки SDK-структур. Проба собрана против патченных заголовков.
+* **Жёсткий отказ без модели** подтверждён: `status=400`,
+  «Missing diarization model source. Provide diarization_model_path or
+  diarization_models_dir.» — деградацию в `speech` вводить не нужно.
+* Производительность (GPU): 71 с аудио → 7,96 с (whisper 6,76 + diar 1,17);
+  дельта VRAM ≈ **0,86 ГБ** к базовому уровню резидента.
+
 | `chat --gpu 1 --n-gpu-layers 99` | 6,3 с | — | +0 МиБ | CPU (флаг не помогает) |
 | **`whisper --whisper-gpu-device 0`** | **4,3 с** | — | **+2 023 МиБ** | **GPU** (×16 быстрее) |
 

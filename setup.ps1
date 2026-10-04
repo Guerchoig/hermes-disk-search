@@ -232,6 +232,15 @@ if (-not $SkipModels) {
     } else {
         Warn "skipped: CLIP image search stays disabled until the models are present."
     }
+
+    Step "Diarization model (auto-transcription, optional)"
+    $ans = Read-Host "[?] Download the Sortformer diarization model now (about 449 MB)? [y/N]"
+    if ($ans -match '^[Yy]') {
+        try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_diarization_model.ps1") }
+        catch { Warn "diarization model not downloaded: $_" }
+    } else {
+        Warn "skipped: auto-transcription needs it (installers\fetch_diarization_model.ps1)."
+    }
 } else {
     Step "Models (skipped)"
 }

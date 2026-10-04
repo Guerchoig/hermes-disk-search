@@ -109,6 +109,7 @@ Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемы
 | `Install Tesseract OCR … [y/N]` | текст на картинках и сканах |
 | `Download the whisper model now (about 1.5 GB)? [y/N]` | расшифровка речи в видео/аудио |
 | `Download the CLIP models now (about 850 MB)? [y/N]` | поиск картинок по содержанию |
+| `Download the Sortformer diarization model now (about 449 MB)? [y/N]` | автотранскрибация: разметка реплик по спикерам |
 | `Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]` | содержимое индекса, MCP-сервер и llm-host поднимаются сами при входе |
 | `Start the web UI automatically at logon (port 8765)? [y/N]` | веб-интерфейс всегда под рукой (иначе — по ярлыку) |
 
@@ -237,10 +238,11 @@ cd D:\hds
 5. **Рантайм движка** — `installers\fetch_engine_runtime.ps1` (по `runtime-manifests\engine-manifest.json`,
    выбор `cuda`/`vulkan`, проверка **sha256**; кладётся в `%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`).
 6. **Модели** — `fetch_llm_models.ps1` (GGUF chat/embedding/rerank в общий `%LOCALAPPDATA%\llama-runtime`),
-   опц. `fetch_whisper_model.ps1` (ASR), опц. `fetch_clip_models.ps1` (CLIP ~850 МБ).
+   опц. `fetch_whisper_model.ps1` (ASR), опц. `fetch_clip_models.ps1` (CLIP ~850 МБ),
+   опц. `fetch_diarization_model.ps1` (sortformer для автотранскрибации ~449 МБ).
 7. **Задачи Планировщика** (по согласию): `HermesDiskSearchLlmHost` (`bin\llm_host.exe run`),
    `HermesDiskSearchWatch` (`bin\hds.exe watch`), `HermesDiskSearchMcp` (`bin\hds.exe mcp-http run`),
-   опц. `HermesDiskSearchUi`.
+   `HermesDiskSearchTranscribe` (`bin\hds.exe transcribe-watch`), опц. `HermesDiskSearchUi`.
 8. **Интеграции** — `install_hermes.ps1` / `install_cline.ps1` (MCP по URL `:8787` или stdio `bin\hds_mcp.exe`).
 9. **Ярлык** на рабочем столе («Hermes Disk Search» → `run_ui.ps1`).
 10. **Диагностика** — `bin\hds.exe check`.
@@ -356,6 +358,9 @@ hds whisper-check [--file <медиа>] [--json]
 # Процессы/сервисы
 hds stop                                # создать index.stop (остановить индексацию)
 hds watch [--roots a;b]                 # наблюдатель ФС
+hds transcribe-watch                    # демон автотранскрибации (inbox_dir → out_dir)
+hds transcribe-once <медиафайл>         # один файл «здесь и сейчас» (без очереди)
+hds transcribe-stop                     # мягкая остановка демона (файл transcribe.stop)
 hds ui [--host H] [--port N]            # веб-интерфейс (default 127.0.0.1:8765)
 hds mcp [--http --host H --port N --path /mcp]   # MCP stdio или streamable-http
 hds mcp-http check|start|stop|status|restart|run
@@ -373,6 +378,55 @@ hds mcp-http check|start|stop|status|restart|run
 (roots/exclude_paths) **с сохранением комментариев**. Страница шлёт `X-HDS-UI: 1` (CSRF-защита POST).
 
 Логи сервера: `%LOCALAPPDATA%\hermes-disk-search\ui.log` и `ui.err.log`.
+На странице две закладки: **«Поиск»** (всё перечисленное выше) и **«Транскрибация»**
+(см. следующий раздел).
+
+На закладке «Поиск» есть блок **«Демон индексации»**: состояние процесса `hds watch`
+(по файлу `watch.lock`, плюс признаки `index.pause`/`index.stop` и «индексация идёт»)
+и кнопки **Запустить / Остановить / Перезапустить**. Остановка мягкая (файл
+`index.stop`), запуск — без окна. `hds watch` — **отдельный** процесс: с `llm-host`
+он не связан (тот перезапускается своей кнопкой в блоке «Резидент llm-host»).
+
+## Автотранскрибация (`hds transcribe-watch`)
+
+Отдельный демон (`PLAN_AUTO_TRANSCRIBE`, вариант A): видит **готовый** медиафайл в
+`inbox_dir`, прогоняет транскрибацию **и** диаризацию одним вызовом движка
+(`mode: transcript`; владелец GPU — `llm-host`) и пишет `.md` с метками спикеров в
+`out_dir`, после чего **удаляет исходник** — только при успехе.
+
+```yaml
+auto_transcribe:
+  enabled: true
+  inbox_dir: 'D:\media_in'    # сюда кладём медиа
+  out_dir:   'D:\media_out'   # здесь появляются транскрипты (индексируются)
+```
+
+* **Команды:** `hds transcribe-watch` (демон; автозапуск — задача
+  `HermesDiskSearchTranscribe`), `hds transcribe-once <файл>` (один файл «здесь и
+  сейчас»), `hds transcribe-stop` (мягкая остановка через файл `transcribe.stop`).
+  Дубль демона не поднимется — его держит `transcribe.lock`.
+* **Формат выхода — как отдаёт движок:** `### SPEAKER_00 [00:00:01 - 00:00:11]`,
+  неприсвоенная реплика — `### UNASSIGNED […]`. Рядом лежат `<stem>.orig.md`
+  (текст до подстановки имён) и `<stem>.speakers.json` (карта «метка → имя»).
+* **Диаризация обязательна:** без sortformer-модели задание падает
+  (`installers\fetch_diarization_model.ps1`, ≈449 МБ) — деградации в `speech` нет.
+* **Приоритеты (ТЗ):** 1) поиск/чат → 2) автотранскрибация → 3) индексация
+  (`gpu.priorities.transcribe = 60`): задание ставит `index.pause` и вытесняет
+  индексные роли; запрос чата вытеснить транскрибацию может, индексация — нет.
+* **Утилизация исходника:** `source_disposal: delete` (по умолчанию) | `keep` | `move`
+  (+`source_disposal_dir`).
+* **UI:** закладка «Транскрибация» — список файлов `out_dir` с превью, кнопка
+  «Присвоить имена спикерам» (таблица Спикер|Имя, подставляются **только заполненные**
+  строки; перед правкой создаётся `<файл>.bak`), «Перезапустить задание» и поля
+  `inbox_dir`/`out_dir` с сохранением в `config.yaml`.
+* **Демоном можно управлять из UI** (блок «Демон автотранскрибации»): состояние
+  (работает / остановлен / `lock` без процесса), кнопки **Запустить**, **Остановить**,
+  **Перезапустить**. Остановка мягкая (`transcribe.stop`), запуск — без окна, тем же
+  способом, что резидент в блоке «Резидент llm-host»; дубль невозможен (`transcribe.lock`).
+  Если `enabled: false`, запуск честно предупредит, что демон завершится сам.
+* **Идемпотентность:** манифест `data/auto-transcribe/manifest.jsonl` и журнал очереди
+  `data/auto-transcribe-queue.jsonl` — уже обработанный файл и свежий выход повторно не
+  берутся (`overwrite_existing: false`), число попыток ограничено `max_attempts`.
 
 ## MCP-сервер
 

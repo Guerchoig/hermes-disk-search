@@ -12,6 +12,7 @@
 //! * [`walk`] — обход корней с `exclude_dirs`/`exclude_paths`, лимиты размеров,
 //!   `~$`-файлы Office, предварительные проверки файла (`FileFilter`).
 
+pub mod autotranscribe;
 pub mod chunker;
 pub mod diag;
 pub mod embed;
@@ -25,6 +26,12 @@ pub mod transcribe;
 pub mod walk;
 pub mod watch;
 
+pub use autotranscribe::{
+    default_diarization_model, diarization_model_for, enqueue_reconcile, load_queue,
+    merge_external_jobs, process_job, reconcile_candidates, run_transcribe_watch, should_enqueue,
+    transcribe_once, try_enqueue, AutoTranscribeConfig, Decision, Disposal, FileMeta, Manifest,
+    ManifestEntry, QJob, SkipReason,
+};
 pub use chunker::{make_chunks, Chunk, Segment, DEFAULT_OVERLAP, DEFAULT_SIZE};
 pub use embed::{vector_blob, Embedder};
 pub use hash::{content_hash, hash_of_parts, HASH_WINDOW};
@@ -34,7 +41,9 @@ pub use pipeline::{process_file, run_index, RunIndexArgs};
 pub use progress::ProgressReporter;
 pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
 pub use transcribe::{
-    resolve_whisper_model, MediaRouter, TranscribeClient, TranscribeConfig, DEFAULT_TRANSCRIBE_URL,
+    detect_speaker_slots, is_speaker_token, resolve_whisper_model, DiarizationSettings,
+    MediaRouter, TranscribeClient, TranscribeConfig, TranscribeOutcome, AUTO_MODE,
+    DEFAULT_TRANSCRIBE_URL, DEFAULT_UNASSIGNED_LABEL,
 };
 pub use walk::{walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions};
 pub use watch::{run_watch, WatchEvent, WatchLock, WatchState};

@@ -696,6 +696,15 @@ pub fn run_index(
             }
             rep.set_paused(false);
             if stop_file.exists() {
+                // Пауза + остановка: это тоже кооперативная остановка — обязаны её
+                // пометить (`stopped`), иначе вызывающий (`hds watch`) не узнает, что
+                // сверку прервали по сигналу, а `index.stop` ниже уже будет снят.
+                rep.note();
+                println!(
+                    "[stop] найден index.stop во время паузы — аккуратная остановка \
+                     (все обработанные файлы уже сохранены)"
+                );
+                counters.insert("stopped".to_string(), json!(true));
                 break;
             }
         }

@@ -6,7 +6,8 @@
 
 use hds_llama::config::{GpuConfig, GpuPolicy};
 use hds_llama::dispatch::{
-    eviction_order, idle_evictions, plan_indexing, plan_query, Action, Demand, InstanceUse, Verdict,
+    eviction_order, eviction_order_for_indexing, idle_evictions, plan_indexing, plan_query,
+    plan_transcribe, Action, Demand, InstanceUse, Verdict, TRANSCRIBE_TRANSPORT_ROLE,
 };
 use hds_llama::ffi::state;
 
@@ -419,4 +420,181 @@ fn unloaded_role_still_needs_memory() {
         !plan.notes.iter().any(|n| n.contains("уже загружена")) || !plan.verdict.is_ok(),
         "ветка «уже загружена» здесь не должна срабатывать"
     );
+}
+
+// --- T3.1: приоритеты автотранскрибации (1 поиск/чат → 2 автотранскрибация → 3 индексация) ---
+
+/// Защищены **две** роли: логическая `transcribe` и её носитель `whisper`.
+/// Вытесняются сначала индексные роли (rerank 30 → embedding 40), чат — последним.
+#[test]
+fn transcribe_evicts_index_roles_before_chat_and_keeps_transcriber() {
+    // носитель выгружен: проверяем именно путь вытеснения (иначе сработала бы
+    // ветка «уже загружен» → Fits без действий)
+    let instances: Vec<InstanceUse> = all_roles()
+        .into_iter()
+        .map(|i| {
+            if i.role == TRANSCRIBE_TRANSPORT_ROLE {
+                i.with_state(state::UNLOADED)
+            } else {
+                i
+            }
+        })
+        .collect();
+    let plan = plan_transcribe(
+        &gpu(),
+        Some(300),
+        &Demand::new("transcribe", 900),
+        &instances,
+    );
+    let names = unload_names(&plan);
+    assert!(
+        !names.contains(&TRANSCRIBE_TRANSPORT_ROLE.to_string()),
+        "транскрибатор не вытесняем: {names:?}"
+    );
+    assert_eq!(
+        names,
+        vec!["rerank", "embedding", "chat"],
+        "индексные роли уступают первыми, чат — последним"
+    );
+    assert!(
+        has_pause(&plan),
+        "пока идёт задание — индексация на паузе (2 > 3)"
+    );
+    assert!(matches!(plan.verdict, Verdict::FitsAfterEviction));
+}
+
+/// Носитель уже загружен — новая VRAM не нужна, ничего не вытесняем.
+#[test]
+fn transcribe_transcriber_already_loaded_fits() {
+    let plan = plan_transcribe(
+        &gpu(),
+        Some(50),
+        &Demand::new("transcribe", 900),
+        &all_roles(),
+    );
+    assert!(plan.verdict.is_ok(), "{:?}", plan.verdict);
+    assert!(unload_names(&plan).is_empty(), "ничего не вытесняем");
+    assert!(
+        plan.notes.iter().any(|n| n.contains("уже загружен")),
+        "пояснение про загруженный носитель: {:?}",
+        plan.notes
+    );
+}
+
+/// Хватает сразу — паузы и вытеснения нет (не трогаем индексные роли «на всякий»).
+#[test]
+fn transcribe_fits_without_actions() {
+    // носитель выгружен, чтобы не срабатывала ветка «уже загружен»
+    let instances: Vec<InstanceUse> = all_roles()
+        .into_iter()
+        .map(|i| {
+            if i.role == TRANSCRIBE_TRANSPORT_ROLE {
+                i.with_state(state::UNLOADED)
+            } else {
+                i
+            }
+        })
+        .collect();
+    let plan = plan_transcribe(
+        &gpu(),
+        Some(12_000),
+        &Demand::new("transcribe", 900),
+        &instances,
+    );
+    assert_eq!(plan.verdict, Verdict::Fits);
+    assert!(unload_names(&plan).is_empty());
+    assert!(
+        !has_pause(&plan),
+        "индексацию не тревожим, если и так влезает"
+    );
+}
+
+/// Совсем не хватает — честный отчёт без деградации (`llm.model_policy: fixed`),
+/// и транскрибатор в него не попадает.
+#[test]
+fn transcribe_reports_shortage_without_touching_transcriber() {
+    let instances: Vec<InstanceUse> = all_roles()
+        .into_iter()
+        .map(|i| {
+            if i.role == TRANSCRIBE_TRANSPORT_ROLE {
+                i.with_state(state::UNLOADED)
+            } else {
+                i
+            }
+        })
+        .collect();
+    let plan = plan_transcribe(
+        &gpu(),
+        Some(100),
+        &Demand::new("transcribe", 30_000),
+        &instances,
+    );
+    assert!(matches!(plan.verdict, Verdict::NotEnough { .. }));
+    assert!(plan.shortage().is_some(), "отчёт о нехватке обязателен");
+    assert!(!unload_names(&plan).contains(&TRANSCRIBE_TRANSPORT_ROLE.to_string()));
+}
+
+/// §6: индексация **не** вытесняет инстанс с активным заданием автотранскрибации
+/// (иначе она выбила бы собственный транскрибатор, дойдя до медиа).
+#[test]
+fn indexing_never_evicts_active_transcriber() {
+    let instances = vec![
+        InstanceUse::new("chat", "chat", 5000).keep_loaded(),
+        InstanceUse::new("embedding", "embedding", 600).with_state(state::UNLOADED),
+        InstanceUse::new("whisper", "whisper", 400)
+            .with_idle(9999)
+            .transcribe_active(),
+        InstanceUse::new("rerank", "rerank", 500)
+            .with_idle(9999)
+            .transcribe_active(),
+    ];
+    let order = eviction_order_for_indexing(&gpu(), &instances, "embedding");
+    let names: Vec<&str> = order.iter().map(|i| i.role.as_str()).collect();
+    assert_eq!(names, vec!["chat"], "активные роли не трогаем: {names:?}");
+
+    let plan = plan_indexing(
+        &gpu(),
+        Some(100),
+        &Demand::new("embedding", 600),
+        &instances,
+    );
+    assert!(
+        plan.notes.iter().any(|n| n.contains("автотранскрибации")),
+        "пояснение про защиту транскрибатора: {:?}",
+        plan.notes
+    );
+}
+
+/// §6: предохранитель простоя не выгружает транскрибатор во время задания.
+#[test]
+fn idle_eviction_skips_active_transcriber() {
+    let instances = vec![
+        InstanceUse::new("whisper", "whisper", 400)
+            .with_idle(9999)
+            .transcribe_active(),
+        InstanceUse::new("rerank", "rerank", 500).with_idle(9999),
+    ];
+    let names: Vec<String> = idle_evictions(&gpu(), &instances)
+        .iter()
+        .filter_map(|a| match a {
+            Action::Unload { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["rerank"], "активный транскрибатор не выгружаем");
+}
+
+/// Приоритет 1 > 2: запрос чата/поиска вытеснить транскрибацию **может** —
+/// флаг `transcribe_active` защищает только от индексации и предохранителя простоя.
+#[test]
+fn query_may_evict_active_transcriber() {
+    let instances = vec![
+        InstanceUse::new("chat", "chat", 5000).keep_loaded(),
+        InstanceUse::new("whisper", "whisper", 400).transcribe_active(),
+    ];
+    let names: Vec<String> = eviction_order(&gpu(), &instances, "chat")
+        .iter()
+        .map(|i| i.name.clone())
+        .collect();
+    assert_eq!(names, vec!["whisper"], "запрос важнее автотранскрибации");
 }

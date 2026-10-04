@@ -93,6 +93,47 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 `engine-patch-v1` (10 ассетов), поэтому `fetch_engine_runtime.ps1 -PatchEngine` работает и на других
 машинах.
 
+## Итерация 3 (04.10.2026): мост с поддержкой FFmpeg — тег `engine-patch-v2`
+
+Инцидент: автотранскрибация `.mp4` падала `501 not_implemented` — «bridge was built
+without FFmpeg support (LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=OFF)». Мост в теге
+`engine-patch-v1` был собран без флага `-EnableFfmpeg`, декодирование контейнеров
+(mp4/mkv/…) не вкомпилировано; `.wav` работал, потому что декодируется нативно.
+
+* Пересобран мост по рецепту выше **с `-EnableFfmpeg`** (ffmpeg 8.1 LGPL-shared
+  из `build/download-ffmpeg-lgpl-win-x64.ps1` → `ENGINEbuilds\runtime-deps\ffmpeg`;
+  soname `avcodec-62` совпадает с вендорным `Engine\vendor\ffmpeg\bin`).
+* Изменились только `llama-server-bridge.dll` (5 439 488 байт, `8c2ec8f4…`) и
+  `multi-node-server.dll` (перелинковка, `1cbbcadd…`); остальные 8 DLL побайтово
+  совпали с v1.
+* Опубликовано тегом **`engine-patch-v2`** (`runtime-manifests/engine-patch.json`
+  обновлён: тег/URL/sha256); `fetch_engine_runtime.ps1 -PatchEngine` на свежих
+  установках ставит именно его. На машинах с v1 — повторно запустить `-PatchEngine`
+  и перезапустить `llm_host`.
+* Проверено на боевой машине: `.mp4` (~1 ч, 309 МБ) прошёл полный конвейер
+  декодирование → whisper (CUDA0) → диаризация sortformer → `.md` со спикерами.
+
+## Побочный эффект: стоковый `example-cli.exe` несовместим с патчеными DLL (T0.1, 04.10.2026)
+
+Патч меняет **раскладки SDK-структур** (`llama_server_bridge_params` и cluster-структуры —
+добавлены поля `cache_type_k/v` и др.). Штатный `example-cli.exe` из каталога движка собран
+против **стоковых** заголовков, поэтому с нашими DLL аудио-путь падает:
+
+| Рантайм в каталоге | `example-cli.exe bridge audio …` |
+|---|---|
+| наши патченые DLL | `0xC0000005` (access violation; в журнале Windows — сбой в `ucrtbase.dll`) |
+| стоковые `*.orig` (копия каталога) | `0xC06D007E` — у копии не оказалось `vendor\ffmpeg\*` |
+| **наши бинарники** (`hds`, `llm_host`, `diar_probe`/`audio_probe`) | ✅ работают (собраны против патченых заголовков) |
+
+Практический вывод: **спайки и проверки аудио/диаризации гонять нашими пробами**, а не
+`example-cli`: `cargo run -p hds-llama --release --bin diar_probe -- <audio>` (или `audio_probe`).
+Спайки 5–6 (`spike5_whisper.py`, `spike6_*`) делались **до** внедрения патча — поэтому у них
+`example-cli.exe` работал; после `-RollbackEnginePatch` CLI снова заработает.
+
+Мелочь для копий рантайма: `vendor\` в боевом каталоге **штатный** — копируя движок
+(`tools\parity\out\engine-*`), копировать дерево целиком, иначе ffmpeg-DLL не найдутся
+(`robocopy <Engine> <dst> /E /XF *.orig` — с `/E`; без него подкаталоги пропускаются).
+
 ## Как проверить (на копии рантайма! боевой не трогаем)
 
 1. Скопировать каталог движка (`%APPDATA%\OpenResearchTools\TranscribeOffline\Engine`) в

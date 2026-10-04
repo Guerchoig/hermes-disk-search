@@ -1,4 +1,5 @@
-# Logon autostart for the Rust stack: file watcher + one shared MCP server.
+# Logon autostart for the Rust stack: file watcher + one shared MCP server +
+# the auto-transcription daemon (PLAN_AUTO_TRANSCRIBE).
 # Scheduler tasks need rights; on failure the script falls back to the Startup
 # folder (no admin rights). llm-host is registered separately by
 # installers\install_llm_host_task.ps1 (called from setup.ps1).
@@ -36,7 +37,11 @@ foreach ($name in @("HermesDiskSearchWatch", "HermesDiskSearchMcp")) {
 
 $tasks = @(
     @{ Name = "HermesDiskSearchWatch"; Args = "watch" },
-    @{ Name = "HermesDiskSearchMcp";   Args = "mcp-http run" }
+    @{ Name = "HermesDiskSearchMcp";   Args = "mcp-http run" },
+    # Auto-transcription daemon (PLAN_AUTO_TRANSCRIBE, variant A): inbox_dir -> out_dir.
+    # Exits immediately (code 0) while auto_transcribe.enabled is false, so the task
+    # is harmless until the feature is switched on in config.yaml.
+    @{ Name = "HermesDiskSearchTranscribe"; Args = "transcribe-watch" }
 )
 $ok = $false
 $created = @()
@@ -65,15 +70,18 @@ if (-not $StartupFolder) {
     Write-Host "[..] -StartupFolder: skipping the scheduler, writing Startup-folder shortcuts" -ForegroundColor DarkGray
 }
 if (-not $ok) {
+    # wscript.exe + hidden_launch.vbs: starts the console binary with no window
+    $vbs = Join-Path $root 'hidden_launch.vbs'
     $ws = New-Object -ComObject WScript.Shell
     foreach ($t in $tasks) {
+        $lnkArgs = "`"$vbs`" `"$hdsExe`"" + (($t.Args -split '\s+' | ForEach-Object { " `"$_`"" }) -join '')
         $lnk = $ws.CreateShortcut("$startupDir\$($t.Name).lnk")
-        $lnk.TargetPath = $hdsExe
-        $lnk.Arguments = $t.Args
+        $lnk.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+        $lnk.Arguments = $lnkArgs
         $lnk.WorkingDirectory = $root
         $lnk.IconLocation = (Join-Path $root 'assets\icon.ico') + ',0'
         $lnk.Save()
-        Write-Host "[ok] startup shortcut: $startupDir\$($t.Name).lnk"
+        Write-Host "[ok] startup shortcut (hidden): $startupDir\$($t.Name).lnk"
     }
 }
-Write-Host "Autostart: HermesDiskSearchWatch ($hdsExe watch) and HermesDiskSearchMcp ($hdsExe mcp-http run)."
+Write-Host "Autostart: HermesDiskSearchWatch ($hdsExe watch), HermesDiskSearchMcp ($hdsExe mcp-http run) and HermesDiskSearchTranscribe ($hdsExe transcribe-watch)."

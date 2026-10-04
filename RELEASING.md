@@ -4,7 +4,8 @@
 > ядро и резидентные компоненты — крейты `crates/` (`hds`, `hds_mcp`, `llm_host`),
 > Python — только `sidecar/` (извлечение/лемматизация; собирается джобами `build-sidecar-*`).
 > Рантайм движка ставится отдельно (`runtime-manifests/engine-manifest.json`); наш патч
-> движка — тег `engine-patch-v1`; ONNX-модели CLIP — тег `clip-onnx-v1`.
+> движка — тег `engine-patch-v2` (актуальный; v1 остался в истории); ONNX-модели CLIP —
+> тег `clip-onnx-v1`.
 
 ## Когда выпускать релиз
 
@@ -56,7 +57,8 @@ SemVer: `vMAJOR.MINOR.PATCH`.
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    ```
-3. Подготовить заметки `RELEASE_NOTES_<версия>.md` и бампнуть `__version__` в `hds/__init__.py`.
+3. Подготовить заметки `RELEASE_NOTES_<версия>.md` (с таблицей «что скачивать» —
+   см. good-practice ниже) и бампнуть `__version__` в `hds/__init__.py`.
 4. Запустить workflow — вручную или тегом:
    ```powershell
    gh workflow run release.yml --ref <ветка> -f version=v0.13.0
@@ -88,6 +90,18 @@ gh release create v0.13.0 --title "v0.13.0 - hermes-disk-search" --notes-file RE
 ## Правила good-practice
 
 - **Не выпускать релиз с красными тестами** — `test-rust` блокирует выпуск.
+- **Заметки о составе релиза: «что скачивать руками, что ставится само».** В
+  `RELEASE_NOTES_<версия>.md` рядом со списком файлов релиза указывать, какие файлы
+  пользователь скачивает **сам**, а какие установщик забирает **автоматически**:
+  * обязателен только `hds-<ver>-windows-x64.zip` (macOS — `hds-<ver>-macos-arm64.zip`);
+    проверка sha256 — по желанию;
+  * `hds-engine-runtime-*.zip` — только для **офлайн-установки** (обычный установщик
+    качает рантайм движка сам по `runtime-manifests/engine-manifest.json`);
+  * модели (LLM/whisper/CLIP ONNX) и sidecar в архив не входят — ставятся при установке;
+  * архивы исходников (`hermes-disk-search-<ver>-*.zip`) рядовому пользователю не нужны.
+  Формат — таблица «Файл / Нужен? / Что это» (как в README, раздел «Установка на
+  Windows: по шагам»); README остаётся каноническим источником, в заметках — та же
+  таблица рядом со списком ассетов, чтобы не искать её по документации.
 - Заметки на русском: новые фичи, исправления, требования к обновлению
   (например «запустите `index --full` после смены модели»).
 - Workflow **никогда не удаляет** прежние релизы и теги.

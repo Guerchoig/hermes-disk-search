@@ -11,6 +11,8 @@ rust-version.workspace = true
 hds-core = { path = "../hds-core" }
 hds-extract = { path = "../hds-extract" }
 hds-clip = { path = "../hds-clip" }
+# каталоги движка/моделей OpenResearchTools (как в hds-llama/hds-ui)
+directories.workspace = true
 rusqlite.workspace = true
 blake2.workspace = true
 hex.workspace = true

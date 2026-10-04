@@ -409,6 +409,11 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
             dir.join("rules").join("disk-search.md"),
         ),
         (
+            "правило dev-машина",
+            root.join("cline-rules").join("dev-machine.md"),
+            dir.join("rules").join("dev-machine.md"),
+        ),
+        (
             "скилл disk-search",
             root.join("hermes-skill").join("disk-search.md"),
             dir.join("skills").join("disk-search").join("SKILL.md"),

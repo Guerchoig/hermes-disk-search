@@ -122,8 +122,10 @@ gpu:
   # vram_source: nvml        # источник истины по VRAM (R29); `engine` = list_devices, недостоверно
   # vram_budget_mb: 11000    # опционально: сузить бюджет (диагностика/критерий A-7)
   # external_vram_mb: 0      # вычет на чужих потребителей GPU (браузер, игры, другие LLM)
-  priorities: { chat: 100, embedding: 40, rerank: 30, whisper: 20 }
+  priorities: { chat: 100, transcribe: 60, embedding: 40, rerank: 30, whisper: 20 }
                              # меньше число = выгружается раньше; роли вне списка → 0
+                             # transcribe — псевдо-роль автотранскрибации (свой приоритет
+                             # между поиском/чатом и индексацией, PLAN_AUTO_TRANSCRIBE)
 
 # MCP-сервер в режиме streamable-http: ОДИН инстанс на машину (клиенты идут
 # по URL). При stdio каждый клиент (Cline, Hermes, ...) поднимает свой процесс.
@@ -143,6 +145,48 @@ search:
   vec_weight: 1.0
   clip_weight: 1.0
   snippet_chars: 500
+
+# --- Автотранскрибация + диаризация «входная папка → выходная» -----------------
+# Демон `hds transcribe-watch` видит готовый медиафайл в inbox_dir, прогоняет
+# транскрибацию+диаризацию движком (владелец GPU — llm-host), пишет `.md` с метками
+# спикеров (SPEAKER_00, SPEAKER_01, …; неприсвоенные — UNASSIGNED) в out_dir и
+# УДАЛЯЕТ исходник (только при успехе). UI: закладка «Транскрибация».
+# Подробности: PLAN_AUTO_TRANSCRIBE.md (спайк формата — tools/parity/T0_1_DIARIZATION_FORMAT.md).
+auto_transcribe:
+  enabled: false              # включить конвейер (демон/задача Планировщика)
+  inbox_dir: 'D:\media_in'    # ВХОД:  исходные медиа (абсолютный путь)
+  out_dir:   'D:\media_out'   # ВЫХОД: транскрибированные/диаризованные (индексируется)
+  recursive: false            # обходить подкаталоги inbox_dir
+  # --- движок (перекрывают index.whisper_* только для этого конвейера) ---
+  mode: transcript            # transcript = транскрибация + диаризация
+  out_format: md              # как отдаёт движок (.md) — без конвертации
+  unassigned_label: UNASSIGNED  # метка «спикер не определён» (как отдаёт движок)
+  # --- диаризация (sortformer) ---
+  diarization: true
+  diarization_model: ''       # .gguf; '' → автопоиск %APPDATA%\OpenResearchTools\models\*sortformer*
+  diarization_backend: sortformer
+  diarization_feed_ms: 10800001
+  diarization_required: true  # нет sortformer-модели ⇒ ЖЁСТКИЙ отказ задания (без fallback в speech)
+  whisper_model: ''           # '' → index.whisper_model / автопоиск движка
+  whisper_gpu: -1             # -1 = как gpu.device_index; иначе индекс GPU движка
+  # --- событие «файл помещён во входную папку» (§3 плана) ---
+  debounce_seconds: 8         # размер файла не меняется N сек ⇒ файл «готов»
+  max_stable_wait: 120        # потолок ожидания стабилизации, сек
+  poll_seconds: 3             # период reconcile-обхода инбокса (страховка от пропусков)
+  require_exclusive_read: true  # файл должен открываться на чтение (не занят писателем)
+  extensions: []              # [] = все медиа (kinds.rs); иначе — только перечисленные
+  ignore_suffixes: ['.part', '.tmp', '.crdownload', '.!qb', '.bak']
+  # --- очередь/идемпотентность ---
+  queue_file: 'data/auto-transcribe-queue.jsonl'
+  state_dir: 'data/auto-transcribe'
+  overwrite_existing: false   # перетранскрибировать, если выход уже есть и свежее
+  max_attempts: 3
+  source_disposal: delete     # после УСПЕХА: delete (удалять исходник) | keep | move
+  source_disposal_dir: ''     # для source_disposal: move — каталог архива
+  # --- объединение с индексацией (§7 плана) ---
+  index_outputs: true         # индексировать out_dir; ASR исходного медиа в индексации ВЫКЛ
+  pause_indexing: true        # на время задания ставить index.pause (выше индексации)
+
 
 rerank:                     # реранкер ask_my_files (роль rerank; владелец — llm-host)
   enabled: false            # по умолчанию выключен

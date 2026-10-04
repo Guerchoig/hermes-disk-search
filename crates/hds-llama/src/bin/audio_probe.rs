@@ -66,7 +66,8 @@ fn main() -> Result<()> {
     let custom = std::env::var("HDS_WHISPER_CUSTOM").unwrap_or_else(|_| "4.5".to_string());
 
     let t0 = std::time::Instant::now();
-    let tr = whisper.transcribe_file(&audio, &mode, &custom)?;
+    // Диаризация — отдельная проба `diar_probe` (здесь путь индексации: без неё).
+    let tr = whisper.transcribe_file(&audio, &mode, &custom, None)?;
     println!(
         "whisper: mode={mode} custom={custom} ({:.1} с)",
         t0.elapsed().as_secs_f64()

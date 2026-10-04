@@ -32,7 +32,7 @@ use serde_json::{json, Value};
 use crate::budget::{compute_buffer_mib, estimate_need_mib};
 use crate::cluster::{Cluster, InstanceSpec};
 use crate::config::{self, GpuConfig, LlmHostConfig, Mode};
-use crate::dispatch::{self, instance_use, plan_query, Demand, InstanceUse, Plan};
+use crate::dispatch::{self, instance_use, plan_query, plan_transcribe, Demand, InstanceUse, Plan};
 use crate::error::{EngineError, Result};
 use crate::facade::{self, Backend, ChatRequest, ServerConfig, Thinking, Usage};
 use crate::gguf::{read_meta, KvBits};
@@ -42,6 +42,7 @@ use crate::resident::{self, Log, PidFile};
 use crate::runtime::RuntimePaths;
 use crate::status::{device_line, StatusInput, StatusReport};
 use crate::vram::{NvmlProbe, VramProbe};
+use crate::whisper::DiarizationParams;
 use crate::{engine::EngineCwd, Engine};
 
 /// Корень репозитория (относительно крейта: `crates/hds-llama/../..`).
@@ -565,6 +566,10 @@ pub struct ClusterBackend {
     upstream: BTreeMap<String, String>,
     /// W3: ленивый транскрибатор whisper (роль whisper, bridge-API движка).
     whisper: Mutex<Option<WhisperCell>>,
+    /// T3.1 (§6): сейчас идёт задание автотранскрибации — индексация и предохранитель
+    /// простоя не вытесняют транскрибатор, пока он работает. Запрос чата/поиска
+    /// вытеснить его **может** (приоритет 1 > 2).
+    transcribe_active: Arc<AtomicBool>,
 }
 
 /// Ленивый транскрибатор whisper под `Mutex` (raw-указатели bridge ⇒ `!Send/!Sync`;
@@ -630,6 +635,72 @@ fn default_whisper_model() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// sortformer-модель диаризации из общего каталога движка: первый `*.gguf` в
+/// каталоге `*sortformer*` (там же, где движок хранит скачанные модели).
+fn default_diarization_model() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    let root = base.config_dir().join("OpenResearchTools").join("models");
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .map(|n| n.to_string_lossy().to_lowercase().contains("sortformer"))
+                    .unwrap_or(false)
+        })
+        .collect();
+    dirs.sort();
+    for dir in dirs {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+            .ok()?
+            .flatten()
+            .map(|f| f.path())
+            .filter(|p| {
+                p.extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("gguf"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        files.sort();
+        if let Some(p) = files.into_iter().next() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Взводит флаг «идёт задание автотранскрибации» и снимает его на `Drop` (§6, T3.1).
+///
+/// Флаг читают `uses()`/`whisper_idle_evict()`: индексация и предохранитель простоя
+/// не вытесняют транскрибатор **во время работы**. Запрос чата/поиска вытеснить его
+/// может — приоритет 1 > 2.
+struct TranscribeGuard(Arc<AtomicBool>);
+
+impl TranscribeGuard {
+    fn set(flag: &Arc<AtomicBool>) -> TranscribeGuard {
+        flag.store(true, Ordering::Relaxed);
+        TranscribeGuard(Arc::clone(flag))
+    }
+}
+
+impl Drop for TranscribeGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Оценка VRAM задания автотранскрибации: whisper-модель + sortformer + буфер.
+///
+/// Считается по размерам файлов (замер T0.1: turbo 1549 МБ + sortformer 449 МБ,
+/// фактическая дельта VRAM ≈ 0,86 ГБ) — этого достаточно для решения арбитра.
+fn transcribe_need_mib(whisper: &Path, diar: Option<&Path>) -> u64 {
+    let size = |p: &Path| std::fs::metadata(p).map(|m| m.len() >> 20).unwrap_or(0);
+    size(whisper) + diar.map(size).unwrap_or(0) + WHISPER_OVERHEAD_MIB
 }
 
 impl ClusterBackend {
@@ -733,7 +804,17 @@ impl ClusterBackend {
             })
             .and_then(|r| r.ok())
             .unwrap_or_default();
-        instance_uses(&instances, &self.needs, &self.idle_map())
+        let mut uses = instance_uses(&instances, &self.needs, &self.idle_map());
+        // §6 (T3.1): пока идёт задание автотранскрибации, помечаем его носитель —
+        // индексация и предохранитель простоя его не вытесняют.
+        if self.transcribe_active.load(Ordering::Relaxed) {
+            for u in uses.iter_mut() {
+                if u.role == crate::dispatch::TRANSCRIBE_TRANSPORT_ROLE {
+                    u.transcribe_active = true;
+                }
+            }
+        }
+        uses
     }
 
     /// Перед запросом: решить по VRAM и применить решение (ARB-1/ARB-2).
@@ -744,10 +825,24 @@ impl ClusterBackend {
     /// `Err` — после вытеснения памяти всё ещё не хватает: запрос надо отклонить с
     /// отчётом (`Verdict::NotEnough`), **без авто-деградации** (§8.6.2).
     fn prepare(&self, role: &str) -> Result<Option<PauseLease>> {
+        let need = self.needs.get(role).copied().unwrap_or(0);
+        self.prepare_demand(role, need, false)
+    }
+
+    /// Как [`ClusterBackend::prepare`], но потребность задаётся явно, и можно выбрать
+    /// план **автотранскрибации** ([`plan_transcribe`], §6).
+    ///
+    /// Нужно потому, что у логической роли `transcribe` нет инстанса в кластере:
+    /// её потребность (whisper + sortformer + буфер) считает вызывающий.
+    fn prepare_demand(
+        &self,
+        role: &str,
+        need: u64,
+        transcribe: bool,
+    ) -> Result<Option<PauseLease>> {
         if !self.dispatch_enabled {
             return Ok(None);
         }
-        let need = self.needs.get(role).copied().unwrap_or(0);
         if need == 0 {
             return Ok(None);
         }
@@ -755,7 +850,12 @@ impl ClusterBackend {
             // сколько освободит каждый инстанс — по ЕГО собственной роли, а не по
             // запрошенной: иначе арифметика вытеснения врёт (поймано живым прогоном)
             let uses = self.uses();
-            plan_query(&self.gpu, self.free_mib(), &Demand::new(role, need), &uses)
+            let demand = Demand::new(role, need);
+            if transcribe {
+                plan_transcribe(&self.gpu, self.free_mib(), &demand, &uses)
+            } else {
+                plan_query(&self.gpu, self.free_mib(), &demand, &uses)
+            }
         };
         // Применяем решение к движку — но **с бюджетом**: если движок занят чужим
         // вызовом (загрузка/инференс другой роли), вытеснение откладываем. Ждать
@@ -952,6 +1052,11 @@ impl ClusterBackend {
     /// При `gpu.policy: manual` или `evict_idle_sec = 0` не трогаем (за оператором).
     fn whisper_idle_evict(&self) {
         if self.gpu.policy == crate::config::GpuPolicy::Manual || self.gpu.evict_idle_sec == 0 {
+            return;
+        }
+        // §6 (T3.1): идёт задание автотранскрибации — предохранитель простоя не
+        // должен выгружать транскрибатор прямо во время работы.
+        if self.transcribe_active.load(Ordering::Relaxed) {
             return;
         }
         if let Some(sec) = self.idle_map().get("whisper").copied() {
@@ -1336,10 +1441,19 @@ impl Backend for ClusterBackend {
         Ok(json!({ "stopping": true, "pid": self.pid }))
     }
 
-    /// W3: транскрибация аудио/видео через bridge-API движка (роль `whisper`).
+    /// W3 + T1 (PLAN_AUTO_TRANSCRIBE): транскрибация аудио/видео через bridge-API
+    /// движка (роль `whisper`).
     ///
-    /// Тело: `{"path": ..., "mode": "subtitle|speech", "custom": "4.5", "gpu": 0,
-    /// "model": ...}`. Транскрибатор создаётся лениво и переиспользуется.
+    /// Тело: `{"path": ..., "mode": "subtitle|speech|transcript", "custom": "4.5",
+    /// "gpu": 0, "model": ...}`. Транскрибатор создаётся лениво и переиспользуется.
+    ///
+    /// Для автотранскрибации (§5.1) добавляются `{"diarization": true,
+    /// "diarization_model": "...gguf", "diarization_backend": "sortformer",
+    /// "diarization_feed_ms": 10800001, "return_text": true}`. `diarization: true`
+    /// **требует** sortformer-модель — без неё задание падает (жёсткий отказ, §0 п.6),
+    /// деградации в `speech` нет. `return_text: true` добавляет в ответ `text` —
+    /// полный текст вывода движка (для `transcript` это `.md` с метками
+    /// `SPEAKER_NN`/`UNASSIGNED`), см. спайк T0.1.
     fn internal_transcribe(&self, body: &Value) -> Result<Value> {
         let engine_dir = self.engine_dir.as_ref().ok_or_else(|| {
             EngineError::Other("движок не загружен — транскрибация недоступна".to_string())
@@ -1367,6 +1481,17 @@ impl Backend for ClusterBackend {
             .ok_or_else(|| {
                 EngineError::Other("не найдена whisper-модель (index.whisper_model)".to_string())
             })?;
+
+        // §5.1: диаризация включается только явным флагом; `return_text` — просьба
+        // вернуть полный текст вывода (для `transcript` — `.md` с метками спикеров).
+        let diarization = body
+            .get("diarization")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let return_text = body
+            .get("return_text")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
@@ -1396,8 +1521,72 @@ impl Backend for ClusterBackend {
             let w = crate::whisper::Whisper::new(api, &model, gpu, -1)?;
             *slot = Some(WhisperCell(Mutex::new(w)));
         }
+        // Диаризацию собираем после финального решения об устройстве whisper: по
+        // умолчанию отдаём движку имя его устройства (как референс — `CUDA0`).
+        let diar = if diarization {
+            let diar_model = body
+                .get("diarization_model")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(PathBuf::from)
+                .or_else(default_diarization_model)
+                .ok_or_else(|| {
+                    EngineError::Other(
+                        "диаризация включена, но sortformer-модель не найдена: задайте \
+                         auto_transcribe.diarization_model или установите модель \
+                         (installers\\fetch_diarization_model.ps1). Fallback в speech запрещён \
+                         (PLAN_AUTO_TRANSCRIBE §0 п.6)."
+                            .to_string(),
+                    )
+                })?;
+            if !diar_model.is_file() {
+                return Err(EngineError::Other(format!(
+                    "sortformer-модель не найдена: {}",
+                    diar_model.display()
+                )));
+            }
+            let backend = body
+                .get("diarization_backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("sortformer");
+            let feed_ms = body
+                .get("diarization_feed_ms")
+                .and_then(|v| v.as_f64())
+                .unwrap_or(10_800_001.0);
+            let device = body
+                .get("diarization_device")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| (gpu >= 0).then(|| format!("CUDA{gpu}")));
+            let mut d = DiarizationParams::new(&diar_model);
+            d.backend = backend.to_string();
+            d.feed_ms = feed_ms;
+            d.device = device;
+            self.log.line(&format!(
+                "[transcribe] диаризация: {} (backend {backend}, feed_ms {feed_ms}, device {})",
+                diar_model.display(),
+                d.device.as_deref().unwrap_or("авто")
+            ));
+            Some(d)
+        } else {
+            None
+        };
+
+        // §6 (T3.1): задание автотранскрибации — приоритет 2 из 3. Пока оно идёт:
+        // * индексация на паузе (`index.pause` — аренда ниже);
+        // * при нехватке VRAM первыми уступают индексные роли, затем чат;
+        // * индексация и предохранитель простоя не выбивают транскрибатор (флаг).
+        let _flag = TranscribeGuard::set(&self.transcribe_active);
+        let need_mib = transcribe_need_mib(&model, diar.as_ref().map(|d| d.model_path.as_path()));
+        let _lease = self.prepare_demand(config::TRANSCRIBE_ROLE, need_mib, true)?;
+        self.log.line(&format!(
+            "[transcribe] задание: нужно ≈{need_mib} МиБ VRAM, приоритет роли '{}' = {}",
+            config::TRANSCRIBE_ROLE,
+            self.gpu.priority_of(config::TRANSCRIBE_ROLE)
+        ));
+
         let w = slot.as_ref().unwrap().0.lock().unwrap();
-        let tr = w.transcribe_file(Path::new(path), mode, &custom)?;
+        let tr = w.transcribe_file(Path::new(path), mode, &custom, diar.as_ref())?;
         drop(w);
         // активность роли whisper — для вытеснения по простою (ARB-5, W3)
         self.note_used("whisper");
@@ -1406,13 +1595,19 @@ impl Backend for ClusterBackend {
             .iter()
             .map(|s| json!({ "text": s.text, "t_start": s.t_start, "t_end": s.t_end }))
             .collect();
-        Ok(json!({
+        let mut out = json!({
             "path": path,
             "mode": mode,
             "custom": custom,
+            "out_ext": tr.out_ext,
+            "diarization": { "enabled": diar.is_some() },
             "segments": segments,
             "stats": tr.json.get("stats").cloned().unwrap_or(Value::Null),
-        }))
+        });
+        if return_text {
+            out["text"] = json!(tr.raw_text);
+        }
+        Ok(out)
     }
 }
 
@@ -1881,6 +2076,7 @@ impl Host {
             mode,
             upstream,
             whisper: Mutex::new(None),
+            transcribe_active: Arc::new(AtomicBool::new(false)),
         });
 
         let handles = if ports.is_empty() {

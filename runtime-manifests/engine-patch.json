@@ -3,69 +3,69 @@
   "project": "Openresearchtools-Engine (HDS patch overlay)",
   "base_tag": "v1.15",
   "base_commit": "2683eb691e24343cc4d1ce261ac2e7fc0f2a9a49",
-  "tag": "engine-patch-v1",
-  "release_url": "https://github.com/Guerchoig/hermes-disk-search/releases/tag/engine-patch-v1",
-  "notes": "HDS patch for Openresearchtools-Engine v1.15: P1 bounded instance-slot wait, P2 model load outside the instance lock (load_mutex + ensure_instance_loaded), P3 set_cluster_error moved out of the instance lock, KV cache type fields (cache_type_k/v) + flash attention for quantized V. Details: engine-patch/README.md. Apply with installers/fetch_engine_runtime.ps1 -PatchEngine, roll back with -RollbackEnginePatch.",
+  "tag": "engine-patch-v2",
+  "release_url": "https://github.com/Guerchoig/hermes-disk-search/releases/tag/engine-patch-v2",
+  "notes": "HDS patch for Openresearchtools-Engine v1.15: P1 bounded instance-slot wait, P2 model load outside the instance lock (load_mutex + ensure_instance_loaded), P3 set_cluster_error moved out of the instance lock, KV cache type fields (cache_type_k/v) + flash attention for quantized V. v2: bridge built with FFmpeg support (LLAMA_SERVER_BRIDGE_ENABLE_FFMPEG=ON) - transcription of media containers (mp4/...) works; v1 bridge answered 501 not_implemented for non-WAV audio. Details: engine-patch/README.md. Apply with installers/fetch_engine_runtime.ps1 -PatchEngine, roll back with -RollbackEnginePatch.",
   "files": [
     {
       "file_name": "multi-node-server.dll",
       "size": 294400,
-      "sha256": "7593b17614bdd5788045e8ea89418ceb66e908b3753f83134c7b2814a9cd26fa",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/multi-node-server.dll"
+      "sha256": "1cbbcadd472b168e76f2bfaf30e18b477e88de8d38395f2f025e73316785ff46",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/multi-node-server.dll"
     },
     {
       "file_name": "llama-server-bridge.dll",
-      "size": 5432320,
-      "sha256": "79d6ec73085950b83673e04e66632fbf261cc70761baf4c26b8f42b7da5f9869",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/llama-server-bridge.dll"
+      "size": 5439488,
+      "sha256": "8c2ec8f4727e7168818e86173dd91216b627a35009c0ab5fdc5614c47fb4b732",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/llama-server-bridge.dll"
     },
     {
       "file_name": "llama-server-audio.dll",
       "size": 553984,
       "sha256": "8450a7de15dac28ab2ff543bab93438c6b30a9930e8c78a6ab6bc5b84c346d7f",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/llama-server-audio.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/llama-server-audio.dll"
     },
     {
       "file_name": "llama.dll",
       "size": 2195968,
       "sha256": "a40636e1856ba1a6d30ca49df32bb67f147ecb7cc512c87594f9f6b595b3a1cf",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/llama.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/llama.dll"
     },
     {
       "file_name": "mtmd.dll",
       "size": 678912,
       "sha256": "9f68827b2f16480c042ca5b7bcb5ea424ce4a93b8f9c8084750a97b854cf367c",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/mtmd.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/mtmd.dll"
     },
     {
       "file_name": "ggml.dll",
       "size": 67584,
       "sha256": "e108729cdd14fc6ee3a2e95e5711abe91b3b2ea53e7b1424d6c325444c692e73",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/ggml.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/ggml.dll"
     },
     {
       "file_name": "ggml-base.dll",
       "size": 558592,
       "sha256": "54e939acbde625d73bd13cf2ee1634c92d66c01f8d4485160de6a96089036c42",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/ggml-base.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/ggml-base.dll"
     },
     {
       "file_name": "ggml-cpu.dll",
       "size": 852992,
       "sha256": "814e75da7ebce5527746e33c00361ef6246b9be0cf668cd07bd0937775566d92",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/ggml-cpu.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/ggml-cpu.dll"
     },
     {
       "file_name": "ggml-cuda.dll",
       "size": 127878656,
       "sha256": "5949c50ec67b9c9fe8dde88384d7e4df859ce89421647a115dde2c89bb9f9ad6",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/ggml-cuda.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/ggml-cuda.dll"
     },
     {
       "file_name": "ggml-rpc.dll",
       "size": 114688,
       "sha256": "7cc6982a5bca6cf8165e1a47c7658bbdf52b02add8ab4ea7e0f72a649aa45d77",
-      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v1/ggml-rpc.dll"
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-patch-v2/ggml-rpc.dll"
     }
   ]
 }

@@ -15,6 +15,7 @@ pub mod reindex_fts;
 pub mod search;
 pub mod status;
 pub mod stop;
+pub mod transcribe;
 pub mod ui;
 pub mod watch;
 pub mod whisper_check;

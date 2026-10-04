@@ -24,9 +24,33 @@ pub const PAGE: &str = r#"<!doctype html>
  .res{border-top:1px solid #24384f;padding:8px 0}
  .loc{color:#9fd0ff;word-break:break-all}
  .warnbox{color:#ffd479;margin-top:8px;line-height:1.4}
+ nav.tabs{display:flex;gap:6px;margin:0 0 12px}
+ nav.tabs button{border-radius:8px;background:#0d1620;color:#8aa0b6}
+ nav.tabs button.active{background:#1c2f44;color:#9fd0ff;border-color:#3a5a80}
+ table.tr{width:100%;border-collapse:collapse}
+ table.tr th,table.tr td{border-bottom:1px solid #24384f;padding:6px 8px;text-align:left;vertical-align:top}
+ table.tr tbody tr{cursor:pointer}
+ table.tr tbody tr:hover{background:#17273a}
+ table.tr tbody tr.sel{background:#1c2f44}
+ #trprev{max-height:340px;overflow:auto}
+  #tree details{margin:2px 0}
+  #tree details details{margin-left:20px;border-left:1px solid #24384f;padding-left:8px}
+  summary{cursor:pointer;user-select:none;list-style-position:outside}
+  summary::-webkit-details-marker{color:#8aa0b6}
+ .modal{position:fixed;inset:0;background:rgba(3,8,14,.72);display:none;align-items:center;justify-content:center;z-index:9}
+ .modal.open{display:flex}
+ .modal .box{background:#131f2b;border:1px solid #24384f;border-radius:10px;padding:16px;min-width:420px;max-width:720px;max-height:82vh;overflow:auto}
+ .modal .box h3{margin:0 0 10px;font-size:15px;color:#9fd0ff}
+ .modal input{min-width:200px}
+ .modal .box table input{width:100%}
 </style></head><body>
 <header><h1>Hermes Disk Search — Rust UI</h1></header>
 <main>
+ <nav class="tabs">
+  <button data-tab="search" class="active" onclick="showTab('search')">Поиск</button>
+  <button data-tab="transcribe" onclick="showTab('transcribe')">Транскрибация</button>
+ </nav>
+ <div id="tab-search">
  <section><h2>Состояние</h2><div id="status" class="muted">…</div></section>
 
  <section><h2>Резидент llm-host</h2>
@@ -52,7 +76,10 @@ pub const PAGE: &str = r#"<!doctype html>
 
  <section><h2>Дерево индекса</h2>
   <div class="row"><button onclick="loadTree()">Показать/обновить</button>
+   <button onclick="treeAll(true)">Развернуть всё</button>
+   <button onclick="treeAll(false)">Свернуть всё</button>
    <span id="tmsg" class="muted"></span></div>
+  <div class="muted">Клик по папке — свернуть/развернуть. 🟢 индекс актуален · 🟡 есть не проиндексированное · ⬜ не индексировано.</div>
   <div id="tree" class="muted">…</div></section>
 
  <section><h2>Настройки (config.yaml)</h2>
@@ -82,6 +109,73 @@ pub const PAGE: &str = r#"<!doctype html>
    <button onclick="act('/api/index/pause')">Пауза</button>
    <button onclick="act('/api/index/resume')">Продолжить</button>
    <span id="imsg" class="muted"></span></div></section>
+
+  <section><h2>Демон индексации</h2>
+   <div class="row"><span id="wdaemon" class="muted">…</span></div>
+   <div class="row" style="margin-top:8px">
+    <button onclick="watchAct('start')">Запустить</button>
+    <button onclick="watchAct('stop')">Остановить</button>
+    <button onclick="watchAct('restart')">Перезапустить</button>
+    <button onclick="loadWatchDaemon()">Обновить состояние</button>
+    <span id="wdaemonmsg" class="muted"></span></div>
+   <div class="muted">Это отдельный процесс <code>hds watch</code> (его держит файл
+    <code>watch.lock</code>), с <code>llm-host</code> он не связан: остановка — мягкая через
+    <code>index.stop</code>, запуск — без окна. Кнопки «Старт/Стоп/Пауза» выше управляют
+    индексацией внутри UI и сигналами <code>index.pause</code>/<code>index.stop</code>.</div></section>
+ </div>
+
+ <div id="tab-transcribe" hidden>
+  <section><h2>Демон автотранскрибации</h2>
+   <div class="row"><span id="trdaemon" class="muted">…</span></div>
+   <div class="row" style="margin-top:8px">
+    <button onclick="daemonAct('start')">Запустить</button>
+    <button onclick="daemonAct('stop')">Остановить</button>
+    <button onclick="daemonAct('restart')">Перезапустить</button>
+    <button onclick="loadDaemon()">Обновить состояние</button>
+    <span id="trdaemonmsg" class="muted"></span></div>
+   <div class="muted">Останавливается мягко (файл <code>transcribe.stop</code>), запускается без окна —
+    как резидент в блоке «Резидент llm-host». Журнала у демона нет: смотрите
+    <code>data/auto-transcribe*</code>.</div></section>
+
+  <section><h2>Файлы out_dir</h2>
+   <div class="row"><button onclick="loadTrList()">Обновить</button>
+    <span id="trdir" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Файл</th><th>Размер</th><th>Изменён</th><th>Спикеры</th><th>Имена</th></tr></thead>
+    <tbody id="trrows"></tbody></table>
+   <div class="muted" id="trhint">Выберите файл в списке — ниже откроется превью.</div></section>
+
+  <section><h2>Превью</h2>
+   <div class="row"><button id="trnames" onclick="openNames()" disabled>Присвоить имена спикерам</button>
+    <button id="trapply" onclick="applyTask()" disabled>Перезапустить задание</button>
+    <span id="trtitle" class="muted"></span></div>
+   <pre id="trprev" class="muted">…</pre>
+   <div class="muted" id="trappmsg"></div></section>
+
+  <section><h2>Папки конвейера</h2>
+   <div class="muted">Входная папка (исходные медиа) и выходная (транскрипты) —
+    сохраняются в <code>config.yaml</code> и применяются к новым запускам демона.</div>
+   <div class="row" style="margin-top:8px"><span class="muted" style="min-width:90px">inbox_dir</span>
+    <input id="trinbox" placeholder="D:\\media_in" style="min-width:420px"></div>
+   <div class="row" style="margin-top:6px"><span class="muted" style="min-width:90px">out_dir</span>
+    <input id="trout" placeholder="D:\\media_out" style="min-width:420px"></div>
+   <div class="row" style="margin-top:8px"><button onclick="saveTrDirs()">Сохранить папки</button>
+    <span id="trdirmsg" class="muted"></span></div></section>
+
+  <div class="modal" id="trmodal">
+   <div class="box">
+    <h3>Присвоить имена спикерам</h3>
+    <div class="muted">Заполните только нужные строки — пустые останутся как есть:
+     подставляются лишь введённые имена. Колонка «Спикер» берётся из файла.</div>
+    <table class="tr"><thead><tr><th style="width:180px">Спикер</th><th>Имя</th></tr></thead>
+     <tbody id="trspk"></tbody></table>
+    <div class="row" style="margin-top:12px">
+     <button onclick="applyNames()">Применить</button>
+     <button onclick="closeNames()">Закрыть</button>
+     <span id="trmsg" class="muted"></span></div>
+   </div>
+  </div>
+ </div>
+
 </main>
 <script>
 async function jget(u){ const r=await fetch(u); return await r.json(); }
@@ -98,6 +192,7 @@ async function refresh(){
                           : '<span class="err">не отвечает</span>')+'\n';
     if(lh.roles) h+='роли: '+esc(lh.roles)+'\n';
     document.getElementById('status').innerHTML='<pre>'+h+'</pre>';
+    if(document.getElementById('tab-search').style.display!=='none') loadWatchDaemon();
   }catch(e){ document.getElementById('status').textContent='ошибка статуса: '+e; }
 }
 async function doSearch(){
@@ -126,11 +221,13 @@ async function act(u){
 }
 function stIcon(s){ return s==='done'?'&#9989;':(s==='partial'?'&#9888;&#65039;':'&#11036;'); }
 function nodeHtml(n,depth){
-  const pad='&nbsp;&nbsp;'.repeat(depth);
-  let h=pad+stIcon(n.status)+' <b>'+esc(n.name)+'</b> <span class="muted">(файлов '+n.files+', инд '+n.indexed+')</span><br>';
-  (n.children||[]).slice(0,60).forEach(c=>{ h+=nodeHtml(c,depth+1); });
-  return h;
+  const all=n.children||[], kids=all.slice(0,60);
+  const more=all.length>60? '<div class="muted" style="margin-left:20px">… ещё '+(all.length-60)+' папок (показаны первые 60)</div>':'';
+  return '<details'+(depth===0?' open':'')+'><summary>'+stIcon(n.status)+' <b>'+esc(n.name)+
+    '</b> <span class="muted">(файлов '+n.files+', инд '+n.indexed+')</span></summary>'
+    +kids.map(c=>nodeHtml(c,depth+1)).join('')+more+'</details>';
 }
+function treeAll(open){ Array.prototype.forEach.call(document.querySelectorAll('#tree details'),function(d){ d.open=open; }); }
 async function loadTree(){
   const t=document.getElementById('tree'); t.textContent='…';
   try{ const j=await jget('/api/tree');
@@ -173,6 +270,137 @@ async function clineSync(){
       +(r.restart_required?'<div class="warnbox">&#9888;&#65039; '+esc(r.restart_note||'Перезапустите Cline.')+'</div>':'');
   }catch(e){ m.textContent='ошибка: '+e; }
 }
+// --- Транскрибация (PLAN_AUTO_TRANSCRIBE §8) ---
+function showTab(name){
+  const tr=(name==='transcribe');
+  document.getElementById('tab-search').style.display=tr?'none':'block';
+  document.getElementById('tab-transcribe').style.display=tr?'block':'none';
+  Array.prototype.forEach.call(document.querySelectorAll('nav.tabs button'), function(b){
+    b.classList.toggle('active', b.getAttribute('data-tab')===name); });
+  try{ localStorage.setItem('hds.tab', name); }catch(e){}
+  if(tr){ loadTrList(); loadTrDirs(); loadDaemon(); }
+}
+function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
+function fmtTime(t){ return t? new Date(t*1000).toLocaleString() : '—'; }
+let trFile=null, trData=null;
+async function loadTrList(){
+  const tb=document.getElementById('trrows'), d=document.getElementById('trdir');
+  tb.innerHTML='<tr><td colspan=5 class="muted">…</td></tr>';
+  try{ const j=await jget('/api/transcribe/list');
+    d.textContent=(j.dir||'папка не задана')+(j.error? ' · '+j.error : '');
+    const f=j.files||[];
+    if(!f.length){ tb.innerHTML='<tr><td colspan=5 class="muted">нет файлов</td></tr>'; return; }
+    tb.innerHTML=f.map(function(x){
+      return '<tr data-name="'+esc(x.name)+'"><td>'+esc(x.name)+'</td><td class="muted">'+fmtSize(x.size)+
+        '</td><td class="muted">'+esc(fmtTime(x.mtime))+'</td><td class="muted">'+esc((x.speakers||[]).join(', '))+
+        '</td><td>'+(x.renamed? '<span class="ok">имена присвоены</span>' : '<span class="muted">не присвоены</span>')+'</td></tr>';
+    }).join('');
+    Array.prototype.forEach.call(tb.querySelectorAll('tr'), function(r){
+      r.onclick=function(){ openTrFile(r.getAttribute('data-name')); }; });
+  }catch(e){ tb.innerHTML='<tr><td colspan=5 class="err">ошибка: '+esc(''+e)+'</td></tr>'; }
+}
+async function openTrFile(name){
+  trFile=name;
+  const p=document.getElementById('trprev'), t=document.getElementById('trtitle');
+  p.textContent='…'; t.textContent=name; t.title='';
+  try{ const j=await jget('/api/transcribe/file?name='+encodeURIComponent(name));
+    if(j.error){ p.textContent='ошибка: '+j.error; trData=null;
+      document.getElementById('trnames').disabled=true; document.getElementById('trapply').disabled=true; return; }
+    trData=j; p.textContent=j.text||''; t.textContent=j.name; t.title=j.path||'';
+    document.getElementById('trnames').disabled=false;
+    document.getElementById('trapply').disabled=false;
+    document.getElementById('trappmsg').textContent='';
+    Array.prototype.forEach.call(document.querySelectorAll('#trrows tr'), function(r){
+      r.classList.toggle('sel', r.getAttribute('data-name')===name); });
+  }catch(e){ p.textContent='ошибка: '+e; }
+}
+function openNames(){
+  if(!trFile||!trData){ alert('Сначала выберите файл в списке'); return; }
+  const saved=trData.saved||{}, spk=trData.speakers||[];
+  const rows=spk.map(function(s){
+    return '<tr><td><code>'+esc(s)+'</code></td><td><input data-sp="'+esc(s)+'" value="'+esc(saved[s]||'')+
+      '" placeholder="Имя или метка"></td></tr>';
+  }).join('');
+  document.getElementById('trspk').innerHTML=rows||'<tr><td colspan=2 class="muted">метки не найдены</td></tr>';
+  document.getElementById('trmsg').textContent='';
+  document.getElementById('trmodal').classList.add('open');
+}
+function closeNames(){ document.getElementById('trmodal').classList.remove('open'); }
+async function applyNames(){
+  const names={};
+  Array.prototype.forEach.call(document.querySelectorAll('#trspk input[data-sp]'), function(i){
+    names[i.getAttribute('data-sp')]=i.value; });
+  const m=document.getElementById('trmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/transcribe/speakers', {name: trFile, names: names});
+    m.textContent=r.msg||r.error||'ok';
+    if(r.ok){ await openTrFile(trFile); await loadTrList(); openNames(); }
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function applyTask(){
+  if(!trFile){ return; }
+  const m=document.getElementById('trappmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/transcribe/apply', {name: trFile});
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.error||'ok');
+    if(r.ok) setTimeout(loadTrList, 1500);
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function loadTrDirs(){
+  try{ const c=await jget('/api/config'); const a=c.auto_transcribe||{};
+    document.getElementById('trinbox').value=a.inbox_dir||'';
+    document.getElementById('trout').value=a.out_dir||'';
+  }catch(e){}
+}
+async function saveTrDirs(){
+  const m=document.getElementById('trdirmsg'); m.textContent='…';
+  const body={inbox_dir: document.getElementById('trinbox').value, out_dir: document.getElementById('trout').value};
+  try{ const r=await jpost('/api/config/transcribe-dirs', body);
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.error||'ok')+(r.warn? ' · внимание: '+r.warn : '');
+    if(r.ok) loadTrList();
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function loadDaemon(){
+  const el=document.getElementById('trdaemon');
+  try{ const d=await jget('/api/transcribe/daemon');
+    const st=d.running? '<span class="ok">работает</span>'+(d.pid? ' (pid '+d.pid+')' : '')
+      : (d.stale? '<span class="err">lock без процесса</span>' : '<span class="muted">остановлен</span>');
+    el.innerHTML='Состояние: '+st+' · в конфиге: '+(d.enabled? 'включён' : '<span class="err">выключен</span>')
+      +' · папки: <span class="muted">'+esc(d.inbox_dir||'—')+' → '+esc(d.out_dir||'—')+'</span>'
+      +' · опрос каждые '+(d.poll_seconds||'?')+' с';
+  }catch(e){ el.textContent='ошибка: '+e; }
+}
+async function daemonAct(action){
+  const m=document.getElementById('trdaemonmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/transcribe/daemon', {action: action});
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.error||'ok')+(r.warn? ' · '+r.warn : '');
+    await loadDaemon();
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function loadWatchDaemon(){
+  const el=document.getElementById('wdaemon');
+  try{ const d=await jget('/api/watch/daemon');
+    const st=d.running? '<span class="ok">работает</span>'+(d.pid? ' (pid '+d.pid+')' : '')
+      : (d.stale? '<span class="err">lock без процесса</span>' : '<span class="muted">остановлен</span>');
+    let extra='';
+    if(d.paused) extra+=' · <span class="warnbox">пауза индексации</span>';
+    if(d.stop_requested) extra+=' · <span class="err">запрошена остановка (index.stop)</span>';
+    if(d.indexing) extra+=' · индексация идёт';
+    el.innerHTML='Состояние: '+st+extra+' · корней в индексе: '+((d.roots||[]).length);
+  }catch(e){ el.textContent='ошибка: '+e; }
+}
+async function watchAct(action){
+  const m=document.getElementById('wdaemonmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/watch/daemon', {action: action});
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.error||'ok');
+    await loadWatchDaemon();
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+function initTab(){
+  let t='search';
+  try{ t=localStorage.getItem('hds.tab')||'search'; }catch(e){}
+  showTab(t==='transcribe'?'transcribe':'search');
+  loadWatchDaemon();
+}
+initTab();
 refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
 </script></body></html>
 "#;

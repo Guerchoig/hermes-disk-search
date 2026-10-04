@@ -145,10 +145,12 @@ if (-not $StartupFolder) {
 if (-not $ok) {
     # mutual exclusion: with a Startup shortcut in place, drop a leftover scheduled task
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+    # wscript.exe + hidden_launch.vbs: starts the console binary with no window
+    $vbs = Join-Path $root 'hidden_launch.vbs'
     $ws = New-Object -ComObject WScript.Shell
     $sc = $ws.CreateShortcut($startupLnk)
-    $sc.TargetPath = $Exe
-    $sc.Arguments = $argList
+    $sc.TargetPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    $sc.Arguments = "`"$vbs`" `"$Exe`"" + (($argList -split '\s+' | ForEach-Object { " `"$_`"" }) -join '')
     $sc.WorkingDirectory = $root
     $sc.IconLocation = (Join-Path $root 'assets\icon.ico') + ',0'
     $sc.Description = "hermes-disk-search: llm-host (Rust GPU owner, ports 8010-8012)"

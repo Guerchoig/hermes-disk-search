@@ -10,6 +10,7 @@
 
 pub mod config_edit;
 pub mod page;
+pub mod transcribe;
 pub mod tree;
 
 use std::io::{Read, Write};
@@ -393,14 +394,9 @@ fn llm_host_healthy(host: &str, port: u16, timeout: std::time::Duration) -> bool
     )
 }
 
-/// Путь к бинарю резидента `llm_host(.exe)`: рядом с текущим `hds`, иначе
-/// `bin/` → `target/release/` → `target/debug/` (dev-дерево).
-fn llm_host_exe() -> Option<std::path::PathBuf> {
-    let names: &[&str] = if cfg!(windows) {
-        &["llm_host.exe", "llm_host"]
-    } else {
-        &["llm_host", "llm_host.exe"]
-    };
+/// Найти исполняемый файл по списку имён: рядом с текущим exe, затем `bin/`,
+/// `target/release`, `target/debug` (dev-дерево).
+pub(crate) fn find_exe(names: &[&str]) -> Option<std::path::PathBuf> {
     let mut dirs: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(cur) = std::env::current_exe() {
         if let Some(d) = cur.parent() {
@@ -420,6 +416,211 @@ fn llm_host_exe() -> Option<std::path::PathBuf> {
         }
     }
     None
+}
+
+/// Путь к бинарю резидента `llm_host(.exe)`: рядом с текущим `hds`, иначе
+/// `bin/` → `target/release/` → `target/debug/` (dev-дерево).
+fn llm_host_exe() -> Option<std::path::PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["llm_host.exe", "llm_host"]
+    } else {
+        &["llm_host", "llm_host.exe"]
+    };
+    find_exe(names)
+}
+
+/// Запустить процесс **detached** (без окна, без наследования stdio) — общий путь для
+/// резидента `llm-host` и обоих демонов (автотранскрибации и индексации).
+pub(crate) fn spawn_detached(
+    exe: &std::path::Path,
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> Result<u32, String> {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(args)
+        .current_dir(cwd)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    cmd.spawn().map(|c| c.id()).map_err(|e| e.to_string())
+}
+
+/// Дождаться нужного состояния файла-сигнала — не дольше `secs` секунд.
+pub(crate) fn wait_file(path: &std::path::Path, want_present: bool, secs: u64) -> bool {
+    for _ in 0..secs.saturating_mul(4).max(1) {
+        if path.exists() == want_present {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    path.exists() == want_present
+}
+
+/// Путь к бинарю `hds(.exe)`: UI обычно запущен внутри него (`hds ui`), поэтому
+/// сначала проверяем текущий процесс, затем — поиск рядом / `bin` / `target`.
+pub(crate) fn hds_exe() -> Option<std::path::PathBuf> {
+    let names: &[&str] = if cfg!(windows) {
+        &["hds.exe", "hds"]
+    } else {
+        &["hds", "hds.exe"]
+    };
+    if let Ok(cur) = std::env::current_exe() {
+        if let Some(n) = cur.file_name().and_then(|n| n.to_str()) {
+            if names.contains(&n) {
+                return Some(cur);
+            }
+        }
+    }
+    find_exe(names)
+}
+
+// --- Демон индексации (`hds watch`): статус и управление из UI -------------------
+
+/// Статус демона индексации: `watch.lock` (с распознаванием устаревшего) плюс
+/// состояние самой индексации по heartbeat / `index.pause` / `index.stop`.
+pub fn watch_status() -> Value {
+    let root = project_root();
+    let lock = root.join("watch.lock");
+    let stale = lock.exists() && hds_index::watch::lock_is_stale(&lock);
+    let running = lock.exists() && !stale;
+    let pid = std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|_| running);
+    let cfg = load().unwrap_or(Config::Null);
+    let roots: Vec<String> = dig(&cfg, "index.roots")
+        .and_then(|v| v.as_sequence())
+        .map(|s| {
+            s.iter()
+                .filter_map(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "running": running,
+        "stale": stale,
+        "pid": pid,
+        "lock": lock.display().to_string(),
+        "stop_requested": root.join("index.stop").exists(),
+        "paused": root.join("index.pause").exists(),
+        "indexing": index_running(),
+        "roots": roots,
+    })
+}
+
+/// Мягкая остановка демона индексации: пишем `index.stop` и ждём ухода процесса.
+///
+/// `index.stop` проверяется в конвейере **перед каждым файлом** (`pipeline::run_index`),
+/// а до цикла идёт обход дерева (`collect_files`) — поэтому в худшем случае watcher
+/// уходит не мгновенно. Поведение:
+/// * процесс уже не запущен → `ok`, `pending: false`;
+/// * вышел за отведённые секунды → `ok`, `pending: false`, «остановлен»;
+/// * ещё не вышел → тоже `ok` (файл-сигнал уже стоит, выход произойдёт на ближайшей
+///   безопасной точке), но `pending: true` — UI показывает это честно.
+fn stop_watch(lock: &std::path::Path, stop: &std::path::Path, secs: u64) -> Value {
+    if !watch_status()["running"].as_bool().unwrap_or(false) {
+        let _ = std::fs::remove_file(stop);
+        return json!({ "ok": true, "pending": false, "msg": "демон индексации не запущен",
+            "status": watch_status() });
+    }
+    if let Err(e) = std::fs::write(stop, b"") {
+        return json!({ "ok": false, "pending": false,
+            "msg": format!("не создать {}: {e}", stop.display()) });
+    }
+    if wait_file(lock, false, secs) {
+        return json!({ "ok": true, "pending": false, "msg": "демон индексации остановлен",
+            "status": watch_status() });
+    }
+    let busy = watch_status()["indexing"].as_bool().unwrap_or(false);
+    json!({ "ok": true, "pending": true,
+        "msg": if busy {
+            "остановка запрошена: идёт индексация — watcher завершится сразу после текущего \
+             файла (index.stop уже стоит)".to_string()
+        } else {
+            format!("остановка запрошена (index.stop): watcher завершится на ближайшей проверке \
+                     — за {secs} с не успел (идёт обход дерева)")
+        },
+        "status": watch_status() })
+}
+
+/// Управление демоном индексации из UI: `start` | `stop` | `restart` | `status`.
+///
+/// Симметрично демону автотранскрибации (`transcribe::daemon_json`):
+/// * запуск — detached `<hds.exe> watch` (дубль невозможен: `watch.lock`); при старте
+///   снимаем `index.stop` (иначе новый watcher завершится сразу) и устаревший lock;
+/// * остановка — мягкая ([`stop_watch`]): `index.stop`, честный `pending`, если процесс
+///   ещё занят (задача Планировщика такой выход **не** перезапускает).
+pub fn watch_json(action: &str) -> Value {
+    let root = project_root();
+    let lock = root.join("watch.lock");
+    let stop = root.join("index.stop");
+    match action.trim() {
+        "" | "status" => watch_status(),
+        "stop" => stop_watch(&lock, &stop, 15),
+        "start" => {
+            let st = watch_status();
+            if st["running"].as_bool().unwrap_or(false) {
+                return json!({ "ok": false, "msg": "демон индексации уже запущен", "status": st });
+            }
+            if st["roots"].as_array().map(|a| a.is_empty()).unwrap_or(true) {
+                return json!({ "ok": false,
+                    "msg": "в config.yaml не заданы index.roots — watcher выйдет сразу",
+                    "status": st });
+            }
+            let _ = std::fs::remove_file(&lock); // устаревший lock не мешает старту
+            let _ = std::fs::remove_file(&stop); // иначе новый watcher завершится сразу
+            let Some(exe) = hds_exe() else {
+                return json!({ "ok": false,
+                    "msg": "не найден бинарь hds (рядом с UI / bin / target/{release,debug})" });
+            };
+            if let Err(e) = spawn_detached(&exe, &["watch"], &root) {
+                return json!({ "ok": false, "msg": format!("не запустить {}: {e}", exe.display()) });
+            }
+            if !wait_file(&lock, true, 15) {
+                return json!({ "ok": false,
+                    "msg": "watcher не занял watch.lock за 15 с — проверьте index.roots \
+                            и доступность дисков",
+                    "status": watch_status() });
+            }
+            json!({ "ok": true, "msg": "демон индексации запущен", "status": watch_status() })
+        }
+        "restart" => {
+            // для перезапуска ждём дольше: законный случай — длинный обход/индексация
+            let stopped = stop_watch(&lock, &stop, 45);
+            if !stopped["ok"].as_bool().unwrap_or(false) {
+                return stopped;
+            }
+            if stopped["pending"].as_bool().unwrap_or(false) {
+                return json!({ "ok": false,
+                    "msg": "текущий watcher ещё завершается (index.stop стоит) — повторите \
+                            перезапуск чуть позже",
+                    "status": watch_status() });
+            }
+            let mut res = watch_json("start");
+            res["msg"] = json!(format!(
+                "перезапуск: {}",
+                res["msg"].as_str().unwrap_or("готово")
+            ));
+            res
+        }
+        other => json!({ "ok": false,
+            "msg": format!("неизвестное действие: {other} (start|stop|restart|status)") }),
+    }
 }
 
 /// `POST /api/llm-host/restart`: остановить резидент `llm-host` и поднять заново.
@@ -476,28 +677,9 @@ pub fn llm_host_restart() -> Value {
             "msg": "резидент не завершился за 60 с — перезапуск отменён (см. data/logs/llm-host.log)" });
     }
 
-    // 3. Запуск заново (detached, без окна).
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("run")
-        .current_dir(&root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    {
-        use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
-    }
-    let pid = match cmd.spawn() {
-        Ok(c) => c.id(),
+    // 3. Запуск заново (detached, без окна) — общий хелпер `spawn_detached`.
+    let pid = match spawn_detached(&exe, &["run"], &root) {
+        Ok(p) => p,
         Err(e) => {
             return json!({ "ok": false, "msg": format!("не запустить {}: {e}", exe.display()) })
         }
@@ -548,6 +730,20 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             qp(query, "refresh").is_some(),
         )),
         ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
+        ("GET", "/api/watch/daemon") => json_ok(watch_status()),
+        ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
+        ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
+        ("GET", "/api/transcribe/file") => {
+            let name = qp(query, "name").unwrap_or_default();
+            if name.trim().is_empty() {
+                return (
+                    400,
+                    "application/json",
+                    json!({ "error": "нет параметра name" }).to_string(),
+                );
+            }
+            json_ok(transcribe::file_json(&name))
+        }
         ("GET", "/api/config") => json_ok(config_edit::get_config()),
         ("GET", "/api/search") => {
             let q = qp(query, "q").unwrap_or_default();
@@ -600,6 +796,71 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                 "/api/config/excludes" => {
                     let paths = body_list(body, "paths");
                     json_ok(config_edit::set_exclude_paths(&paths))
+                }
+                "/api/transcribe/speakers" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let name = v
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.trim().is_empty() {
+                        return (
+                            400,
+                            "application/json",
+                            json!({ "error": "нет поля name" }).to_string(),
+                        );
+                    }
+                    let names = v.get("names").cloned().unwrap_or_else(|| json!({}));
+                    json_ok(transcribe::speakers_json(&name, &names))
+                }
+                "/api/transcribe/apply" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let name = v
+                        .get("name")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    if name.trim().is_empty() {
+                        return (
+                            400,
+                            "application/json",
+                            json!({ "error": "нет поля name" }).to_string(),
+                        );
+                    }
+                    json_ok(transcribe::apply_json(&name))
+                }
+                "/api/watch/daemon" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let action = v
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("status")
+                        .to_string();
+                    json_ok(watch_json(&action))
+                }
+                "/api/transcribe/daemon" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let action = v
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("status")
+                        .to_string();
+                    json_ok(transcribe::daemon_json(&action))
+                }
+                "/api/config/transcribe-dirs" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let inbox = v
+                        .get("inbox_dir")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let out = v
+                        .get("out_dir")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    json_ok(config_edit::set_transcribe_dirs(&inbox, &out))
                 }
                 _ => (
                     404,

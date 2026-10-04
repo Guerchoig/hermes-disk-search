@@ -60,11 +60,8 @@ fn stub_server(body: String) -> (String, std::thread::JoinHandle<()>) {
 fn client(url: &str, enabled: bool) -> TranscribeClient {
     TranscribeClient::new(TranscribeConfig {
         url: url.into(),
-        model: None,
-        mode: "subtitle".into(),
-        custom: "4.5".into(),
-        gpu: 0,
         enabled,
+        ..Default::default()
     })
 }
 
@@ -158,4 +155,81 @@ fn segments_from_json_filters_empty() {
     assert_eq!(segs.len(), 2);
     assert_eq!(segs[0].text, "a");
     assert_eq!(segs[1].text, "b");
+}
+
+/// T2.1: `transcribe_to_file` пишет выход в `out_dir`, а `.orig` и sidecar — в
+/// каталог сервисных файлов (`service_dir`), чтобы `out_dir` оставался чистым (§5.3).
+#[test]
+fn transcribe_to_file_writes_output_sidecar_and_orig() {
+    let body = serde_json::json!({"mode":"transcript","out_ext":"md","text":"### SPEAKER_00 [00:00:01 - 00:00:11]\nПривет.\n\n### UNASSIGNED [00:00:11 - 00:00:12]\nХвост.\n"}).to_string();
+    let (url, h) = stub_server(body.to_string());
+    let out = std::env::temp_dir().join(format!("hds-auto-out-{}", std::process::id()));
+    let svc = std::env::temp_dir().join(format!("hds-auto-svc-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let _ = std::fs::remove_dir_all(&svc);
+    let src = temp_file("auto", "встреча.wav");
+    let tc = TranscribeConfig {
+        url: url.clone(),
+        out_dir: Some(out.clone()),
+        service_dir: Some(svc.clone()),
+        mode: "transcript".into(),
+        ..Default::default()
+    };
+    let res = TranscribeClient::new(tc).transcribe_to_file(&src).unwrap();
+    h.join().unwrap();
+    let name = |p: &Path| p.file_name().unwrap().to_str().unwrap().to_string();
+    assert_eq!(name(&res.out_path), "встреча.md");
+    assert!(res.out_path.exists() && res.orig_path.exists() && res.speakers_path.exists());
+    // Сервисные файлы — в service_dir, в out_dir остаётся только выход.
+    assert_eq!(res.orig_path.parent().unwrap(), svc);
+    assert_eq!(res.speakers_path.parent().unwrap(), svc);
+    assert_eq!(
+        std::fs::read_dir(&out).unwrap().count(),
+        1,
+        "в out_dir только выход"
+    );
+    assert_eq!(res.speakers, vec!["SPEAKER_00", "UNASSIGNED"]);
+    assert!(res.chars > 0);
+    let md = std::fs::read_to_string(&res.out_path).unwrap();
+    assert!(md.contains("### SPEAKER_00"), "метки движка как есть: {md}");
+    let side = std::fs::read_to_string(&res.speakers_path).unwrap();
+    assert!(side.contains("\"SPEAKER_00\": \"\""), "sidecar={side}");
+    assert!(side.contains("\"unassigned_label\": \"UNASSIGNED\""));
+    std::fs::remove_dir_all(&out).ok();
+    std::fs::remove_dir_all(&svc).ok();
+}
+
+/// T2.1: коллизия имён выхода — суффикс `-2` (§5.3), sidecar рядом с фактическим стемом.
+#[test]
+fn transcribe_to_file_avoids_name_collision() {
+    let (url, h) = stub_server(
+        serde_json::json!({"text":"### SPEAKER_00 [00:00:01 - 00:00:02]\nA\n","out_ext":"md"})
+            .to_string(),
+    );
+    let out = std::env::temp_dir().join(format!("hds-auto-clash-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(out.join("клип.md"), "старое").unwrap();
+    let src = temp_file("clash", "клип.wav");
+    let tc = TranscribeConfig {
+        url,
+        out_dir: Some(out.clone()),
+        mode: "transcript".into(),
+        ..Default::default()
+    };
+    let res = TranscribeClient::new(tc).transcribe_to_file(&src).unwrap();
+    h.join().unwrap();
+    assert_eq!(
+        res.out_path.file_name().unwrap().to_str().unwrap(),
+        "клип-2.md"
+    );
+    assert_eq!(
+        res.speakers_path.file_name().unwrap().to_str().unwrap(),
+        "клип-2.speakers.json"
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("клип.md")).unwrap(),
+        "старое"
+    );
+    std::fs::remove_dir_all(&out).ok();
 }

@@ -44,6 +44,12 @@ pub struct InstanceUse {
     pub idle_secs: u64,
     /// Grace роли (`load_on_demand_grace_seconds`): движок выгружает сам.
     pub grace_seconds: i32,
+    /// Идёт задание автотранскрибации, использующее этот инстанс (§6, T3.1).
+    ///
+    /// Защищает **только от индексации и от вытеснения по простою**: запрос
+    /// чата/поиска (приоритет 1 из 3) вытеснить транскрибацию **может** — так
+    /// требует ТЗ; иначе порядок «1 → 2 → 3» был бы нарушен.
+    pub transcribe_active: bool,
 }
 
 impl InstanceUse {
@@ -60,6 +66,7 @@ impl InstanceUse {
             owned: true,
             idle_secs: 0,
             grace_seconds: 0,
+            transcribe_active: false,
         }
     }
 
@@ -94,6 +101,13 @@ impl InstanceUse {
     /// Инстанс создан не нами (чужой владелец) — не трогаем.
     pub fn foreign(mut self) -> Self {
         self.owned = false;
+        self
+    }
+
+    /// Пометить «на этом инстансе идёт задание автотранскрибации» (§6, T3.1):
+    /// индексация и предохранитель простоя его не вытесняют.
+    pub fn transcribe_active(mut self) -> Self {
+        self.transcribe_active = true;
         self
     }
 
@@ -142,16 +156,21 @@ impl Demand {
 }
 
 /// Кандидаты на вытеснение: владелец — HDS, инстанс держит VRAM, не занят запросом
-/// и это не роль, под которую просят память.
-fn evictable<'a>(instances: &'a [InstanceUse], protect_role: &str) -> Vec<&'a InstanceUse> {
+/// и его роль **не** в списке защищённых.
+///
+/// Список ролей, а не одна: у задания автотранскрибации защищены и логическая роль
+/// (`transcribe`), и физический носитель (`whisper`) — см. [`plan_transcribe`].
+fn evictable<'a>(instances: &'a [InstanceUse], protect: &[&str]) -> Vec<&'a InstanceUse> {
     instances
         .iter()
-        .filter(|i| i.owned && i.holds_vram() && !i.is_busy() && i.role != protect_role)
+        .filter(|i| {
+            i.owned && i.holds_vram() && !i.is_busy() && !protect.contains(&i.role.as_str())
+        })
         .collect()
 }
 
 /// Порядок вытеснения **для запроса**: сначала роли с меньшим приоритетом
-/// (`gpu.priorities`: whisper 20 → rerank 30 → embedding 40 → chat 100),
+/// (`gpu.priorities`: whisper 20 → rerank 30 → embedding 40 → transcribe 60 → chat 100),
 /// при равном приоритете — дольше простаивающие, затем более крупные.
 ///
 /// Роль, которой нет в `gpu.priorities`, получает приоритет 0 и выгружается
@@ -161,7 +180,16 @@ pub fn eviction_order(
     instances: &[InstanceUse],
     protect_role: &str,
 ) -> Vec<InstanceUse> {
-    let mut out = evictable(instances, protect_role);
+    eviction_order_multi(gpu, instances, &[protect_role])
+}
+
+/// То же, но защищать можно несколько ролей сразу (§6: `transcribe` + `whisper`).
+pub fn eviction_order_multi(
+    gpu: &GpuConfig,
+    instances: &[InstanceUse],
+    protect: &[&str],
+) -> Vec<InstanceUse> {
+    let mut out = evictable(instances, protect);
     out.sort_by_key(|i| {
         (
             gpu.priority_of(&i.role),
@@ -176,12 +204,18 @@ pub fn eviction_order(
 /// (`KEEP_LOADED`, то есть чат: он вернётся при следующем запросе), затем
 /// index-роли по возрастанию приоритета. Роль, под которую просят память
 /// (её использует сама индексация), не вытесняется.
+///
+/// Инстанс с активным заданием автотранскрибации не вытесняется никогда
+/// (§6, T3.1): иначе индексация, дойдя до медиа, выбила бы собственный
+/// транскрибатор. Запрос чата при этом транскрибацию вытеснить **может** —
+/// это приоритет 1 > 2.
 pub fn eviction_order_for_indexing(
     gpu: &GpuConfig,
     instances: &[InstanceUse],
     protect_role: &str,
 ) -> Vec<InstanceUse> {
-    let mut out = evictable(instances, protect_role);
+    let mut out = evictable(instances, &[protect_role]);
+    out.retain(|i| !i.transcribe_active);
     out.sort_by_key(|i| {
         (
             i.is_on_demand() as u8,
@@ -379,6 +413,184 @@ pub fn plan_query(
                 plan.notes.push(msg);
                 plan.notes.push(
                     "вытеснено всё, что можно (занятые и чужие инстансы не трогаем)".to_string(),
+                );
+            }
+        }
+    }
+    plan
+}
+
+/// Физический носитель автотранскрибации: bridge-audio движка — это роль `whisper`.
+///
+/// Логическая роль задания — `transcribe` (`config::TRANSCRIBE_ROLE`, приоритет 60),
+/// но инстанса с таким именем в кластере нет: защищать нужно именно `whisper`,
+/// иначе вытеснение первой жертвой выберет транскрибатор (у него приоритет 20).
+pub const TRANSCRIBE_TRANSPORT_ROLE: &str = "whisper";
+
+/// Решение по заданию **автотранскрибации** (§6: приоритет 2 из 3).
+///
+/// Отличия от [`plan_query`]:
+/// * защищены **две** роли — логическая `transcribe` и носитель `whisper`;
+/// * если носитель уже загружен, новой VRAM не требуется — сразу `Fits`;
+/// * при нехватке первыми уступают **индексные** роли (`rerank` 30 → `embedding` 40),
+///   `chat` (100) — последним, и только если без него не влезает;
+/// * при `query_priority` ставится `index.pause` — это и есть «2 > 3»: пока идёт
+///   задание, индексация стоит;
+/// * отчёт о нехватке вместо деградации (`llm.model_policy: fixed`).
+pub fn plan_transcribe(
+    gpu: &GpuConfig,
+    free_mib: Option<u64>,
+    demand: &Demand,
+    instances: &[InstanceUse],
+) -> Plan {
+    let free = gpu.effective_free_mib(free_mib);
+    let mut plan = Plan::new(free, demand.need_mib, gpu.reserve_mb);
+    let protect = [demand.role.as_str(), TRANSCRIBE_TRANSPORT_ROLE];
+
+    // (а0) носитель уже загружен — новая VRAM не нужна (та же логика, что в
+    // `plan_query`: на заполненной карте иначе «не влезала» бы сама в себя).
+    if let Some(inst) = instances
+        .iter()
+        .find(|i| i.role == TRANSCRIBE_TRANSPORT_ROLE && i.is_loaded())
+    {
+        plan.verdict = Verdict::Fits;
+        plan.actions.push(Action::EnsureLoaded {
+            role: TRANSCRIBE_TRANSPORT_ROLE.to_string(),
+        });
+        plan.notes.push(format!(
+            "транскрибатор '{}' уже загружен ({}): новая VRAM не нужна",
+            TRANSCRIBE_TRANSPORT_ROLE,
+            state::name(inst.state)
+        ));
+        return plan;
+    }
+
+    let total = plan.total_mib();
+
+    // (а) замера нет — решает движок, но паузу под задание всё равно ставим
+    let Some(free_u) = free else {
+        plan.verdict = Verdict::Unknown;
+        if gpu.pause_index_on_query {
+            plan.actions.push(Action::PauseIndex {
+                reason: "задание автотранскрибации: замера VRAM нет (NVML недоступен)".to_string(),
+            });
+        }
+        plan.actions.push(Action::EnsureLoaded {
+            role: TRANSCRIBE_TRANSPORT_ROLE.to_string(),
+        });
+        plan.notes.push(
+            "нет замера свободной VRAM: бюджет задания не проверяем, но индексацию \
+             ставим на паузу (приоритет автотранскрибации выше индексации)"
+                .to_string(),
+        );
+        return plan;
+    };
+
+    if free_u >= total {
+        plan.verdict = Verdict::Fits;
+        plan.actions.push(Action::EnsureLoaded {
+            role: TRANSCRIBE_TRANSPORT_ROLE.to_string(),
+        });
+        plan.notes.push(format!(
+            "VRAM достаточно: нужно {total} МиБ (модель+KV {} + резерв {}), свободно {free_u} МиБ",
+            demand.need_mib, gpu.reserve_mb
+        ));
+        return plan;
+    }
+
+    match gpu.policy {
+        GpuPolicy::Manual => {
+            let msg = shortage_message(
+                gpu,
+                demand,
+                free_u,
+                0,
+                total,
+                "; gpu.policy: manual — вытеснение и пауза выключены",
+            );
+            plan.verdict = Verdict::NotEnough {
+                short_mib: total - free_u,
+            };
+            plan.actions.push(Action::ReportShortage {
+                message: msg.clone(),
+            });
+            plan.notes.push(msg);
+        }
+        GpuPolicy::IndexingPriority => {
+            let msg = shortage_message(
+                gpu,
+                demand,
+                free_u,
+                0,
+                total,
+                "; gpu.policy: indexing_priority — индексные роли не вытесняем",
+            );
+            plan.verdict = Verdict::NotEnough {
+                short_mib: total - free_u,
+            };
+            plan.actions.push(Action::ReportShortage {
+                message: msg.clone(),
+            });
+            plan.notes.push(msg);
+            plan.notes.push(
+                "задание ждёт: сейчас приоритет у индексации (gpu.policy: indexing_priority)"
+                    .to_string(),
+            );
+        }
+        GpuPolicy::QueryPriority => {
+            // «2 > 3»: пока идёт автотранскрибация, индексация стоит на паузе.
+            if gpu.pause_index_on_query {
+                plan.actions.push(Action::PauseIndex {
+                    reason: format!(
+                        "задание автотранскрибации: нужно {total} МиБ, свободно {free_u} МиБ"
+                    ),
+                });
+            }
+            let mut freed = 0u64;
+            for inst in eviction_order_multi(gpu, instances, &protect) {
+                if free_u + freed >= total {
+                    break;
+                }
+                plan.actions.push(Action::Unload {
+                    name: inst.name.clone(),
+                    role: inst.role.clone(),
+                    vram_mib: inst.vram_mib,
+                    why: format!(
+                        "уступает автотранскрибации (приоритет {}): простой {} с, retention {}",
+                        gpu.priority_of(&inst.role),
+                        inst.idle_secs,
+                        inst.retention_label()
+                    ),
+                });
+                freed += inst.vram_mib;
+            }
+            plan.freed_mib = freed;
+            plan.actions.push(Action::EnsureLoaded {
+                role: TRANSCRIBE_TRANSPORT_ROLE.to_string(),
+            });
+            if free_u + freed >= total {
+                plan.verdict = Verdict::FitsAfterEviction;
+                plan.notes.push(format!(
+                    "после вытеснения хватает: освободили {freed} МиБ, доступно {} МиБ",
+                    free_u + freed
+                ));
+                plan.notes.push(
+                    "индексные роли вернутся сами (LOAD_ON_DEMAND), пауза снимается по \
+                     завершении задания — §6"
+                        .to_string(),
+                );
+            } else {
+                let msg = shortage_message(gpu, demand, free_u, freed, total, "");
+                plan.verdict = Verdict::NotEnough {
+                    short_mib: total - (free_u + freed),
+                };
+                plan.actions.push(Action::ReportShortage {
+                    message: msg.clone(),
+                });
+                plan.notes.push(msg);
+                plan.notes.push(
+                    "вытеснено всё, что можно: транскрибатор и занятые инстансы не трогаем"
+                        .to_string(),
                 );
             }
         }
@@ -585,6 +797,16 @@ pub fn plan_indexing(
         return plan;
     }
 
+    if instances
+        .iter()
+        .any(|i| i.transcribe_active && i.owned && i.holds_vram())
+    {
+        plan.notes.push(
+            "инстанс с активным заданием автотранскрибации не вытесняем (§6): индексация \
+             уступает автотранскрибации — 2 > 3"
+                .to_string(),
+        );
+    }
     let mut freed = 0u64;
     for inst in eviction_order_for_indexing(gpu, instances, &demand.role) {
         if free_u + freed >= total {
@@ -646,13 +868,17 @@ fn idle_threshold(gpu: &GpuConfig, inst: &InstanceUse) -> u64 {
 /// Роль чата (`KEEP_LOADED`) тоже попадает под него — `llm-host` единственный
 /// владелец GPU, и §8.6.2 прямо разрешает выгрузить чат, чтобы продолжить
 /// индексацию; при следующем запросе он загрузится сам.
+///
+/// Инстанс с **активным** заданием автотранскрибации пропускается (§6, T3.1):
+/// предохранитель не должен убивать транскрибатор прямо во время работы —
+/// иначе задание упадёт на середине.
 pub fn idle_evictions(gpu: &GpuConfig, instances: &[InstanceUse]) -> Vec<Action> {
     if gpu.policy == GpuPolicy::Manual || gpu.evict_idle_sec == 0 {
         return Vec::new();
     }
     instances
         .iter()
-        .filter(|i| i.owned && i.holds_vram() && !i.is_busy())
+        .filter(|i| i.owned && i.holds_vram() && !i.is_busy() && !i.transcribe_active)
         .filter_map(|i| {
             let threshold = idle_threshold(gpu, i);
             if i.idle_secs < threshold {
@@ -689,6 +915,7 @@ pub fn instance_use(inst: &Instance, role: &str, vram_mib: u64, idle_secs: u64) 
         owned: true,
         idle_secs,
         grace_seconds: inst.load_on_demand_grace_seconds,
+        transcribe_active: false,
     }
 }
 

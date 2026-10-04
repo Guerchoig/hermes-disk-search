@@ -622,9 +622,35 @@ pub fn check_gpu_observability() -> Check {
     check
 }
 
+/// T5: модель диаризации (sortformer) — без неё автотранскрибация с диаризацией
+/// падает: задание `mode: transcript` требует модель и **не** деградирует в `speech`
+/// (`PLAN_AUTO_TRANSCRIBE` §0 п.6).
+pub fn check_diarization(cfg: &Config) -> Check {
+    match crate::autotranscribe::diarization_model_for(cfg) {
+        Some(p) => Check::new("diarization", "ok", "модель диаризации (sortformer)").msg(format!(
+            "найдена: {} ({:.0} МБ)",
+            p.display(),
+            std::fs::metadata(&p)
+                .map(|m| m.len() as f64 / 1_048_576.0)
+                .unwrap_or(0.0)
+        )),
+        None => Check::new(
+            "diarization",
+            "warn",
+            "модель диаризации (sortformer) не найдена",
+        )
+        .msg(
+            "`hds transcribe-watch` будет падать: задание `mode: transcript` без модели \
+             отказывает (fallback в speech нет)",
+        )
+        .fix("installers\\fetch_diarization_model.ps1 (или auto_transcribe.diarization_model)"),
+    }
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![check_db(cfg), check_roots(cfg), check_chat(cfg)];
+    checks.push(check_diarization(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);

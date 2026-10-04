@@ -146,6 +146,32 @@
 > cargo обновляет индекс, качает и собирает крейты (например `ort` `2.0.0-rc.13`); прокси и
 > `CARGO_NET_OFFLINE` не заданы. Новые зависимости добавлять можно; заметки поправлены
 > (`tools/parity/README.md` §3 п.13, `W2_REPORT.md` §17).
+> **Автотранскрибация + диаризация (04.10.2026, `PLAN_AUTO_TRANSCRIBE`, T0.1–T5):**
+> спайк зафиксировал формат вывода движка (`tools/parity/T0_1_DIARIZATION_FORMAT.md`:
+> `### SPEAKER_00 [hh:mm:ss - hh:mm:ss]`, неприсвоенная реплика `UNASSIGNED`, выход `.md`);
+> спайки идут **нашей** пробой `crates\hds-llama\src\bin\diar_probe.rs` — стоковый
+> `example-cli.exe` несовместим с патчеными DLL (`engine-patch/README.md`). Добавлено:
+> секция `auto_transcribe.*`; контракт `/internal/transcribe` (`diarization*`, `return_text`,
+> жёсткий отказ без sortformer); `hds-index::transcribe::transcribe_to_file` (выход + `.orig.md`
+> + `.speakers.json`); демон `hds transcribe-watch` (+ `transcribe-once`, `transcribe-stop`,
+> `transcribe.lock`, манифест/очередь JSONL, утилизация исходника delete/keep/move); арбитр
+> VRAM — `dispatch::plan_transcribe` и `gpu.priorities.transcribe = 60` (1 поиск/чат →
+> 2 автотранскрибация → 3 индексация) с защитой транскрибатора от индексации; UI — закладка
+> «Транскрибация» (`/api/transcribe/{list,file,speakers,apply}`, path-safety, `.bak`, частичная
+> подстановка имён, правка `inbox_dir`/`out_dir`); установка — `installers\fetch_diarization_model.ps1`,
+> задача `HermesDiskSearchTranscribe`, пункт `diarization` в `hds check`/`whisper-check`.
+> Живые прогоны: `transcribe-once` и демон (исходник удалён, манифест `done/delete`),
+> переименование `SPEAKER_00→Иван→Пётр`, арбитр в логе резидента (`модель+KV 2254`, приоритет
+> `transcribe = 60`). clippy 0/0, `cargo test --workspace` — зелёные.
+> **Управление демонами из UI (04.10.2026):** на закладке «Транскрибация» — блок «Демон
+> автотранскрибации», на закладке «Поиск» — «Демон индексации»: состояние по `*.lock`
+> (`lock_is_stale` распознаёт мёртвый процесс) + кнопки **Запустить/Остановить/Перезапустить**
+> (`GET/POST /api/transcribe/daemon`, `GET/POST /api/watch/daemon`; запуск detached, стоп —
+> `transcribe.stop`/`index.stop`, POST — под CSRF). Заодно **исправлен баг**: `pipeline::run_index`
+> снимал `index.stop` в конце (в т.ч. при выходе из-за `index.stop` **во время паузы**), из-за
+> чего `hds watch` не останавливался — теперь остановка помечается счётчиком `stopped`, и
+> watcher завершается (`watch.rs`). Живой прогон: `stop` → `pending=false` за 2.5–4 с, `restart`
+> и повторный `stop` — ок.
 > **Передача контекста:** `tools/parity/README.md` §4 (чек-лист на 5 минут + что читать) →
 > `tools/parity/W2_REPORT.md` §9 (состояние, карта кода, команды, грабли), **§10 (отчёт A6:
 > боевые порты, офлоад 9384 МиБ, `n_batch` −1503 МиБ, ARB 6/6; §10.6 — живая машина,

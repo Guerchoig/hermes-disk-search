@@ -23,6 +23,9 @@ fn usage() -> String {
      \x20 whisper-check [--file <медиа>] [--json]\n\
      \x20 db-move      --to <path> [--force]\n\
      \x20 watch        [--roots a;b]\n\
+     \x20 transcribe-watch            (демон автотранскрибации: inbox_dir → out_dir)\n\
+     \x20 transcribe-once <медиафайл>  (один файл «здесь и сейчас», без очереди)\n\
+     \x20 transcribe-stop              (мягкая остановка демона автотранскрибации)\n\
      \x20 mcp          [--http --host H --port N --path /mcp] (stdio или streamable-http)\n\
      \x20 mcp-http     check|start|stop|status|restart|run [--host --port --path]\n\
      \x20 cline-sync   [--json] [--dry-run] (настройки Cline под config.yaml: модели/MCP/правило)\n\
@@ -111,6 +114,15 @@ fn run(args: &[String]) -> i32 {
             }
         },
         "watch" => cmd::watch::cmd_watch(flag_val(rest, "--roots")),
+        "transcribe-watch" => cmd::transcribe::cmd_transcribe_watch(),
+        "transcribe-once" => match rest.first() {
+            Some(p) if !p.starts_with("--") => cmd::transcribe::cmd_transcribe_once(p),
+            _ => {
+                eprintln!("transcribe-once: нужен путь к медиафайлу");
+                2
+            }
+        },
+        "transcribe-stop" => cmd::transcribe::cmd_transcribe_stop(),
         "mcp" => cmd::mcp::cmd_mcp(
             has(rest, "--http"),
             flag_val(rest, "--host"),
