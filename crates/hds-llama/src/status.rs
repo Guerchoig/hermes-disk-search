@@ -502,10 +502,15 @@ pub fn state_label(code: Option<i32>) -> String {
 }
 
 /// Одна строка описания устройства (как в `llm_host_plan`).
+///
+/// Оговорка про `memory_free` движка сохранена (R29: на NVIDIA цифры расходились
+/// до +7,7 ГБ), но источник решений теперь не только NVML: на машинах без NVIDIA
+/// работает вендор-нейтральный DXGI-измеритель (`vram::dxgi`), а при его
+/// отсутствии решение честно помечается «нет замера» (движок решает сам).
 pub fn device_line(d: &Device) -> String {
     format!(
         "index={} backend={} name={} free={:.0} МиБ (R29: `memory_free` движка недостоверен, \
-         решения — по NVML) total={:.0} МиБ",
+         решения — по измерителю VRAM: NVML/DXGI, иначе «нет замера») total={:.0} МиБ",
         d.bridge_device_index,
         d.backend,
         d.name,
