@@ -713,6 +713,22 @@ pub fn bind_device_probes(
 
 /// Основная часть — перенос из `bin/llm_host_facade.rs` (A5), поэтому поля и
 /// порядок решений совпадают с проверенным живым прогоном (§7.3 `W2_REPORT.md`).
+/// Убрать `PauseIndex` из плана для ролей, которые обслуживают **самого индексатора**.
+///
+/// `embedding`/`rerank` во время индексации вызывает сам индексатор; пауза
+/// индексации на таких запросах — «индексатор ставит паузу себе»: файл
+/// `index.pause` появляется/исчезает на каждом запросе эмбеддингов → UI мигает
+/// «идёт ↔ пауза», а лог диспетчера растёт на две строки за запрос (живой
+/// инцидент 05.10.2026, ноутбук во время первичной индексации). Пауза имеет
+/// смысл для пользовательских запросов (chat) и транскрибации — их не трогаем.
+/// Арифметика VRAM и остальные действия плана не меняются.
+fn strip_index_self_pause(plan: &mut Plan, role: &str) {
+    if role == "embedding" || role == "rerank" {
+        plan.actions
+            .retain(|a| !matches!(a, crate::dispatch::Action::PauseIndex { .. }));
+    }
+}
+
 pub struct ClusterBackend {
     /// Кластер движка. `None` в режимах `facade`/`off` — инстансов нет, запросы
     /// ролей отклоняются честной причиной (или проксируются, если есть upstream).
@@ -1126,11 +1142,13 @@ impl ClusterBackend {
             // запрошенной: иначе арифметика вытеснения врёт (поймано живым прогоном)
             let uses = self.uses();
             let demand = Demand::new(role, need);
-            if transcribe {
+            let mut plan = if transcribe {
                 plan_transcribe(&self.gpu, self.target_free_mib(), &demand, &uses)
             } else {
                 plan_query(&self.gpu, self.target_free_mib(), &demand, &uses)
-            }
+            };
+            strip_index_self_pause(&mut plan, role);
+            plan
         };
         // Применяем решение к движку — но **с бюджетом**: если движок занят чужим
         // вызовом (загрузка/инференс другой роли), вытеснение откладываем. Ждать
@@ -2692,7 +2710,46 @@ impl Drop for Host {
 #[cfg(test)]
 mod whisper_device_tests {
     use super::names_match;
+    use super::strip_index_self_pause;
     use super::whisper_device;
+    use crate::dispatch::{Action, Plan};
+
+    /// Роли индексации не ставят паузу индексации сами себе (фликер в UI).
+    #[test]
+    fn index_roles_do_not_pause_indexing() {
+        let mut plan = Plan::new(Some(7000), 726, 1024);
+        plan.actions.push(Action::PauseIndex {
+            reason: "запрос роли 'embedding'".to_string(),
+        });
+        plan.actions.push(Action::EnsureLoaded {
+            role: "embedding".to_string(),
+        });
+        strip_index_self_pause(&mut plan, "embedding");
+        assert!(
+            !plan
+                .actions
+                .iter()
+                .any(|a| matches!(a, Action::PauseIndex { .. })),
+            "пауза снята для embedding"
+        );
+        assert!(
+            plan.actions
+                .iter()
+                .any(|a| matches!(a, Action::EnsureLoaded { .. })),
+            "остальные действия целы"
+        );
+
+        // Пользовательские роли — пауза остаётся (запрос важнее индексации).
+        let mut plan = Plan::new(Some(7000), 9036, 1024);
+        plan.actions.push(Action::PauseIndex {
+            reason: "запрос роли 'chat'".to_string(),
+        });
+        strip_index_self_pause(&mut plan, "chat");
+        assert!(plan
+            .actions
+            .iter()
+            .any(|a| matches!(a, Action::PauseIndex { .. })));
+    }
 
     #[test]
     fn enough_vram_keeps_gpu() {
