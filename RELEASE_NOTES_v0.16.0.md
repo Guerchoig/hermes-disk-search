@@ -10,10 +10,13 @@
 |---|---|---|
 | hds-0.16.0-windows-x64.zip (+ .sha256.txt) | **Да, обязательно** | программа: bin\ (Rust), установщик, скилл, манифесты, sidecar-воркер |
 | hds-engine-runtime-windows-x64-cuda.zip | Только для **офлайн-установки** (NVIDIA) | рантайм движка CUDA; обычный установщик качает его сам по манифесту |
-| hds-engine-runtime-windows-x64-vulkan.zip | Только для **офлайн-установки** (AMD/Intel) | рантайм движка Vulkan; обычный установщик ставит его на машины без NVIDIA сам |
-| hds-0.16.0-macos-arm64.zip (+ .sha256.txt) | Только для macOS (best-effort) | то же для macOS; прикладывается, если сборка прошла |
 | hds-engine-runtime-macos-arm64-metal.zip | Только для macOS офлайн | рантайм движка Metal |
+| hds-0.16.0-macos-arm64.zip (+ .sha256.txt) | Только для macOS (best-effort) | то же для macOS; прикладывается, если сборка прошла |
 | hermes-disk-search-0.16.0-windows.zip / -macos.zip | Нет | архивы исходников (для разработчиков) |
+
+На машинах **без NVIDIA** (AMD/Intel) установщик сам качает **Vulkan-рантайм
+движка** из апстрима (`openresearchtools/engine`, манифест
+`runtime-manifests/engine-manifest.json`) — отдельного файла в этом релизе нет.
 
 Модели (LLM/whisper/диаризация/CLIP ONNX) и Python-sidecar в архив **не входят** —
 установщик скачивает их сам. Патч движка (engine-patch-v2) применяется автоматически.
