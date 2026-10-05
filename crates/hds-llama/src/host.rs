@@ -957,6 +957,28 @@ impl ClusterBackend {
             .map(|d| d.memory_free >> 20)
     }
 
+    /// Имя устройства движка по bridge-индексу (`CUDA0`/`Vulkan0`/`Metal0`/`CPU`).
+    ///
+    /// Раньше имя диаризации хардкодилось `CUDA{gpu}` — валидно только для
+    /// CUDA-сборки движка; на Vulkan/Metal-сборках такого бэкенда нет, и
+    /// диаризация падала «failed to initialize backend: CUDA0» (живой инцидент
+    /// 05.10.2026, ноутбук AMD). Для CPU-пути (`gpu < 0`) возвращаем `None` —
+    /// движок сам оставит диаризацию на CPU (`whisper_no_gpu`).
+    fn engine_device_name(&self, bridge_index: i32) -> Option<String> {
+        if bridge_index < 0 {
+            return None;
+        }
+        let cluster = self.cluster.as_ref()?;
+        let devices = cluster
+            .try_with("devices", DISPATCH_BUDGET, |c| c.devices())
+            .ok()?
+            .ok()?;
+        devices
+            .iter()
+            .find(|d| d.bridge_device_index == bridge_index)
+            .map(|d| d.name.clone())
+    }
+
     /// Свободная VRAM **целевого устройства** — то, чем распоряжается диспетчер.
     ///
     /// Берём минимум из двух сигналов: проба (NVML/DXGI — «сколько разрешено ОС»)
@@ -1816,7 +1838,7 @@ impl Backend for ClusterBackend {
                 .get("diarization_device")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
-                .or_else(|| (gpu >= 0).then(|| format!("CUDA{gpu}")));
+                .or_else(|| self.engine_device_name(gpu));
             let mut d = DiarizationParams::new(&diar_model);
             d.backend = backend.to_string();
             d.feed_ms = feed_ms;
