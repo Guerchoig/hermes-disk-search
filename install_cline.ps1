@@ -34,6 +34,34 @@ if (-not (Test-Path $clineDir) -and -not $clineCmd) {
 }
 Write-Host "== Connecting disk-search to Cline ($clineDir) =="
 
+# --- Cline Desktop version check (observed 05.10.2026) ------------------------
+# Cline Desktop 0.0.37 does NOT create the model catalog file
+# (~/.cline/data/settings/models.json) at all, so the "models.json" step of
+# cline-sync stays "not found" forever; 0.0.43 creates it once a model is chosen.
+# The provider catalog of "openai-compatible" is not dynamic there either, so
+# the update button silently does nothing - models must be entered by hand
+# (or created by cline-sync, release 0.16+).
+$clineApp = Join-Path $env:LOCALAPPDATA "Cline\cline-app.exe"
+if (Test-Path $clineApp) {
+    # PS 5.1: .VersionInfo on a bare string path is empty - go through Get-Item.
+    $vi = (Get-Item $clineApp).VersionInfo
+    $verText = $vi.FileVersion
+    if (-not $verText) { $verText = $vi.ProductVersion }
+    $ver = $null
+    if ([version]::TryParse($verText, [ref]$ver)) {
+        if ($ver -lt [version]"0.0.43") {
+            Write-Host "[--] Cline Desktop $verText is older than 0.0.43." -ForegroundColor Yellow
+            Write-Host "    Old builds do not create the model catalog (models.json), which"
+            Write-Host "    cline-sync needs for the context-window step. Update Cline first:"
+            Write-Host "    https://github.com/cline/cline/releases/latest"
+        } else {
+            Write-Host "[ok] Cline Desktop version: $verText"
+        }
+    } else {
+        Write-Host "[..] Cline Desktop version not parsed ('$verText') - continuing."
+    }
+}
+
 # Settings are written by the SAME code the UI button uses (`hds cline-sync`):
 # models.json context windows, both MCP settings files, the rule and the skill.
 if (-not $hdsExe) {
