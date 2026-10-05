@@ -142,6 +142,35 @@ if ($workerPython -and (Test-Worker -Python $workerPython)) {
     Note "Fallback: install Python 3.10+ and set the HDS_EXTRACT_PYTHON environment variable."
 }
 
+$workerPython = Find-WorkerPython
+if ($workerPython -and (Test-Worker -Python $workerPython)) {
+    Ok "worker is ready ($workerPython)"
+} elseif ($workerPython) {
+    Warn "worker did not answer 'hello': $workerPython"
+    Note "The bundled sidecar may be incomplete. Fallback: install Python 3.10+ and set HDS_EXTRACT_PYTHON."
+} else {
+    Warn "no Python for the extraction worker found."
+    Note "Expected sidecar\python\python.exe (bundled) or .venv\Scripts\python.exe."
+    Note "Fallback: install Python 3.10+ and set the HDS_EXTRACT_PYTHON environment variable."
+}
+
+# --- 4b. OCR (Tesseract): binary path + rus/eng language packs ---------------
+# configure_ocr.py: finds tesseract (PATH + standard install dirs), ensures the
+# rus/eng language packs in a user-writable tessdata, writes index.ocr_tesseract_cmd
+# into config.yaml. Idempotent and non-blocking: "tesseract not found" prints a
+# hint (winget/brew) and returns 0 - users may install Tesseract at ANY time and
+# just re-run this step (it re-runs on every setup/update).
+Step "OCR (Tesseract) configuration"
+if ($workerPython) {
+    try {
+        & $workerPython (Join-Path $root "installers\configure_ocr.py") 2>&1 |
+            ForEach-Object { Write-Host "    $_" }
+    } catch { Warn "OCR configuration: $_" }
+} else {
+    Warn "no Python found - skipping OCR configuration."
+    Note "Re-run later: python installers\configure_ocr.py"
+}
+
 # --- 5. config.yaml ---------------------------------------------------------
 Step "config.yaml"
 $cfg = Join-Path $root "config.yaml"
