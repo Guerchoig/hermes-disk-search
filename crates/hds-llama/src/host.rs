@@ -32,7 +32,9 @@ use serde_json::{json, Value};
 use crate::budget::{compute_buffer_mib, estimate_need_mib};
 use crate::cluster::{Cluster, InstanceSpec};
 use crate::config::{self, GpuConfig, LlmHostConfig, Mode};
-use crate::dispatch::{self, instance_use, plan_query, plan_transcribe, Demand, InstanceUse, Plan};
+use crate::dispatch::{
+    self, instance_use, plan_query, plan_transcribe, Demand, InstanceUse, Plan, Verdict,
+};
 use crate::error::{EngineError, Result};
 use crate::facade::{self, Backend, ChatRequest, ServerConfig, Thinking, Usage};
 use crate::gguf::{read_meta, KvBits};
@@ -41,7 +43,7 @@ use crate::registry::{self, RolePlan};
 use crate::resident::{self, Log, PidFile};
 use crate::runtime::RuntimePaths;
 use crate::status::{device_line, StatusInput, StatusReport};
-use crate::vram::{NvmlProbe, VramProbe};
+use crate::vram::{open_vram_probe, VramProbe};
 use crate::whisper::DiarizationParams;
 use crate::{engine::EngineCwd, Engine};
 
@@ -371,8 +373,8 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
 
     let pause = IndexPause::new(args.pause_dir.clone());
     let heartbeat = read_heartbeat(&args.pause_dir);
-    let nvml = NvmlProbe::open(args.nvml_index).ok();
-    let vram = nvml.as_ref().and_then(|p| p.snapshot());
+    let vram_probe = open_vram_probe(args.nvml_index);
+    let vram = vram_probe.as_ref().and_then(|p| p.snapshot());
 
     // Прогноз диспетчера: что будет, если запрос чата придёт прямо сейчас.
     let idle: BTreeMap<String, u64> = BTreeMap::new();
@@ -581,7 +583,7 @@ pub struct ClusterBackend {
     /// Оценка «модель + KV» по ролям (для решений диспетчера).
     needs: BTreeMap<String, u64>,
     gpu: GpuConfig,
-    nvml: Option<Arc<NvmlProbe>>,
+    vram_probe: Option<Arc<dyn VramProbe>>,
     pause: Arc<IndexPause>,
     /// Диспетчер включён (флаг `--dispatcher on`).
     dispatch_enabled: bool,
@@ -768,9 +770,10 @@ impl ClusterBackend {
         })
     }
 
-    /// Свободная VRAM (NVML) — источник истины (R29).
+    /// Свободная VRAM — NVML (источник истины, R29) или DXGI (вендор-нейтральный
+    /// фолбэк Windows); `None` — измерить нечем.
     fn free_mib(&self) -> Option<u64> {
-        self.nvml
+        self.vram_probe
             .as_ref()
             .and_then(|p| p.snapshot())
             .map(|v| v.free_mib)
@@ -940,7 +943,12 @@ impl ClusterBackend {
                 d.push(format!("[deferred] {why}"));
             }
         }
-        let verdict_ok = plan.verdict.is_ok();
+        // Verdict::Unknown («замера нет — решает движок») — это пропуск запроса,
+        // а не отказ: план уже содержит EnsureLoaded. Раньше Unknown трактовался
+        // как «не хватает» и отклонялся с вводящим в заблуждение «свободно ?» —
+        // на машинах без NVML (AMD/Intel) автотранскрибация не проходила вовсе
+        // (живой инцидент 05.10.2026).
+        let verdict_ok = plan.verdict.is_ok() || matches!(plan.verdict, Verdict::Unknown);
         if let Ok(mut last) = self.last_plan.lock() {
             *last = Some(plan);
         }
@@ -1001,7 +1009,7 @@ impl ClusterBackend {
     /// Именно поэтому heartbeat обновляется, даже когда движок занят и HTTP не отвечает.
     pub fn heartbeat(&self, pid: u32, uptime_sec: u64, ts_unix: u64) -> resident::Heartbeat {
         let used = self
-            .nvml
+            .vram_probe
             .as_ref()
             .and_then(|p| p.snapshot())
             .map(|s| s.used_mib)
@@ -1339,7 +1347,7 @@ impl Backend for ClusterBackend {
             },
             None => Vec::new(),
         };
-        let vram = self.nvml.as_ref().and_then(|p| p.snapshot());
+        let vram = self.vram_probe.as_ref().and_then(|p| p.snapshot());
         let decision = self.last_plan.lock().ok().and_then(|p| p.clone());
         let report = StatusReport::build(StatusInput {
             config: &self.cfg,
@@ -1944,22 +1952,23 @@ impl Host {
         let mut engine_dir: Option<PathBuf> = None;
         let mut baseline_used_mib: Option<u64> = None;
         let upstream = upstream_map(&yaml, &resolved);
-        let nvml = NvmlProbe::open(cfg.nvml_index).ok().map(Arc::new);
+        let vram_probe = open_vram_probe(cfg.nvml_index);
 
-        if let Some(p) = &nvml {
+        if let Some(p) = &vram_probe {
             if let Some(v) = p.snapshot() {
                 log.line(&format!(
-                    "NVML {}: занято {} / {} МиБ, свободно {} МиБ",
+                    "VRAM ({}): {} — занято {} / {} МиБ, свободно {} МиБ",
+                    p.source().as_str(),
                     p.name(),
                     v.used_mib,
                     v.total_mib,
                     v.free_mib
                 ));
-                // baseline: наша занятость = NVML used − это значение (R29)
+                // baseline: наша занятость = измеритель used − это значение (R29)
                 baseline_used_mib = Some(v.used_mib);
             }
         } else {
-            log.note("NVML недоступен: бюджет VRAM не проверяется (R29)");
+            log.note("измеритель VRAM недоступен (нет ни NVML, ни DXGI): бюджет не проверяется");
         }
 
         match mode {
@@ -2103,7 +2112,7 @@ impl Host {
             n_ctx: n_ctx_map,
             needs: needs.clone(),
             gpu: resolved.gpu.clone(),
-            nvml,
+            vram_probe,
             parallel: resolved.parallel,
             dispatch_enabled: cfg.dispatcher,
             decisions: Mutex::new(Vec::new()),

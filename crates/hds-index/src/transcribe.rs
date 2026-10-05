@@ -172,15 +172,17 @@ impl TranscribeConfig {
     /// индексации (`hds index`/`watch`) читает только `index.*` и не должна менять
     /// поведение из-за ключей автотранскрибации (Python-паритет B4).
     pub fn from_auto_transcribe(cfg: &Config) -> Self {
-        let gpu = dig(cfg, "auto_transcribe.whisper_gpu")
-            .and_then(|v| v.as_i64())
-            .filter(|v| *v >= 0)
-            .or_else(|| {
-                dig(cfg, "gpu.device_index")
-                    .and_then(|v| v.as_i64())
-                    .map(config_index_to_bridge)
-            })
-            .unwrap_or(0) as i32;
+        // Явное значение в конфиге — приоритет; `whisper_gpu: -1` сохраняет
+        // задокументированный смысл «как gpu.device_index», прочие отрицательные
+        // (например `-2`) — принудительный CPU (в теле `/internal/transcribe`
+        // отрицательный индекс = CPU). Без явного значения — из `gpu.device_index`.
+        let gpu = match dig(cfg, "auto_transcribe.whisper_gpu").and_then(|v| v.as_i64()) {
+            Some(v) if v != -1 => v as i32,
+            _ => dig(cfg, "gpu.device_index")
+                .and_then(|v| v.as_i64())
+                .map(config_index_to_bridge)
+                .unwrap_or(0) as i32,
+        };
         // Сервисные файлы (.orig/.speakers.json) — в state_dir, не в out_dir:
         // в выходной папке должен оставаться только результат (§5.3).
         let state_dir = dig_str(cfg, "auto_transcribe.state_dir")
