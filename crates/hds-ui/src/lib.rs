@@ -429,6 +429,67 @@ fn llm_host_exe() -> Option<std::path::PathBuf> {
     find_exe(names)
 }
 
+/// pid-файл резидента: `Some(pid)` — процесс жив, `None` — мёртв/мусор.
+///
+/// Компактная копия `hds_llama::resident::owner_pid` (та же логика чтения pid и
+/// проверки живости): hds-ui сознательно не зависит от hds-llama, а кнопке
+/// «Перезапустить llm-host» нужно отличать устаревший pid-файл (резидент упал
+/// нативно и файл не освободил) от живого процесса.
+fn resident_owner_pid(path: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let pid: u32 = text.trim().parse().ok()?;
+    if pid == 0 || !process_alive(pid) {
+        return None;
+    }
+    Some(pid)
+}
+
+#[cfg(windows)]
+fn process_alive(pid: u32) -> bool {
+    // Без unsafe: hds-ui объявлен `#![forbid(unsafe_code)]`, поэтому живость
+    // процесса проверяем `tasklist`'ом (вызов один на клик «Перезапустить» —
+    // скорость некритична; PID в CSV-выводе во втором поле, в кавычках).
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains(&format!("\"{pid}\"")))
+        .unwrap_or(false)
+}
+
+/// Вне Windows — «лучше перестраховаться» (как в `hds_llama::resident`).
+#[cfg(not(windows))]
+fn process_alive(_pid: u32) -> bool {
+    true
+}
+
+/// Принудительно завершить процесс резидента (`taskkill /F /T`) — как
+/// `llm_host stop --force`. `false` — не удалось (пусть пользователь действует
+/// вручную).
+fn terminate_process(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/F", "/T"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+}
+
 /// Запустить процесс **detached** (без окна, без наследования stdio) — общий путь для
 /// резидента `llm-host` и обоих демонов (автотранскрибации и индексации).
 pub(crate) fn spawn_detached(
@@ -673,8 +734,30 @@ pub fn llm_host_restart() -> Value {
             !pid_file.exists() && !llm_host_healthy(&host, port, std::time::Duration::from_secs(1));
     }
     if !stopped {
-        return json!({ "ok": false,
-            "msg": "резидент не завершился за 60 с — перезапуск отменён (см. data/logs/llm-host.log)" });
+        // Резидент не сдался сам. Разбираем, почему:
+        // а) pid-файл остался от УМЕРШЕГО резидента (нативный краш не освобождает
+        //    файл; живой инцидент 05.10.2026) — файл устаревший, снимаем и
+        //    продолжаем: запускать новый резидент ничто не мешает;
+        // б) процесс жив, но HTTP не отвечает (движок завис) — завершаем по
+        //    pid-файлу принудительно (как `llm_host stop --force`), снимаем
+        //    pid-файл и продолжаем. Случай «пока жив и мы не смогли» — отмена.
+        match resident_owner_pid(&pid_file) {
+            None => {
+                let _ = std::fs::remove_file(&pid_file);
+            }
+            Some(pid) => {
+                if !terminate_process(pid) {
+                    return json!({ "ok": false,
+                        "msg": format!(
+                            "резидент (pid {pid}) не отвечает на stop и не завершается \
+                             принудительно — используйте `llm_host stop --force` вручную"
+                        ) });
+                }
+                let _ = std::fs::remove_file(&pid_file);
+                // процесс мог держать порт — даём ОС время освободить.
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+            }
+        }
     }
 
     // 3. Запуск заново (detached, без окна) — общий хелпер `spawn_detached`.
