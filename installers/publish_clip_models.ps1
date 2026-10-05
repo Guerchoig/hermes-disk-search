@@ -47,17 +47,28 @@ foreach ($a in @($mf.assets)) {
     $files += $src
 }
 
-& gh release view $tag --repo $Repository *> $null
+# gh writes its "release not found" to stderr; with $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 turns that into a NativeCommandError and aborts, so run gh
+# with stderr merged into stdout (EAP "Continue") and decide by $LASTEXITCODE.
+$ErrorActionPreference = "Continue"
+$null = & gh release view $tag --repo $Repository 2>&1
+$ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -ne 0) {
     Write-Host "[..] creating release $tag"
-    & gh release create $tag --repo $Repository --title "$tag (CLIP ONNX models)" --notes "CLIP ONNX models for hermes-disk-search (see runtime-manifests/clip-manifest.json)."
+    $ErrorActionPreference = "Continue"
+    $null = & gh release create $tag --repo $Repository --title "$tag (CLIP ONNX models)" --notes "CLIP ONNX models for hermes-disk-search (see runtime-manifests/clip-manifest.json)." 2>&1
+    $ErrorActionPreference = "Stop"
     if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 }
 if ($Clobber) {
     foreach ($f in $files) {
-        & gh release delete-asset $tag (Split-Path $f -Leaf) --repo $Repository --yes *> $null
+        $ErrorActionPreference = "Continue"
+        $null = & gh release delete-asset $tag (Split-Path $f -Leaf) --repo $Repository --yes 2>&1
+        $ErrorActionPreference = "Stop"
     }
 }
-& gh release upload $tag @files --repo $Repository
+$ErrorActionPreference = "Continue"
+$null = & gh release upload $tag @files --repo $Repository 2>&1
+$ErrorActionPreference = "Stop"
 if ($LASTEXITCODE -ne 0) { throw "gh release upload failed (use -Clobber to replace existing assets)" }
 Write-Host "[ok] CLIP models published: $tag"
