@@ -146,6 +146,18 @@ where
             Ok(None) => return Ok(()), // соединение закрыто клиентом
             Ok(Some(req)) => {
                 let keep_alive = req.keep_alive;
+                // CORS-префлайт (OPTIONS): браузерные клиенты (вебвью Cline Desktop)
+                // запрашивают каталог моделей `GET /v1/models` с заголовком
+                // `Authorization` — такой запрос требует предварительный OPTIONS.
+                // Раньше OPTIONS падал 404 (нет маршрута) и реальный GET не делался:
+                // список моделей в Cline не обновлялся (проверено 05.10.2026).
+                if req.method.eq_ignore_ascii_case("OPTIONS") {
+                    write_preflight(&mut writer, keep_alive)?;
+                    if !keep_alive {
+                        return Ok(());
+                    }
+                    continue;
+                }
                 let resp = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(&req)))
                     .unwrap_or_else(|_| {
                         Response::error(
@@ -277,6 +289,24 @@ fn read_request<R: BufRead, W: Write>(
         body,
         keep_alive,
     }))
+}
+
+/// Записать ответ на CORS-префлайт (OPTIONS) — до вызова маршрутов.
+///
+/// Разрешаем любой origin (`*`, как и в обычных ответах `write_response`) и любые
+/// заголовки запроса (`*` поддерживают все современные Chromium-вебвью; запросы
+/// клиентов фасада не credentialed). Тело пустое: префлайт отвечает только заголовками.
+fn write_preflight<W: Write>(w: &mut W, keep_alive: bool) -> std::io::Result<()> {
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: {}\r\n\
+         Access-Control-Allow-Origin: *\r\n\
+         Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
+         Access-Control-Allow-Headers: *\r\n\
+         Access-Control-Max-Age: 86400\r\n\r\n",
+        if keep_alive { "keep-alive" } else { "close" }
+    );
+    w.write_all(head.as_bytes())?;
+    w.flush()
 }
 
 /// Записать ответ (JSON либо SSE + `Content-Length`, keep-alive по запросу).

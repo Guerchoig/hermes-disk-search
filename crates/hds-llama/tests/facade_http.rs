@@ -451,3 +451,48 @@ fn http_transport_handles_keep_alive_continue_and_chunked() {
 
     stop.store(true, Ordering::Relaxed);
 }
+
+/// CORS-префлайт (OPTIONS): вебвью Cline запрашивает каталог моделей с заголовком
+/// `Authorization` — браузерный контекст требует предварительный OPTIONS. Раньше
+/// OPTIONS падал 404 (нет маршрута) и список моделей в Cline не обновлялся
+/// (проверено 05.10.2026: GET с Origin/Authorization отвечал 200 + ACAO *,
+/// а OPTIONS — 404).
+#[test]
+fn http_preflight_options_answers_200_with_cors_headers() {
+    let backend = Arc::new(Fake::new(vec!["chat".to_string()]));
+    let (port, stop) = start(cfg_for(0), backend);
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let raw = b"OPTIONS /v1/models HTTP/1.1\r\nHost: x\r\n\
+        Origin: app://cline\r\n\
+        Access-Control-Request-Method: GET\r\n\
+        Access-Control-Request-Headers: authorization\r\n\r\n";
+    stream.write_all(raw).unwrap();
+    let mut head = String::new();
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        if line.trim().is_empty() {
+            break;
+        }
+        head.push_str(&line);
+    }
+    let lower = head.to_ascii_lowercase();
+    assert!(lower.starts_with("http/1.1 200"), "{head}");
+    assert!(lower.contains("access-control-allow-origin: *"), "{head}");
+    assert!(lower.contains("access-control-allow-methods"), "{head}");
+    assert!(lower.contains("access-control-allow-headers"), "{head}");
+
+    // после префлайта keep-alive живёт: реальный GET по тому же соединению — 200
+    stream
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let (status, body) = read_response(&mut reader, false);
+    assert_eq!(status, 200, "{body}");
+
+    stop.store(true, Ordering::Relaxed);
+}
