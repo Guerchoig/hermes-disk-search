@@ -509,11 +509,16 @@ pub fn state_label(code: Option<i32>) -> String {
 /// отсутствии решение честно помечается «нет замера» (движок решает сам).
 pub fn device_line(d: &Device) -> String {
     format!(
-        "index={} backend={} name={} free={:.0} МиБ (R29: `memory_free` движка недостоверен, \
+        "index={} backend={} name={}{} free={:.0} МиБ (R29: `memory_free` движка недостоверен, \
          решения — по измерителю VRAM: NVML/DXGI, иначе «нет замера») total={:.0} МиБ",
         d.bridge_device_index,
         d.backend,
         d.name,
+        if d.description.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" desc={}", d.description)
+        },
         d.memory_free_mib(),
         d.memory_total as f64 / (1024.0 * 1024.0)
     )

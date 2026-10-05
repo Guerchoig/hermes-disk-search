@@ -47,15 +47,24 @@ pub fn cpu_device(devices: &[Device]) -> Option<&Device> {
 }
 
 /// Текстовое описание списка устройств (для `llm-host devices`/логов).
+///
+/// `desc` — описание устройства от движка (обычно имя GPU: `AMD Radeon(TM)
+/// Graphics`, `NVIDIA GeForce RTX 3060`): по нему проба VRAM (NVML/DXGI)
+/// сопоставляется с устройством движка (`vram_probe_for_device`).
 pub fn describe_devices(devices: &[Device]) -> String {
     devices
         .iter()
         .map(|d| {
             format!(
-                "index={} backend={} name={} free={:.0} МиБ total={:.0} МиБ",
+                "index={} backend={} name={}{} free={:.0} МиБ total={:.0} МиБ",
                 d.bridge_device_index,
                 d.backend,
                 d.name,
+                if d.description.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!(" desc={}", d.description)
+                },
                 d.memory_free_mib(),
                 d.memory_total as f64 / (1024.0 * 1024.0)
             )

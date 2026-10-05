@@ -38,6 +38,15 @@ impl Device {
     pub fn memory_free_mib(&self) -> f64 {
         self.memory_free as f64 / (1024.0 * 1024.0)
     }
+
+    /// Описание устройства от движка, а если его нет — имя (`Vulkan0`, `CUDA0`).
+    pub fn description_or_name(&self) -> String {
+        if self.description.trim().is_empty() {
+            self.name.clone()
+        } else {
+            self.description.clone()
+        }
+    }
 }
 
 /// Инстанс кластера (`list_instances`).

@@ -32,6 +32,7 @@ use serde_json::{json, Value};
 use crate::budget::{compute_buffer_mib, estimate_need_mib};
 use crate::cluster::{Cluster, InstanceSpec};
 use crate::config::{self, GpuConfig, LlmHostConfig, Mode};
+use crate::device::describe_devices;
 use crate::dispatch::{
     self, instance_use, plan_query, plan_transcribe, Demand, InstanceUse, Plan, Verdict,
 };
@@ -325,12 +326,17 @@ pub struct LocalStatus {
     pub pause_line: String,
     /// `None` — в кластере нет инстансов (или движок не открывался).
     pub instances_line: Option<String>,
+    /// Как измеряется **целевое** устройство (проба ↔ устройство движка).
+    pub target_line: Option<String>,
 }
 
 impl LocalStatus {
     /// Человеческие строки для консоли (`llm_host_status`, `llm_host status`).
     pub fn lines(&self) -> Vec<String> {
         let mut out = self.report.lines();
+        if let Some(line) = &self.target_line {
+            out.push(line.clone());
+        }
         out.push(self.pause_line.clone());
         if let Some(line) = &self.instances_line {
             out.push(line.clone());
@@ -376,13 +382,66 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
     let vram_probe = open_vram_probe(args.nvml_index);
     let vram = vram_probe.as_ref().and_then(|p| p.snapshot());
 
+    // Пробы, привязанные к устройствам движка: прогноз должен считаться по тому
+    // устройству, на которое поедет роль (`gpu.device_index`), а не по «первой
+    // карте системы» — иначе на машине с iGPU+dGPU прогноз бессмыслен.
+    let probes = bind_device_probes(&devices, args.nvml_index);
+    let target_bridge =
+        match crate::device::selection_from_config_index(cfg.gpu.device_index, &devices) {
+            Ok(crate::device::DeviceSelection::Csv(csv)) => csv
+                .split(',')
+                .next()
+                .and_then(|s| s.trim().parse::<i32>().ok()),
+            _ => None,
+        };
+    let by_probe = target_bridge
+        .and_then(|idx| probes.get(&idx))
+        .and_then(|p| p.snapshot())
+        .map(|v| v.free_mib);
+    let by_engine = target_bridge.and_then(|idx| {
+        devices
+            .iter()
+            .find(|d| d.bridge_device_index == idx)
+            .map(|d| d.memory_free >> 20)
+    });
+    let target_free = match (by_probe, by_engine) {
+        (Some(p), Some(e)) => Some(p.min(e)),
+        (Some(p), None) => Some(p),
+        (None, Some(e)) => Some(e),
+        (None, None) => None,
+    };
+    let target_line = target_bridge.map(|idx| {
+        let dev = devices.iter().find(|d| d.bridge_device_index == idx);
+        match &probes.get(&idx) {
+            Some(p) => format!(
+                "измерение целевого устройства (index={idx}{}): {} ({}) — свободно {} МиБ",
+                dev.map(|d| format!(", {}", d.description_or_name()))
+                    .unwrap_or_default(),
+                p.name(),
+                p.source().as_str(),
+                target_free
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            ),
+            None => format!(
+                "измерение целевого устройства (index={idx}{}): проба не сопоставилась — \
+                 по числам движка: свободно {} МиБ",
+                dev.map(|d| format!(", {}", d.description_or_name()))
+                    .unwrap_or_default(),
+                target_free
+                    .map(|f| f.to_string())
+                    .unwrap_or_else(|| "?".to_string())
+            ),
+        }
+    });
+
     // Прогноз диспетчера: что будет, если запрос чата придёт прямо сейчас.
     let idle: BTreeMap<String, u64> = BTreeMap::new();
     let uses = instance_uses(&instances, &needs, &idle);
     let forecast = cfg.role("chat").map(|_| {
         plan_query(
             &cfg.gpu,
-            vram.map(|v| v.free_mib),
+            target_free,
             &Demand::new("chat", needs.get("chat").copied().unwrap_or(0)),
             &uses,
         )
@@ -438,6 +497,7 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
         report,
         pause_line,
         instances_line,
+        target_line,
     })
 }
 
@@ -565,9 +625,92 @@ impl ClusterShared {
     }
 }
 
-/// Живой backend фасада: инстансы по конфигу + диспетчер VRAM (A4) + пауза
-/// индексации + внутренний API управления (A6).
+/// Нормализация имени устройства для сопоставления: нижний регистр, без
+/// пунктуации, одиночные пробелы (`AMD Radeon(TM) Graphics` → `amd radeon tm graphics`).
+fn normalized_device_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// «Шумовые» токены имён, которые драйверы добавляют произвольно (`(TM)`, `(R)`):
+/// после их удаления имена одной карты у движка, NVML и DXGI совпадают буквально.
+const DEVICE_NAME_NOISE: [&str; 3] = ["tm", "r", "reg"];
+
+/// Значимые токены имени устройства (нормализация минус шумовые токены).
+fn device_name_tokens(s: &str) -> Vec<String> {
+    normalized_device_name(s)
+        .split_whitespace()
+        .filter(|t| !DEVICE_NAME_NOISE.contains(t))
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Совпадают ли устройство движка и проба VRAM (NVML/DXGI)?
 ///
+/// Сверка **строгая**: после нормализации и удаления шумовых токенов списки
+/// токенов должны совпасть точно. Это осознанный выбор: движок, NVML и DXGI
+/// берут имя у одного драйвера, поэтому имена либо совпадают, либо различаются
+/// по существу. «Мягкое» сопоставление по вхождению дало бы ложные срабатывания
+/// (`RTX 3060` ⊂ `RTX 3060 Ti`, `Radeon Graphics` ⊂ `Radeon Vega Graphics`) и
+/// привязало бы пробу **другой** карты — а это тот самый баг «мерим один GPU,
+/// грузим на другой», от которого мы уходим. Не сопоставилось — проба не
+/// используется (падаем на числа движка), и это безопаснее.
+pub fn names_match(engine_desc: &str, probe_name: &str) -> bool {
+    let a = device_name_tokens(engine_desc);
+    let b = device_name_tokens(probe_name);
+    !a.is_empty() && a == b
+}
+
+/// Сопоставить пробы VRAM с устройствами движка: bridge-индекс → проба.
+///
+/// Порядок предпочтения: NVML (источник истины на NVIDIA, R29) → DXGI
+/// (вендор-нейтральный, Windows). Проба используется только для устройства с
+/// совпавшим именем; устройство без совпадения остаётся на числах движка.
+pub fn bind_device_probes(
+    devices: &[crate::cluster::Device],
+    nvml_index: u32,
+) -> BTreeMap<i32, Arc<dyn VramProbe>> {
+    let mut candidates: Vec<Arc<dyn VramProbe>> = Vec::new();
+    // NVML: карта из конфига — первой, затем остальные NVIDIA-карты по индексу.
+    if let Ok(p) = crate::vram::NvmlProbe::open(nvml_index) {
+        candidates.push(Arc::new(p));
+    }
+    for idx in 0..8u32 {
+        if idx == nvml_index {
+            continue;
+        }
+        if let Ok(p) = crate::vram::NvmlProbe::open(idx) {
+            candidates.push(Arc::new(p));
+        }
+    }
+    #[cfg(windows)]
+    if let Ok(adapters) = crate::vram::dxgi::DxgiProbe::open_all() {
+        candidates.extend(
+            adapters
+                .into_iter()
+                .map(|p| Arc::new(p) as Arc<dyn VramProbe>),
+        );
+    }
+    let mut out: BTreeMap<i32, Arc<dyn VramProbe>> = BTreeMap::new();
+    for dev in devices.iter().filter(|d| d.is_accelerator()) {
+        let desc = dev.description_or_name();
+        if let Some(p) = candidates.iter().find(|c| names_match(&desc, &c.name())) {
+            out.insert(dev.bridge_device_index, Arc::clone(p));
+        }
+    }
+    out
+}
+
 /// Основная часть — перенос из `bin/llm_host_facade.rs` (A5), поэтому поля и
 /// порядок решений совпадают с проверенным живым прогоном (§7.3 `W2_REPORT.md`).
 pub struct ClusterBackend {
@@ -584,6 +727,15 @@ pub struct ClusterBackend {
     needs: BTreeMap<String, u64>,
     gpu: GpuConfig,
     vram_probe: Option<Arc<dyn VramProbe>>,
+    /// Устройства движка на старте — источник сопоставления проб VRAM с GPU.
+    devices: Vec<crate::cluster::Device>,
+    /// Проба VRAM, **привязанная к устройству** (bridge-индекс → проба).
+    ///
+    /// Зачем: на машине с двумя GPU измерять одну карту, а грузить модель на
+    /// другую — грубая ошибка (живой замер 05.10.2026: NVML мерил RTX (свободно
+    /// 3569 МиБ), а роль выбиралась на встроенную AMD с 31 ГиБ свободных → ложный
+    /// «не хватает VRAM»). Привязка — по имени устройства (`names_match`).
+    probes: BTreeMap<i32, Arc<dyn VramProbe>>,
     pause: Arc<IndexPause>,
     /// Диспетчер включён (флаг `--dispatcher on`).
     dispatch_enabled: bool,
@@ -779,6 +931,55 @@ impl ClusterBackend {
             .map(|v| v.free_mib)
     }
 
+    /// Bridge-индекс устройства, выбранного для ролей (`gpu.device_index`).
+    ///
+    /// Именно это устройство получит инстанс, поэтому и измерять надо его, а не
+    /// «первую карту системы» (на машинах с iGPU + dGPU это разные GPU).
+    fn target_bridge_index(&self) -> Option<i32> {
+        match crate::device::selection_from_config_index(self.gpu.device_index, &self.devices) {
+            Ok(crate::device::DeviceSelection::Csv(csv)) => {
+                csv.split(',').next()?.trim().parse::<i32>().ok()
+            }
+            _ => None,
+        }
+    }
+
+    /// Живые числа движка по устройству (неблокирующе: движок занят → `None`).
+    fn engine_free_mib(&self, bridge_index: i32) -> Option<u64> {
+        let cluster = self.cluster.as_ref()?;
+        let devices = cluster
+            .try_with("devices", DISPATCH_BUDGET, |c| c.devices())
+            .ok()?
+            .ok()?;
+        devices
+            .iter()
+            .find(|d| d.bridge_device_index == bridge_index)
+            .map(|d| d.memory_free >> 20)
+    }
+
+    /// Свободная VRAM **целевого устройства** — то, чем распоряжается диспетчер.
+    ///
+    /// Берём минимум из двух сигналов: проба (NVML/DXGI — «сколько разрешено ОС»)
+    /// и живые числа движка по тому же устройству («сколько видит его бэкенд»).
+    /// На UMA-системах (iGPU, Metal) второе — реальная граница: DXGI-бюджет там
+    /// заметно больше heap движка (замер 05.10.2026: бюджет iGPU 48 ГиБ против
+    /// heap 16 ГиБ). Если проба не сопоставилась — используем числа движка с
+    /// оговоркой R29 (лучше, чем «нет замера»: движок — тот, кто аллоцирует).
+    fn target_free_mib(&self) -> Option<u64> {
+        let idx = self.target_bridge_index()?;
+        let by_probe = self
+            .probes
+            .get(&idx)
+            .and_then(|p| p.snapshot())
+            .map(|v| v.free_mib);
+        match (by_probe, self.engine_free_mib(idx)) {
+            (Some(p), Some(e)) => Some(p.min(e)),
+            (Some(p), None) => Some(p),
+            (None, Some(e)) => Some(e),
+            (None, None) => None,
+        }
+    }
+
     fn id_of(&self, role: &str) -> Result<i64> {
         self.cl()?;
         self.ids.get(role).copied().ok_or_else(|| {
@@ -904,9 +1105,9 @@ impl ClusterBackend {
             let uses = self.uses();
             let demand = Demand::new(role, need);
             if transcribe {
-                plan_transcribe(&self.gpu, self.free_mib(), &demand, &uses)
+                plan_transcribe(&self.gpu, self.target_free_mib(), &demand, &uses)
             } else {
-                plan_query(&self.gpu, self.free_mib(), &demand, &uses)
+                plan_query(&self.gpu, self.target_free_mib(), &demand, &uses)
             }
         };
         // Применяем решение к движку — но **с бюджетом**: если движок занят чужим
@@ -961,7 +1162,7 @@ impl ClusterBackend {
             return Err(EngineError::Other(format!(
                 "не хватает VRAM для роли '{role}': нужно {need} МиБ, свободно {}; \
                  вытеснение не помогло — авто-деградации нет (gpu.model_policy: {})",
-                self.free_mib()
+                self.target_free_mib()
                     .map(|f| f.to_string())
                     .unwrap_or_else(|| "?".to_string()),
                 self.cfg.model_policy
@@ -1555,7 +1756,8 @@ impl Backend for ClusterBackend {
         let model_mib = std::fs::metadata(&model)
             .map(|m| m.len() >> 20)
             .unwrap_or(0);
-        let (dev, fallback) = whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.free_mib());
+        let (dev, fallback) =
+            whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.target_free_mib());
         if let Some(reason) = fallback {
             self.log.line(&format!(
                 "[whisper] {reason} — транскрибация на CPU (VRAM-бюджет)"
@@ -1951,6 +2153,8 @@ impl Host {
         let mut planned = Vec::new();
         let mut engine_dir: Option<PathBuf> = None;
         let mut baseline_used_mib: Option<u64> = None;
+        // Устройства движка (заполняются в режиме `embedded`) — для привязки проб VRAM.
+        let mut engine_devices: Vec<crate::cluster::Device> = Vec::new();
         let upstream = upstream_map(&yaml, &resolved);
         let vram_probe = open_vram_probe(cfg.nvml_index);
 
@@ -2001,6 +2205,11 @@ impl Host {
                 engine_dir = Some(eng.dir().to_path_buf());
 
                 let devices = cls.devices()?;
+                log.line(&format!(
+                    "устройства движка: {}",
+                    describe_devices(&devices)
+                ));
+                engine_devices = devices.clone();
                 planned = registry::plan(&resolved, &paths.root, &devices);
                 if let Some(ngl) = cfg.ngl {
                     apply_ngl_override(&mut planned, ngl, &devices, &log);
@@ -2105,6 +2314,21 @@ impl Host {
             );
         }
         let stop = Arc::new(AtomicBool::new(false));
+        // Пробы VRAM, привязанные к устройствам движка по имени: диспетчер мерит
+        // именно то устройство, на которое поедет модель (iGPU vs dGPU!).
+        let device_probes = bind_device_probes(&engine_devices, cfg.nvml_index);
+        if !device_probes.is_empty() {
+            let bound = device_probes
+                .iter()
+                .map(|(idx, p)| format!("{idx}:{} ({})", p.name(), p.source().as_str()))
+                .collect::<Vec<_>>()
+                .join(", ");
+            log.line(&format!("пробы VRAM по устройствам: {bound}"));
+        } else if !engine_devices.is_empty() {
+            log.note(
+                "ни одна проба VRAM не сопоставилась с устройством движка — решения по числам движка (R29)",
+            );
+        }
         let backend = Arc::new(ClusterBackend {
             cluster: cluster.clone(),
             ids: ids.clone(),
@@ -2113,6 +2337,8 @@ impl Host {
             needs: needs.clone(),
             gpu: resolved.gpu.clone(),
             vram_probe,
+            devices: engine_devices,
+            probes: device_probes,
             parallel: resolved.parallel,
             dispatch_enabled: cfg.dispatcher,
             decisions: Mutex::new(Vec::new()),
@@ -2443,6 +2669,7 @@ impl Drop for Host {
 
 #[cfg(test)]
 mod whisper_device_tests {
+    use super::names_match;
     use super::whisper_device;
 
     #[test]
@@ -2472,5 +2699,38 @@ mod whisper_device_tests {
         let (d, fb) = whisper_device(0, 1549, 1024, None);
         assert_eq!(d, 0);
         assert!(fb.is_none());
+    }
+
+    // --- сопоставление пробы VRAM с устройством движка (общий случай: iGPU+dGPU) ---
+
+    #[test]
+    fn names_match_engine_desc_and_probe_names() {
+        // Замеры 05.10.2026: описания движка и имена NVML/DXGI совпадают.
+        assert!(names_match(
+            "NVIDIA GeForce RTX 3060",
+            "NVIDIA GeForce RTX 3060"
+        ));
+        assert!(names_match(
+            "AMD Radeon(TM) Graphics",
+            "AMD Radeon(TM) Graphics"
+        ));
+        // Пунктуация/регистр не должны мешать.
+        assert!(names_match(
+            "AMD Radeon(TM) Graphics",
+            "amd radeon graphics"
+        ));
+        // Разные карты не совпадают; имя без описания (`Vulkan0`) — тоже нет.
+        assert!(!names_match(
+            "AMD Radeon(TM) Graphics",
+            "NVIDIA GeForce RTX 3060"
+        ));
+        assert!(!names_match("Vulkan0", "NVIDIA GeForce RTX 3060"));
+        // Страж от «мягкого» сопоставления: другая ревизия той же линейки — НЕ та карта.
+        assert!(!names_match(
+            "NVIDIA GeForce RTX 3060",
+            "NVIDIA GeForce RTX 3060 Ti"
+        ));
+        assert!(!names_match("", "NVIDIA GeForce RTX 3060"));
+        assert!(!names_match("NVIDIA GeForce RTX 3060", ""));
     }
 }
