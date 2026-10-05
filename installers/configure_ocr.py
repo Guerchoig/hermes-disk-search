@@ -198,23 +198,65 @@ def _patch_config_text(text: str, value: str) -> tuple[str, str]:
 
 # ==================== Запись config.yaml ====================
 
-def write_config(path: Path | None, value: str) -> str:
-    """Прописать путь к tesseract в config.yaml (создать при отсутствии)."""
-    import yaml
-    from hds.config import config_path, ensure_config, replace_file
+def _replace_file_atomic(tmp: Path, cfg: Path) -> None:
+    """os.replace с ретраями: Windows — целевой файл может держать живой процесс."""
+    import time
 
-    cfg = path or Path(config_path())
-    if path is None and ensure_config():
-        print(f"    [..] создан config.yaml по умолчанию: {cfg}")
+    last: Exception | None = None
+    for attempt in range(6):
+        try:
+            os.replace(tmp, cfg)
+            return
+        except PermissionError as e:
+            last = e
+            time.sleep(0.5 * (attempt + 1))
+    if last is not None:
+        raise last
+
+
+def write_config(path: Path | None, value: str) -> str:
+    """Прописать путь к tesseract в config.yaml (создать при отсутствии).
+
+    Два режима:
+    * полный (репозиторий/.venv): `hds.config` — ensure_config + атомарная
+      замена с ретраями;
+    * фолбэк (релизный архив: пакета `hds` и PyYAML может не быть):
+      config.yaml создаётся из config.example.yaml, правка — текстом
+      ([`_patch_config_text`]), запись с сохранением BOM и os.replace.
+    """
+    cfg: Path
+    if path:
+        cfg = Path(path)
+    else:
+        try:
+            from hds.config import config_path, ensure_config
+
+            cfg = Path(config_path())
+            if ensure_config():
+                print(f"    [..] создан config.yaml по умолчанию: {cfg}")
+        except ImportError:
+            cfg = ROOT / "config.yaml"
+            if not cfg.exists():
+                example = ROOT / "config.example.yaml"
+                if not example.exists():
+                    return "пропущено (config.yaml не найден)"
+                shutil.copyfile(example, cfg)
+                print(f"    [..] создан config.yaml из config.example.yaml: {cfg}")
+
     raw = cfg.read_bytes()
     bom = raw.startswith(b"\xef\xbb\xbf")
     new_text, action = _patch_config_text(raw.decode("utf-8-sig"), value)
     if action.startswith("пропущено"):
         return action
-    yaml.safe_load(new_text)          # не пишем заведомо битый YAML
+    try:
+        import yaml
+
+        yaml.safe_load(new_text)      # не пишем заведомо битый YAML (если есть PyYAML)
+    except ImportError:
+        pass                          # фолбэк-режим: правка текстом, YAML тривиален
     tmp = cfg.with_suffix(cfg.suffix + ".tmp")
     tmp.write_bytes((b"\xef\xbb\xbf" if bom else b"") + new_text.encode("utf-8"))
-    replace_file(str(tmp), str(cfg))
+    _replace_file_atomic(tmp, cfg)
     return f"{action}: {value}"
 
 

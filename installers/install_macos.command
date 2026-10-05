@@ -39,6 +39,20 @@ if [ ! -f "$ROOT/config.yaml" ] && [ -f "$ROOT/config.example.yaml" ]; then
     echo "[ok] config.yaml created - edit roots/db_path to taste"
 fi
 
+# --- 2b. OCR (Tesseract): binary path + rus/eng language packs ----------------
+# configure_ocr.py: finds tesseract (brew paths + standard dirs), ensures the
+# rus/eng language packs in a user-writable tessdata, writes
+# index.ocr_tesseract_cmd into config.yaml. Idempotent and non-blocking:
+# "not found" prints the brew hint and returns 0 - Tesseract may be installed
+# at ANY time and this step re-runs on every install/update.
+PY="$(command -v python3 || true)"
+if [ -n "$PY" ]; then
+    "$PY" "$ROOT/installers/configure_ocr.py" || true
+else
+    echo "[i] python3 not found - skipping OCR configuration."
+    echo "    Re-run later: python3 installers/configure_ocr.py"
+fi
+
 # --- 3. engine runtime (metal) by manifest ------------------------------------
 MANIFEST="$ROOT/runtime-manifests/engine-manifest.json"
 ENGINE_DIR="$HOME/Library/Application Support/OpenResearchTools/TranscribeOffline/Engine"
