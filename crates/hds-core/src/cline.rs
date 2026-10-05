@@ -198,6 +198,16 @@ fn ctx_for_model(id: &str, chat: i64, embed: i64, rerank: i64) -> Option<i64> {
 /// (наш `llm-host`): чужие провайдеры и модели не трогаем. Возвращает список
 /// изменённых пар «провайдер/модель» (для отчёта) — `contextWindow` приравнивается
 /// контексту слота, `maxInputTokens` — тому же значению.
+///
+/// Дополнительно (важно для поставки): у провайдера `openai-compatible` в Cline
+/// каталог моделей **не динамический** — `modelsSourceUrl` у него не задан, кнопка
+/// «обновить список» молча ничего не делает, и модели появляются в `models.json`
+/// только после ручного ввода id в селекторе (проверено по исходникам
+/// cline/cline 0.0.43 и живьём 05.10.2026). Поэтому здесь мы **создаём
+/// отсутствующие** записи `chat`/`chat-think` сами, а фантомный дефолт
+/// каталога (`defaultModelId: "gpt-4o"` — заглушка Cline, не наша модель)
+/// заменяем на `chat`: после синхронизации модели видны в селекторе без ручного
+/// ввода.
 pub fn sync_models(
     data: &mut Value,
     chat_base_url: &str,
@@ -220,10 +230,27 @@ pub fn sync_models(
         if base.as_deref() != Some(want.as_str()) {
             continue;
         }
+        // Запись `models` может отсутствовать целиком (каталог ещё пуст) — создаём.
+        if let Some(obj) = pval.as_object_mut() {
+            if !obj.contains_key("models") {
+                obj.insert("models".to_string(), json!({}));
+            }
+            // Фантомный дефолт каталога Cline (например `gpt-4o`) → наш `chat`.
+            let default_id = obj
+                .get("defaultModelId")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !default_id.is_empty() && !default_id.starts_with("chat") {
+                obj.insert("defaultModelId".to_string(), json!("chat"));
+                changed.push(format!("{pname}/defaultModelId → chat"));
+            }
+        }
         let models = match pval.get_mut("models").and_then(|m| m.as_object_mut()) {
             Some(m) => m,
             None => continue,
         };
+        // Окна контекста существующих записей (по id, как у ролей llm-host).
         for (key, mval) in models.iter_mut() {
             let id = mval
                 .get("id")
@@ -244,6 +271,26 @@ pub fn sync_models(
                 obj.insert("maxInputTokens".to_string(), json!(ctx));
                 changed.push(format!("{pname}/{id} → {ctx}"));
             }
+        }
+        // Отсутствующие роли чата — создаём (см. док: каталог не динамический).
+        for (id, name) in [
+            ("chat", "chat (thinking off)"),
+            ("chat-think", "chat-think (thinking on)"),
+        ] {
+            if models.contains_key(id) {
+                continue;
+            }
+            models.insert(
+                id.to_string(),
+                json!({
+                    "id": id,
+                    "name": name,
+                    "contextWindow": chat_ctx,
+                    "maxInputTokens": chat_ctx,
+                    "capabilities": ["streaming", "tools"],
+                }),
+            );
+            changed.push(format!("{pname}/{id} → создана ({chat_ctx})"));
         }
     }
     changed
@@ -515,6 +562,50 @@ mod tests {
         );
         // повторный прогон — изменений нет
         assert!(sync_models(&mut data, "http://127.0.0.1:8010/v1", 65536, 8192, 8192).is_empty());
+    }
+
+    /// Провайдер настроен, но каталог пуст (модель руками не вводили): sync сам
+    /// создаёт `chat`/`chat-think` с окнами слотов и чинит фантомный дефолт Cline.
+    #[test]
+    fn sync_models_creates_missing_role_models() {
+        let mut data = json!({ "providers": {
+            "openai-compatible": {
+                "provider": { "baseUrl": "http://127.0.0.1:8010/v1" },
+                "defaultModelId": "gpt-4o",
+                "models": {}
+            },
+            "openrouter": {
+                "provider": { "baseUrl": "https://openrouter.ai/api/v1" },
+                "defaultModelId": "~x",
+                "models": {}
+            }
+        }});
+        let changed = sync_models(&mut data, "http://127.0.0.1:8010/v1", 32768, 8192, 8192);
+        assert_eq!(
+            changed,
+            vec![
+                "openai-compatible/defaultModelId → chat",
+                "openai-compatible/chat → создана (32768)",
+                "openai-compatible/chat-think → создана (32768)"
+            ],
+            "чужой провайдер не тронут"
+        );
+        let m = &data["providers"]["openai-compatible"]["models"];
+        assert_eq!(m["chat"]["contextWindow"], 32768);
+        assert_eq!(m["chat"]["maxInputTokens"], 32768);
+        assert_eq!(m["chat"]["name"], "chat (thinking off)");
+        assert_eq!(m["chat-think"]["capabilities"][0], "streaming");
+        assert_eq!(
+            data["providers"]["openai-compatible"]["defaultModelId"],
+            "chat",
+            "фантомный gpt-4o заменён на chat"
+        );
+        assert_eq!(
+            data["providers"]["openrouter"]["defaultModelId"], "~x",
+            "чужой defaultModelId не тронут"
+        );
+        // повторный прогон — изменений нет
+        assert!(sync_models(&mut data, "http://127.0.0.1:8010/v1", 32768, 8192, 8192).is_empty());
     }
 
     #[test]
