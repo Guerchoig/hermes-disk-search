@@ -48,8 +48,57 @@ use crate::{engine::EngineCwd, Engine};
 /// Корень репозитория (относительно крейта: `crates/hds-llama/../..`).
 ///
 /// Нужен для путей по умолчанию: `config.yaml`, `index.pause`, `data/`.
+///
+/// Порядок — как в `hds_core::config::project_root` (важно для **поставки**):
+/// `HDS_ROOT` → по расположению исполняемого файла → build-time
+/// `CARGO_MANIFEST_DIR/../..` (dev-фолбэк). Раньше корень был **только**
+/// build-time (путь машины сборки; у CI-сборки — `D:\a\<repo>\<repo>`):
+/// распакованный на другой машине релизный `llm_host.exe` падал на старте
+/// с «конфиг …\config.yaml: не читается (os error 2)» ещё **до** записи лога.
 pub fn repo_root() -> PathBuf {
+    if let Some(v) = std::env::var_os("HDS_ROOT") {
+        if !v.is_empty() {
+            return clean_path(Path::new(&v));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if let Some(r) = root_from_exe(dir) {
+                return clean_path(&r);
+            }
+        }
+    }
     clean_path(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
+}
+
+/// Корень проекта по каталогу исполняемого файла (чистая функция, зеркально
+/// `hds_core::config::root_from_exe`): `<root>\bin\x.exe` → `<root>`;
+/// `target\{debug,release}[\deps]\x.exe` → корень репозитория; иначе — каталог exe.
+fn root_from_exe(dir: &Path) -> Option<PathBuf> {
+    let mut dir = dir.to_path_buf();
+    // `target\<profile>\deps\x.exe` → `target\<profile>`
+    if dir.file_name().map(|n| n == "deps").unwrap_or(false) {
+        dir = dir.parent()?.to_path_buf();
+    }
+    // `<root>\bin\x.exe` → `<root>`
+    if dir.file_name().map(|n| n == "bin").unwrap_or(false) {
+        return dir.parent().map(|p| p.to_path_buf());
+    }
+    // `target\{debug,release}\x.exe` → корень репозитория
+    let profile = matches!(
+        dir.file_name().and_then(|n| n.to_str()),
+        Some("debug") | Some("release")
+    );
+    if profile
+        && dir
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| n == "target")
+            .unwrap_or(false)
+    {
+        return dir.parent()?.parent().map(|p| p.to_path_buf());
+    }
+    Some(dir)
 }
 
 /// Абсолютный путь **до** переключения cwd на каталог движка (`Engine::activate`).
