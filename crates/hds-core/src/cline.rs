@@ -596,8 +596,7 @@ mod tests {
         assert_eq!(m["chat"]["name"], "chat (thinking off)");
         assert_eq!(m["chat-think"]["capabilities"][0], "streaming");
         assert_eq!(
-            data["providers"]["openai-compatible"]["defaultModelId"],
-            "chat",
+            data["providers"]["openai-compatible"]["defaultModelId"], "chat",
             "фантомный gpt-4o заменён на chat"
         );
         assert_eq!(
