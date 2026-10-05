@@ -120,15 +120,25 @@ pub fn open_vram_probe(nvml_index: u32) -> Option<Arc<dyn VramProbe>> {
 /// интегрированной графикой) его нет — живой инцидент 05.10.2026: диспетчер
 /// llm-host отклонял транскрибацию «нужно 2254 МиБ, свободно ?» и задание
 /// крутилось в ретраях. `IDXGIAdapter3::QueryVideoMemoryInfo` (DXGI 1.4,
-/// Windows 10+, dxgi.dll) — штатный, вендор-нейтральный способ: ОС выдаёт
-/// процессу **бюджет** (`Budget`) памяти GPU и показывает занятость
-/// (`CurrentUsage`). Доступно для новых аллокаций = `Budget − CurrentUsage` —
-/// ровно то, что нужно диспетчеру («влезет ли модель»). LOCAL — сегмент
-/// dedicated (дискретные карты), NONLOCAL — shared/системная память (у iGPU
-/// dedicated крошечный, аллокации Vulkan/llama.cpp идут в shared).
+/// Windows 10+, dxgi.dll) — документированный, вендор-нейтральный способ,
+/// ровно под нашу задачу: MS пишет, что `Budget` — «the OS-provided video memory
+/// budget, in bytes, that the application should target», а приложения «must
+/// keep usage within the budget assigned to the application process».
 ///
-/// Отличие от NVML: цифры per-process, а не системные — «занято» здесь только
-/// наше, зато «свободно» отвечает именно на вопрос нашего процесса.
+/// **Границы применимости (проверено на железе 05.10.2026).** Это цифры
+/// **нашего процесса**, а не системы: `CurrentUsage` — только наши аллокации,
+/// а `Budget − CurrentUsage` отвечает на вопрос «сколько ЕЩЁ разрешено нам», но
+/// НЕ «сколько физически свободно». Замер в один момент на одной машине:
+/// NVML для RTX 3060 — занято 8549 / свободно 3565 МиБ (системная истина, чат
+/// уже резидент), DXGI для той же карты — бюджет 11347, usage 0 (наш процесс),
+/// т.е. «свободно» 11347: ОС допускает аллокации, вытесняя других (MS
+/// предупреждает о stuttering при выходе за пределы физического). Поэтому на
+/// NVIDIA источником истины остаётся NVML (R29), а DXGI — фолбэк для машин без
+/// NVML, где важнее «влезет ли модель», чем системная занятость.
+///
+/// Сегменты: LOCAL — обычная карта; у AMD iGPU (унифицированная память) LOCAL
+/// несёт бюджет всего пула (замер: ~48 ГиБ на 64 ГБ RAM), NON_LOCAL пуст —
+/// поэтому пробуем LOCAL и лишь при нулевом бюджете переключаемся на NON_LOCAL.
 #[cfg(windows)]
 pub mod dxgi {
     // Raw FFI, а не `windows-sys`: в закреплённой версии windows-sys 0.59 модуля
@@ -140,6 +150,8 @@ pub mod dxgi {
 
     use windows_sys::core::{GUID, HRESULT};
 
+    #[cfg(test)]
+    use super::NvmlProbe;
     use super::{VramProbe, VramSnapshot, VramSource};
 
     // --- GUID-ы интерфейсов (сверены с метаданными windows-rs, 05.10.2026) ---
@@ -237,22 +249,21 @@ pub mod dxgi {
 
     /// Программный адаптер Microsoft («Microsoft Basic Render Driver») — не GPU.
     const MS_SOFTWARE_VENDOR_ID: u32 = 0x1414;
-    /// Порог «дискретная карта»: у iGPU dedicated-сегмент — BIOS carve-out
-    /// (сотни МиБ), у дискретных — гигабайты. Ниже порога измеряем
-    /// shared-сегмент (NONLOCAL): аллокации llama.cpp/Vulkan на iGPU идут в shared.
-    const DISCRETE_MIN_DEDICATED_BYTES: usize = 2 * 1024 * 1024 * 1024;
 
     pub struct DxgiProbe {
-        /// COM-объекты factory/adapter: доступ строго под мьютексом (COM API
-        /// не обязан быть потокобезопасным), поэтому Send/Sync — вручную.
+        /// COM-объект адаптера (IDXGIAdapter3): доступ строго под мьютексом
+        /// (COM API не обязан быть потокобезопасным), поэтому Send/Sync — вручную.
         handles: Mutex<Option<Handles>>,
         device_name: String,
-        /// Сегмент, который измеряем: LOCAL (дискретная) или NONLOCAL (iGPU).
+        /// Dedicated-сегмент адаптера из `DXGI_ADAPTER_DESC1` — по нему выбираем
+        /// дискретную карту и понимаем, iGPU это или нет.
+        dedicated_bytes: u64,
+        /// Сегмент, который измеряем: LOCAL (обычная карта/унифицированная память
+        /// AMD iGPU) с fallback на NON_LOCAL, если LOCAL-бюджет нулевой.
         segment: u32,
     }
 
     struct Handles {
-        factory: *mut c_void,
         adapter3: *mut c_void,
     }
 
@@ -261,10 +272,32 @@ pub mod dxgi {
     unsafe impl Sync for DxgiProbe {}
 
     impl DxgiProbe {
-        /// Открыть DXGI: первый настоящий адаптер (программные адаптеры MS
-        /// пропускаются). Индекс NVML не применяется: в целевых конфигурациях
-        /// проекта аппаратный адаптер один.
+        /// Открыть DXGI: выбрать **наиболее ёмкий по dedicated** аппаратный адаптер.
+        ///
+        /// Почему не «первый»: `EnumAdapters1` отдаёт адаптер, на котором показан
+        /// рабочий стол (обычно iGPU), а движок может работать на дискретной карте —
+        /// на машине с двумя GPU «первый» дал бы цифры не того устройства.
+        /// Дискретная карта узнаётся по крупному dedicated-сегменту (у iGPU это
+        /// BIOS carve-out, сотни МиБ). Программные адаптеры MS пропускаются.
         pub fn open() -> crate::error::Result<DxgiProbe> {
+            let mut all = Self::open_all()?;
+            if all.is_empty() {
+                return Err(crate::EngineError::Other(
+                    "DXGI: ни одного аппаратного адаптера не найдено".to_string(),
+                ));
+            }
+            let best = all
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, p)| p.dedicated_bytes)
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            Ok(all.swap_remove(best))
+        }
+
+        /// Все аппаратные адаптеры машины (диагностика/валидация на железе:
+        /// `live_dxgi_vs_nvml`, отчёты о VRAM при нескольких GPU).
+        pub fn open_all() -> crate::error::Result<Vec<DxgiProbe>> {
             let mut factory: *mut c_void = std::ptr::null_mut();
             let hr = unsafe { CreateDXGIFactory1(&IID_IDXGIFACTORY1, &mut factory) };
             if hr != 0 || factory.is_null() {
@@ -272,32 +305,22 @@ pub mod dxgi {
                     "CreateDXGIFactory1: HRESULT {hr:#x}"
                 )));
             }
-            let mut name = String::new();
-            let mut segment = SEGMENT_NON_LOCAL;
-            let adapter3 = match pick_adapter(factory, &mut name, &mut segment) {
-                Some(a) => a,
-                None => {
-                    release_handle(&mut factory);
-                    return Err(crate::EngineError::Other(
-                        "DXGI: ни одного аппаратного адаптера не найдено".to_string(),
-                    ));
-                }
-            };
-            Ok(DxgiProbe {
-                handles: Mutex::new(Some(Handles { factory, adapter3 })),
-                device_name: name,
-                segment,
-            })
+            let probes = enumerate_adapters(factory);
+            // Адаптеры держат собственную ссылку (QI) — фабрика больше не нужна.
+            release_handle(&mut factory);
+            if probes.is_empty() {
+                return Err(crate::EngineError::Other(
+                    "DXGI: ни одного аппаратного адаптера не найдено".to_string(),
+                ));
+            }
+            Ok(probes)
         }
     }
 
-    /// Перечислить адаптеры, пропустить программные, первый настоящий — наш.
-    /// Возвращает `adapter3` (уже с собственной ссылкой QI) + имя и сегмент.
-    fn pick_adapter(
-        factory: *mut c_void,
-        name: &mut String,
-        segment: &mut u32,
-    ) -> Option<*mut c_void> {
+    /// Перечислить аппаратные адаптеры (программные адаптеры MS пропускаются),
+    /// для каждого вернуть готовый [`DxgiProbe`] с собственной ссылкой QI.
+    fn enumerate_adapters(factory: *mut c_void) -> Vec<DxgiProbe> {
+        let mut out = Vec::new();
         let mut i = 0u32;
         loop {
             let mut adapter: *mut c_void = std::ptr::null_mut();
@@ -305,7 +328,7 @@ pub mod dxgi {
             let enum_fn: EnumAdapters1Fn = unsafe { slot(factory, 12) };
             let hr = unsafe { enum_fn(factory, i, &mut adapter) };
             if hr == DXGI_ERROR_NOT_FOUND {
-                return None;
+                break;
             }
             if hr != 0 || adapter.is_null() {
                 i += 1;
@@ -315,12 +338,7 @@ pub mod dxgi {
             // IDXGIAdapter1::GetDesc1 — слот 10.
             let desc_fn: GetDesc1Fn = unsafe { slot(adapter, 10) };
             let got = unsafe { desc_fn(adapter, &mut desc) };
-            if got != 0 {
-                unsafe { release(adapter) };
-                i += 1;
-                continue;
-            }
-            if desc.vendor_id == MS_SOFTWARE_VENDOR_ID {
+            if got != 0 || desc.vendor_id == MS_SOFTWARE_VENDOR_ID {
                 unsafe { release(adapter) };
                 i += 1;
                 continue;
@@ -335,18 +353,19 @@ pub mod dxgi {
                 i += 1;
                 continue;
             }
-            let mut n = String::from_utf16_lossy(&desc.description);
-            if let Some(nul) = n.find('\0') {
-                n.truncate(nul);
+            let mut name = String::from_utf16_lossy(&desc.description);
+            if let Some(nul) = name.find('\0') {
+                name.truncate(nul);
             }
-            *name = n;
-            *segment = if desc.dedicated_video_memory >= DISCRETE_MIN_DEDICATED_BYTES {
-                SEGMENT_LOCAL
-            } else {
-                SEGMENT_NON_LOCAL
-            };
-            return Some(adapter3);
+            out.push(DxgiProbe {
+                handles: Mutex::new(Some(Handles { adapter3 })),
+                device_name: name,
+                dedicated_bytes: desc.dedicated_video_memory as u64,
+                segment: SEGMENT_LOCAL,
+            });
+            i += 1;
         }
+        out
     }
 
     fn release_handle(h: &mut *mut c_void) {
@@ -361,7 +380,6 @@ pub mod dxgi {
             if let Ok(mut inner) = self.handles.lock() {
                 if let Some(h) = inner.as_mut() {
                     release_handle(&mut h.adapter3);
-                    release_handle(&mut h.factory);
                 }
             }
         }
@@ -403,6 +421,35 @@ pub mod dxgi {
                 used_mib: info.current_usage >> 20,
                 free_mib: info.budget.saturating_sub(info.current_usage) >> 20,
             })
+        }
+    }
+
+    /// Живая сверка измерений на железе: NVML (эталон NVIDIA) против DXGI по
+    /// каждому аппаратному адаптеру. Отвечает на вопрос «можно ли доверять DXGI»
+    /// эмпирически: на машине с NVIDIA сравниваем free/total NVML и бюджет DXGI,
+    /// а также проверяем, что выбирается дискретная карта, а не iGPU.
+    #[test]
+    #[ignore = "живое железо: запускать вручную (--ignored --nocapture)"]
+    fn live_dxgi_vs_nvml() {
+        match NvmlProbe::open(0) {
+            Ok(nvml) => println!("NVML {}: {:?}", nvml.name(), nvml.snapshot()),
+            Err(e) => println!("NVML недоступен (не NVIDIA): {e}"),
+        }
+        match DxgiProbe::open_all() {
+            Ok(all) => {
+                for p in &all {
+                    println!(
+                        "DXGI «{}» (dedicated {} МиБ): {:?}",
+                        p.name(),
+                        p.dedicated_bytes >> 20,
+                        p.snapshot()
+                    );
+                }
+                if let Ok(best) = DxgiProbe::open() {
+                    println!("DXGI выбрал для измерений: «{}»", best.name());
+                }
+            }
+            Err(e) => println!("DXGI недоступен: {e}"),
         }
     }
 
@@ -462,6 +509,11 @@ impl NvmlProbe {
 impl VramProbe for NvmlProbe {
     fn source(&self) -> VramSource {
         VramSource::Nvml
+    }
+
+    /// Имя GPU — как `nvidia-smi` (`NVIDIA GeForce RTX 3060`).
+    fn name(&self) -> String {
+        self.name.clone()
     }
 
     fn snapshot(&self) -> Option<VramSnapshot> {
