@@ -252,7 +252,10 @@ fn page_admin_sections() {
     ] {
         assert!(body.contains(needle), "в странице нет {needle}");
     }
-    assert!(!body.contains("doSearch"), "карточки «Поиск» быть не должно");
+    assert!(
+        !body.contains("doSearch"),
+        "карточки «Поиск» быть не должно"
+    );
     assert!(!body.contains("doAsk"), "карточки «Вопрос» быть не должно");
 }
 
@@ -267,7 +270,10 @@ fn mcp_status_shape() {
     }
     assert!(v["state"].as_str().is_some(), "{v}");
     assert!(
-        matches!(v["state"].as_str(), Some("mcp") | Some("foreign") | Some("down")),
+        matches!(
+            v["state"].as_str(),
+            Some("mcp") | Some("foreign") | Some("down")
+        ),
         "{v}"
     );
 }
@@ -275,11 +281,21 @@ fn mcp_status_shape() {
 /// Неизвестное действие MCP отклоняется без запуска процессов.
 #[test]
 fn mcp_action_validated() {
-    let (status, _, body) = route("POST", "/api/mcp-http", "", &h(), r#"{ "action": "bogus" }"#);
+    let (status, _, body) = route(
+        "POST",
+        "/api/mcp-http",
+        "",
+        &h(),
+        r#"{ "action": "bogus" }"#,
+    );
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["ok"], false, "{body}");
-    assert!(v["msg"].as_str().unwrap_or("").contains("start|stop|restart"),
+    assert!(
+        v["msg"]
+            .as_str()
+            .unwrap_or("")
+            .contains("start|stop|restart"),
         "{body}"
     );
 }
@@ -306,14 +322,25 @@ fn chat_model_set_rejects_non_first_shard() {
     let (_, _, body) = route("POST", "/api/chat-model/set", "", &h(), &req);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     let msg = v["msg"].as_str().unwrap_or("");
-    assert!(!msg.contains("ПЕРВЫЙ"), "первый фрагмент не должен режется: {msg}");
+    assert!(
+        !msg.contains("ПЕРВЫЙ"),
+        "первый фрагмент не должен режется: {msg}"
+    );
 }
 
 /// Смена модели — под CSRF; обход пути/пустое имя/не-.gguf отклоняются до любых
 /// файловых операций (перезапуска хоста в тестах нет).
 #[test]
 fn chat_model_set_rejects_bad_file() {
-    for bad in ["", "  ", "..", "../x.gguf", "a\\b.gguf", "a/b.gguf", "x.onnx"] {
+    for bad in [
+        "",
+        "  ",
+        "..",
+        "../x.gguf",
+        "a\\b.gguf",
+        "a/b.gguf",
+        "x.onnx",
+    ] {
         let req = serde_json::json!({ "file": bad }).to_string();
         let (status, _, body) = route("POST", "/api/chat-model/set", "", &h(), &req);
         assert_eq!(status, 200, "{bad}");

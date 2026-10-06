@@ -1119,8 +1119,16 @@ pub fn mcp_http_action(action: &str) -> Value {
                 ok = false;
                 format!(
                     "{} не поднялся{} — см. вывод",
-                    if action == "start" { "MCP-сервер" } else { "перезапуск" },
-                    if state == "foreign" { " (порт занят чужим сервисом)" } else { "" }
+                    if action == "start" {
+                        "MCP-сервер"
+                    } else {
+                        "перезапуск"
+                    },
+                    if state == "foreign" {
+                        " (порт занят чужим сервисом)"
+                    } else {
+                        ""
+                    }
                 )
             }
         }
