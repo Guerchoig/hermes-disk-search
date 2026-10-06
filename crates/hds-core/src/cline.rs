@@ -449,7 +449,9 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
     }
 
     // 3. Правило (always-on) и скилл (ленивый) — источники в корне проекта.
-    let pairs = [
+    // Правило slow-machine ставится только на «медленных» машинах: опциональный
+    // ключ `cline.slow_machine: true` в config.yaml (iGPU, низкая tok/s).
+    let mut pairs = vec![
         (
             "правило disk-search",
             root.join("cline-rules").join("disk-search.md"),
@@ -466,6 +468,29 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
             dir.join("skills").join("disk-search").join("SKILL.md"),
         ),
     ];
+    if dig(cfg, "cline.slow_machine")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        pairs.push((
+            "правило slow-machine",
+            root.join("cline-rules").join("disk-search-slow.md"),
+            dir.join("rules").join("disk-search-slow.md"),
+        ));
+    } else {
+        // машину перестали считать медленной → правило убрать (если ставили раньше)
+        let stale = dir.join("rules").join("disk-search-slow.md");
+        if !dry_run && stale.exists() {
+            match std::fs::remove_file(&stale) {
+                Ok(()) => rep.push("правило slow-machine", "ok", "убрано (не slow_machine)"),
+                Err(e) => rep.push(
+                    "правило slow-machine",
+                    "warn",
+                    format!("не убрано {}: {e}", stale.display()),
+                ),
+            }
+        }
+    }
     for (title, src, dst) in pairs {
         match copy_if_changed(&src, &dst) {
             Ok(None) => rep.push(

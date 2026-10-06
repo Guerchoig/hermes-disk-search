@@ -547,6 +547,13 @@ fn busy_err(busy: crate::gate::Busy) -> EngineError {
     EngineError::Other(format!("движок занят ({busy}) — попробуйте позже"))
 }
 
+/// Страж брошенных запросов (чистая функция — тестируется без движка): сработать,
+/// если держатель — «engine» (запрос чата/эмбеддингов, а не служебная операция)
+/// и он держится дольше порога. Порог 0 = страж выключен (никогда не срабатывает).
+fn abandoned_request_guard(busy: &crate::gate::Busy, engine_tag: &str, threshold_sec: u64) -> bool {
+    threshold_sec > 0 && busy.what == engine_tag && busy.secs() >= threshold_sec
+}
+
 impl ClusterShared {
     pub fn new(cluster: Cluster) -> ClusterShared {
         ClusterShared(crate::gate::Gate::new(cluster))
@@ -789,6 +796,9 @@ pub struct ClusterBackend {
     /// простоя не вытесняют транскрибатор, пока он работает. Запрос чата/поиска
     /// вытеснить его **может** (приоритет 1 > 2).
     transcribe_active: Arc<AtomicBool>,
+    /// Страж брошенных запросов: порог одного вызова движка в секундах
+    /// (`gpu.abandoned_request_sec`; 0 — выключен).
+    abandoned_request_sec: u64,
 }
 
 /// Ленивый транскрибатор whisper под `Mutex` (raw-указатели bridge ⇒ `!Send/!Sync`;
@@ -1317,6 +1327,24 @@ impl ClusterBackend {
                         reported_busy = false;
                     }
                     _ => {}
+                }
+                // Страж брошенных запросов: «engine — N с» дольше порога = генерация,
+                // чей клиент уже ушёл. Штатная остановка резидента освобождает GPU.
+                if me.abandoned_request_sec > 0 {
+                    if let Some(b) = me.cl().ok().as_ref().and_then(|c| c.busy()) {
+                        if abandoned_request_guard(&b, "engine", me.abandoned_request_sec) {
+                            me.log.line(&format!(
+                                "[guard] вызов движка «engine» держится {} с ≥ порога {} с \
+                                 — клиент, скорее всего, оборвал запрос; ШТАТНАЯ остановка \
+                                 резидента для освобождения GPU (автозапуск поднимет заново)",
+                                b.secs(),
+                                me.abandoned_request_sec
+                            ));
+                            // Result осознанно не проверяем: страж повторит попытку
+                            // на следующем такте, если остановка не прошла.
+                            let _ = me.internal_stop();
+                        }
+                    }
                 }
                 // сон мелкими кусками: остановка не должна ждать такт целиком
                 let mut slept = Duration::ZERO;
@@ -2400,6 +2428,7 @@ impl Host {
             upstream,
             whisper: Mutex::new(None),
             transcribe_active: Arc::new(AtomicBool::new(false)),
+            abandoned_request_sec: resolved.gpu.abandoned_request_sec,
         });
 
         let handles = if ports.is_empty() {
@@ -2712,6 +2741,38 @@ mod whisper_device_tests {
     use super::strip_index_self_pause;
     use super::whisper_device;
     use crate::dispatch::{Action, Plan};
+
+    /// Страж брошенных запросов: срабатывает только на «engine» дольше порога —
+    /// служебные операции (status/arbiter/dispatcher) и короткие вызовы не трогаем.
+    #[test]
+    fn abandoned_request_guard_semantics() {
+        use super::abandoned_request_guard;
+        use crate::gate::Busy;
+        use std::time::Duration;
+        let mk = |what: &str, secs: u64| Busy {
+            what: what.to_string(),
+            since: std::time::Instant::now() - Duration::from_secs(secs),
+        };
+        // запрос чата висит дольше порога → остановка
+        assert!(abandoned_request_guard(&mk("engine", 901), "engine", 900));
+        // ровно на пороге → тоже срабатываем
+        assert!(abandoned_request_guard(&mk("engine", 900), "engine", 900));
+        // ещё держится недолго → терпим
+        assert!(!abandoned_request_guard(&mk("engine", 899), "engine", 900));
+        // служебные операции — не запросы, их не сбрасываем
+        assert!(!abandoned_request_guard(
+            &mk("arbiter", 5_000),
+            "engine",
+            900
+        ));
+        assert!(!abandoned_request_guard(
+            &mk("status:devices", 5_000),
+            "engine",
+            900
+        ));
+        // страж выключен (порог 0) → никогда
+        assert!(!abandoned_request_guard(&mk("engine", 5_000), "engine", 0));
+    }
 
     /// Роли индексации не ставят паузу индексации сами себе (фликер в UI).
     #[test]

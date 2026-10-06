@@ -118,6 +118,9 @@ gpu:
   n_gpu_layers: -1           # -1 = все слои на GPU (приоритетнее legacy `-ngl` в extra_args)
   reserve_mb: 1024           # не выедаем под ноль
   evict_idle_sec: 600        # внешний предохранитель: простой роли → выгрузка
+  abandoned_request_sec: 900 # страж брошенных запросов: вызов движка дольше 900 с (клиент
+                             #   оборвал запрос, отмены в API движка нет) → штатная остановка
+                             #   резидента, GPU освобождается; 0 = выключить
   pause_index_on_query: true # ставить index.pause, пока обслуживается запрос
   # vram_source: nvml        # источник истины по VRAM (R29); `engine` = list_devices, недостоверно
   # vram_budget_mb: 11000    # опционально: сузить бюджет (диагностика/критерий A-7)
@@ -199,3 +202,10 @@ watch:
   debounce_seconds: 8
   reconcile_on_start: true
   max_stable_wait: 120
+
+# Интеграция с Cline: экономный режим поиска на «медленных» машинах.
+cline:
+  slow_machine: false        # true — правило slow-machine устанавливается при cline-sync:
+                             #   один вызов инструмента за ход, limit ≤ 5, без web_search.
+                             #   Включайте на машинах с интегрированной графикой (iGPU),
+                             #   где ходы Cline не успевают за таймаутом клиента.

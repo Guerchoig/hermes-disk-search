@@ -117,6 +117,11 @@ pub struct GpuConfig {
     pub external_vram_mb: u64,
     /// `gpu.vram_source`: источник истины по свободной VRAM (`nvml` по умолчанию).
     pub vram_source: VramSource,
+    /// `gpu.abandoned_request_sec`: страж брошенных запросов. Если один вызов
+    /// движка держится дольше порога (клиент оборвал запрос по своему таймауту,
+    /// отмены в API движка нет), резидент завершается штатной уборкой — GPU
+    /// освобождается. `0` — выключить; по умолчанию 900 с.
+    pub abandoned_request_sec: u64,
 }
 
 impl Default for GpuConfig {
@@ -139,6 +144,7 @@ impl Default for GpuConfig {
             pause_index_on_query: true,
             external_vram_mb: 0,
             vram_source: VramSource::Nvml, // R29: только NVML — источник истины
+            abandoned_request_sec: 900,    // страж брошенных запросов (15 мин)
         }
     }
 }
@@ -317,6 +323,9 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
     }
     if let Some(v) = dig_i64(root, "gpu.external_vram_mb") {
         gpu.external_vram_mb = v.max(0) as u64;
+    }
+    if let Some(v) = dig_i64(root, "gpu.abandoned_request_sec") {
+        gpu.abandoned_request_sec = v.max(0) as u64;
     }
     if let Some(v) = dig_str(root, "gpu.vram_source") {
         match VramSource::parse(&v) {
@@ -625,6 +634,25 @@ pub fn parse_extra_args(s: &str) -> ExtraArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Страж брошенных запросов: ключ из YAML доезжает до `GpuConfig`, 0 = выключен.
+    #[test]
+    fn abandoned_request_sec_parsed() {
+        let root: serde_yaml::Value =
+            serde_yaml::from_str("gpu:\n  abandoned_request_sec: 300\n").unwrap();
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(cfg.gpu.abandoned_request_sec, 300);
+
+        let root: serde_yaml::Value =
+            serde_yaml::from_str("gpu:\n  abandoned_request_sec: 0\n").unwrap();
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(cfg.gpu.abandoned_request_sec, 0, "0 = явно выключен");
+
+        // без ключа — дефолт 900 с (15 мин)
+        let root: serde_yaml::Value = serde_yaml::from_str("gpu: {}\n").unwrap();
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(cfg.gpu.abandoned_request_sec, 900);
+    }
 
     /// Legacy-строка из реального конфига: понятые флаги + список непонятых.
     #[test]
