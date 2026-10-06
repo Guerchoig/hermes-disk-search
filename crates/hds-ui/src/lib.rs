@@ -1027,11 +1027,21 @@ fn mcp_probe_cfg(cfg: &Config) -> (String, Value) {
 }
 
 /// `GET /api/mcp-http`: состояние общего MCP-сервера (проба `/health` + живой
-/// процесс из `data/mcp_http.pid`).
+/// процесс из `data/mcp_http.pid`). Даже при нечитаемом `config.yaml` (CI,
+/// распакованный архив) отдаём полную структуру с дефолтным URL — карточке
+/// всегда есть что показать, причина — в поле `error`.
 pub fn mcp_http_status() -> Value {
     let cfg = match load() {
         Ok(c) => c,
-        Err(e) => return json!({ "state": "down", "error": e.message() }),
+        Err(e) => {
+            return json!({
+                "state": "down",
+                "url": "http://127.0.0.1:8787/mcp",
+                "pid": Value::Null,
+                "version": Value::Null,
+                "error": e.message(),
+            })
+        }
     };
     let (state, info) = mcp_probe_cfg(&cfg);
     let pid = std::fs::read_to_string(project_root().join("data").join("mcp_http.pid"))
