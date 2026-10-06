@@ -19,6 +19,7 @@ pub mod tree;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 use hds_core::config::{db_abs_path, dig, load, project_root, Config};
 use hds_core::{db, http};
@@ -687,6 +688,87 @@ pub fn watch_json(action: &str) -> Value {
     }
 }
 
+// --- Фоновое задание перезапуска llm-host: этапы для карточек UI ------------------
+
+/// Состояние одного фонового задания (смена модели чата / перезапуск резидента).
+#[derive(Clone)]
+struct LlmJob {
+    kind: String,
+    stage: String,
+    detail: String,
+    started: std::time::Instant,
+    result: Option<Value>,
+}
+
+static LLM_JOB: OnceLock<Mutex<Option<LlmJob>>> = OnceLock::new();
+
+/// Начать задание. `false` — другое задание ещё идёт (или не выгружено за 10 мин:
+/// зависший поток — считаем его мёртвым и поднимаем новое).
+fn llm_job_start(kind: &str, detail: &str) -> bool {
+    let slot = LLM_JOB.get_or_init(|| Mutex::new(None));
+    let mut g = match slot.lock() {
+        Ok(g) => g,
+        Err(_) => return false,
+    };
+    if let Some(j) = g.as_ref() {
+        if j.result.is_none() && j.started.elapsed().as_secs() < 600 {
+            return false;
+        }
+    }
+    *g = Some(LlmJob {
+        kind: kind.to_string(),
+        stage: "старт".to_string(),
+        detail: detail.to_string(),
+        started: std::time::Instant::now(),
+        result: None,
+    });
+    true
+}
+
+/// Отметить этап (вызывается из потока задания; вне задания — ничего не делает).
+fn llm_progress(stage: &str, detail: impl Into<String>) {
+    if let Some(mut g) = LLM_JOB.get().and_then(|m| m.lock().ok()) {
+        if let Some(j) = g.as_mut() {
+            if j.result.is_none() {
+                j.stage = stage.to_string();
+                j.detail = detail.into();
+            }
+        }
+    }
+}
+
+/// Завершить задание с результатом (остаётся доступным до следующего старта).
+fn llm_job_finish(res: Value) {
+    if let Some(mut g) = LLM_JOB.get().and_then(|m| m.lock().ok()) {
+        if let Some(j) = g.as_mut() {
+            j.stage = "готово".to_string();
+            j.result = Some(res);
+        }
+    }
+}
+
+/// `GET /api/llm-host/job`: ход фонового задания (этап, деталь, таймер, результат).
+pub fn llm_job_json() -> Value {
+    match LLM_JOB
+        .get()
+        .and_then(|m| m.lock().ok())
+        .and_then(|g| g.clone())
+    {
+        Some(j) => json!({
+            "running": j.result.is_none(),
+            "kind": j.kind,
+            "stage": j.stage,
+            "detail": j.detail,
+            "elapsed_sec": j.started.elapsed().as_secs(),
+            "result": j.result,
+        }),
+        None => json!({
+            "running": false, "kind": "", "stage": "", "detail": "",
+            "elapsed_sec": 0, "result": Value::Null,
+        }),
+    }
+}
+
 /// `POST /api/llm-host/restart`: остановить резидент `llm-host` и поднять заново.
 ///
 /// Свой процесс нельзя перезапустить «сам в себе», но резидент — отдельный, поэтому
@@ -714,6 +796,7 @@ pub fn llm_host_restart() -> Value {
     let pid_file = root.join("data").join("llm-host.pid");
 
     // 1. Остановка, если резидент отвечает (или остался pid-файл).
+    llm_progress("остановка", "прошу резидента завершиться (/internal/stop)");
     let was_up = llm_host_healthy(&host, port, std::time::Duration::from_secs(2));
     if was_up || pid_file.exists() {
         let _ = http::request(
@@ -728,7 +811,11 @@ pub fn llm_host_restart() -> Value {
     }
     // 2. Ждём остановки: порт не отвечает И pid-файл снят (макс ~60 c).
     let mut stopped = !was_up && !pid_file.exists();
-    for _ in 0..120 {
+    for it in 0..120 {
+        llm_progress(
+            "остановка",
+            format!("жду завершения резидента… {} с", it / 2),
+        );
         if stopped {
             break;
         }
@@ -749,6 +836,10 @@ pub fn llm_host_restart() -> Value {
                 let _ = std::fs::remove_file(&pid_file);
             }
             Some(pid) => {
+                llm_progress(
+                    "остановка",
+                    format!("резидент (pid {pid}) не завершился — завершаю принудительно"),
+                );
                 if !terminate_process(pid) {
                     return json!({ "ok": false,
                         "msg": format!(
@@ -771,9 +862,16 @@ pub fn llm_host_restart() -> Value {
         }
     };
 
-    // 4. Ждём готовности фасада (макс ~180 c: резидент поднимает роли).
+    llm_progress(
+        "запуск",
+        format!("резидент запущен (pid {pid}) — жду /health: загрузка модели может занять минуты"),
+    );
     let mut up = false;
-    for _ in 0..360 {
+    for it in 0..360 {
+        llm_progress(
+            "запуск",
+            format!("жду /health… {} с (загрузка модели)", it / 2),
+        );
         std::thread::sleep(std::time::Duration::from_millis(500));
         if llm_host_healthy(&host, port, std::time::Duration::from_secs(1)) {
             up = true;
@@ -950,14 +1048,29 @@ pub fn chat_model_set_json(file: &str) -> Value {
     if let Err(e) = std::fs::write(&manifest, body.to_string() + "\n") {
         return json!({ "ok": false, "msg": format!("{}: {e}", manifest.display()) });
     }
-    let mut res = llm_host_restart();
-    if res["ok"].as_bool().unwrap_or(false) {
-        res["msg"] = json!(format!(
-            "активная модель роли chat → {f}; {}",
-            res["msg"].as_str().unwrap_or("llm-host перезапущен")
-        ));
+    // Перезапуск хоста — фоновое задание с этапами (карточка показывает прогресс),
+    // ответ уходит сразу: HTTP-поток не занят минутами.
+    if !llm_job_start("chat-model", &format!("активация модели {f}")) {
+        return json!({ "ok": false,
+            "msg": "операция llm-host уже идёт — дождитесь завершения (прогресс в карточке)" });
     }
-    res
+    let f_owned = f.to_string();
+    std::thread::spawn(move || {
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(llm_host_restart))
+            .unwrap_or_else(
+                |_| json!({ "ok": false, "msg": "внутренняя ошибка потока перезапуска" }),
+            );
+        let mut res = res;
+        if res["ok"].as_bool().unwrap_or(false) {
+            res["msg"] = json!(format!(
+                "активная модель роли chat → {f_owned}; {}",
+                res["msg"].as_str().unwrap_or("llm-host перезапущен")
+            ));
+        }
+        llm_job_finish(res);
+    });
+    json!({ "ok": true, "started": true,
+        "msg": format!("модель {f} записана — перезапускаю llm-host, прогресс в карточке") })
 }
 
 /// Метка времени смены модели (`current.json.switched_at`), UTC ISO-8601 без
@@ -1164,6 +1277,7 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
         ("GET", "/api/watch/daemon") => json_ok(watch_status()),
         ("GET", "/api/chat-model") => json_ok(chat_model_json()),
         ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
+        ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
         ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
         ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
         ("GET", "/api/transcribe/file") => {
@@ -1224,7 +1338,31 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                     let roots = body_list(body, "roots");
                     json_ok(config_edit::set_roots(&roots))
                 }
-                "/api/llm-host/restart" => json_ok(llm_host_restart()),
+                "/api/llm-host/restart" => {
+                    if !llm_job_start("llm-host-restart", "перезапуск по кнопке карточки")
+                    {
+                        return (
+                            409,
+                            "application/json",
+                            json!({ "ok": false,
+                                "msg": "операция llm-host уже идёт — прогресс в карточке" })
+                            .to_string(),
+                        );
+                    }
+                    std::thread::spawn(|| {
+                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            llm_host_restart,
+                        ))
+                        .unwrap_or_else(|_| {
+                            json!({ "ok": false, "msg": "внутренняя ошибка потока перезапуска" })
+                        });
+                        llm_job_finish(res);
+                    });
+                    json_ok(json!({
+                        "ok": true, "started": true,
+                        "msg": "перезапуск запущен — прогресс в карточке"
+                    }))
+                }
                 "/api/chat-model/set" => {
                     let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
                     let file = v

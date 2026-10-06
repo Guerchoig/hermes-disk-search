@@ -213,15 +213,33 @@ async function loadChatModels(){
       (j.warn?' · <span class="warnbox">'+esc(j.warn)+'</span>':'')+
       '<br>Смена перезаписывает <code>current.json</code> и перезапускает резидент (аккуратно: '+
       'устаревшие pid-файлы и зависшие процессы разбираются). Первый ответ после смены — с задержкой.';
+    try{ const j=await jget('/api/llm-host/job');
+      if(j.running){ const m=document.getElementById('cmmsg');
+        m.textContent='… '+j.stage+' · '+j.detail+' ('+j.elapsed_sec+' с)'; pollJob(m); }
+    }catch(e){}
   }catch(e){ inf.textContent='ошибка: '+e; }
+}
+let jobTimer=null;
+async function pollJob(m){
+  try{ const j=await jget('/api/llm-host/job');
+    if(j.running){
+      m.textContent='… '+j.stage+' · '+j.detail+' ('+j.elapsed_sec+' с)';
+      if(!jobTimer) jobTimer=setInterval(()=>pollJob(m), 2000);
+      return;
+    }
+    const r=j.result||{};
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'готово');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  if(jobTimer){ clearInterval(jobTimer); jobTimer=null; }
+  loadChatModels(); loadMcp(); refresh();
 }
 async function applyChatModel(){
   const f=document.getElementById('cm').value; if(!f) return;
-  const m=document.getElementById('cmmsg'); m.textContent='меняю модель и перезапускаю llm-host… (до 3 минут)';
+  const m=document.getElementById('cmmsg'); m.textContent='записываю модель…';
   try{ const r=await jpost('/api/chat-model/set',{file:f});
-    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok')+(r.warn?' · '+r.warn:'');
+    if(r.started){ m.textContent='… перезапуск llm-host запущен'; pollJob(m); }
+    else m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
   }catch(e){ m.textContent='ошибка: '+e; }
-  loadChatModels(); refresh();
 }
 async function loadMcp(){
   const el=document.getElementById('mcpstatus');
@@ -280,10 +298,11 @@ async function saveExcl(){ const m=document.getElementById('cmsg'); m.textConten
   try{ const r=await jpost('/api/config/excludes',{paths:linesOf('excl')}); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; } }
 async function restartLlmHost(){
   const m=document.getElementById('lhmsg');
-  m.textContent='перезапускаю… (может занять до минуты)';
-  try{ const r=await jpost('/api/llm-host/restart'); m.textContent=(r.ok?'':'ошибка: ')+(r.msg||(r.ok?'ok':'')); }
+  try{ const r=await jpost('/api/llm-host/restart');
+    if(r.started){ m.textContent='… перезапуск запущен'; pollJob(m); }
+    else m.textContent=(r.ok?'':'ошибка: ')+(r.msg||'ok');
+  }
   catch(e){ m.textContent='ошибка: '+e; }
-  refresh();
 }
 function clineIcon(s){ return s==='ok'?'&#9989;':(s==='skip'?'&#11036;':'&#9888;&#65039;'); }
 async function clineSync(){

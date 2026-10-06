@@ -381,8 +381,10 @@ hds mcp-http check|start|stop|status|restart|run
 перезапуск резидента (`/api/llm-host/restart`), смена модели чата из общего рантайма
 (`/api/chat-model`, `POST /api/chat-model/set` — с перезапуском `llm-host`), запуск/остановка
 общего MCP-сервера (`/api/mcp-http`), правка `config.yaml` (roots/exclude_paths) **с сохранением
-комментариев**, синхронизация настроек Cline, транскрибация. Поиск/RAG — через агентов (Cline),
-MCP-инструменты и CLI (`hds search`/`hds ask`). Страница шлёт `X-HDS-UI: 1` (CSRF-защита POST).
+комментариев**, синхронизация настроек Cline, транскрибация. Перезапуск `llm-host` и смена модели
+идут **фоновым заданием**: карточка показывает этапы и таймер (`GET /api/llm-host/job`), не выглядя
+«зависшей» во время загрузки модели. Поиск/RAG — через агентов (Cline), MCP-инструменты и CLI
+(`hds search`/`hds ask`). Страница шлёт `X-HDS-UI: 1` (CSRF-защита POST).
 
 Логи сервера: `%LOCALAPPDATA%\hermes-disk-search\ui.log` и `ui.err.log`.
 На странице две закладки: **«Поиск»** (всё перечисленное выше) и **«Транскрибация»**

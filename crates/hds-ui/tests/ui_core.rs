@@ -248,6 +248,8 @@ fn page_admin_sections() {
         "MCP-сервер disk-search",
         "mcpAct(",
         "/api/mcp-http",
+        "/api/llm-host/job",
+        "pollJob(",
         "Главная",
     ] {
         assert!(body.contains(needle), "в странице нет {needle}");
@@ -298,6 +300,28 @@ fn mcp_action_validated() {
             .contains("start|stop|restart"),
         "{body}"
     );
+}
+
+/// Фоновое задание llm-host: эндпоинт хода отдаёт полную структуру
+/// (`running/stage/detail/elapsed_sec/result`) — карточка не выглядит зависшей.
+#[test]
+fn llm_job_status_shape() {
+    let (status, _, body) = route("GET", "/api/llm-host/job", "", &ReqHeaders::default(), "");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    for key in [
+        "running",
+        "kind",
+        "stage",
+        "detail",
+        "elapsed_sec",
+        "result",
+    ] {
+        assert!(v.get(key).is_some(), "нет поля {key}: {v}");
+    }
+    assert!(v["running"].is_boolean(), "{v}");
+    assert!(v["elapsed_sec"].is_u64(), "{v}");
+    assert!(v["stage"].as_str().is_some(), "{v}");
 }
 
 /// Не-первый фрагмент шардированной GGUF отклоняется с подсказкой (до любых
