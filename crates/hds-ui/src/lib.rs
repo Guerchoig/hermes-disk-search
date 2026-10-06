@@ -1,5 +1,8 @@
 //! `hds-ui` — минимальный веб-интерфейс на Rust (`MIGRATION_PLAN_RUST.md` §4.1 W1):
-//! статус (индекс + роли `llm-host`), поиск, RAG-вопрос, управление индексацией.
+//! **администрирование**: статус (индекс + роли `llm-host`), управление индексацией,
+//! перезапуск резидента и смена модели чата (общий рантайм), запуск/остановка MCP,
+//! правка конфига, транскрибация. Запросы (поиск/RAG) в UI не дублируются — для них
+//! есть агенты (`Cline`), MCP-инструменты и CLI (`hds search` / `hds ask`).
 //!
 //! Это **перепроектированный** UI под Rust-стек (не 1:1-порт `hds/ui_server.py`:
 //! тот обслуживал Python-операционку — `llama_server`, скачивание/смену моделей,
@@ -798,6 +801,333 @@ pub fn cline_sync_json() -> Value {
     hds_core::cline::sync(&cfg, &project_root(), false).to_json()
 }
 
+// --- Модель чата (общий llama-рантайм): просмотр и смена --------------------------
+
+/// `GET /api/chat-model`: GGUF-модели роли chat в общем рантайме машины
+/// (`models/chat/*.gguf`), активная (`current.json`) и состояние хоста.
+pub fn chat_model_json() -> Value {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "error": e.message() }),
+    };
+    let rt = match hds_llama::runtime::runtime_dir() {
+        Ok(d) => d,
+        Err(e) => return json!({ "error": e.to_string() }),
+    };
+    let dir = hds_llama::runtime::models_dir(&rt, Some("chat"));
+    let current = hds_llama::runtime::read_current(&rt, "chat");
+    // Сначала сырой список `*.gguf`, затем шардированные модели группируются в
+    // одну запись (первый фрагмент; llama.cpp сам подтягивает остальные части).
+    let mut raw: Vec<(String, u64)> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p
+                .extension()
+                .map(|x| x.eq_ignore_ascii_case("gguf"))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            raw.push((
+                e.file_name().to_string_lossy().to_string(),
+                e.metadata().map(|m| m.len()).unwrap_or(0),
+            ));
+        }
+    }
+    raw.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut models: Vec<Value> = Vec::new();
+    let mut done: Vec<(String, u32)> = Vec::new();
+    for (name, bytes) in &raw {
+        let entry = match hds_llama::gguf::parse_shard_name(name) {
+            Some((base, idx, total)) => {
+                if idx != 1 {
+                    continue; // части 2..N не выбираются — грузится первая
+                }
+                let key = (base.clone(), total);
+                if done.contains(&key) {
+                    continue;
+                }
+                done.push(key);
+                let sum: u64 = raw
+                    .iter()
+                    .filter(|(n, _)| {
+                        matches!(
+                            hds_llama::gguf::parse_shard_name(n),
+                            Some((b, _, t)) if b == base && t == total
+                        )
+                    })
+                    .map(|(_, b)| *b)
+                    .sum();
+                json!({
+                    "file": name,
+                    "size_mb": sum >> 20,
+                    "parts": total,
+                    "current": name.eq_ignore_ascii_case(&current),
+                })
+            }
+            None => json!({
+                "file": name,
+                "size_mb": bytes >> 20,
+                "parts": 1,
+                "current": name.eq_ignore_ascii_case(&current),
+            }),
+        };
+        models.push(entry);
+    }
+    models.sort_by(|a, b| {
+        a["file"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["file"].as_str().unwrap_or(""))
+    });
+    // Смена манифеста влияет на роль, только если модель берётся из общего рантайма.
+    let spec = dig(&cfg, "llm_server.chat.model")
+        .and_then(|v| v.as_str())
+        .unwrap_or("shared:chat")
+        .trim()
+        .to_string();
+    let warn = if spec.eq_ignore_ascii_case("shared:chat") {
+        None
+    } else {
+        Some(format!(
+            "llm_server.chat.model = «{spec}» — не shared:chat: смена активной модели \
+             рантайма на эту роль не повлияет"
+        ))
+    };
+    json!({
+        "dir": dir.display().to_string(),
+        "current": current,
+        "models": models,
+        "host_up": llm_host_status(&cfg)["up"].as_bool().unwrap_or(false),
+        "warn": warn,
+    })
+}
+
+/// `POST /api/chat-model/set {"file": "…gguf"}`: записать `current.json` роли chat
+/// в общем рантайме и аккуратно перезапустить llm-host.
+///
+/// Перезапуск — [`llm_host_restart`]: `/internal/stop`, ожидание остановки,
+/// разбор устаревшего pid-файла, принудительное завершение зависшего процесса —
+/// «блокеров» после смены модели не остаётся. Модель грузится лениво: первый
+/// ответ после смены будет с задержкой.
+pub fn chat_model_set_json(file: &str) -> Value {
+    let f = file.trim();
+    if f.is_empty() || f.contains('/') || f.contains('\\') || f.contains("..") {
+        return json!({ "ok": false,
+            "msg": "ожидалось имя файла модели из общего рантайма (например Qwen3.5-9B-Q6_K.gguf)" });
+    }
+    if !f.to_ascii_lowercase().ends_with(".gguf") {
+        return json!({ "ok": false, "msg": format!("ожидался .gguf-файл, получено «{f}»") });
+    }
+    // Шардированная модель: грузится только по ПЕРВОМУ фрагменту (llama.cpp сам
+    // находит остальные части рядом) — не-первый фрагмент не принимаем.
+    if let Some((base, idx, total)) = hds_llama::gguf::parse_shard_name(f) {
+        if idx != 1 {
+            let first = format!("{base}-00001-of-{total:05}.gguf");
+            return json!({ "ok": false,
+                "msg": format!(
+                    "шардированная модель: указывайте ПЕРВЫЙ фрагмент — {first} \
+                     (остальные части движок подтягивает сам)"
+                ) });
+        }
+    }
+    let rt = match hds_llama::runtime::runtime_dir() {
+        Ok(d) => d,
+        Err(e) => return json!({ "ok": false, "msg": e.to_string() }),
+    };
+    let dir = hds_llama::runtime::models_dir(&rt, Some("chat"));
+    let p = dir.join(f);
+    if !p.is_file() {
+        return json!({ "ok": false,
+            "msg": format!("файла нет в {}: {f}", dir.display()) });
+    }
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        return json!({ "ok": false, "msg": format!("каталог моделей: {e}") });
+    }
+    let manifest = hds_llama::runtime::current_file(&rt, "chat");
+    let body = json!({ "file": f, "switched_at": iso_now() });
+    if let Err(e) = std::fs::write(&manifest, body.to_string() + "\n") {
+        return json!({ "ok": false, "msg": format!("{}: {e}", manifest.display()) });
+    }
+    let mut res = llm_host_restart();
+    if res["ok"].as_bool().unwrap_or(false) {
+        res["msg"] = json!(format!(
+            "активная модель роли chat → {f}; {}",
+            res["msg"].as_str().unwrap_or("llm-host перезапущен")
+        ));
+    }
+    res
+}
+
+/// Метка времени смены модели (`current.json.switched_at`), UTC ISO-8601 без
+/// внешних крейтов (читается только человеком).
+fn iso_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days = (secs / 86400) as i64;
+    let rem = secs % 86400;
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Дни от эпохи → `(год, месяц, день)` (алгоритм Хиннанта, без крейтов).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// --- MCP-сервер disk-search (streamable-http): статус и управление из UI ----------
+
+/// Проба общего MCP-сервера: `("mcp", info)` — наш инстанс (`/health` →
+/// `{"app":"disk-search"}`), `("foreign", …)` — порт занят чужим сервисом,
+/// `("down", …)` — не отвечает. Тот же контракт, что `hds mcp-http status`.
+fn mcp_probe_cfg(cfg: &Config) -> (String, Value) {
+    let host = dig(cfg, "mcp_http.host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    let port = dig(cfg, "mcp_http.port")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(8787) as u16;
+    match http::request(
+        &host,
+        port,
+        "GET",
+        "/health",
+        &[("Accept", "application/json")],
+        None,
+        std::time::Duration::from_secs(3),
+    ) {
+        Ok(r) if (200..300).contains(&r.status) => match r.json() {
+            Ok(v) if v.get("app").and_then(|a| a.as_str()) == Some(hds_core::config::APP_NAME) => {
+                ("mcp".to_string(), v)
+            }
+            Ok(v) => ("foreign".to_string(), v),
+            Err(_) => ("foreign".to_string(), json!({})),
+        },
+        Ok(r) => ("foreign".to_string(), json!({ "status": r.status })),
+        Err(_) => ("down".to_string(), json!({})),
+    }
+}
+
+/// `GET /api/mcp-http`: состояние общего MCP-сервера (проба `/health` + живой
+/// процесс из `data/mcp_http.pid`).
+pub fn mcp_http_status() -> Value {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "state": "down", "error": e.message() }),
+    };
+    let (state, info) = mcp_probe_cfg(&cfg);
+    let pid = std::fs::read_to_string(project_root().join("data").join("mcp_http.pid"))
+        .ok()
+        .and_then(|t| t.trim().parse::<u32>().ok())
+        .filter(|p| process_alive(*p));
+    json!({
+        "state": state,
+        "url": hds_core::cline::mcp_url(&cfg),
+        "pid": pid,
+        "version": info.get("version").cloned().unwrap_or(Value::Null),
+    })
+}
+
+/// `POST /api/mcp-http {"action": "start"|"stop"|"restart"}`: управление общим
+/// MCP-сервером через CLI (`hds mcp-http <action>`) — один код управления
+/// (проба/PID-файл/detached-запуск), без дублирования. Захват вывода безопасен:
+/// CLI при detached-spawn сам снимает наследование std-хендлов, иначе родитель
+/// висел бы на открытом пайпе (`crates/hds-cli/src/cmd/mcp_http.rs`).
+///
+/// Правдивость результата: CLI ориентируется на pid-файл и печатает «остановлен»
+/// безусловно, а инстанс автозапуска (`mcp-http run` из задачи Планировщика)
+/// pid-файла не пишет. Поэтому после действия перепроверяем порт и `ok/msg`
+/// выставляем по факту.
+pub fn mcp_http_action(action: &str) -> Value {
+    match action {
+        "start" | "stop" | "restart" => {}
+        other => {
+            return json!({ "ok": false,
+                "msg": format!("неизвестное действие: {other} (start|stop|restart)") })
+        }
+    }
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return json!({ "ok": false, "msg": e.message() }),
+    };
+    let Some(exe) = hds_exe() else {
+        return json!({ "ok": false,
+            "msg": "не найден бинарь hds (рядом с UI / bin / target/{release,debug})" });
+    };
+    let out = std::process::Command::new(&exe)
+        .args(["mcp-http", action])
+        .current_dir(project_root())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    let (text, mut ok) = match out {
+        Ok(o) => {
+            let mut t = String::from_utf8_lossy(&o.stdout).into_owned();
+            let err = String::from_utf8_lossy(&o.stderr);
+            if !err.trim().is_empty() {
+                if !t.trim().is_empty() {
+                    t.push('\n');
+                }
+                t.push_str(&err);
+            }
+            (t.trim().to_string(), o.status.success())
+        }
+        Err(e) => (format!("не запустить {}: {e}", exe.display()), false),
+    };
+    // Сверка с фактом на порту (mcp | foreign | down).
+    let (state, _) = mcp_probe_cfg(&cfg);
+    let msg = match action {
+        "stop" => {
+            if state == "mcp" {
+                ok = false;
+                "остановка выполнена по pid-файлу, но порт по-прежнему отвечает живым \
+                 инстансом (без pid-файла) — остановите его процесс или используйте restart"
+                    .to_string()
+            } else if ok {
+                "MCP-сервер остановлен".to_string()
+            } else {
+                "остановка не удалась — см. вывод".to_string()
+            }
+        }
+        _ => {
+            if state == "mcp" && ok {
+                if action == "start" {
+                    "MCP-сервер запущен".to_string()
+                } else {
+                    "MCP-сервер перезапущен".to_string()
+                }
+            } else {
+                ok = false;
+                format!(
+                    "{} не поднялся{} — см. вывод",
+                    if action == "start" { "MCP-сервер" } else { "перезапуск" },
+                    if state == "foreign" { " (порт занят чужим сервисом)" } else { "" }
+                )
+            }
+        }
+    };
+    json!({ "ok": ok, "msg": msg, "detail": text, "state": state })
+}
+
 /// Маршрутизация (чистая функция — тестируется без сокетов).
 ///
 /// `path` — без query; `query` — часть после `?`; `h` — заголовки; `body` — тело POST.
@@ -814,6 +1144,8 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
         )),
         ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
         ("GET", "/api/watch/daemon") => json_ok(watch_status()),
+        ("GET", "/api/chat-model") => json_ok(chat_model_json()),
+        ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
         ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
         ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
         ("GET", "/api/transcribe/file") => {
@@ -875,6 +1207,24 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                     json_ok(config_edit::set_roots(&roots))
                 }
                 "/api/llm-host/restart" => json_ok(llm_host_restart()),
+                "/api/chat-model/set" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let file = v
+                        .get("file")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    json_ok(chat_model_set_json(&file))
+                }
+                "/api/mcp-http" => {
+                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                    let action = v
+                        .get("action")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("status")
+                        .to_string();
+                    json_ok(mcp_http_action(&action))
+                }
                 "/api/cline/sync" => json_ok(cline_sync_json()),
                 "/api/config/excludes" => {
                     let paths = body_list(body, "paths");

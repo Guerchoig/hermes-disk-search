@@ -2263,9 +2263,8 @@ impl Host {
                         }
                     };
                     let spec: InstanceSpec = inst.spec.clone();
-                    let file_mib = std::fs::metadata(&inst.model_path)
-                        .map(|m| m.len() >> 20)
-                        .unwrap_or(0);
+                    // Размер с учётом шардов (первый фрагмент → сумма всех частей).
+                    let file_mib = crate::gguf::file_total_mib(&inst.model_path);
                     if let Ok(meta) = read_meta(&inst.model_path) {
                         let n_ctx = spec.n_ctx.unwrap_or(0) as i64;
                         let parallel = resolved.parallel.max(1) as i64;

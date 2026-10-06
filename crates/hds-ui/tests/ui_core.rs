@@ -236,7 +236,125 @@ fn transcribe_apply_requires_name() {
     assert_eq!(v["ok"], false, "{body}");
 }
 
-/// T5/§8.4: запись папок конвейера — под CSRF (в тестах БЕЗ корректных заголовков,
+/// Страница: карточки «Модель чата» и «MCP-сервер»; групп запросов (поиск/ask)
+/// больше нет — UI только для администрирования (запросы: агенты/MCP/CLI).
+#[test]
+fn page_admin_sections() {
+    let (_, _, body) = route("GET", "/", "", &ReqHeaders::default(), "");
+    for needle in [
+        "Модель чата",
+        "applyChatModel()",
+        "/api/chat-model",
+        "MCP-сервер disk-search",
+        "mcpAct(",
+        "/api/mcp-http",
+        "Главная",
+    ] {
+        assert!(body.contains(needle), "в странице нет {needle}");
+    }
+    assert!(!body.contains("doSearch"), "карточки «Поиск» быть не должно");
+    assert!(!body.contains("doAsk"), "карточки «Вопрос» быть не должно");
+}
+
+/// Статус MCP — структура `{state, url, pid, version}` (без процессов в тесте).
+#[test]
+fn mcp_status_shape() {
+    let (status, _, body) = route("GET", "/api/mcp-http", "", &ReqHeaders::default(), "");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    for key in ["state", "url", "pid", "version"] {
+        assert!(v.get(key).is_some(), "нет поля {key}: {v}");
+    }
+    assert!(v["state"].as_str().is_some(), "{v}");
+    assert!(
+        matches!(v["state"].as_str(), Some("mcp") | Some("foreign") | Some("down")),
+        "{v}"
+    );
+}
+
+/// Неизвестное действие MCP отклоняется без запуска процессов.
+#[test]
+fn mcp_action_validated() {
+    let (status, _, body) = route("POST", "/api/mcp-http", "", &h(), r#"{ "action": "bogus" }"#);
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false, "{body}");
+    assert!(v["msg"].as_str().unwrap_or("").contains("start|stop|restart"),
+        "{body}"
+    );
+}
+
+/// Не-первый фрагмент шардированной GGUF отклоняется с подсказкой (до любых
+/// файловых операций).
+#[test]
+fn chat_model_set_rejects_non_first_shard() {
+    for (bad, hint) in [
+        ("m-00002-of-00003.gguf", "m-00001-of-00003.gguf"),
+        ("m-00003-of-00003.gguf", "m-00001-of-00003.gguf"),
+    ] {
+        let req = serde_json::json!({ "file": bad }).to_string();
+        let (status, _, body) = route("POST", "/api/chat-model/set", "", &h(), &req);
+        assert_eq!(status, 200, "{bad}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false, "{bad}: {body}");
+        let msg = v["msg"].as_str().unwrap_or("");
+        assert!(msg.contains("ПЕРВЫЙ"), "{bad}: {msg}");
+        assert!(msg.contains(hint), "{bad}: {msg}");
+    }
+    // первый фрагмент проходит валидацию имени (дальше — честная проверка файла)
+    let req = serde_json::json!({ "file": "m-00001-of-00003.gguf" }).to_string();
+    let (_, _, body) = route("POST", "/api/chat-model/set", "", &h(), &req);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let msg = v["msg"].as_str().unwrap_or("");
+    assert!(!msg.contains("ПЕРВЫЙ"), "первый фрагмент не должен режется: {msg}");
+}
+
+/// Смена модели — под CSRF; обход пути/пустое имя/не-.gguf отклоняются до любых
+/// файловых операций (перезапуска хоста в тестах нет).
+#[test]
+fn chat_model_set_rejects_bad_file() {
+    for bad in ["", "  ", "..", "../x.gguf", "a\\b.gguf", "a/b.gguf", "x.onnx"] {
+        let req = serde_json::json!({ "file": bad }).to_string();
+        let (status, _, body) = route("POST", "/api/chat-model/set", "", &h(), &req);
+        assert_eq!(status, 200, "{bad}");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["ok"], false, "{bad}: {body}");
+        assert!(!v["msg"].as_str().unwrap_or("").is_empty(), "{bad}: {body}");
+    }
+}
+
+/// Список моделей роли chat — структура `{dir, current, models, host_up}`.
+#[test]
+fn chat_model_shape() {
+    let (status, _, body) = route("GET", "/api/chat-model", "", &ReqHeaders::default(), "");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    if v.get("error").is_some() {
+        return; // в окружении без общего рантайма достаточно понятной ошибки
+    }
+    assert!(v.get("models").and_then(|m| m.as_array()).is_some(), "{v}");
+    assert!(v.get("dir").is_some(), "{v}");
+    assert!(v["host_up"].is_boolean(), "{v}");
+    for m in v["models"].as_array().unwrap() {
+        assert!(m["file"].as_str().is_some(), "{m}");
+        assert!(m["current"].is_boolean(), "{m}");
+    }
+}
+
+/// POST-маршруты новых карточек защищены той же CSRF-проверкой.
+#[test]
+fn new_post_routes_require_csrf() {
+    let bad = ReqHeaders {
+        origin: Some("http://evil.example".into()),
+        content_type: Some("application/json".into()),
+        x_hds_ui: None,
+    };
+    for path in ["/api/chat-model/set", "/api/mcp-http"] {
+        assert_eq!(route("POST", path, "", &bad, "{}").0, 403, "{path}");
+    }
+}
+
+// --- T5/§8.4: запись папок конвейера — под CSRF (в тестах БЕЗ корректных заголовков,
 /// чтобы не править боевой `config.yaml`).
 #[test]
 fn transcribe_dirs_post_requires_csrf() {

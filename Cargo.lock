@@ -653,6 +653,7 @@ dependencies = [
  "hds-core",
  "hds-extract",
  "hds-index",
+ "hds-llama",
  "hds-search",
  "rusqlite",
  "serde_json",

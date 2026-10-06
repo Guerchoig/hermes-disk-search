@@ -1,6 +1,7 @@
 //! Встроенная страница Rust-UI (одна HTML, без внешних ресурсов). Перепроектирована
-//! под Rust-стек: статус (индекс + роли `llm-host`), поиск, RAG-вопрос, управление
-//! индексацией. Python-`assets/ui.html` остаётся для Python-версии.
+//! под Rust-стек: статус, администрирование (индексация, резидент `llm-host`, модель
+//! чата, MCP-сервер, транскрибация, настройки). Python-`assets/ui.html` остаётся для
+//! Python-версии.
 
 /// HTML-страница (`text/html; charset=utf-8`).
 pub const PAGE: &str = r#"<!doctype html>
@@ -14,7 +15,7 @@ pub const PAGE: &str = r#"<!doctype html>
  main{max-width:900px;margin:0 auto;padding:16px 20px}
  section{background:#131f2b;border:1px solid #24384f;border-radius:10px;padding:14px 16px;margin:14px 0}
  h2{font-size:15px;margin:0 0 10px;color:#9fd0ff}
- input,button,textarea{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a3a55;background:#0d1620;color:#e6edf3}
+ input,button,textarea,select{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a3a55;background:#0d1620;color:#e6edf3}
  input{min-width:280px}button{cursor:pointer;background:#1c2f44}
  textarea{width:100%;min-height:64px;box-sizing:border-box}
  button:hover{background:#25405e}
@@ -47,7 +48,7 @@ pub const PAGE: &str = r#"<!doctype html>
 <header><h1>Hermes Disk Search — Rust UI</h1></header>
 <main>
  <nav class="tabs">
-  <button data-tab="search" class="active" onclick="showTab('search')">Поиск</button>
+  <button data-tab="search" class="active" onclick="showTab('search')">Главная</button>
   <button data-tab="transcribe" onclick="showTab('transcribe')">Транскрибация</button>
  </nav>
  <div id="tab-search">
@@ -63,16 +64,22 @@ pub const PAGE: &str = r#"<!doctype html>
    <span id="dmsg" class="muted"></span></div>
   <div id="diag" class="muted">…</div></section>
 
- <section><h2>Поиск</h2>
-  <div class="row"><input id="q" placeholder="например: накладная склад">
-   <input id="lim" type="number" value="8" min="1" max="30" style="min-width:70px">
-   <button onclick="doSearch()">Найти</button></div>
-  <div id="sres"></div></section>
+ <section><h2>Модель чата (общий llama-рантайм)</h2>
+  <div class="row"><select id="cm" style="min-width:280px"></select>
+   <button onclick="applyChatModel()">Сменить и перезапустить llm-host</button>
+   <span id="cmmsg" class="muted"></span></div>
+  <div id="cminfo" class="muted">…</div></section>
 
- <section><h2>Вопрос (ответ по файлам)</h2>
-  <div class="row"><input id="aq" placeholder="о чём … ?" style="min-width:360px">
-   <button onclick="doAsk()">Спросить</button></div>
-  <pre id="aans" class="muted" style="display:none"></pre></section>
+ <section><h2>MCP-сервер disk-search (агенты)</h2>
+  <div class="row">
+   <button onclick="mcpAct('start')">Запустить</button>
+   <button onclick="mcpAct('stop')">Остановить</button>
+   <button onclick="mcpAct('restart')">Перезапустить</button>
+   <span id="mcpmsg" class="muted"></span></div>
+  <div id="mcpstatus" class="muted">…</div>
+  <div class="muted">Общий инстанс streamable-http (<code>mcp_http.*</code> конфига,
+   по умолчанию <code>127.0.0.1:8787/mcp</code>): к нему подключаются Cline/Hermes.
+   «Чужой» сервис на порту не переиспользуется — освободите порт и запустите заново.</div></section>
 
  <section><h2>Дерево индекса</h2>
   <div class="row"><button onclick="loadTree()">Показать/обновить</button>
@@ -195,24 +202,42 @@ async function refresh(){
     if(document.getElementById('tab-search').style.display!=='none') loadWatchDaemon();
   }catch(e){ document.getElementById('status').textContent='ошибка статуса: '+e; }
 }
-async function doSearch(){
-  const q=document.getElementById('q').value.trim(); if(!q) return;
-  const lim=document.getElementById('lim').value||8;
-  const box=document.getElementById('sres'); box.innerHTML='<div class="muted">…</div>';
-  try{ const res=await jget('/api/search?q='+encodeURIComponent(q)+'&limit='+lim);
-    if(!res.length){ box.innerHTML='<div class="muted">Ничего не найдено.</div>'; return; }
-    box.innerHTML=res.map((r,i)=>'<div class="res"><b>['+(i+1)+']</b> <span class="loc">'+
-      esc(r.location)+'</span> <span class="muted">(score '+r.score+')</span><div>'+
-      esc(r.snippet)+'</div></div>').join('');
-  }catch(e){ box.innerHTML='<div class="err">ошибка: '+esc(''+e)+'</div>'; }
+async function loadChatModels(){
+  const sel=document.getElementById('cm'), inf=document.getElementById('cminfo');
+  try{ const j=await jget('/api/chat-model');
+    if(j.error){ inf.innerHTML='<span class="err">'+esc(j.error)+'</span>'; return; }
+    sel.innerHTML=(j.models||[]).map(m=>'<option'+(m.current?' selected':'')+' value="'+esc(m.file)+'">'+
+      esc(m.file)+(m.size_mb?' ('+m.size_mb+' МиБ':'')+(m.parts>1?', '+m.parts+' частей':'')+(m.size_mb?')':'')+'</option>').join('')||'<option value="">(нет .gguf в каталоге)</option>';
+    inf.innerHTML='каталог: '+esc(j.dir||'?')+' · активная: <b>'+esc(j.current||'(манифест не создан)')+'</b>'+
+      ' · llm-host: '+(j.host_up?'<span class="ok">up</span>':'<span class="err">не отвечает</span>')+
+      (j.warn?' · <span class="warnbox">'+esc(j.warn)+'</span>':'')+
+      '<br>Смена перезаписывает <code>current.json</code> и перезапускает резидент (аккуратно: '+
+      'устаревшие pid-файлы и зависшие процессы разбираются). Первый ответ после смены — с задержкой.';
+  }catch(e){ inf.textContent='ошибка: '+e; }
 }
-async function doAsk(){
-  const q=document.getElementById('aq').value.trim(); if(!q) return;
-  const p=document.getElementById('aans'); p.style.display='block'; p.textContent='…';
-  try{ const r=await jget('/api/ask?q='+encodeURIComponent(q));
-    let t=r.answer||''; (r.sources||[]).forEach((s,i)=>{ t+='\n['+(i+1)+'] '+s.location; });
-    p.textContent=t;
-  }catch(e){ p.textContent='ошибка: '+e; }
+async function applyChatModel(){
+  const f=document.getElementById('cm').value; if(!f) return;
+  const m=document.getElementById('cmmsg'); m.textContent='меняю модель и перезапускаю llm-host… (до 3 минут)';
+  try{ const r=await jpost('/api/chat-model/set',{file:f});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok')+(r.warn?' · '+r.warn:'');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  loadChatModels(); refresh();
+}
+async function loadMcp(){
+  const el=document.getElementById('mcpstatus');
+  try{ const j=await jget('/api/mcp-http');
+    const st=j.state==='mcp'?'<span class="ok">работает</span>'
+      :(j.state==='foreign'?'<span class="err">порт занят чужим сервисом</span>':'<span class="muted">остановлен</span>');
+    el.innerHTML='Состояние: '+st+(j.pid?' · pid '+j.pid:'')+' · URL: '+esc(j.url||'?')+
+      (j.version?' · версия '+esc(j.version):'');
+  }catch(e){ el.textContent='ошибка: '+e; }
+}
+async function mcpAct(action){
+  const m=document.getElementById('mcpmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/mcp-http',{action:action});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  loadMcp(); refresh();
 }
 async function act(u){
   const m=document.getElementById('imsg'); m.textContent='…';
@@ -402,5 +427,6 @@ function initTab(){
 }
 initTab();
 refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
+loadChatModels(); loadMcp();
 </script></body></html>
 "#;

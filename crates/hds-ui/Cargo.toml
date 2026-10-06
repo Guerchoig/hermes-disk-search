@@ -10,6 +10,7 @@ hds-core = { path = "../hds-core" }
 hds-index = { path = "../hds-index" }
 hds-search = { path = "../hds-search" }
 hds-extract = { path = "../hds-extract" }
+hds-llama = { path = "../hds-llama" }
 walkdir.workspace = true
 serde_yaml.workspace = true
 rusqlite.workspace = true

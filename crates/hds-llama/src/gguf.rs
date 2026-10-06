@@ -554,6 +554,58 @@ fn skip_value<R: Read + std::io::Seek>(r: &mut R, vtype: u32, path: &Path) -> Re
     }
 }
 
+/// Разбор имени шардированной GGUF (`llama.cpp`: `<base>-00001-of-00003.gguf`):
+/// возвращает `(база, индекс части с 1, всего частей)`; `None` — имя не шард.
+pub fn parse_shard_name(file: &str) -> Option<(String, u32, u32)> {
+    let stem = if file.to_ascii_lowercase().ends_with(".gguf") {
+        &file[..file.len() - 5]
+    } else {
+        return None;
+    };
+    let (left, total_s) = stem.rsplit_once("-of-")?;
+    let (base, idx_s) = left.rsplit_once('-')?;
+    if base.is_empty()
+        || !idx_s.bytes().all(|b| b.is_ascii_digit())
+        || !total_s.bytes().all(|b| b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some((base.to_string(), idx_s.parse().ok()?, total_s.parse().ok()?))
+}
+
+/// Размер модели в МиБ с учётом шардов: llama.cpp грузит модель по ПЕРВОМУ
+/// фрагменту (`…-00001-of-000NN.gguf`), остальные части находит рядом — поэтому
+/// «размер файла» для оценки VRAM берём как сумму всех частей каталога.
+/// Для не-шардированного файла — обычный размер.
+pub fn file_total_mib(path: &std::path::Path) -> u64 {
+    let own = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let (base, _idx, total) = match parse_shard_name(&name) {
+        Some(x) => x,
+        None => return own >> 20,
+    };
+    let dir = match path.parent() {
+        Some(d) => d,
+        None => return own >> 20,
+    };
+    let mut sum = 0u64;
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let n = e.file_name().to_string_lossy().to_string();
+            if matches!(
+                parse_shard_name(&n),
+                Some((b, _, t)) if b == base && t == total
+            ) {
+                sum += e.metadata().map(|m| m.len()).unwrap_or(0);
+            }
+        }
+    }
+    (if sum > 0 { sum } else { own }) >> 20
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -658,6 +710,22 @@ mod tests {
         let kv = crate::budget::kv_cache_mib(&meta, 32768, 1, KvBits::F16);
         assert!((kv - 1024.0).abs() < 1.0, "KV = {kv}");
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn parse_shard_name_and_sizes() {
+        assert_eq!(
+            parse_shard_name("Qwen3.5-14B-Q6_K-00001-of-00003.gguf"),
+            Some(("Qwen3.5-14B-Q6_K".to_string(), 1, 3))
+        );
+        assert_eq!(
+            parse_shard_name("m-00003-of-00012.gguf"),
+            Some(("m".to_string(), 3, 12))
+        );
+        // не шард: без суффикса, не .gguf, «-of-» без цифр
+        assert_eq!(parse_shard_name("model.gguf"), None);
+        assert_eq!(parse_shard_name("a-of-b.gguf"), None);
+        assert_eq!(parse_shard_name("m-00001-of-00003.bin"), None);
     }
 
     #[test]

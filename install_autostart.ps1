@@ -37,7 +37,11 @@ foreach ($name in @("HermesDiskSearchWatch", "HermesDiskSearchMcp")) {
 
 $tasks = @(
     @{ Name = "HermesDiskSearchWatch"; Args = "watch" },
-    @{ Name = "HermesDiskSearchMcp";   Args = "mcp-http run" },
+    # mcp-http start (not run): the manager writes data\mcp_http.pid and exits,
+    # so the UI card "MCP server" can stop/restart the instance later. The spawned
+    # child is detached and survives the task exit; a live instance on the port
+    # is reused, so a duplicate cannot appear.
+    @{ Name = "HermesDiskSearchMcp";   Args = "mcp-http start" },
     # Auto-transcription daemon (PLAN_AUTO_TRANSCRIBE, variant A): inbox_dir -> out_dir.
     # Exits immediately (code 0) while auto_transcribe.enabled is false, so the task
     # is harmless until the feature is switched on in config.yaml.
@@ -84,4 +88,4 @@ if (-not $ok) {
         Write-Host "[ok] startup shortcut (hidden): $startupDir\$($t.Name).lnk"
     }
 }
-Write-Host "Autostart: HermesDiskSearchWatch ($hdsExe watch), HermesDiskSearchMcp ($hdsExe mcp-http run) and HermesDiskSearchTranscribe ($hdsExe transcribe-watch)."
+Write-Host "Autostart: HermesDiskSearchWatch ($hdsExe watch), HermesDiskSearchMcp ($hdsExe mcp-http start) and HermesDiskSearchTranscribe ($hdsExe transcribe-watch)."
