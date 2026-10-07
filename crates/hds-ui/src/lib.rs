@@ -1572,6 +1572,9 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
                 "origin" => h.origin = Some(val),
                 "content-type" => h.content_type = Some(val),
                 "x-hds-ui" => h.x_hds_ui = Some(val),
+                // T0 (M2): без этого ui_auth_gate не видел токен — server-режим
+                // отдавал 401 даже с валидным Bearer (ловится только сокет-тестом).
+                "authorization" => h.authorization = Some(val),
                 "content-length" => content_length = val.parse().unwrap_or(0),
                 _ => {}
             }
@@ -1616,6 +1619,12 @@ fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
 pub fn run_http(host: &str, port: u16) -> Result<(), String> {
     let listener =
         TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
+    run_http_listener(listener)
+}
+
+/// Служить на готовом слушателе (отдельно — для тестов через реальный сокет:
+/// тест биндит порт `0` и сам узнаёт адрес).
+pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {

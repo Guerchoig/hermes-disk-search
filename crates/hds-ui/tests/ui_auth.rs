@@ -8,6 +8,10 @@ use hds_core::access::{hash_password, load_at, save_at, Access, User};
 use hds_ui::route_with_access;
 use hds_ui::ReqHeaders;
 
+/// Общий замок на env-переменные (HDS_CONFIG/HDS_ROOT персистентны в процессе):
+/// тесты одного бинаря идут параллельно в потоках — гонка env недопустима.
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn tmpdir(tag: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -69,6 +73,7 @@ fn issue_token(acc_path: &std::path::Path, login: &str) -> String {
 
 #[test]
 fn ui_auth_gate_and_access_api() {
+    let _env = ENV_LOCK.lock().unwrap();
     let dir = tmpdir("gate");
     let cfg_desktop = dir.join("config-desktop.yaml");
     let cfg_server = dir.join("config-server.yaml");
@@ -169,5 +174,82 @@ fn ui_auth_gate_and_access_api() {
         "хэши не отдаются"
     );
 
+    std::env::remove_var("HDS_CONFIG");
+}
+
+/// Сырой HTTP GET через реальный сокет; возвращает `(код, всё тело ответа)`.
+fn http_get(addr: std::net::SocketAddr, auth: Option<&str>) -> (u16, String) {
+    let mut s = std::net::TcpStream::connect(addr).expect("connect");
+    let auth_line = match auth {
+        Some(a) => format!("Authorization: {a}\r\n"),
+        None => String::new(),
+    };
+    let req = format!("GET / HTTP/1.1\r\nHost: test\r\n{auth_line}Connection: close\r\n\r\n");
+    use std::io::{Read, Write};
+    s.write_all(req.as_bytes()).unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    let code: u16 = resp
+        .split_whitespace()
+        .nth(1)
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    (code, resp)
+}
+
+/// T0 (M2, код-ревью 07.10.2026): `read_request` не парсил заголовок
+/// `Authorization` → `ui_auth_gate` в server-режиме отдавал 401 даже с валидным
+/// админ-токеном. Чистые функции (`route`) дефект не ловят — они получают
+/// `ReqHeaders`, сконструированный руками. Проверка через **реальный сокет**:
+/// `run_http_listener` + сырой HTTP-запрос из `TcpStream`.
+#[test]
+fn ui_auth_socket_parses_authorization() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmpdir("socket");
+    let cfg_path = dir.join("config.yaml");
+    std::fs::write(&cfg_path, "access:\n  enabled: true\n").unwrap();
+    // HDS_ROOT — временный корень: access_path() = <root>/data/access.yaml
+    // (живой data/ теста не касается).
+    std::env::set_var("HDS_ROOT", &dir);
+    std::env::set_var("HDS_CONFIG", &cfg_path);
+
+    let acc_path = dir.join("data").join("access.yaml");
+    std::fs::create_dir_all(acc_path.parent().unwrap()).unwrap();
+    add_user(&acc_path, "boss", true);
+    let token = issue_token(&acc_path, "boss");
+
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let _ = hds_ui::run_http_listener(listener);
+    });
+
+    // Без токена — 401 (гейт включён).
+    let (code, _) = http_get(addr, None);
+    assert_eq!(code, 401, "без токена страница — 401");
+
+    // С валидным админ-токеном — 200: заголовок Authorization должен дойти
+    // из потока до ui_auth_gate (до фикса здесь был 401).
+    let (code, resp) = http_get(addr, Some(&format!("Bearer {token}")));
+    assert_eq!(
+        code, 200,
+        "токен из реального сокета должен проходить: {resp:.200}"
+    );
+
+    // Заголовок в другом регистре — тоже должен парситься (HTTP-ключи case-insensitive).
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    use std::io::{Read, Write};
+    let req = format!(
+        "GET / HTTP/1.1\r\nHost: test\r\nAUTHORIZATION: Bearer {token}\r\nConnection: close\r\n\r\n"
+    );
+    s.write_all(req.as_bytes()).unwrap();
+    let mut resp = String::new();
+    s.read_to_string(&mut resp).unwrap();
+    assert!(
+        resp.starts_with("HTTP/1.1 200"),
+        "верхний регистр ключа: {resp:.200}"
+    );
+
+    std::env::remove_var("HDS_ROOT");
     std::env::remove_var("HDS_CONFIG");
 }
