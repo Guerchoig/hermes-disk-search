@@ -4,7 +4,8 @@
 > Структура — по образцу `PLAN_M1_ACCESS_PROJECTS.md`. Промт для нового чата —
 > `M2_HANDOFF_PROMPT.md`.
 >
-> **Статус:** не начат. Ветка-продолжение — **`server-multiuser`** (база после M1).
+> **Статус:** в работе — **T0 (дефекты M1) выполнен** 07.10.2026 (см. §4 T0); дальше
+> T1 (профиль) → T5. Ветка-продолжение — **`server-multiuser`** (база после M1).
 > **Основание:** решения заказчика 07.10.2026 (`PLAN_SERVER_MULTIUSER.md`, шапка):
 > периметр — **reverse-proxy с TLS**; **UI — только админ**; **службы управляются из UI**
 > (W10, будущий Э7); профиль `desktop | server` — «разделить интерактивный десктоп и
@@ -89,14 +90,21 @@
 
 ## 4. Треки
 
-### T0. Устранение дефектов M1 (код-ревью) — 0,5 дн
-- [ ] **UI:** `read_request` (`crates/hds-ui/src/lib.rs`) парсит заголовок
+### T0. Устранение дефектов M1 (код-ревью) — 0,5 дн — **выполнен 07.10.2026**
+- [x] **UI:** `read_request` (`crates/hds-ui/src/lib.rs`) парсит заголовок
       `authorization:` в `ReqHeaders.authorization`; тест через **реальный сокет**
       (`TcpListener` + `route`), т.к. чистая функция `route` дефект не ловит.
-- [ ] **Git:** `.gitignore` — `data/` заменить на `data/*` + `!data/access.example.yaml`
-      (ре-инклуд внутри исключённого каталога не работает); проверка `git ls-files data/`.
-- [ ] **CLI:** `hds login` — тело запроса через `serde_json::json!` (экранирование
-      логина/пароля), не `format!`.
+      → `243a028` `fix(ui)`: парсинг + `run_http_listener` (публичный, для тестов);
+      сокет-тест `ui_auth_socket_parses_authorization` (сырой HTTP, 401 без токена /
+      200 с админ-токеном / case-insensitive ключ); проверено рантаймом: `hds ui` +
+      curl → 401 без токена, **200** с Bearer (до фикса — 401). Негативная проверка:
+      без парсинга сокет-тест падает (дефект действительно ловится).
+- [x] **Git:** `.gitignore` — `data/` → `data/*` + `!data/access.example.yaml`.
+      → `f62cbc1` `chore(git)`: `git ls-files data/` = `data/access.example.yaml`;
+      `git check-ignore data/access.yaml` — по-прежнему игнорируется.
+- [x] **CLI:** `hds login` — тело запроса через `serde_json::json!`, не `format!`.
+      → `0362fef` `fix(cli)`: `login_body()` + юнит-тест на `"`, `\`, `\n`;
+      рантайм: пользователь с паролем `p"a\ss` логинится живым `/auth/login`.
 
 ### T1. Профиль конфига — 1 дн
 - [ ] `config::profile(cfg)` (`desktop` по умолчанию); показ профиля в `hds check`.
