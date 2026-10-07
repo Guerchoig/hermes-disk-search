@@ -4,6 +4,7 @@
 use serde_json::{json, Value};
 
 use crate::schema;
+use hds_core::access::AuthCtx;
 
 /// Версия протокола MCP, которую объявляем при `initialize`.
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
@@ -39,7 +40,10 @@ grep) — индекс отвечает за секунды, обход дере
 каталогах. При цитировании всегда приводи путь файла и страницу/таймкод.";
 
 /// Обработать один JSON-RPC объект; `None` — ответ не нужен (notification).
-pub fn handle(msg: &Value) -> Option<Value> {
+///
+/// `auth` — контекст токена (M1 T4); `None` — без авторизации (desktop/stdio):
+/// инструменты работают как раньше, без фильтра проектов.
+pub fn handle(msg: &Value, auth: Option<&AuthCtx>) -> Option<Value> {
     let id = msg.get("id").cloned();
     let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let is_notification = id.is_none();
@@ -61,7 +65,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
                 .pointer("/params/arguments")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
-            match schema::call(name, &args) {
+            match schema::call(name, &args, auth) {
                 Ok(text) => json!({
                     "content": [{ "type": "text", "text": text }],
                     "isError": false
@@ -95,7 +99,7 @@ pub fn handle(msg: &Value) -> Option<Value> {
 /// Обработать строку (для тестов): `None` — ответа нет; `Some` — JSON-строка ответа.
 pub fn handle_line(line: &str) -> Option<String> {
     let msg: Value = serde_json::from_str(line.trim()).ok()?;
-    handle(&msg).map(|v| v.to_string())
+    handle(&msg, None).map(|v| v.to_string())
 }
 
 /// Запустить MCP-сервер на stdio (блокирующе, до EOF на stdin).
@@ -112,7 +116,7 @@ pub fn run_stdio() -> i32 {
             continue;
         }
         let reply = match serde_json::from_str::<Value>(line.trim()) {
-            Ok(msg) => handle(&msg).map(|v| v.to_string()),
+            Ok(msg) => handle(&msg, None).map(|v| v.to_string()),
             Err(e) => Some(
                 json!({ "jsonrpc": "2.0", "id": Value::Null,
                         "error": { "code": -32700, "message": format!("Parse error: {e}") } })

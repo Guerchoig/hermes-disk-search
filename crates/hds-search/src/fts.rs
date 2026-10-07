@@ -91,7 +91,7 @@ pub fn fts_search_ids(
 
     // Единая точка фильтрации (M1 T3): JOIN files нужен при любом из фильтров.
     let kinds_active = kinds.is_some_and(|ks| !ks.is_empty());
-    let projects_active = projects.is_some_and(|ps| !ps.is_empty());
+    let projects_active = projects.is_some(); // Some(пусто) = не видит ничего (M1)
     let (join, filter_sql) = if kinds_active || projects_active {
         let mut conds: Vec<String> = Vec::new();
         if kinds_active {
@@ -99,8 +99,12 @@ pub fn fts_search_ids(
             conds.push(format!("f.kind IN ({})", vec!["?"; n].join(",")));
         }
         if projects_active {
-            let n = projects.unwrap_or(&[]).len();
-            conds.push(format!("f.project IN ({})", vec!["?"; n].join(",")));
+            let ps = projects.unwrap_or(&[]);
+            if ps.is_empty() {
+                conds.push("0".to_string()); // Some(пусто) = ничего (M1 T4)
+            } else {
+                conds.push(format!("f.project IN ({})", vec!["?"; ps.len()].join(",")));
+            }
         }
         (
             "JOIN chunks c ON c.id = cf.rowid JOIN files f ON f.id = c.file_id ",

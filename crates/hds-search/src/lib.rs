@@ -336,7 +336,9 @@ pub fn vec_search_ids(
         }
     }
     if let Some(ps) = projects {
-        if !ps.is_empty() {
+        if ps.is_empty() {
+            sql += " AND 0"; // Some(пусто) = ничего не выдать (M1 T4)
+        } else {
             sql += &format!(" AND f.project IN ({})", vec!["?"; ps.len()].join(","));
             for x in ps {
                 params.push(Box::new(x.clone()));
@@ -364,7 +366,9 @@ pub fn clip_search_ids(
     let mut params: Vec<Box<dyn rusqlite::ToSql>> =
         vec![Box::new(blob.to_vec()), Box::new(k as i64)];
     if let Some(ps) = projects {
-        if !ps.is_empty() {
+        if ps.is_empty() {
+            sql += " AND 0"; // Some(пусто) = ничего не выдать (M1 T4)
+        } else {
             sql += &format!(" AND f.project IN ({})", vec!["?"; ps.len()].join(","));
             for x in ps {
                 params.push(Box::new(x.clone()));

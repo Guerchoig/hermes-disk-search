@@ -3,7 +3,9 @@
 
 use serde_json::{json, Value};
 
+use crate::auth::admin_required;
 use crate::tools;
+use hds_core::access::AuthCtx;
 
 /// Список инструментов (для `tools/list`).
 pub fn tool_list() -> Vec<Value> {
@@ -64,27 +66,35 @@ pub fn tool_list() -> Vec<Value> {
 }
 
 /// Диспетчер `tools/call`: имя + аргументы → текст результата.
-pub fn call(name: &str, args: &Value) -> Result<String, String> {
+///
+/// `auth` — контекст токена (M1 T4): фильтр проектов для поиска/RAG,
+/// admin-гейтинг для управляющих инструментов.
+pub fn call(name: &str, args: &Value, auth: Option<&AuthCtx>) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
     match name {
         "search_local_files" => {
             let query = s("query").ok_or("нет аргумента query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(8);
             let kinds = s("kinds").unwrap_or_default();
-            Ok(tools::search_local_files(&query, limit, &kinds))
+            Ok(tools::search_local_files(auth, &query, limit, &kinds))
         }
         "ask_my_files" => {
             let q = s("question").ok_or("нет аргумента question")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(8);
-            Ok(tools::ask_my_files(&q, limit))
+            Ok(tools::ask_my_files(auth, &q, limit))
         }
         "index_status" => Ok(tools::index_status()),
         "start_indexing" => {
+            admin_required(auth)?; // M1 T4: индексацией занимается только админ
             let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
             Ok(tools::start_indexing(full))
         }
-        "stop_indexing" => Ok(tools::stop_indexing()),
+        "stop_indexing" => {
+            admin_required(auth)?;
+            Ok(tools::stop_indexing())
+        }
         "reindex_path" => {
+            admin_required(auth)?; // M1 T4
             let p = s("path").ok_or("нет аргумента path")?;
             Ok(tools::reindex_path(&p))
         }

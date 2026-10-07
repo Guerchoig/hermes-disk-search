@@ -7,10 +7,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod http;
 pub mod schema;
 pub mod server;
 pub mod tools;
 
+pub use auth::{resolve_bearer, AuthEnv};
 pub use http::run_http;
 pub use server::{handle, handle_line, run_stdio};

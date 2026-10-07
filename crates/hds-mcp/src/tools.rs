@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use hds_core::access::AuthCtx;
 use hds_core::config::{db_abs_path, dig, load, project_root, Config};
 use hds_core::db;
 use hds_index::heartbeat::{self, HeartbeatFile};
@@ -92,7 +93,9 @@ fn parse_kinds(kinds: &str) -> Option<Vec<String>> {
 }
 
 /// Инструмент `search_local_files` (ГЛАВНЫЙ — «найди на этом компе/диске…»).
-pub fn search_local_files(query: &str, limit: i64, kinds: &str) -> String {
+///
+/// `auth` (M1 T4): фильтр проектов из токена (`None` = без фильтра).
+pub fn search_local_files(auth: Option<&AuthCtx>, query: &str, limit: i64, kinds: &str) -> String {
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
@@ -109,6 +112,7 @@ pub fn search_local_files(query: &str, limit: i64, kinds: &str) -> String {
     };
     let kinds_v = parse_kinds(kinds);
     let lim = limit.clamp(1, 30) as usize;
+    let projects = crate::auth::project_filter(auth);
     let res = hds_search::search(
         &conn,
         Some(&emb),
@@ -116,7 +120,7 @@ pub fn search_local_files(query: &str, limit: i64, kinds: &str) -> String {
         &cfg,
         query,
         kinds_v.as_deref(),
-        None, // T4: сюда попадёт фильтр проектов токена
+        projects.as_deref(),
         lim,
     );
     if res.is_empty() {
@@ -148,7 +152,8 @@ pub fn search_local_files(query: &str, limit: i64, kinds: &str) -> String {
 /// `limit` — глубина выборки фрагментов, попадающих в контекст ответа. Обзорные
 /// вопросы («какие есть ТЗ/проекты/документы») требуют больше контекста, чем
 /// точечные: при 8 фрагментах модель объявляет полным очевидно неполный ответ.
-pub fn ask_my_files(question: &str, limit: i64) -> String {
+/// `auth` (M1 T4): фильтр проектов из токена (`None` = без фильтра).
+pub fn ask_my_files(auth: Option<&AuthCtx>, question: &str, limit: i64) -> String {
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
@@ -164,7 +169,16 @@ pub fn ask_my_files(question: &str, limit: i64) -> String {
         Err(e) => return format!("Воркер извлечения/лемматизации: {e}"),
     };
     let lim = limit.clamp(1, 30) as usize;
-    let out = hds_search::ask(&conn, Some(&emb), side.as_ref(), &cfg, question, None, lim);
+    let projects = crate::auth::project_filter(auth);
+    let out = hds_search::ask(
+        &conn,
+        Some(&emb),
+        side.as_ref(),
+        &cfg,
+        question,
+        projects.as_deref(),
+        lim,
+    );
     let src = out
         .sources
         .iter()
