@@ -133,6 +133,42 @@ pub fn db_abs_path(cfg: &Config) -> PathBuf {
     }
 }
 
+/// Профиль установки (`profile` в config.yaml, план M2 §3.1).
+///
+/// `desktop` — одиночная машина (дефолт): состояние рядом с программой,
+/// автозапуск — задачи Планировщика `AtLogOn`. `server` — серверный режим:
+/// системный каталог состояния, службы без интерактивного входа, headless-UI.
+/// Сам по себе профиль **не** включает авторизацию — гейт определяется
+/// только `access.enabled` (`PLAN_SERVER_MULTIUSER.md`, решения 07.10.2026).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Profile {
+    Desktop,
+    Server,
+}
+
+impl Profile {
+    /// Имя профиля (`desktop` | `server`) — для вывода в `hds check`/UI.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Profile::Desktop => "desktop",
+            Profile::Server => "server",
+        }
+    }
+
+    /// Серверный профиль?
+    pub fn is_server(self) -> bool {
+        matches!(self, Profile::Server)
+    }
+}
+
+/// `profile(cfg)`: значение ключа `profile`; неизвестное/отсутствующее — `desktop`.
+pub fn profile(cfg: &Config) -> Profile {
+    match dig(cfg, "profile").and_then(|v| v.as_str()) {
+        Some("server") => Profile::Server,
+        _ => Profile::Desktop,
+    }
+}
+
 /// Атомарная замена файла с ретраями на `PermissionError` (как `config.replace_file`).
 ///
 /// Windows: UI читает `config.yaml` каждые 2 с из соседнего потока, а `os.replace`
@@ -204,5 +240,28 @@ mod tests {
             root_from_exe(&p(&["portable", "hds.exe"])).unwrap(),
             p(&["portable"])
         );
+    }
+
+    /// M2 T1: `profile` — desktop по умолчанию, server — по ключу; мусор → desktop.
+    #[test]
+    fn profile_defaults_and_parsing() {
+        use super::{profile, Profile};
+        use serde_yaml::Value;
+
+        let cfg: Value = serde_yaml::from_str("profile: server").unwrap();
+        assert_eq!(profile(&cfg), Profile::Server);
+
+        let cfg: Value = serde_yaml::from_str("profile: desktop").unwrap();
+        assert_eq!(profile(&cfg), Profile::Desktop);
+
+        // Ключа нет — дефолт.
+        let cfg: Value = serde_yaml::from_str("index:\n  roots: []").unwrap();
+        assert_eq!(profile(&cfg), Profile::Desktop);
+
+        // Неизвестное значение / не строка — desktop (не падаем).
+        let cfg: Value = serde_yaml::from_str("profile: cluster").unwrap();
+        assert_eq!(profile(&cfg), Profile::Desktop);
+        let cfg: Value = serde_yaml::from_str("profile: [server]").unwrap();
+        assert_eq!(profile(&cfg), Profile::Desktop);
     }
 }

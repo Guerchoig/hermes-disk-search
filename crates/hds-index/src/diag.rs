@@ -658,9 +658,64 @@ pub fn check_diarization(cfg: &Config) -> Check {
     }
 }
 
+/// M2 T1 (`PLAN_M2_SERVER_PROFILE.md` §3.1): профиль установки + рекомендации
+/// для `server`. Авторизация определяется **только** `access.enabled` — профиль
+/// без неё не включает auth, лишь предупреждает (решение заказчика 07.10.2026).
+fn check_profile(cfg: &Config) -> Check {
+    let p = hds_core::config::profile(cfg);
+    if !p.is_server() {
+        return Check::new("profile", "ok", "профиль установки: desktop").msg(
+            "дефолт: состояние рядом с программой, автозапуск AtLogOn — поведение без изменений",
+        );
+    }
+    let enabled = hds_core::config::dig(cfg, "access.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let has_ui = hds_core::config::dig(cfg, "ui")
+        .and_then(|v| v.as_mapping())
+        .map(|m| !m.is_empty())
+        .unwrap_or(false);
+    let mut msgs = vec![
+        "серверный режим: системный каталог состояния, службы без интерактивного входа, headless-UI".to_string(),
+    ];
+    let mut fixes: Vec<String> = Vec::new();
+    let mut status = "ok";
+    if !enabled {
+        status = "warn";
+        msgs.push(
+            "access.enabled выключен: MCP/UI открыты без токенов — для сервера включите авторизацию"
+                .to_string(),
+        );
+        fixes.push(
+            "access: { enabled: true } + `hds user add --admin` (README_SERVER_MULTIUSER.md)"
+                .into(),
+        );
+    }
+    if !has_ui {
+        status = "warn";
+        msgs.push(
+            "секция ui (host/port) не задана: hds ui слушает 127.0.0.1:8765 по умолчанию"
+                .to_string(),
+        );
+        fixes.push(
+            "ui: { host: \"127.0.0.1\", port: 8765 } — наружу публикует reverse-proxy".into(),
+        );
+    }
+    let mut c = Check::new("profile", status, "профиль установки: server").msg(msgs.join("; "));
+    if !fixes.is_empty() {
+        c = c.fix(fixes.join("; "));
+    }
+    c
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
-    let mut checks = vec![check_db(cfg), check_roots(cfg), check_chat(cfg)];
+    let mut checks = vec![
+        check_profile(cfg),
+        check_db(cfg),
+        check_roots(cfg),
+        check_chat(cfg),
+    ];
     checks.push(check_diarization(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
@@ -696,4 +751,42 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         .msg("Аппаратные пути (CUDA/Vulkan/Metal) в CI не проверяются: нет GPU/раннера."),
     );
     checks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_profile;
+    use serde_yaml::Value;
+
+    fn cfg(text: &str) -> Value {
+        serde_yaml::from_str(text).unwrap()
+    }
+
+    /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.
+    #[test]
+    fn profile_check_statuses() {
+        // Нет ключа profile → desktop, ok.
+        let c = check_profile(&cfg("index:\n  roots: []"));
+        assert_eq!(c.status, "ok");
+        assert!(c.title.contains("desktop"), "title={}", c.title);
+
+        // server без access.enabled и без ui → warn (два предупреждения).
+        let c = check_profile(&cfg("profile: server"));
+        assert_eq!(c.status, "warn", "msg={}", c.msg);
+        assert!(c.msg.contains("access.enabled"), "msg={}", c.msg);
+        assert!(c.msg.contains("ui"), "msg={}", c.msg);
+        assert!(!c.fix.is_empty());
+
+        // server + access.enabled, ui нет → warn (только про ui).
+        let c = check_profile(&cfg("profile: server\naccess:\n  enabled: true"));
+        assert_eq!(c.status, "warn");
+        assert!(c.msg.contains("ui"), "msg={}", c.msg);
+        assert!(!c.msg.contains("access.enabled выключен"), "msg={}", c.msg);
+
+        // server + access.enabled + ui → ok.
+        let c = check_profile(&cfg(
+            "profile: server\naccess:\n  enabled: true\nui:\n  host: 127.0.0.1\n  port: 8765",
+        ));
+        assert_eq!(c.status, "ok");
+    }
 }

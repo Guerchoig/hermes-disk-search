@@ -136,11 +136,24 @@ gpu:
 
 # MCP-сервер в режиме streamable-http: ОДИН инстанс на машину (клиенты идут
 # по URL). При stdio каждый клиент (Cline, Hermes, ...) поднимает свой процесс.
-# --- Р”РѕСЃС‚СѓРї (M1, PLAN_M1_ACCESS_PROJECTS.md) ---
-profile: desktop            # desktop | server (СЃРµСЂРІРµСЂРЅС‹Р№ РїСЂРѕС„РёР»СЊ вЂ” СЃ access.enabled: true)
+# --- Доступ (M1, PLAN_M1_ACCESS_PROJECTS.md) ---
+profile: desktop            # desktop | server (M2: серверный профиль — с access.enabled: true)
 access:
-  enabled: false            # true = Bearer-С‚РѕРєРµРЅС‹ РѕР±СЏР·Р°С‚РµР»СЊРЅС‹ (hds-mcp/hds-ui), 401 Р±РµР· С‚РѕРєРµРЅР°
-  token_ttl_days: 90        # TTL Р°РІС‚Рѕ-РІС‹РґР°РЅРЅС‹С… С‚РѕРєРµРЅРѕРІ (users/tokens РІ data/access.yaml)
+  enabled: false            # true = Bearer-токены обязательны (hds-mcp/hds-ui), 401 без токена
+  token_ttl_days: 90        # TTL авто-выданных токенов (users/tokens в data/access.yaml)
+# --- Серверный профиль (M2, PLAN_M2_SERVER_PROFILE.md §3) ---
+# profile: desktop (по умолчанию) — одиночная машина: состояние рядом с программой,
+#   автозапуск — задачи Планировщика по входу пользователя (AtLogOn).
+# profile: server — серверный режим: состояние в системном каталоге
+#   (%ProgramData%\hermes-disk-search / /Library/Application Support/hermes-disk-search),
+#   службы без интерактивного входа (`hds service ...`), headless-UI.
+#   Сам по себе profile авторизацию НЕ включает — доступ задаёт access.enabled.
+# --- Bind веб-интерфейса (M2 T3): hds ui слушает ui.host:ui.port;
+# флаги --host/--port CLI переопределяют. В server-профиле держите 127.0.0.1 —
+# наружу публикует reverse-proxy (фасад :8010–8012 не публикуется).
+ui:
+  host: "127.0.0.1"
+  port: 8765
 mcp_http:
   host: "127.0.0.1"
   port: 8787
