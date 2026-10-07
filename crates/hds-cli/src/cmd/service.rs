@@ -236,7 +236,7 @@ mod scm {
                         .unwrap_or_default()
                 ),
                 "start= auto".into(),
-                "DisplayName= \"Hermes Disk Search: <role>\"".into(),
+                format!("DisplayName= \"Hermes Disk Search: {role}\""),
                 "obj= LocalSystem".into(),
             ],
             "uninstall" => vec!["delete".into(), name],
@@ -445,6 +445,13 @@ mod tests {
         assert!(bin.starts_with("binPath= \"\\\""), "{bin}");
         assert!(bin.contains("\" service run mcp-http\""), "{bin}");
         assert!(args.contains(&"start= auto".to_string()));
+        // M3 T0 (F1): DisplayName должен содержать реальную роль, а не литерал
+        // `<role>` (дефект M2: все службы получали имя «Hermes Disk Search: <role>»).
+        assert!(
+            args.contains(&"DisplayName= \"Hermes Disk Search: mcp-http\"".to_string()),
+            "DisplayName без подстановки роли: {args:?}"
+        );
+        assert!(!args.iter().any(|a| a.contains("<role>")), "{args:?}");
         for sub in ["uninstall", "start", "stop", "status"] {
             let a = super::scm::sc_args(sub, "ui");
             assert_eq!(a.last().unwrap(), "hermes-disk-search-ui");
