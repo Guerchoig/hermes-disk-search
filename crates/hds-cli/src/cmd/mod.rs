@@ -2,6 +2,7 @@
 //! (или `hds/dbops.py`/`hds/diag.py`); общие помощники — в [`crate::support`].
 
 pub mod ask;
+pub mod auth;
 pub mod check;
 pub mod cline_sync;
 pub mod clip_index;
