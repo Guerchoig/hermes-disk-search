@@ -125,6 +125,8 @@ impl Scores {
 ///
 /// `emb` — клиент эмбеддингов (фасад `:8011`); `lem` — лемматизатор токенов
 /// (воркер). Возвращает до `limit` результатов; ошибки ветвей не прерывают поиск.
+// M1: +projects (8 аргументов — контракт плана; allow осознанный).
+#[allow(clippy::too_many_arguments)]
 pub fn search(
     conn: &Connection,
     emb: Option<&Embedder>,
@@ -132,13 +134,14 @@ pub fn search(
     cfg: &Config,
     query: &str,
     kinds: Option<&[String]>,
+    projects: Option<&[String]>,
     limit: usize,
 ) -> Vec<SearchResult> {
     let rrf = Rrf::from_config(cfg);
     let mut scores = Scores::new();
 
     // FTS-ветка
-    for (rank, cid) in fts_search_ids(conn, lem, query, rrf.fts_k, kinds)
+    for (rank, cid) in fts_search_ids(conn, lem, query, rrf.fts_k, kinds, projects)
         .into_iter()
         .enumerate()
     {
@@ -151,24 +154,7 @@ pub fn search(
             match emb.embed_query(query) {
                 Ok(qv) => {
                     let blob = vector_blob(&qv);
-                    let mut sql = String::from(
-                        "SELECT v.rowid, v.distance FROM chunks_vec v \
-                         JOIN chunks c ON c.id = v.rowid \
-                         JOIN files f ON f.id = c.file_id \
-                         WHERE v.embedding MATCH ? AND v.k = ?",
-                    );
-                    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
-                        vec![Box::new(blob), Box::new(rrf.vec_k as i64)];
-                    if let Some(ks) = kinds {
-                        if !ks.is_empty() {
-                            sql += &format!(" AND f.kind IN ({})", vec!["?"; ks.len()].join(","));
-                            for k in ks {
-                                params.push(Box::new(k.clone()));
-                            }
-                        }
-                    }
-                    sql += " ORDER BY v.distance";
-                    match query_ids(conn, &sql, params) {
+                    match vec_search_ids(conn, &blob, kinds, projects, rrf.vec_k) {
                         Ok(rows) => {
                             for (rank, (cid, _d)) in rows.into_iter().enumerate() {
                                 scores.add(cid, rrf.vec_w, rank, rrf.rrf_k);
@@ -198,11 +184,7 @@ pub fn search(
         if let Some(clip) = hds_clip::shared(cfg) {
             if let Ok(qv) = clip.embed_text(query) {
                 let blob = vector_blob(&qv);
-                let sql = "SELECT rowid, distance FROM images_vec WHERE embedding MATCH ? \
-                           AND k = ? ORDER BY distance";
-                let params: Vec<Box<dyn rusqlite::ToSql>> =
-                    vec![Box::new(blob), Box::new(rrf.vec_k as i64)];
-                match query_ids(conn, sql, params) {
+                match clip_search_ids(conn, &blob, projects, rrf.vec_k) {
                     Ok(rows) => {
                         let fids: Vec<i64> = rows.iter().map(|(f, _)| *f).collect();
                         let chmap = first_chunk_of_files(conn, &fids);
@@ -324,4 +306,71 @@ fn first_chunk_of_files(conn: &Connection, fids: &[i64]) -> HashMap<i64, i64> {
         }
     }
     map
+}
+
+/// Векторная ветка: топ-`k` `(chunk_id, distance)` по `chunks_vec`.
+///
+/// Фильтры `kinds`/`projects` — в SQL до LIMIT (M1 T3: единая точка; пост-фильтр
+/// после LIMIT дал бы утечку — выдача уже обрезана до фильтра).
+pub fn vec_search_ids(
+    conn: &Connection,
+    blob: &[u8],
+    kinds: Option<&[String]>,
+    projects: Option<&[String]>,
+    k: usize,
+) -> rusqlite::Result<Vec<(i64, f64)>> {
+    let mut sql = String::from(
+        "SELECT v.rowid, v.distance FROM chunks_vec v \
+         JOIN chunks c ON c.id = v.rowid \
+         JOIN files f ON f.id = c.file_id \
+         WHERE v.embedding MATCH ? AND v.k = ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(blob.to_vec()), Box::new(k as i64)];
+    if let Some(ks) = kinds {
+        if !ks.is_empty() {
+            sql += &format!(" AND f.kind IN ({})", vec!["?"; ks.len()].join(","));
+            for x in ks {
+                params.push(Box::new(x.clone()));
+            }
+        }
+    }
+    if let Some(ps) = projects {
+        if !ps.is_empty() {
+            sql += &format!(" AND f.project IN ({})", vec!["?"; ps.len()].join(","));
+            for x in ps {
+                params.push(Box::new(x.clone()));
+            }
+        }
+    }
+    sql += " ORDER BY v.distance";
+    query_ids(conn, &sql, params)
+}
+
+/// CLIP-ветка: `(file_id, distance)` из `images_vec` (rowid = `files.id`).
+///
+/// `projects` — фильтр в SQL до LIMIT (M1 T3).
+pub fn clip_search_ids(
+    conn: &Connection,
+    blob: &[u8],
+    projects: Option<&[String]>,
+    k: usize,
+) -> rusqlite::Result<Vec<(i64, f64)>> {
+    let mut sql = String::from(
+        "SELECT v.rowid, v.distance FROM images_vec v \
+         JOIN files f ON f.id = v.rowid \
+         WHERE v.embedding MATCH ? AND v.k = ?",
+    );
+    let mut params: Vec<Box<dyn rusqlite::ToSql>> =
+        vec![Box::new(blob.to_vec()), Box::new(k as i64)];
+    if let Some(ps) = projects {
+        if !ps.is_empty() {
+            sql += &format!(" AND f.project IN ({})", vec!["?"; ps.len()].join(","));
+            for x in ps {
+                params.push(Box::new(x.clone()));
+            }
+        }
+    }
+    sql += " ORDER BY distance";
+    query_ids(conn, &sql, params)
 }

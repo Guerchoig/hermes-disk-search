@@ -295,6 +295,7 @@ pub fn search_json(query: &str, limit: i64, kinds: &str) -> Value {
         &cfg,
         query,
         kinds_v.as_deref(),
+        None,
         lim,
     );
     side.shutdown();
@@ -324,7 +325,7 @@ pub fn ask_json(question: &str) -> Value {
         Ok(s) => s,
         Err(e) => return json!({ "error": e }),
     };
-    let out = hds_search::ask(&conn, Some(&emb), &side, &cfg, question, 8);
+    let out = hds_search::ask(&conn, Some(&emb), &side, &cfg, question, None, 8);
     side.shutdown();
     out.to_json()
 }

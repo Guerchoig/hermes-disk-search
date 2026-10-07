@@ -132,13 +132,14 @@ pub fn ask(
     lem: &dyn Lemmatizer,
     cfg: &Config,
     question: &str,
+    projects: Option<&[String]>,
     limit: usize,
 ) -> Answer {
     let rerank_on = dig(cfg, "rerank.enabled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let pool = if rerank_on { 20 } else { limit };
-    let mut results = search(conn, emb, lem, cfg, question, None, pool);
+    let mut results = search(conn, emb, lem, cfg, question, None, projects, pool);
     if results.is_empty() {
         return Answer {
             answer: "В индексе ничего не найдено. Проиндексируйте диски: hds index".to_string(),

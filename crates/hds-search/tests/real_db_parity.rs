@@ -95,7 +95,7 @@ fn real_db_control_queries() {
     for q in g["queries"].as_array().cloned().unwrap_or_default() {
         let search_q = q.get("search_query").and_then(|v| v.as_str()).unwrap_or("");
         let label = q.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let res = search(&conn, Some(&emb), lem, &cfg, search_q, None, 20);
+        let res = search(&conn, Some(&emb), lem, &cfg, search_q, None, None, 20);
         let ka: Vec<String> = res
             .iter()
             .map(|r| rkey(&r.path, r.page, r.t_start))

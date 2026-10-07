@@ -78,6 +78,7 @@ pub fn fts_search_ids(
     q: &str,
     k: usize,
     kinds: Option<&[String]>,
+    projects: Option<&[String]>,
 ) -> Vec<i64> {
     let tokens = fts_tokens(lem, q);
     if tokens.is_empty() {
@@ -88,23 +89,41 @@ pub fn fts_search_ids(
         last.push('*'); // префиксный матчинг последнего токена
     }
 
-    let (join, kind_sql) = match kinds {
-        Some(ks) if !ks.is_empty() => (
+    // Единая точка фильтрации (M1 T3): JOIN files нужен при любом из фильтров.
+    let kinds_active = kinds.is_some_and(|ks| !ks.is_empty());
+    let projects_active = projects.is_some_and(|ps| !ps.is_empty());
+    let (join, filter_sql) = if kinds_active || projects_active {
+        let mut conds: Vec<String> = Vec::new();
+        if kinds_active {
+            let n = kinds.unwrap_or(&[]).len();
+            conds.push(format!("f.kind IN ({})", vec!["?"; n].join(",")));
+        }
+        if projects_active {
+            let n = projects.unwrap_or(&[]).len();
+            conds.push(format!("f.project IN ({})", vec!["?"; n].join(",")));
+        }
+        (
             "JOIN chunks c ON c.id = cf.rowid JOIN files f ON f.id = c.file_id ",
-            format!(" AND f.kind IN ({})", vec!["?"; ks.len()].join(",")),
-        ),
-        _ => ("", String::new()),
+            format!(" AND {}", conds.join(" AND ")),
+        )
+    } else {
+        ("", String::new())
     };
 
     let run = |expr: &str| -> Vec<i64> {
         let sql = format!(
-            "SELECT cf.rowid FROM chunks_fts cf {join}WHERE chunks_fts MATCH ?{kind_sql} \
+            "SELECT cf.rowid FROM chunks_fts cf {join}WHERE chunks_fts MATCH ?{filter_sql} \
              ORDER BY bm25(chunks_fts) LIMIT ?"
         );
         let mut params: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(expr.to_string())];
-        if let Some(ks) = kinds {
-            for kk in ks {
+        if kinds_active {
+            for kk in kinds.unwrap_or(&[]) {
                 params.push(Box::new(kk.clone()));
+            }
+        }
+        if projects_active {
+            for pp in projects.unwrap_or(&[]) {
+                params.push(Box::new(pp.clone()));
             }
         }
         params.push(Box::new(k as i64));

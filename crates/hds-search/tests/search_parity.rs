@@ -100,7 +100,7 @@ fn golden_search_parity() {
             Err(_) => continue,
         };
         let query = g.get("query").and_then(|v| v.as_str()).unwrap_or("");
-        let res = search(&conn, Some(&emb), lem, &cfg, query, None, 20);
+        let res = search(&conn, Some(&emb), lem, &cfg, query, None, None, 20);
         let ka: Vec<String> = res
             .iter()
             .map(|r| rkey(&r.path, r.page, r.t_start))

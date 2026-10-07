@@ -29,7 +29,7 @@ pub fn cmd_ask(question: String, limit: usize, json: bool) -> i32 {
             return 1;
         }
     };
-    let out = hds_search::ask(&conn, Some(&emb), &sidecar, &cfg, &question, limit);
+    let out = hds_search::ask(&conn, Some(&emb), &sidecar, &cfg, &question, None, limit);
     sidecar.shutdown();
     if json {
         println!(

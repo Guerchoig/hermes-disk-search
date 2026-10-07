@@ -42,6 +42,7 @@ pub fn cmd_search(query: String, kinds: Option<String>, limit: usize, json: bool
         &cfg,
         &query,
         kinds_slice,
+        None,
         limit,
     );
     sidecar.shutdown();

@@ -116,6 +116,7 @@ pub fn search_local_files(query: &str, limit: i64, kinds: &str) -> String {
         &cfg,
         query,
         kinds_v.as_deref(),
+        None, // T4: сюда попадёт фильтр проектов токена
         lim,
     );
     if res.is_empty() {
@@ -163,7 +164,7 @@ pub fn ask_my_files(question: &str, limit: i64) -> String {
         Err(e) => return format!("Воркер извлечения/лемматизации: {e}"),
     };
     let lim = limit.clamp(1, 30) as usize;
-    let out = hds_search::ask(&conn, Some(&emb), side.as_ref(), &cfg, question, lim);
+    let out = hds_search::ask(&conn, Some(&emb), side.as_ref(), &cfg, question, None, lim);
     let src = out
         .sources
         .iter()
