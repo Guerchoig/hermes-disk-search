@@ -560,9 +560,30 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   (`sqlite-vec`, dim `embedding.dim`), `images_vec` (CLIP, dim 512). Путь — `db_path` (по умолчанию
   относительный — от корня проекта; в версионной раскладке лучше абсолютный или `data\index.db`).
 * **`index.stop`** — файл-команда: аккуратно остановить текущую индексацию.
+* ⚠️ **Схема изменилась (M1: `files.project`)** — старая база (без `project`) дропается
+  при первом `connect()` (сообщение в stderr) — **переиндексация обязательна**.
 * **`index.pause`** — приостановить индексацию (ставит UI/диспетчер; **пользовательскую не снимать сами**).
 * **`index.heartbeat.json`** — кросс-процессный статус/прогресс (свежесть < 30 с).
 * **`watch.lock`** — pid наблюдателя; **`data\llm-host.pid`** — pid резидента; логи — `data\logs\`.
+
+## Доступ и проекты (M1)
+
+* **Проекты** — единица разграничения доступа. Корню в `index.roots` можно задать имя
+  проекта: элемент — строка (проект по умолчанию = имя младшей папки; корень диска
+  `D:\` → проект `D:`) или объект `{ path: ..., project: "..." }`. Один файл
+  принадлежит одному проекту (корень с наибольшим совпадающим префиксом).
+* **Идентичность** — `data/access.yaml` (образец: `data/access.example.yaml`):
+  пользователи (логин/пароль — Argon2id) + авто-выдаваемые токены (opaque 256 бит,
+  хранятся хэшем sha256, TTL `access.token_ttl_days`, по умолчанию 90 дней).
+* **Server-режим** (`access.enabled: true`): MCP (`hds mcp-http`) требует
+  `Authorization: Bearer <token>` — без него `401`; `POST /auth/login` выдаёт токен
+  (или `hds login --login ... --password ...`); поиск/RAG фильтруются по проектам
+  токена (админ видит всё); индексацией (`start_indexing`/`stop_indexing`/
+  `reindex_path`) занимается только админ. UI открывается только с админ-токеном.
+* **Десктоп** (по умолчанию, `access.enabled` отсутствует/false) — прежнее поведение
+  без токена и без фильтра.
+* Управление: `hds user add|list|del|passwd|grant|revoke`, `hds token list|revoke`;
+  в UI — карточка «Доступ».
 
 ## Настройки (`config.yaml`)
 

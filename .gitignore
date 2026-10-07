@@ -22,6 +22,8 @@ models/
 # llama.cpp: бинарь и runtime llama-server (~0,6-1 ГБ) + PID-файлы/логи менеджера
 tools/llama.cpp/
 data/
+# M1: образец хранилища доступа — в репозитории (сам data/access.yaml игнорируется data/)
+!data/access.example.yaml
 
 # Среда
 .env
@@ -42,6 +44,6 @@ eval/
 # Личная конфигурация (пути дисков пользователя); образец — config.example.yaml,
 # при первом запуске config.yaml создаётся автоматически
 config.yaml
-# ��������� ��������� ������ ����������
+# ��������� ��������� ������ ����������
 out/
 transcribe.lock

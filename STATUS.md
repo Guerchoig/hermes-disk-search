@@ -1,6 +1,13 @@
 # Состояние проекта hermes-disk-search — контекст для нового чата
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (private).
+>
+> **M1 «Фундамент доступа» выполнен (07.10.2026, ветка `server-multiuser`):** проекты
+> (`index.roots` → `files.project`, переиндексация обязательна), Argon2id-пароли +
+> авто-токены (`data/access.yaml`), Bearer-авторизация MCP/UI в server-режиме
+> (`access.enabled`), фильтрация по проектам во всех ветках поиска (тесты на утечку),
+> admin-гейтинг индексации, `hds user|token|login`, карточка «Доступ» в UI.
+> Детали — `PLAN_M1_ACCESS_PROJECTS.md` (исполнение), `PLAN_SERVER_MULTIUSER.md` §9.
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
 > **Релиз v0.13.0 (02.10.2026):** CI переписан под Rust-first (Windows — блокирующий,
