@@ -14,6 +14,7 @@ pub mod mcp_http;
 pub mod reindex;
 pub mod reindex_fts;
 pub mod search;
+pub mod service;
 pub mod status;
 pub mod stop;
 pub mod transcribe;
