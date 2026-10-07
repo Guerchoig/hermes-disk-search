@@ -62,6 +62,20 @@ for u in /Users/*; do
     done
 done
 
+# --- Reverse-proxy samples (M3 T1): copy when caddy/nginx is found, else hint. ---
+PROXY_SRC="$(cd "$(dirname "$0")" && pwd)/proxy"
+for px in caddy nginx; do
+    file="nginx.conf"; [ "$px" = "caddy" ] && file="Caddyfile"
+    if command -v "$px" >/dev/null 2>&1; then
+        mkdir -p "$STATE/proxy"
+        cp -f "$PROXY_SRC/$file" "$STATE/proxy/$file"
+        echo "[ok] proxy sample copied: $STATE/proxy/$file"
+        echo "     edit domain/certs, then run it and set trusted_proxy: true in config.yaml"
+    else
+        echo "[..] $px not found - publish /mcp and /ui via TLS using samples in installers/proxy/"
+    fi
+done
+
 # --- Install LaunchDaemons per role. ---
 IFS=',' ; for role in $ROLES; do
     role="$(echo "$role" | xargs)"
@@ -74,4 +88,5 @@ echo
 echo "Next steps:"
 echo "  - Start now: $HDS service start <role>"
 echo "  - Status:    $HDS service status <role>"
-echo "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local)."
+echo "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"
+echo "    samples in installers/proxy/ (Caddyfile, nginx.conf); then set trusted_proxy: true."

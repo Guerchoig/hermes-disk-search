@@ -1,0 +1,30 @@
+# Sample Caddy reverse proxy for hermes-disk-search (M3 T1,
+# PLAN_M3_NETWORK_PERIMETER.md par. 3.1).
+#
+# Only /mcp and /ui are published; TLS terminates at the proxy; the app itself
+# listens on 127.0.0.1 (ui.host / mcp_http.host in config.yaml). The facade
+# ports 8010-8012 (/v1/*) are NOT published - localhost only.
+#
+# After publishing, set `trusted_proxy: true` in config.yaml so the app
+# honors X-Forwarded-For / X-Forwarded-Proto from this proxy.
+#
+# Run:   caddy run --config Caddyfile        (foreground, for a trial)
+#        caddy start --config Caddyfile       (background)
+# Stop:  caddy stop
+
+hds.example.com {
+    # TLS: Let's Encrypt (automatic) - replace the email or use your own
+    # certificates:  tls /path/fullchain.pem /path/privkey.pem
+    tls you@example.com
+
+    # MCP (Cline/Hermes clients): long calls (ask_my_files) need a big timeout.
+    reverse_proxy /mcp* 127.0.0.1:8787
+
+    # Admin UI (headless in server profile).
+    reverse_proxy /ui* 127.0.0.1:8765
+
+    # Do not reveal server internals.
+    header -Server
+}
+
+# Anything else (including /v1/* -> 8010-8012) matches no site and is refused.

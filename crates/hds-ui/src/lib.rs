@@ -166,6 +166,14 @@ pub struct ReqHeaders {
     pub x_hds_ui: Option<String>,
     /// `Authorization: Bearer <token>` (M1 T5: server-режим — админ-токен).
     pub authorization: Option<String>,
+    /// `X-Forwarded-For` (M3 T1: читается всегда, доверие решает
+    /// `trusted_proxy` — без него заголовок игнорируется).
+    pub x_forwarded_for: Option<String>,
+    /// `X-Forwarded-Proto` (`https`, если прокси терминирует TLS).
+    pub x_forwarded_proto: Option<String>,
+    /// Реальный клиентский IP (M3 T1): заполняется серверным циклом
+    /// (`hds_core::net::real_client_ip`), не приходит из запроса.
+    pub client_ip: Option<String>,
 }
 
 /// CSRF-защита POST (аналог `_csrf_ok`): Origin пуст или loopback **и**
@@ -1595,6 +1603,9 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
                 // T0 (M2): без этого ui_auth_gate не видел токен — server-режим
                 // отдавал 401 даже с валидным Bearer (ловится только сокет-тестом).
                 "authorization" => h.authorization = Some(val),
+                // M3 T1: forwarded-заголовки reverse-proxy (доверие — trusted_proxy).
+                "x-forwarded-for" => h.x_forwarded_for = Some(val),
+                "x-forwarded-proto" => h.x_forwarded_proto = Some(val),
                 "content-length" => content_length = val.parse().unwrap_or(0),
                 _ => {}
             }
@@ -1645,11 +1656,26 @@ pub fn run_http(host: &str, port: u16) -> Result<(), String> {
 /// Служить на готовом слушателе (отдельно — для тестов через реальный сокет:
 /// тест биндит порт `0` и сам узнаёт адрес).
 pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
+    // M3 T1: доверие forwarded-заголовкам — ключ конфига `trusted_proxy`
+    // (раз на процесс; нечитаемый конфиг — не доверяем, безопаснее).
+    let trusted = load()
+        .map(|c| hds_core::net::trusted_proxy(&c))
+        .unwrap_or(false);
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
                 std::thread::spawn(move || {
-                    if let Some((m, p, q, h, b)) = read_request(&mut stream) {
+                    if let Some((m, p, q, mut h, b)) = read_request(&mut stream) {
+                        // Реальный клиент: remote_addr, за доверенным прокси — XFF.
+                        h.client_ip = Some(hds_core::net::real_client_ip(
+                            &peer,
+                            h.x_forwarded_for.as_deref(),
+                            trusted,
+                        ));
                         write_reply(&mut stream, route(&m, &p, &q, &h, &b));
                     }
                 });

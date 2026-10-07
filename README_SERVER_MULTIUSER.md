@@ -219,7 +219,41 @@ hds login --login alice --password "..." --url http://127.0.0.1:8787   # → т�
 # UI                — ?token=<админ-токен>
 ```
 
-## 11. Ограничения M1 и что дальше
+## 11. Сетевой периметр (M3): TLS reverse-proxy
+
+Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
+(Caddy или nginx, образцы — `installers/proxy/{Caddyfile,nginx.conf}`).
+Приложение и фасад остаются на localhost:
+
+| Сервис | Адрес | Наружу? |
+|---|---|---|
+| MCP (`/mcp`) | `127.0.0.1:8787` | через прокси (TLS) |
+| UI (`/ui`) | `127.0.0.1:8765` | через прокси (TLS), только админ |
+| Фасад `:8010–8012` (`/v1/*`) | localhost | **не публикуется** |
+
+```powershell
+# Caddy: caddy run --config installers\proxy\Caddyfile (домен/сертификат — в файле)
+# nginx: копия installers\proxy\nginx.conf в conf.d, затем nginx -t && nginx -s reload
+```
+
+После публикации прокси включите в `config.yaml`:
+
+```yaml
+trusted_proxy: true   # доверять X-Forwarded-For/Proto от прокси
+```
+
+* Пока `trusted_proxy: false` (дефолт, в т.ч. десктоп), заголовки прокси
+  **игнорируются**: сидящий напрямую клиент не может подделать свой IP.
+* При `trusted_proxy: true` реальный клиент — **последняя (правая) запись**
+  `X-Forwarded-For` (её дописал наш прокси, клиенту не подделать); аудит и
+  rate-limit ключуются по нему. Схема (`https`) — из `X-Forwarded-Proto`.
+* Диагностика: `GET /health` MCP-сервера возвращает `client_ip` — так видно,
+  как сервер «видит» клиента (напрямую — его IP; за прокси — IP прокси, а с
+  `trusted_proxy: true` — реальный клиент из XFF).
+* TLS терминируется на прокси; сертификаты настраивает оператор
+  (Let's Encrypt или свои) — приложение остаётся на plain HTTP в localhost.
+
+## 12. Ограничения M1 и что дальше
 
 * Токен ходит по сети открытым текстом — **TLS обязателен** (reverse-proxy, Э2);
   до этого публикать порт наружу нельзя.

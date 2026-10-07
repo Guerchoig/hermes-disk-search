@@ -47,6 +47,7 @@ fn token_for(e: &AuthEnv, login: &str) -> String {
         "/mcp",
         e,
         None,
+        "127.0.0.1",
     );
     assert_eq!(status, 200, "{body}");
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -59,7 +60,7 @@ fn call(e: &AuthEnv, login: &str, name: &str, args: &str) -> serde_json::Value {
     let body = format!(
         r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"{name}","arguments":{args}}}}}"#
     );
-    let (status, _, body) = route("POST", "/mcp", &body, "/mcp", e, Some(&hdr));
+    let (status, _, body) = route("POST", "/mcp", &body, "/mcp", e, Some(&hdr), "127.0.0.1");
     assert_eq!(status, 200, "{body}");
     serde_json::from_str(&body).unwrap_or(serde_json::Value::Null)
 }

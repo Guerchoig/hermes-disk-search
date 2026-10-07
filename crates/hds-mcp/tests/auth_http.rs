@@ -42,7 +42,7 @@ fn add_user(env: &AuthEnv, login: &str, name: &str, admin: bool, projects: &[&st
 #[test]
 fn health_is_public_without_token() {
     let e = env("health");
-    let (status, _, _) = route("GET", "/health", "", "/mcp", &e, None);
+    let (status, _, _) = route("GET", "/health", "", "/mcp", &e, None, "127.0.0.1");
     assert_eq!(status, 200);
 }
 
@@ -50,10 +50,18 @@ fn health_is_public_without_token() {
 fn mcp_without_token_is_401() {
     let e = env("no-token");
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#;
-    let (status, _, _) = route("POST", "/mcp", body, "/mcp", &e, None);
+    let (status, _, _) = route("POST", "/mcp", body, "/mcp", &e, None, "127.0.0.1");
     assert_eq!(status, 401);
     // Мусорный токен — тоже 401.
-    let (status, _, _) = route("POST", "/mcp", body, "/mcp", &e, Some("Bearer garbage"));
+    let (status, _, _) = route(
+        "POST",
+        "/mcp",
+        body,
+        "/mcp",
+        &e,
+        Some("Bearer garbage"),
+        "127.0.0.1",
+    );
     assert_eq!(status, 401);
 }
 
@@ -69,6 +77,7 @@ fn login_issues_token_and_token_works() {
         "/mcp",
         &e,
         None,
+        "127.0.0.1",
     );
     assert_eq!(status, 401);
     // Верный → 200 {token, expires, user, projects}.
@@ -79,6 +88,7 @@ fn login_issues_token_and_token_works() {
         "/mcp",
         &e,
         None,
+        "127.0.0.1",
     );
     assert_eq!(status, 200);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -95,6 +105,7 @@ fn login_issues_token_and_token_works() {
         "/mcp",
         &e,
         Some(&hdr),
+        "127.0.0.1",
     );
     assert_eq!(status, 200);
     let r: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -111,6 +122,7 @@ fn disabled_env_keeps_desktop_behavior() {
         "/mcp",
         &e,
         None,
+        "127.0.0.1",
     );
     assert_eq!(status, 404);
     // /mcp без токена работает (десктоп не ломаем).
@@ -121,6 +133,7 @@ fn disabled_env_keeps_desktop_behavior() {
         "/mcp",
         &e,
         None,
+        "127.0.0.1",
     );
     assert_eq!(status, 200);
 }

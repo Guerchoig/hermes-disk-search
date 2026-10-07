@@ -160,6 +160,14 @@ mcp_http:
   path: "/mcp"               # streamable-http endpoint
   autostart: true            # поднимать при старте UI/MCP/cli (живой переиспользуется)
   start_timeout: 30          # сек ожидания /health при старте
+# --- Reverse-proxy (M3, PLAN_M3_NETWORK_PERIMETER.md §3.1): наружу только
+# /mcp и /ui через Caddy/nginx с TLS (образцы — installers/proxy/), фасад
+# :8010–8012 не публикуется. Пока клиенты ходят напрямую — false. ---
+trusted_proxy: false        # true = доверять X-Forwarded-For/Proto от прокси:
+                            #   аудит и rate-limit видят реальный IP клиента.
+                            #   Включайте только если прямого доступа к
+                            #   :8787/:8765 снаружи нет — иначе IP подделывают
+                            #   заголовком
 
 
 search:

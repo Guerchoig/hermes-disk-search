@@ -29,6 +29,7 @@ fn headers(auth: Option<&str>) -> ReqHeaders {
         content_type: Some("application/json".into()),
         x_hds_ui: Some("1".into()),
         authorization: auth.map(|a| a.to_string()),
+        ..ReqHeaders::default()
     }
 }
 

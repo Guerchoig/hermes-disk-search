@@ -9,6 +9,7 @@ fn h() -> ReqHeaders {
         content_type: Some("application/json".into()),
         x_hds_ui: Some("1".into()),
         authorization: None,
+        ..ReqHeaders::default()
     }
 }
 
@@ -46,6 +47,7 @@ fn csrf_blocks_cross_origin_post() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     assert_eq!(route("POST", "/api/index/stop", "", &bad, "").0, 403);
     assert_eq!(
@@ -124,6 +126,7 @@ fn transcribe_daemon_post_requires_csrf() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     assert_eq!(
         route(
@@ -194,6 +197,7 @@ fn watch_daemon_post_requires_csrf() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     assert_eq!(
         route(
@@ -404,6 +408,7 @@ fn new_post_routes_require_csrf() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     for path in ["/api/chat-model/set", "/api/mcp-http"] {
         assert_eq!(route("POST", path, "", &bad, "{}").0, 403, "{path}");
@@ -419,6 +424,7 @@ fn transcribe_dirs_post_requires_csrf() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     assert_eq!(
         route("POST", "/api/config/transcribe-dirs", "", &bad, "{}").0,
@@ -505,6 +511,7 @@ fn transcribe_post_requires_csrf() {
         content_type: Some("application/json".into()),
         x_hds_ui: None,
         authorization: None,
+        ..ReqHeaders::default()
     };
     assert_eq!(
         route("POST", "/api/transcribe/speakers", "", &bad, "{}").0,

@@ -77,6 +77,21 @@ if (-not $KeepAtLogOn) {
     }
 }
 
+# --- Reverse-proxy samples (M3 T1): copy when caddy/nginx is found, else hint. ---
+$proxySrc = Join-Path $PSScriptRoot "proxy"
+foreach ($px in @("caddy", "nginx")) {
+    $file = if ($px -eq "caddy") { "Caddyfile" } else { "nginx.conf" }
+    if (Get-Command $px -ErrorAction SilentlyContinue) {
+        $dst = Join-Path $state "proxy"
+        New-Item -ItemType Directory -Force -Path $dst | Out-Null
+        Copy-Item (Join-Path $proxySrc $file) (Join-Path $dst $file) -Force
+        Write-Host "[ok] proxy sample copied: $(Join-Path $dst $file)"
+        Write-Host "     edit domain/certs, then run it and set trusted_proxy: true in config.yaml"
+    } else {
+        Write-Host "[..] $px not found - publish /mcp and /ui via TLS using samples in installers\proxy\"
+    }
+}
+
 # --- Install services per role. ---
 $summary = @()
 foreach ($role in $Roles.Split(",")) {
@@ -105,4 +120,5 @@ Write-Host ""
 Write-Host "Next steps:"
 Write-Host "  - Start now: bin\hds.exe service start <role>"
 Write-Host "  - Status:    bin\hds.exe service status <role>"
-Write-Host "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local)."
+Write-Host "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"
+Write-Host "    samples in installers\proxy\ (Caddyfile, nginx.conf); then set trusted_proxy: true."

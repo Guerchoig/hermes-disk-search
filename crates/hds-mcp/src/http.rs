@@ -31,7 +31,9 @@ fn unauthorized() -> Reply {
 
 /// Обработать HTTP-запрос (чистая функция — тестируется без сокетов).
 ///
-/// `auth_header` — значение заголовка `Authorization` (если был).
+/// `auth_header` — значение заголовка `Authorization` (если был); `client_ip` —
+/// реальный клиентский IP (T1): `remote_addr`, а за доверенным прокси —
+/// `X-Forwarded-For` (`hds_core::net::real_client_ip`).
 pub fn route(
     method: &str,
     req_path: &str,
@@ -39,6 +41,7 @@ pub fn route(
     mcp_path: &str,
     env: &AuthEnv,
     auth_header: Option<&str>,
+    client_ip: &str,
 ) -> Reply {
     let p = req_path
         .split('?')
@@ -52,7 +55,10 @@ pub fn route(
             json!({
                 "app": hds_core::config::APP_NAME,
                 "version": env!("CARGO_PKG_VERSION"),
-                "transport": "streamable-http"
+                "transport": "streamable-http",
+                // T1: как сервер видит клиента — живая диагностика прокси
+                // (без trusted_proxy здесь будет IP прокси, не клиента).
+                "client_ip": client_ip
             })
             .to_string(),
         ),
@@ -126,8 +132,17 @@ fn handle_login(body: &str, env: &AuthEnv) -> Reply {
     }
 }
 
-/// Прочитать один HTTP/1.1-запрос: `(метод, путь, тело, заголовок Authorization)`.
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, Option<String>)> {
+/// Заголовки запроса, значимые для периметра (M3 T1): авторизация и
+/// forwarded-заголовки reverse-proxy (доверие решает `trusted_proxy`).
+#[derive(Debug, Default)]
+struct ReqHead {
+    authorization: Option<String>,
+    x_forwarded_for: Option<String>,
+    x_forwarded_proto: Option<String>,
+}
+
+/// Прочитать один HTTP/1.1-запрос: `(метод, путь, тело, заголовки)`.
+fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHead)> {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     // читаем до конца заголовков
@@ -151,14 +166,20 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, Optio
     let method = parts.next().unwrap_or("").to_string();
     let path = parts.next().unwrap_or("").to_string();
     let mut content_length = 0usize;
-    let mut authorization: Option<String> = None;
+    let mut h = ReqHead::default();
     for l in lines {
         let low = l.to_ascii_lowercase();
         if let Some(v) = low.strip_prefix("content-length:") {
             content_length = v.trim().parse().unwrap_or(0);
         }
         if let Some(v) = low.strip_prefix("authorization:") {
-            authorization = Some(v.trim().to_string());
+            h.authorization = Some(v.trim().to_string());
+        }
+        if let Some(v) = low.strip_prefix("x-forwarded-for:") {
+            h.x_forwarded_for = Some(v.trim().to_string());
+        }
+        if let Some(v) = low.strip_prefix("x-forwarded-proto:") {
+            h.x_forwarded_proto = Some(v.trim().to_string());
         }
     }
     let mut body = buf[header_end + 4..].to_vec();
@@ -170,12 +191,7 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, Optio
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Some((
-        method,
-        path,
-        String::from_utf8_lossy(&body).into_owned(),
-        authorization,
-    ))
+    Some((method, path, String::from_utf8_lossy(&body).into_owned(), h))
 }
 
 fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
@@ -203,17 +219,32 @@ fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
 pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
     let cfg = hds_core::config::load().map_err(|e| e.message())?;
     let env = AuthEnv::from_config(&cfg);
+    // T1: доверие forwarded-заголовкам — ключ конфига `trusted_proxy` (раз
+    // на процесс; живой конфиг тут не перечитываем, как и `access.enabled`).
+    let trusted = hds_core::net::trusted_proxy(&cfg);
     let listener =
         TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                let peer = stream
+                    .peer_addr()
+                    .map(|a| a.ip().to_string())
+                    .unwrap_or_else(|_| "unknown".to_string());
                 let mp = mcp_path.clone();
                 let env = env.clone();
                 std::thread::spawn(move || {
-                    if let Some((m, p, b, ah)) = read_request(&mut stream) {
-                        write_reply(&mut stream, route(&m, &p, &b, &mp, &env, ah.as_deref()));
+                    if let Some((m, p, b, head)) = read_request(&mut stream) {
+                        let ip = hds_core::net::real_client_ip(
+                            &peer,
+                            head.x_forwarded_for.as_deref(),
+                            trusted,
+                        );
+                        write_reply(
+                            &mut stream,
+                            route(&m, &p, &b, &mp, &env, head.authorization.as_deref(), &ip),
+                        );
                     }
                 });
             }
