@@ -14,8 +14,14 @@
 > (server-гейт проверен рантаймом: 401 без токена / 200 с админ-Bearer; сокет-тест),
 > `data/access.example.yaml` в репозитории (`data/*` + negation, живой `data/`
 > игнорируется), `hds login` строит тело через `serde_json::json!` (проверено живым
-> сервером с `"`,`\` в пароле). Дальше — T1 (профиль) → T5 (headless-UI, доклад).
-> Детали — `PLAN_M2_SERVER_PROFILE.md` (§4 T0 — коммиты).
+> сервером с `"`,`\` в пароле). **T1** — профиль `desktop|server` (`hds_core::config::profile`,
+> пункт `profile` в `hds check`: server без `access.enabled`/`ui` → warn). **T2** —
+> каталог состояния (`state_dir`: server → `%ProgramData%\hermes-disk-search` /
+> `/Library/Application Support/...`, `HDS_ROOT` сильнее всего; БД, `access.yaml`,
+> PID/логи/heartbeat — через резолвер; фолбэк конфига в системный каталог). **T3** —
+> `hds ui`/`hds_ui` слушают `ui.host:ui.port` из конфига (флаги переопределяют).
+> Все шаги проверены рантаймом; десктоп-поведение не изменилось. Дальше — T4 (службы)
+> → T5 (headless-UI, доклад). Детали — `PLAN_M2_SERVER_PROFILE.md` (§4, коммиты).
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
 > **Релиз v0.13.0 (02.10.2026):** CI переписан под Rust-first (Windows — блокирующий,

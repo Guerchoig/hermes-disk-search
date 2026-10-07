@@ -4,8 +4,9 @@
 > Структура — по образцу `PLAN_M1_ACCESS_PROJECTS.md`. Промт для нового чата —
 > `M2_HANDOFF_PROMPT.md`.
 >
-> **Статус:** в работе — **T0 (дефекты M1) выполнен** 07.10.2026 (см. §4 T0); дальше
-> T1 (профиль) → T5. Ветка-продолжение — **`server-multiuser`** (база после M1).
+> **Статус:** в работе — **T0 (дефекты M1), T1 (профиль), T2 (серверные пути),
+> T3 (bind UI из конфига) выполнены** 07.10.2026 (детали и коммиты — §4); дальше
+> T4 (службы Windows/macOS) → T5 (headless-UI + доклад). Ветка — **`server-multiuser`**.
 > **Основание:** решения заказчика 07.10.2026 (`PLAN_SERVER_MULTIUSER.md`, шапка):
 > периметр — **reverse-proxy с TLS**; **UI — только админ**; **службы управляются из UI**
 > (W10, будущий Э7); профиль `desktop | server` — «разделить интерактивный десктоп и
@@ -106,22 +107,40 @@
       → `0362fef` `fix(cli)`: `login_body()` + юнит-тест на `"`, `\`, `\n`;
       рантайм: пользователь с паролем `p"a\ss` логинится живым `/auth/login`.
 
-### T1. Профиль конфига — 1 дн
-- [ ] `config::profile(cfg)` (`desktop` по умолчанию); показ профиля в `hds check`.
-- [ ] Предупреждения для `server`: `access.enabled`, наличие `ui.*`.
-- [ ] `config.example.yaml`: секция `ui: { host, port }` + комментарии.
-- [ ] Тесты парсинга/дефолтов профиля.
+### T1. Профиль конфига — 1 дн — **выполнен 07.10.2026**
+- [x] `config::profile(cfg)` (`desktop` по умолчанию); показ профиля в `hds check`.
+      → `8354be4` `feat(config)`: `hds_core::config::{Profile, profile()}`; пункт
+      `profile` в `run_checks` (и `/api/diagnostics` UI); тесты парсинга.
+- [x] Предупреждения для `server`: `access.enabled`, наличие `ui.*`.
+      → server без них — `warn` + fix-подсказки; **профиль сам auth не включает**
+      (гейт — только `access.enabled`, решение заказчика). Рантайм: `hds check --json`
+      — warn/ok по трём вариантам конфига.
+- [x] `config.example.yaml`: секция `ui: { host, port }` + комментарии
+      (+ починена битая кодировка комментариев секции M1).
+- [x] Тесты парсинга/дефолтов профиля (`config.rs`, `diag.rs`).
 
-### T2. Серверные пути (state dir) — 1,5 дн
-- [ ] `state_dir(cfg)`: `HDS_ROOT` → иначе `server` = ProgramData / Application Support,
-      `desktop` = корень проекта.
-- [ ] БД, PID, логи, `access.yaml` — через резолвер; `db_abs_path` учитывает `state_dir`.
-- [ ] Инициализация каталога при первом запуске службы.
-- [ ] `hds check`/`status` показывает фактические пути; тесты.
+### T2. Серверные пути (state dir) — 1,5 дн — **выполнен 07.10.2026**
+- [x] `state_dir(cfg)`: `HDS_ROOT` → иначе `server` = ProgramData / Application Support,
+      `desktop` = корень проекта. → `9dfd054` `feat(paths)`:
+      `hds_core::config::{state_dir, system_state_dir, ensure_state_dir}`.
+- [x] БД, PID, логи, `access.yaml` — через резолвер; `db_abs_path` учитывает `state_dir`.
+      → БД (`db_abs_path`), `access_path`, PID mcp-http, PID/лог/heartbeat llm-host
+      (`HostConfig.data_dir`, читатель в `llm_host status` и `diag`), pid при
+      перезапуске резидента из UI. Конфиг-фолбэк: нет конфига в корне — системный
+      каталог (server-поставка).
+- [x] Инициализация каталога при первом запуске службы → `ensure_state_dir` в
+      `hds ui` и `mcp-http run` (T4 добавит в `service run`).
+- [x] `hds check` показывает фактические пути (пункты `profile` и `db`); тесты.
+      Рантайм: server (подмена ProgramData) — `index.db`, `data/access.yaml`,
+      `data/mcp_http.pid` в системном каталоге; desktop — корень из `HDS_ROOT`.
+      Ограничение: сигналы индексации (`index.stop/pause`, `watch.lock`) и sidecar
+      остаются в корне установки (согласованы писатели/читатели).
 
-### T3. Хосты/порты из конфига — 0,5 дн
-- [ ] `hds ui` и бинарь `hds_ui` читают `ui.host/port` (CLI-флаги — переопределение).
-- [ ] Тесты.
+### T3. Хосты/порты из конфига — 0,5 дн — **выполнен 07.10.2026**
+- [x] `hds ui` и бинарь `hds_ui` читают `ui.host/port` (CLI-флаги — переопределение).
+      → `31d4498` `feat(ui)`: `hds_ui::bind_from_config`.
+- [x] Тесты (`ui_core.rs`: дефолт/секция/мусор). Рантайм: `ui.port: 18790` →
+      `hds ui` без флагов слушает 18790 (HTTP 200).
 
 ### T4. Службы Windows/macOS — 2,5–3 дн
 - [ ] `hds service run <role>` — единый сервис-хостинг (`watch`/`mcp-http`/`ui`/`llm-host`).
