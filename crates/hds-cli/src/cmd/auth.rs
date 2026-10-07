@@ -339,6 +339,13 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
 
 /// `hds login [--url http://127.0.0.1:8787] --login L --password P` —
 /// клиентский помощник: логин/пароль → токен (JSON на stdout).
+///
+/// Тело строится `serde_json::json!` (M2 T0, код-ревью 07.10.2026): `format!`
+/// не экранировал `"`/`\` в логине/пароле — ломалось тело запроса.
+fn login_body(login: &str, password: &str) -> String {
+    serde_json::json!({ "login": login, "password": password }).to_string()
+}
+
 pub fn cmd_login(args: &[String]) -> i32 {
     let url = flag(args, "--url").unwrap_or_else(|| "http://127.0.0.1:8787".to_string());
     let login = flag(args, "--login").unwrap_or_default();
@@ -360,7 +367,7 @@ pub fn cmd_login(args: &[String]) -> i32 {
         Some((h, p)) => (h.to_string(), p.parse::<u16>().unwrap_or(8787)),
         None => (hostport.clone(), 8787),
     };
-    let body = format!(r#"{{"login":"{login}","password":"{password}"}}"#);
+    let body = login_body(&login, &password);
     let path = format!("{base_path}/auth/login");
     let reply = hds_core::http::request(
         &host,
@@ -384,4 +391,20 @@ pub fn cmd_login(args: &[String]) -> i32 {
     }
     println!("{}", resp.body.trim());
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::login_body;
+
+    /// M2 T0: логин/пароль с `"`, `\` и переводами строк не ломают JSON-тело
+    /// (раньше тело собиралось `format!` без экранирования).
+    #[test]
+    fn login_body_escapes_special_chars() {
+        let body = login_body("ad\"min", "p\\a\"ss\nword");
+        let v: serde_json::Value =
+            serde_json::from_str(&body).expect("тело должно быть валидным JSON");
+        assert_eq!(v["login"], "ad\"min");
+        assert_eq!(v["password"], "p\\a\"ss\nword");
+    }
 }
