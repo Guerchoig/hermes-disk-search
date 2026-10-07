@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use hds_core::config::{self, dig, Config};
 use hds_core::error::{CoreError, Result};
+use hds_core::roots::roots_from_cfg;
 use hds_core::{db, http, EMB_CONTEXT};
 use hds_extract::discover_python;
 use serde_json::Value;
@@ -306,37 +307,47 @@ pub fn check_db(cfg: &Config) -> Check {
 }
 
 /// Проверка корней индексации (пункт 2): пусто/нет каталогов — `warn`.
+/// M1 (§3.1): показывает «корень → проект», предупреждает о дублях корня.
 pub fn check_roots(cfg: &Config) -> Check {
-    let roots: Vec<String> = dig(cfg, "index.roots")
-        .and_then(|v| v.as_sequence())
-        .map(|s| {
-            s.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let roots = roots_from_cfg(cfg);
     if roots.is_empty() {
         return Check::new("roots", "warn", "Корни индексации не заданы")
             .fix("Добавьте диски/папки в config.yaml (index.roots).");
     }
     let missing: Vec<String> = roots
         .iter()
-        .filter(|r| !Path::new(r).is_dir())
-        .cloned()
+        .filter(|r| !Path::new(&r.path).is_dir())
+        .map(|r| r.path.clone())
         .collect();
-    if missing.is_empty() {
-        Check::new(
-            "roots",
-            "ok",
-            format!("Корни индексации: {}", roots.join(", ")),
-        )
-    } else {
-        Check::new(
+    if !missing.is_empty() {
+        return Check::new(
             "roots",
             "warn",
             format!("Корни индексации не существуют: {}", missing.join(", ")),
         )
-        .fix("Поправьте index.roots — укажите существующий диск/папку.")
+        .fix("Поправьте index.roots — укажите существующий диск/папку.");
+    }
+    let list = roots
+        .iter()
+        .map(|r| format!("{} → {}", r.path, r.project))
+        .collect::<Vec<_>>()
+        .join("; ");
+    // Один и тот же путь дважды — лишний обход (проекты дублировать можно).
+    let mut dup: Vec<String> = Vec::new();
+    for (i, r) in roots.iter().enumerate() {
+        if roots[..i]
+            .iter()
+            .any(|x| x.path.eq_ignore_ascii_case(&r.path))
+            && !dup.contains(&r.path)
+        {
+            dup.push(r.path.clone());
+        }
+    }
+    let check = Check::new("roots", "ok", format!("Корни индексации: {list}"));
+    if dup.is_empty() {
+        check
+    } else {
+        check.msg(format!("Дубли корней (лишний обход): {}", dup.join(", ")))
     }
 }
 

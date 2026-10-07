@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use hds_core::config::{dig, project_root, Config};
 use hds_core::error::Result;
+use hds_core::roots::{project_for_path, roots_from_cfg, roots_paths};
 use hds_core::{db, EMB_CONTEXT};
 use serde_json::{json, Value};
 
@@ -248,7 +249,19 @@ pub fn extract_file(
         }
     }
 
-    let fid = db::upsert_file(conn, &p, &ext, kind, size as i64, mtime, chash.as_deref())?;
+    // Проект файла — корень с наибольшим совпадающим префиксом (M1 §3.1);
+    // файл вне всех корней → NULL (в server-режиме не виден).
+    let project = project_for_path(&roots_from_cfg(cfg), &p).map(|s| s.to_string());
+    let fid = db::upsert_file(
+        conn,
+        &p,
+        &ext,
+        kind,
+        size as i64,
+        mtime,
+        chash.as_deref(),
+        project.as_deref(),
+    )?;
     let (kind2, segments) = match extractor.extract(path) {
         Ok(v) => v,
         Err(e) => {
@@ -459,10 +472,7 @@ impl Default for RunIndexArgs {
 fn effective_roots(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
     match roots {
         Some(r) => r.to_vec(),
-        None => string_list(cfg, "index.roots")
-            .iter()
-            .map(PathBuf::from)
-            .collect(),
+        None => roots_paths(cfg).iter().map(PathBuf::from).collect(),
     }
 }
 

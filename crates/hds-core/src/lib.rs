@@ -9,7 +9,8 @@
 //!   `sqlite3_auto_extension`, проба `meta.vec_dim`, бэкфилл `indexed_at`,
 //!   CRUD `files`/`chunks`/`chunks_fts`/`chunks_vec`;
 //! * [`access`] — идентичность и доступ (M1, `PLAN_M1_ACCESS_PROJECTS.md`
-//!   §3.2/§3.3): `data/access.yaml`, пароли Argon2id, opaque-токены.
+//!   §3.2/§3.3): `data/access.yaml`, пароли Argon2id, opaque-токены;
+//! * [`roots`] — корни индексации → проекты (M1, §3.1).
 //!
 //! Правило волны W2: Python-версия (`hds/db.py`, `hds/config.py`) — источник
 //! истины по поведению (`PLAN_W2_LLM_HOST.md` §5); расхождения допустимы только
@@ -24,6 +25,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod roots;
 
 pub use access::{
     access_path, authenticate, hash_password, load as load_access, new_token, resolve_token,
@@ -38,3 +40,4 @@ pub use config::{
 };
 pub use db::{connect, has_vec, vec_ok, DbError, FileRow, Stats};
 pub use error::{CoreError, Result};
+pub use roots::{default_project, project_for_path, roots_from_cfg, roots_paths, Root};

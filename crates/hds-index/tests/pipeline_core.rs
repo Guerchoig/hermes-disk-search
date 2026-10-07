@@ -131,6 +131,7 @@ fn unchanged_and_force() {
         size,
         mtime,
         Some("h"),
+        None,
     )
     .unwrap();
     let fid = db::get_file_by_path(&conn, &pipeline::path_str(&p))
@@ -168,6 +169,7 @@ fn moved_renames_when_old_path_gone() {
         size as i64,
         1.0,
         Some(&chash),
+        None,
     )
     .unwrap();
     let fid = db::get_file_by_path(&conn, &pipeline::path_str(&old))
@@ -243,6 +245,7 @@ fn prune_blocks_over_20_percent_without_confirm() {
             1,
             1.0,
             None,
+            None,
         )
         .unwrap();
     }
@@ -255,6 +258,7 @@ fn prune_blocks_over_20_percent_without_confirm() {
         "text",
         1,
         1.0,
+        None,
         None,
     )
     .unwrap();

@@ -5,6 +5,10 @@
 index:
   roots:
     - 'C:\Users\имя_пользователя'    # корни индексации (диски/папки)
+    # Проекты (M1): имя проекта можно задать явно, иначе — младшая папка
+    # корня; для корня диска — метка с двоеточием (`D:\` → `D:`):
+    # - 'E:\Archive'                                   # project = "Archive"
+    # - { path: 'D:\Work\Sales', project: 'Sales' }    # тот же проект — другой корень
   exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search-db", "WindowsApps", ".Trash", ".Trashes", "models"]
   # исключаемые пути-префиксы (каталог или файл целиком; редактируется в UI):
   exclude_paths: []

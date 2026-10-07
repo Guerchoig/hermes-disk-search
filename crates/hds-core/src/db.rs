@@ -13,6 +13,10 @@
 //!   `SAVEPOINT`/`ROLLBACK` и только затем `DROP chunks_vec` + запись `meta`
 //!   (обычный `connect()` не должен превращаться в write-транзакцию);
 //! * бэкфилл `indexed_at` (`mtime + 10`) для старых строк — молча.
+//!
+//! M1 (PLAN_M1_ACCESS_PROJECTS.md §3.1/T2): в `files` добавлено поле `project`;
+//! схема изменилась — старая база (без `project`) дропается при `connect`,
+//! переиндексация обязательна (решение согласовано).
 
 use std::path::Path;
 use std::sync::Once;
@@ -40,11 +44,13 @@ CREATE TABLE IF NOT EXISTS files(
   status TEXT DEFAULT 'new',
   error TEXT,
   chunk_count INTEGER DEFAULT 0,
-  indexed_at REAL
+  indexed_at REAL,
+  project TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_files_kind ON files(kind);
 CREATE INDEX IF NOT EXISTS idx_files_hash ON files(content_hash);
 CREATE INDEX IF NOT EXISTS idx_files_status ON files(status);
+CREATE INDEX IF NOT EXISTS idx_files_project ON files(project);
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY,
   file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -116,6 +122,40 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
          PRAGMA foreign_keys=ON;\n\
          PRAGMA busy_timeout=30000;",
     )?;
+
+    // M1 (PLAN_M1_ACCESS_PROJECTS.md T2): старая схема без `project` у files —
+    // согласованный дроп и переиндексация. Дети перед родителем, meta — последней.
+    let has_project: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name='project'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|n| n > 0)
+        .unwrap_or(false);
+    if !has_project {
+        let files_exist: bool = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='files'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .map(|n| n > 0)
+            .unwrap_or(false);
+        if files_exist {
+            eprintln!(
+                "[db] схема индекса устарела (нет поля project у files) — база дропается, переиндексация обязательна (согласовано в M1)"
+            );
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS chunks_vec; \
+                 DROP TABLE IF EXISTS chunks_fts; \
+                 DROP TABLE IF EXISTS chunks; \
+                 DROP TABLE IF EXISTS images_vec; \
+                 DROP TABLE IF EXISTS files; \
+                 DROP TABLE IF EXISTS meta;",
+            )?;
+        }
+    }
 
     let vec_available = vec_ok(&conn);
     if !vec_available {
@@ -216,6 +256,8 @@ pub struct FileRow {
     pub error: Option<String>,
     pub chunk_count: Option<i64>,
     pub indexed_at: Option<f64>,
+    /// Проект (корень с наибольшим совпадающим префиксом); вне корней — NULL.
+    pub project: Option<String>,
 }
 
 impl FileRow {
@@ -233,6 +275,7 @@ impl FileRow {
             error: r.get("error")?,
             chunk_count: r.get("chunk_count")?,
             indexed_at: r.get("indexed_at")?,
+            project: r.get("project")?,
         })
     }
 
@@ -274,6 +317,8 @@ pub fn get_file_by_hash(conn: &Connection, chash: Option<&str>) -> Result<Option
 }
 
 /// Порт `db.upsert_file`: `INSERT … ON CONFLICT(path) DO UPDATE` + id.
+// M1: +project (8 аргументов — контракт плана; allow осознанный).
+#[allow(clippy::too_many_arguments)]
 pub fn upsert_file(
     conn: &Connection,
     path: &str,
@@ -282,14 +327,16 @@ pub fn upsert_file(
     size: i64,
     mtime: f64,
     content_hash: Option<&str>,
+    project: Option<&str>,
 ) -> Result<i64> {
     conn.execute(
-        "INSERT INTO files(path, ext, kind, size, mtime, content_hash, status) \
-         VALUES(?1,?2,?3,?4,?5,?6,'new') \
+        "INSERT INTO files(path, ext, kind, size, mtime, content_hash, status, project) \
+         VALUES(?1,?2,?3,?4,?5,?6,'new',?7) \
          ON CONFLICT(path) DO UPDATE SET \
            ext=excluded.ext, kind=excluded.kind, size=excluded.size, \
-           mtime=excluded.mtime, content_hash=excluded.content_hash",
-        rusqlite::params![path, ext, kind, size, mtime, content_hash],
+           mtime=excluded.mtime, content_hash=excluded.content_hash, \
+           project=excluded.project",
+        rusqlite::params![path, ext, kind, size, mtime, content_hash, project],
     )?;
     get_file_by_path(conn, path)?
         .map(|r| r.id)

@@ -22,7 +22,17 @@ fn crud_round_trip_matches_python() {
     let conn = db::connect(&p, 1024).expect("connect");
 
     // upsert + get_file_by_path (первый раз — 'new' по DEFAULT)
-    let fid = db::upsert_file(&conn, "D:/x/a.md", ".md", "text", 100, 5.0, Some("hash1")).unwrap();
+    let fid = db::upsert_file(
+        &conn,
+        "D:/x/a.md",
+        ".md",
+        "text",
+        100,
+        5.0,
+        Some("hash1"),
+        Some("Docs"),
+    )
+    .unwrap();
     let row: FileRow = db::get_file_by_path(&conn, "D:/x/a.md").unwrap().unwrap();
     assert_eq!(row.id, fid);
     assert_eq!(row.status.as_deref(), Some("new"));
@@ -30,7 +40,17 @@ fn crud_round_trip_matches_python() {
     assert_eq!(row.content_hash.as_deref(), Some("hash1"));
 
     // повторный upsert обновляет поля, id сохраняется
-    let fid2 = db::upsert_file(&conn, "D:/x/a.md", ".md", "text", 120, 6.0, Some("hash2")).unwrap();
+    let fid2 = db::upsert_file(
+        &conn,
+        "D:/x/a.md",
+        ".md",
+        "text",
+        120,
+        6.0,
+        Some("hash2"),
+        Some("Docs"),
+    )
+    .unwrap();
     assert_eq!(fid, fid2, "ON CONFLICT(path) сохраняет id");
     let row = db::get_file_by_path(&conn, "D:/x/a.md").unwrap().unwrap();
     assert_eq!(row.size, Some(120));
@@ -108,7 +128,7 @@ fn crud_round_trip_matches_python() {
 fn finish_file_error_keeps_status_and_message() {
     let p = tmp_db("err");
     let conn = db::connect(&p, 1024).expect("connect");
-    let fid = db::upsert_file(&conn, "D:/x/bad.docx", ".docx", "docx", 1, 1.0, None).unwrap();
+    let fid = db::upsert_file(&conn, "D:/x/bad.docx", ".docx", "docx", 1, 1.0, None, None).unwrap();
     db::finish_file(&conn, fid, "error", Some("BadZipFile"), None, 0.0).unwrap();
     let row = db::get_file_by_path(&conn, "D:/x/bad.docx")
         .unwrap()

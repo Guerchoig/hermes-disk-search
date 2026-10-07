@@ -90,7 +90,17 @@ fn second_connect_keeps_vec_table_and_dim() {
     let p = tmp_db("reconnect");
     {
         let conn = db::connect(&p, 1024).expect("connect #1");
-        db::upsert_file(&conn, "D:/x/a.txt", ".txt", "text", 10, 1.0, Some("h")).unwrap();
+        db::upsert_file(
+            &conn,
+            "D:/x/a.txt",
+            ".txt",
+            "text",
+            10,
+            1.0,
+            Some("h"),
+            Some("D:"),
+        )
+        .unwrap();
     }
     let conn = db::connect(&p, 1024).expect("connect #2");
     assert!(
