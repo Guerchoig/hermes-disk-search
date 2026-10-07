@@ -16,6 +16,13 @@ serde.workspace = true
 serde_json.workspace = true
 serde_yaml.workspace = true
 thiserror.workspace = true
+hex.workspace = true
+# T1 (PLAN_M1_ACCESS_PROJECTS.md §3.2/§3.3): пароли Argon2id, токены sha256/getrandom.
+argon2.workspace = true
+rand_core.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+getrandom.workspace = true
 
 [dev-dependencies]
 # OpenFlags/Connection для тестов паритета (боевая БД, read-only)

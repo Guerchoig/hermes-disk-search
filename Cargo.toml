@@ -30,6 +30,13 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_LibraryLoader",
 ] }
+# T1 (PLAN_M1_ACCESS_PROJECTS.md §3.2/§3.3): Argon2id для паролей, opaque-токены.
+# rand_core с getrandom — включает OsRng для SaltString::generate (password-hash).
+argon2 = "0.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
+sha2 = "0.10"
+subtle = "2"
+getrandom = "0.3"
 
 # sqlite-vec компилируется из C: без оптимизации скорость вставки/поиска
 # падает в разы (грабля спайка 1, tools/parity/spikes/Cargo.toml).

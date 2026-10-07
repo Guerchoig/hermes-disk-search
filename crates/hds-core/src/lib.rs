@@ -7,7 +7,9 @@
 //!   (`journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`,
 //!   `busy_timeout=30000`), подключение `sqlite-vec` (vec0) через
 //!   `sqlite3_auto_extension`, проба `meta.vec_dim`, бэкфилл `indexed_at`,
-//!   CRUD `files`/`chunks`/`chunks_fts`/`chunks_vec`.
+//!   CRUD `files`/`chunks`/`chunks_fts`/`chunks_vec`;
+//! * [`access`] — идентичность и доступ (M1, `PLAN_M1_ACCESS_PROJECTS.md`
+//!   §3.2/§3.3): `data/access.yaml`, пароли Argon2id, opaque-токены.
 //!
 //! Правило волны W2: Python-версия (`hds/db.py`, `hds/config.py`) — источник
 //! истины по поведению (`PLAN_W2_LLM_HOST.md` §5); расхождения допустимы только
@@ -16,12 +18,19 @@
 //! Отклонение от §2.4: `chunker` оставлен в `hds-index` (задача B3 уже принята),
 //! чтобы не двигать проверенный код; перенос в `hds-core` — отдельная задача.
 
+pub mod access;
 pub mod cline;
 pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
 
+pub use access::{
+    access_path, authenticate, hash_password, load as load_access, new_token, resolve_token,
+    revoke_token, revoke_tokens_of_user, save as save_access, token_sha256_hex, token_ttl_days,
+    tokens_of_user, user_by_login, verify_password, Access, AuthCtx, Token, User,
+    DEFAULT_TOKEN_TTL_DAYS,
+};
 pub use cline::{cline_dir, mcp_entry, mcp_url, role_ctx_tokens, sync, Report, Step};
 pub use config::{
     config_path, db_abs_path, dig, load, load_from, project_root, replace_file, Config, APP_NAME,
