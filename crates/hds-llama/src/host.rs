@@ -100,9 +100,17 @@ pub fn system_state_dir() -> Option<PathBuf> {
 }
 
 /// data-корень файлов состояния резидента (pid/лог/heartbeat, M2 T2):
+/// `HDS_ROOT` переопределяет всё (M3 T0 F3 — зеркально
+/// `hds_core::config::state_dir`: без этого server-профиль при заданном
+/// `HDS_ROOT` всё равно писал состояние в системный каталог), далее
 /// `profile: server` в конфиге → системный каталог состояния, иначе корень
 /// проекта (прежнее поведение). Профиль читается по пути конфига.
 pub fn resident_data_root(config_path: &Path) -> PathBuf {
+    if let Some(v) = std::env::var_os("HDS_ROOT") {
+        if !v.is_empty() {
+            return clean_path(Path::new(&v));
+        }
+    }
     let is_server = std::fs::read_to_string(config_path)
         .ok()
         .and_then(|t| {

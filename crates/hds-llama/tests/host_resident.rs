@@ -22,6 +22,10 @@ use hds_llama::http::{self, Request, Response};
 use hds_llama::resident::{self, Log, PidFile};
 use hds_llama::{client_json, Result};
 
+/// Тесты, трогающие env (`HDS_ROOT` и т.п.), идут параллельно в потоках —
+/// гонка env недопустима (как `ENV_LOCK` в `hds-core::config`).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
+
 /// Временный каталог (аналог корня проекта) — как в `pause_gate.rs`.
 struct Tmp {
     dir: PathBuf,
@@ -50,6 +54,7 @@ impl Drop for Tmp {
 /// состояния (если платформа его имеет), иначе корень проекта (прежнее поведение).
 #[test]
 fn resident_data_root_follows_profile() {
+    let _env = ENV_LOCK.lock().unwrap();
     let tmp = Tmp::new("data-root");
     let desktop = tmp.dir.join("desktop.yaml");
     std::fs::write(&desktop, "profile: desktop\n").unwrap();
@@ -87,6 +92,22 @@ fn resident_data_root_follows_profile() {
             "нет системного каталога — корень проекта (linux-CI)"
         ),
     }
+}
+
+/// M3 T0 (F3): `HDS_ROOT` переопределяет даже server-профиль — зеркально
+/// `hds_core::config::state_dir`. Env-переменная общая для всех тестов
+/// процесса, поэтому соседние тесты синхронизируются через ENV_LOCK.
+#[test]
+fn resident_data_root_hds_root_overrides_server_profile() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let tmp = Tmp::new("hds-root");
+    let server = tmp.dir.join("server.yaml");
+    std::fs::write(&server, "profile: server\n").unwrap();
+
+    std::env::set_var("HDS_ROOT", &tmp.dir);
+    let root = host::resident_data_root(&server);
+    std::env::remove_var("HDS_ROOT");
+    assert_eq!(root, tmp.dir, "HDS_ROOT сильнее server-профиля");
 }
 
 /// Второй экземпляр обязан получить отказ: два `llm-host` — два владельца GPU.
@@ -149,6 +170,8 @@ fn log_file_collects_lines() {
 /// Пути по умолчанию — под `data/` проекта (в git `data/` не входит).
 #[test]
 fn host_config_defaults_point_to_project_data() {
+    // env (`HDS_ROOT`) влияет на `repo_root`/`resident_data_root`.
+    let _env = ENV_LOCK.lock().unwrap();
     let cfg = HostConfig::default();
     let root = host::repo_root();
     assert_eq!(
