@@ -1,0 +1,21 @@
+# Хранилище доступа (M1, PLAN_M1_ACCESS_PROJECTS.md §3.2).
+# Скопируйте в data/access.yaml (в .gitignore — персональные данные).
+# Пароли — Argon2id (PHC); токены авто-выдаваемые, хранятся хэшем sha256.
+#
+# Создание пользователя: hds user add --login alice --password "..." --projects "Sales,Docs"
+# Выдача токена: hds login --login alice --password "..." --url http://127.0.0.1:8787
+# Управление: hds user list|del|passwd|grant|revoke, hds token list|revoke.
+
+users:
+  - name: admin
+    login: admin
+    password_hash: "$argon2id$v=19$m=19456,t=2,p=1$<соль>$<хэш>"   # hds user add --admin
+    admin: true
+  - name: alice
+    login: alice
+    password_hash: "$argon2id$..."
+    projects: [Sales, Docs]        # пусто у обычного пользователя = ничего не видно
+
+# Авто-выданные токены (plain показывается один раз при login; здесь — хэш).
+tokens:
+  - { token_sha256: "<hex64>", user: alice, expires: 1798761600 }   # unix-секунды; TTL 90 дней

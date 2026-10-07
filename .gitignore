@@ -21,8 +21,10 @@ models/
 
 # llama.cpp: бинарь и runtime llama-server (~0,6-1 ГБ) + PID-файлы/логи менеджера
 tools/llama.cpp/
-data/
-# M1: образец хранилища доступа — в репозитории (сам data/access.yaml игнорируется data/)
+# M2 T0: `data/` целиком исключал каталог, и ре-инклуд `!data/access.example.yaml`
+# не работал (git не заходит внутрь исключённого каталога) — файл не был в репо.
+data/*
+# M1: образец хранилища доступа — в репозитории (сам data/access.yaml игнорируется)
 !data/access.example.yaml
 
 # Среда
