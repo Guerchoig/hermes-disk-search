@@ -61,6 +61,12 @@ pub fn now_unix() -> i64 {
         .unwrap_or(0)
 }
 
+/// Вырезать токен из заголовка `Authorization: Bearer <token>` (публично —
+/// используется и rate-limit'ом как ключ лимитов).
+pub fn bearer_token(header: Option<&str>) -> Option<&str> {
+    bearer_plain(header)
+}
+
 /// Вырезать токен из заголовка `Authorization: Bearer <token>`.
 fn bearer_plain(header: Option<&str>) -> Option<&str> {
     let h = header?;

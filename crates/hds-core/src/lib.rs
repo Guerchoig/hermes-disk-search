@@ -27,6 +27,7 @@ pub mod db;
 pub mod error;
 pub mod http;
 pub mod net;
+pub mod ratelimit;
 pub mod roots;
 
 pub use access::{

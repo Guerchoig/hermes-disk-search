@@ -276,22 +276,70 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
     Some((method, path, String::from_utf8_lossy(&body).into_owned(), h))
 }
 
-fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
+fn write_reply(stream: &mut TcpStream, reply: Reply) {
+    write_reply_with(stream, reply, &[]);
+}
+
+/// `write_reply` с дополнительными заголовками (Retry-After и т.п.).
+fn write_reply_with(
+    stream: &mut TcpStream,
+    (status, ctype, body): Reply,
+    extra: &[(&str, String)],
+) {
     let reason = match status {
         200 => "OK",
         202 => "Accepted",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
         _ => "OK",
     };
-    let resp = format!(
+    let mut resp = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
+         Connection: close\r\n",
         body.len()
     );
+    for (k, v) in extra {
+        resp.push_str(&format!("{k}: {v}\r\n"));
+    }
+    resp.push_str("\r\n");
+    resp.push_str(&body);
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
+}
+
+/// Ответ `429 Too Many Requests` (M3 T3).
+pub fn too_many(inflight: bool, retry: u64) -> Reply {
+    (
+        429,
+        "application/json",
+        serde_json::json!({
+            "error": "rate limited",
+            "hint": if inflight {
+                "too many concurrent heavy requests".to_string()
+            } else {
+                format!("retry after {retry}s")
+            }
+        })
+        .to_string(),
+    )
+}
+
+/// Заголовки `Retry-After`/`X-RateLimit-Limit` для ответа 429.
+pub fn rate_limit_headers(
+    limits: &hds_core::ratelimit::Limiter,
+    retry: u64,
+) -> Vec<(&'static str, String)> {
+    vec![
+        ("Retry-After", retry.to_string()),
+        (
+            "X-RateLimit-Limit",
+            limits.cfg().requests_per_min.to_string(),
+        ),
+    ]
 }
 
 /// Запустить HTTP-MCP сервер (блокирующе). `path` — endpoint (например `/mcp`).
@@ -304,6 +352,9 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
     // T1: доверие forwarded-заголовкам — ключ конфига `trusted_proxy` (раз
     // на процесс; живой конфиг тут не перечитываем, как и `access.enabled`).
     let trusted = hds_core::net::trusted_proxy(&cfg);
+    // T3: rate-limit (None — выключен, desktop по умолчанию).
+    let limits: Option<std::sync::Arc<hds_core::ratelimit::Limiter>> =
+        hds_core::ratelimit::Limiter::from_config(&cfg).map(std::sync::Arc::new);
     let listener =
         TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
     let mcp_path = path.to_string();
@@ -316,6 +367,7 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
                     .unwrap_or_else(|_| "unknown".to_string());
                 let mp = mcp_path.clone();
                 let env = env.clone();
+                let limits = limits.clone();
                 std::thread::spawn(move || {
                     if let Some((m, p, b, head)) = read_request(&mut stream) {
                         let ip = hds_core::net::real_client_ip(
@@ -323,6 +375,35 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
                             head.x_forwarded_for.as_deref(),
                             trusted,
                         );
+                        // T3: ключ лимитов — токен, иначе IP.
+                        let token = auth::bearer_token(head.authorization.as_deref());
+                        let key = token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone());
+                        let is_login = p.split('?').next().unwrap_or("") == "/auth/login";
+                        // Лимит частоты: /auth/login — жёсткий, по IP логина.
+                        let over = match &limits {
+                            Some(l) if is_login => l.check_login(&ip),
+                            Some(l) => l.check(&key),
+                            None => None,
+                        };
+                        if let (Some(l), Some(retry)) = (&limits, over) {
+                            let r = too_many(false, retry);
+                            write_reply_with(&mut stream, r, &rate_limit_headers(l, retry));
+                            return;
+                        }
+                        // Тяжёлый RAG-инструмент — под лимит параллелизма
+                        // (guard живёт до конца обработки запроса).
+                        let heavy = b.contains("tools/call") && b.contains("ask_my_files");
+                        let inflight_guard = match &limits {
+                            Some(l) if heavy => l.inflight_guard(&key),
+                            _ => None,
+                        };
+                        if heavy && inflight_guard.is_none() {
+                            if let Some(l) = &limits {
+                                let r = too_many(true, 1);
+                                write_reply_with(&mut stream, r, &rate_limit_headers(l, 1));
+                                return;
+                            }
+                        }
                         write_reply(
                             &mut stream,
                             route(&m, &p, &b, &mp, &env, head.authorization.as_deref(), &ip),

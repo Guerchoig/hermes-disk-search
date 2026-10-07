@@ -1677,19 +1677,36 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
     ))
 }
 
-fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
+fn write_reply(stream: &mut TcpStream, reply: Reply) {
+    write_reply_with(stream, reply, &[]);
+}
+
+/// `write_reply` с дополнительными заголовками (Retry-After и т.п.).
+fn write_reply_with(
+    stream: &mut TcpStream,
+    (status, ctype, body): Reply,
+    extra: &[(&str, String)],
+) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        413 => "Payload Too Large",
+        429 => "Too Many Requests",
+        503 => "Service Unavailable",
         _ => "OK",
     };
-    let resp = format!(
+    let mut resp = format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
+         Connection: close\r\n",
         body.len()
     );
+    for (k, v) in extra {
+        resp.push_str(&format!("{k}: {v}\r\n"));
+    }
+    resp.push_str("\r\n");
+    resp.push_str(&body);
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
 }
@@ -1709,6 +1726,11 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
     let trusted = load()
         .map(|c| hds_core::net::trusted_proxy(&c))
         .unwrap_or(false);
+    // M3 T3: rate-limit (None — выключен, desktop по умолчанию).
+    let limits: Option<std::sync::Arc<hds_core::ratelimit::Limiter>> = load()
+        .ok()
+        .and_then(|c| hds_core::ratelimit::Limiter::from_config(&c))
+        .map(std::sync::Arc::new);
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
@@ -1716,6 +1738,7 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
                     .peer_addr()
                     .map(|a| a.ip().to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
+                let limits = limits.clone();
                 std::thread::spawn(move || {
                     if let Some((m, p, q, mut h, b)) = read_request(&mut stream) {
                         // Реальный клиент: remote_addr, за доверенным прокси — XFF.
@@ -1724,6 +1747,34 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
                             h.x_forwarded_for.as_deref(),
                             trusted,
                         ));
+                        // M3 T3: лимит частоты (ключ — токен, иначе IP).
+                        let token = h.authorization.as_deref().and_then(|a| {
+                            a.split_once(' ')
+                                .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
+                                .map(|(_, t)| t.trim())
+                        });
+                        let key = token
+                            .map(|s| s.to_string())
+                            .unwrap_or_else(|| h.client_ip.clone().unwrap_or_default());
+                        if let (Some(l), Some(retry)) =
+                            (&limits, limits.as_ref().and_then(|l| l.check(&key)))
+                        {
+                            let r = (
+                                429,
+                                "application/json",
+                                serde_json::json!({
+                                    "error": "rate limited",
+                                    "hint": format!("retry after {retry}s")
+                                })
+                                .to_string(),
+                            );
+                            let hdrs = vec![
+                                ("Retry-After", retry.to_string()),
+                                ("X-RateLimit-Limit", l.cfg().requests_per_min.to_string()),
+                            ];
+                            write_reply_with(&mut stream, r, &hdrs);
+                            return;
+                        }
                         write_reply(&mut stream, route(&m, &p, &q, &h, &b));
                     }
                 });

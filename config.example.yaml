@@ -168,6 +168,16 @@ trusted_proxy: false        # true = доверять X-Forwarded-For/Proto от
                             #   Включайте только если прямого доступа к
                             #   :8787/:8765 снаружи нет — иначе IP подделывают
                             #   заголовком
+# --- Rate-limit (M3, §3.3): token-bucket на MCP и UI; ключ — токен, иначе IP;
+# превышение -> 429 + Retry-After; /auth/login ограничен жёстче (антибрутфорс,
+# всегда по IP). Лимиты в памяти процесса: mcp-http и ui считаются независимо.
+# Без ключа enabled: server — включён (дефолты ниже), desktop — выключен. ---
+# rate_limit:
+#   enabled: true            # true/false переопределяет профиль
+#   requests_per_min: 120    # частота запросов на ключ
+#   burst: 30                # всплеск (ёмкость bucket)
+#   login_per_min: 10        # POST /auth/login по IP (антибрутфорс)
+#   max_inflight: 4          # параллельные тяжёлые запросы (ask_my_files) на ключ
 
 
 search:
