@@ -81,6 +81,23 @@ pub const PAGE: &str = r#"<!doctype html>
    по умолчанию <code>127.0.0.1:8787/mcp</code>): к нему подключаются Cline/Hermes.
    «Чужой» сервис на порту не переиспользуется — освободите порт и запустите заново.</div></section>
 
+ <section><h2>Доступ (пользователи и проекты)</h2>
+  <div id="access-users" class="muted">…</div>
+  <div class="row" style="margin-top:8px">
+   <input id="acc-login" placeholder="логин" style="min-width:110px">
+   <input id="acc-pass" placeholder="пароль" type="password" style="min-width:110px">
+   <input id="acc-projects" placeholder="проекты: A,B" style="min-width:190px">
+   <label style="display:flex;gap:4px;align-items:center"><input id="acc-admin" type="checkbox" style="min-width:auto"> админ</label>
+   <button onclick="accessAdd()">Создать</button>
+   <button onclick="accessDel()">Удалить</button>
+   <button onclick="accessList()">Обновить</button>
+  </div>
+  <div id="accmsg" class="muted"></div>
+  <div class="muted">Проекты назначаются по корням (<code>index.roots</code>: «корень → проект»).
+   В server-режиме страница открывается только с админ-токеном (<code>?token=...</code> —
+   запоминается в браузере; токены выдаёт <code>POST /auth/login</code> или <code>hds login</code>).</div>
+ </section>
+
  <section><h2>Дерево индекса</h2>
   <div class="row"><button onclick="loadTree()">Показать/обновить</button>
    <button onclick="treeAll(true)">Развернуть всё</button>
@@ -185,8 +202,20 @@ pub const PAGE: &str = r#"<!doctype html>
 
 </main>
 <script>
-async function jget(u){ const r=await fetch(u); return await r.json(); }
-async function jpost(u,body){ const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json','X-HDS-UI':'1'},body:JSON.stringify(body||{})}); return await r.json(); }
+// M1 T5: админ-токен UI (?token=... сохраняется; сервер-режим требует его).
+const HDS_T=(function(){ try{
+  const p=new URLSearchParams(location.search).get('token');
+  if(p){ localStorage.setItem('hds.token',p); history.replaceState(null,'',location.pathname); }
+}catch(e){} try{ return localStorage.getItem('hds.token')||''; }catch(e){ return ''; } })();
+function hdsAuth(){ return HDS_T? {'Authorization':'Bearer '+HDS_T} : {}; }
+async function jget(u){ const r=await fetch(u,{headers:hdsAuth()});
+  if(r.status===401) throw new Error('401: нужен админ-токен (откройте страницу с ?token=...)');
+  return await r.json(); }
+async function jpost(u,body){ const r=await fetch(u,{method:'POST',
+  headers:Object.assign({'Content-Type':'application/json','X-HDS-UI':'1'}, hdsAuth()),
+  body:JSON.stringify(body||{})});
+  if(r.status===401) throw new Error('401: нужен админ-токен (откройте страницу с ?token=...)');
+  return await r.json(); }
 function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
 async function refresh(){
   try{ const s=await jget('/api/status');
@@ -199,7 +228,7 @@ async function refresh(){
                           : '<span class="err">не отвечает</span>')+'\n';
     if(lh.roles) h+='роли: '+esc(lh.roles)+'\n';
     document.getElementById('status').innerHTML='<pre>'+h+'</pre>';
-    if(document.getElementById('tab-search').style.display!=='none') loadWatchDaemon();
+    if(document.getElementById('tab-search').style.display!=='none') { loadWatchDaemon(); accessList(); }
   }catch(e){ document.getElementById('status').textContent='ошибка статуса: '+e; }
 }
 async function loadChatModels(){

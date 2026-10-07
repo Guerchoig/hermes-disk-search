@@ -8,6 +8,7 @@ fn h() -> ReqHeaders {
         origin: None,
         content_type: Some("application/json".into()),
         x_hds_ui: Some("1".into()),
+        authorization: None,
     }
 }
 
@@ -44,6 +45,7 @@ fn csrf_blocks_cross_origin_post() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     assert_eq!(route("POST", "/api/index/stop", "", &bad, "").0, 403);
     assert_eq!(
@@ -121,6 +123,7 @@ fn transcribe_daemon_post_requires_csrf() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     assert_eq!(
         route(
@@ -190,6 +193,7 @@ fn watch_daemon_post_requires_csrf() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     assert_eq!(
         route(
@@ -399,6 +403,7 @@ fn new_post_routes_require_csrf() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     for path in ["/api/chat-model/set", "/api/mcp-http"] {
         assert_eq!(route("POST", path, "", &bad, "{}").0, 403, "{path}");
@@ -413,6 +418,7 @@ fn transcribe_dirs_post_requires_csrf() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     assert_eq!(
         route("POST", "/api/config/transcribe-dirs", "", &bad, "{}").0,
@@ -498,6 +504,7 @@ fn transcribe_post_requires_csrf() {
         origin: Some("http://evil.example".into()),
         content_type: Some("application/json".into()),
         x_hds_ui: None,
+        authorization: None,
     };
     assert_eq!(
         route("POST", "/api/transcribe/speakers", "", &bad, "{}").0,

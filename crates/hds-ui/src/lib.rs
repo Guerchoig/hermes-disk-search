@@ -152,11 +152,18 @@ pub struct ReqHeaders {
     pub origin: Option<String>,
     pub content_type: Option<String>,
     pub x_hds_ui: Option<String>,
+    /// `Authorization: Bearer <token>` (M1 T5: server-режим — админ-токен).
+    pub authorization: Option<String>,
 }
 
 /// CSRF-защита POST (аналог `_csrf_ok`): Origin пуст или loopback **и**
 /// (`Content-Type: application/json` **или** заголовок `X-HDS-UI: 1`).
-fn csrf_ok(h: &ReqHeaders) -> bool {
+fn csrf_ok(h: &ReqHeaders, server_mode: bool) -> bool {
+    // M1 T5: в server-режиме запрос уже прошёл Bearer-проверку админа
+    // (`ui_auth_gate`) — reverse-proxy может быть не-loopback, origin не проверяем.
+    if server_mode {
+        return h.content_type.as_deref().is_some() || h.x_hds_ui.as_deref() == Some("1");
+    }
     let origin_ok = match h.origin.as_deref() {
         None | Some("") => true,
         Some(o) => {
@@ -1260,10 +1267,65 @@ pub fn mcp_http_action(action: &str) -> Value {
     json!({ "ok": ok, "msg": msg, "detail": text, "state": state })
 }
 
+/// Гейт UI (M1 T5): при `access.enabled` весь UI — только для админ-токена.
+///
+/// `access_path` — явный путь (тесты); `None` — `data/access.yaml` по умолчанию.
+/// Десктоп (access disabled) — вход свободный, как раньше.
+fn ui_auth_gate(h: &ReqHeaders, access_path: Option<&std::path::Path>) -> Result<bool, Reply> {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(_) => return Ok(false), // без конфига — прежнее поведение
+    };
+    let enabled = dig(&cfg, "access.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(false);
+    }
+    let plain = h.authorization.as_deref().and_then(|x| {
+        x.split_once(' ')
+            .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
+            .map(|(_, t)| t.trim())
+    });
+    let acc = match access_path {
+        Some(p) => hds_core::access::load_at(p),
+        None => hds_core::access::load(),
+    };
+    let ctx = plain.and_then(|t| {
+        acc.ok()
+            .and_then(|a| hds_core::access::resolve_token(&a, t, access_now_unix()))
+    });
+    match ctx {
+        Some(c) if c.admin => Ok(true),
+        _ => Err((
+            401,
+            "application/json",
+            json!({ "error": "unauthorized", "hint": "UI: Bearer admin token (?token=...)" })
+                .to_string(),
+        )),
+    }
+}
+
 /// Маршрутизация (чистая функция — тестируется без сокетов).
 ///
 /// `path` — без query; `query` — часть после `?`; `h` — заголовки; `body` — тело POST.
 pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) -> Reply {
+    route_with_access(method, path, query, h, body, None)
+}
+
+/// `route` с явным путём хранилища доступа (тесты); `None` — путь по умолчанию.
+pub fn route_with_access(
+    method: &str,
+    path: &str,
+    query: &str,
+    h: &ReqHeaders,
+    body: &str,
+    access_path: Option<&std::path::Path>,
+) -> Reply {
+    let server_mode = match ui_auth_gate(h, access_path) {
+        Ok(v) => v,
+        Err(reply) => return reply,
+    };
     let p = path.trim_end_matches('/');
     match (method, p) {
         ("GET", "") | ("GET", "/index.html") => {
@@ -1293,6 +1355,8 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             json_ok(transcribe::file_json(&name))
         }
         ("GET", "/api/config") => json_ok(config_edit::get_config()),
+        ("GET", "/api/access/users") => json_ok(access_users_json(access_path)),
+        ("GET", "/api/access/projects") => json_ok(access_projects_json(access_path)),
         ("GET", "/api/search") => {
             let q = qp(query, "q").unwrap_or_default();
             if q.trim().is_empty() {
@@ -1318,7 +1382,7 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
             json_ok(ask_json(&q))
         }
         ("POST", _) => {
-            if !csrf_ok(h) {
+            if !csrf_ok(h, server_mode) {
                 return (
                     403,
                     "application/json",
@@ -1326,6 +1390,11 @@ pub fn route(method: &str, path: &str, query: &str, h: &ReqHeaders, body: &str) 
                 );
             }
             match p {
+                "/api/access/user/add" => access_user_add(body, access_path),
+                "/api/access/user/del" => access_user_del(body, access_path),
+                "/api/access/user/passwd" => access_user_passwd(body, access_path),
+                "/api/access/user/grant" => access_user_grant(body, access_path),
+                "/api/access/token/revoke" => access_token_revoke(body, access_path),
                 "/api/index/start" => {
                     let full = qp(query, "full")
                         .map(|v| v == "1" || v == "true")
@@ -1530,6 +1599,7 @@ fn write_reply(stream: &mut TcpStream, (status, ctype, body): Reply) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         _ => "OK",
     };
@@ -1559,4 +1629,256 @@ pub fn run_http(host: &str, port: u16) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// --- Доступ (M1 T5): пользователи/проекты/токены. В server-режиме сюда
+// попадают только запросы с валидным админ-токеном (`ui_auth_gate`); в десктопе
+// — как раньше (локальные операции через CLI/конфиг). ---
+
+/// Текущее unix-время (сек).
+fn access_now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn access_load(access_path: Option<&std::path::Path>) -> Result<hds_core::access::Access, String> {
+    match access_path {
+        Some(p) => hds_core::access::load_at(p),
+        None => hds_core::access::load(),
+    }
+    .map_err(|e| e.message())
+}
+
+fn access_save(
+    access_path: Option<&std::path::Path>,
+    a: &hds_core::access::Access,
+) -> Result<(), String> {
+    match access_path {
+        Some(p) => hds_core::access::save_at(p, a),
+        None => hds_core::access::save(a),
+    }
+    .map_err(|e| e.message())
+}
+
+fn body_str(v: &Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn body_err(msg: &str) -> Reply {
+    (400, "application/json", json!({ "error": msg }).to_string())
+}
+
+/// GET /api/access/users — пользователи (без хэшей) + корни → проекты.
+fn access_users_json(access_path: Option<&std::path::Path>) -> Value {
+    let users: Vec<Value> = match access_load(access_path) {
+        Ok(a) => a
+            .users
+            .iter()
+            .map(|u| {
+                json!({
+                    "login": u.login, "name": u.name, "admin": u.admin,
+                    "disabled": u.disabled, "projects": u.projects,
+                })
+            })
+            .collect(),
+        Err(e) => return json!({ "error": e }),
+    };
+    let roots = load()
+        .ok()
+        .map(|c| hds_core::roots::roots_from_cfg(&c))
+        .unwrap_or_default();
+    json!({
+        "users": users,
+        "roots": roots
+            .iter()
+            .map(|r| json!({ "root": r.path, "project": r.project }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// GET /api/access/projects — список проектов (по корням конфига).
+fn access_projects_json(_access_path: Option<&std::path::Path>) -> Value {
+    let roots = load()
+        .ok()
+        .map(|c| hds_core::roots::roots_from_cfg(&c))
+        .unwrap_or_default();
+    json!({
+        "projects": roots
+            .iter()
+            .map(|r| json!({ "root": r.path, "project": r.project }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// POST /api/access/user/add `{login, password, name?, admin?, projects?[]}`.
+fn access_user_add(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let (login, password) = match (body_str(&v, "login"), body_str(&v, "password")) {
+        (Some(l), Some(p)) => (l, p),
+        _ => return body_err("нужны поля login и password"),
+    };
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    if acc.users.iter().any(|u| u.login == login) {
+        return body_err("логин уже существует");
+    }
+    let hash = match hds_core::access::hash_password(&password) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                500,
+                "application/json",
+                json!({ "error": e.message() }).to_string(),
+            )
+        }
+    };
+    let projects: Vec<String> = v
+        .get("projects")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    acc.users.push(hds_core::access::User {
+        name: body_str(&v, "name").unwrap_or_else(|| login.clone()),
+        login,
+        password_hash: hash,
+        admin: v.get("admin").and_then(|x| x.as_bool()).unwrap_or(false),
+        projects: projects.clone(),
+        disabled: false,
+    });
+    match access_save(access_path, &acc) {
+        Ok(()) => json_ok(json!({ "ok": true, "msg": "Пользователь создан" })),
+        Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+    }
+}
+/// POST /api/access/user/del `{login}` (токены пользователя отзываются).
+fn access_user_del(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let login = match body_str(&v, "login") {
+        Some(l) => l,
+        None => return body_err("нужно поле login"),
+    };
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    if !acc.users.iter().any(|u| u.login == login) {
+        return body_err("логин не найден");
+    }
+    acc.users.retain(|u| u.login != login);
+    hds_core::access::revoke_tokens_of_user(&mut acc, &login);
+    match access_save(access_path, &acc) {
+        Ok(()) => json_ok(json!({ "ok": true, "msg": "Пользователь удалён" })),
+        Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+    }
+}
+
+/// POST /api/access/user/passwd `{login, password}` (токены отзываются).
+fn access_user_passwd(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let (login, password) = match (body_str(&v, "login"), body_str(&v, "password")) {
+        (Some(l), Some(p)) => (l, p),
+        _ => return body_err("нужны поля login и password"),
+    };
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    let hash = match hds_core::access::hash_password(&password) {
+        Ok(h) => h,
+        Err(e) => {
+            return (
+                500,
+                "application/json",
+                json!({ "error": e.message() }).to_string(),
+            )
+        }
+    };
+    match acc.users.iter_mut().find(|u| u.login == login) {
+        Some(u) => u.password_hash = hash,
+        None => return body_err("логин не найден"),
+    }
+    hds_core::access::revoke_tokens_of_user(&mut acc, &login);
+    match access_save(access_path, &acc) {
+        Ok(()) => json_ok(json!({ "ok": true, "msg": "Пароль обновлён, токены отозваны" })),
+        Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+    }
+}
+
+/// POST /api/access/user/grant `{login, projects: []}` — задаёт список проектов.
+fn access_user_grant(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let login = match body_str(&v, "login") {
+        Some(l) => l,
+        None => return body_err("нужно поле login"),
+    };
+    let projects: Vec<String> = v
+        .get("projects")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    match acc.users.iter_mut().find(|u| u.login == login) {
+        Some(u) => u.projects = projects.clone(),
+        None => return body_err("логин не найден"),
+    }
+    match access_save(access_path, &acc) {
+        Ok(()) => json_ok(
+            json!({ "ok": true, "msg": format!("Проекты {login}: {}", projects.join(", ")) }),
+        ),
+        Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+    }
+}
+
+/// POST /api/access/token/revoke `{sha_prefix?}` или `{user?}`.
+fn access_token_revoke(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    if let Some(user) = body_str(&v, "user") {
+        let n = hds_core::access::revoke_tokens_of_user(&mut acc, &user);
+        match access_save(access_path, &acc) {
+            Ok(()) => json_ok(json!({ "ok": true, "msg": format!("Отозвано токенов: {n}") })),
+            Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+        }
+    } else if let Some(sha) = body_str(&v, "sha_prefix") {
+        let hit: Vec<String> = acc
+            .tokens
+            .iter()
+            .map(|t| t.token_sha256.clone())
+            .filter(|h| h.starts_with(&sha))
+            .collect();
+        if hit.is_empty() {
+            return body_err("токен с таким префиксом не найден");
+        }
+        if hit.len() > 1 {
+            return body_err("префикс неоднозначен");
+        }
+        hds_core::access::revoke_token(&mut acc, &hit[0]);
+        match access_save(access_path, &acc) {
+            Ok(()) => json_ok(json!({ "ok": true, "msg": "Токен отозван" })),
+            Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
+        }
+    } else {
+        body_err("нужно поле sha_prefix или user")
+    }
 }
