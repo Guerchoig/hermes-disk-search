@@ -253,6 +253,54 @@ trusted_proxy: true   # доверять X-Forwarded-For/Proto от прокси
 * TLS терминируется на прокси; сертификаты настраивает оператор
   (Let's Encrypt или свои) — приложение остаётся на plain HTTP в localhost.
 
+### Аудит (M3 T2)
+
+Append-only JSONL: `<state_dir>/data/logs/audit.jsonl`, ротация по размеру
+(`audit.max_mb`, дефолт 50 → `audit.jsonl.1`). Включение — `audit.enabled`;
+без ключа: server — **включён**, desktop — выключен (не шумим локально).
+
+```json
+{"ts":1791406900,"event":"login_ok","user":"alice","ip":"203.0.113.7","method":"POST","path":"/auth/login","status":200,"ms":395}
+{"ts":1791406900,"event":"unauthorized","ip":"203.0.113.7","method":"POST","path":"/mcp","status":401,"ms":0}
+{"ts":1791406900,"event":"tool_call","user":"alice","ip":"203.0.113.7","tool":"search_local_files","projects":["Sales"],"status":200,"ms":120}
+```
+
+События: `login_ok`/`login_fail` (MCP), `unauthorized` (MCP и UI-гейт),
+`tool_call` (кто/какой инструмент/проекты токена), `admin_op` (POST-операции
+UI в server-режиме), `token_revoke` (`hds token revoke`). **Не логируются**
+тела запросов и токены. Состояние аудита — `hds check` и карточка
+«Диагностика» в UI (`audit`): вкл/выкл, путь, размер.
+
+### Rate-limit (M3 T3)
+
+Token-bucket без внешних крейтов, в памяти процесса (mcp-http и ui лимитируются
+независимо — общий лимит, если нужен, ставится на прокси). Ключ — **токен**
+(Bearer), иначе реальный IP (за доверенным прокси — из XFF). `POST /auth/login`
+— отдельный жёсткий лимит по IP (антибрутфорс); `ask_my_files` — лимит
+параллелизма (`max_inflight`).
+
+```yaml
+rate_limit:
+  enabled: true            # без ключа: server — true, desktop — false
+  requests_per_min: 120
+  burst: 30
+  login_per_min: 10
+  max_inflight: 4
+```
+
+Превышение → `429 Too Many Requests` + `Retry-After: <сек>` +
+`X-RateLimit-Limit: <rpm>`.
+
+### Hardening (M3 T4)
+
+* `http.max_body_kb` (дефолт 512; 0 — без лимита): тело больше лимита →
+  `413` без чтения тела.
+* `http.max_conns` (дефолт 32; 0 — без предела): сверх предела → короткий
+  `503` (+ `Retry-After`) без спавна потоков.
+* Ошибки — единый JSON `{error, hint}`, без внутренних путей/версий.
+* `ui_auth_gate` при нечитаемом `config.yaml` в server-поставке **fail-closed**
+  (401), а не молча открытый UI (дефект F2 из ревью M2).
+
 ## 12. Ограничения M1 и что дальше
 
 * Токен ходит по сети открытым текстом — **TLS обязателен** (reverse-proxy, Э2);

@@ -614,6 +614,39 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   server-профиль и не открывает браузер; админ ходит через reverse-proxy.
   Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) не менялся.
 
+## Сетевой периметр (M3): TLS-прокси, аудит, rate-limit
+
+Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
+(образцы — `installers/proxy/{Caddyfile,nginx.conf}`; `install_server.*` при
+наличии `caddy`/`nginx` копируют образец и подсказывают команду). Фасад
+`:8010–8012` (`/v1/*`) — **только localhost**. TLS терминирует прокси;
+сертификаты настраивает оператор. Подробности и сценарии —
+`README_SERVER_MULTIUSER.md` §11.
+
+* **Заголовки прокси:** ключ `trusted_proxy` (по умолчанию `false`). Без него
+  `X-Forwarded-For/Proto` **игнорируются** (напрямую подключённый клиент не
+  может подделать свой IP); при `trusted_proxy: true` реальный клиент —
+  правая запись XFF (её дописывает наш прокси). Диагностика: `GET /health`
+  MCP-сервера возвращает `client_ip` — как сервер видит клиента.
+* **Аудит:** `hds-core::audit`, append-only JSONL в
+  `<state_dir>/data/logs/audit.jsonl`, ротация по размеру (`audit.max_mb`,
+  дефолт 50 → `audit.jsonl.1`). События: `login_ok`/`login_fail`/
+  `unauthorized`/`tool_call` (пользователь/инструмент/проекты)/`admin_op`/
+  `token_revoke`. Включение: `audit.enabled`; без ключа — server: вкл,
+  desktop: выкл. Тела запросов и токены не логируются. Состояние —
+  `hds check` и `/api/diagnostics` (`audit`).
+* **Rate-limit:** token-bucket (ключ — токен, иначе реальный IP);
+  `rate_limit: { enabled, requests_per_min: 120, burst: 30, login_per_min: 10,
+  max_inflight: 4 }`; `POST /auth/login` ограничен жёстче (антибрутфорс, по
+  IP); `ask_my_files` — лимит параллелизма. Превышение → `429` +
+  `Retry-After` + `X-RateLimit-Limit`. Без ключа: server — вкл, desktop —
+  выкл; лимиты в памяти процесса (mcp-http и ui считаются независимо).
+* **Hardening:** `http.max_body_kb` (дефолт 512; 0 — без лимита) → тело
+  больше лимита получает `413` без чтения; `http.max_conns` (дефолт 32;
+  0 — без предела) → сверх предела короткий `503` без спавна потоков;
+  ошибки — единый JSON `{error, hint}` без внутренних путей; UI-гейт в
+  server-поставке fail-closed при нечитаемом конфиге (ревью M2 F2).
+
 ## Настройки (`config.yaml`)
 
 Полный образец — `config.example.yaml`. Основное:

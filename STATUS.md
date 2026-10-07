@@ -28,6 +28,32 @@
 > README «Серверный профиль и службы». Все шаги проверены рантаймом (полный
 > SCM-цикл — только из-под администратора, см. PLAN_M2 §4 T4); десктоп-поведение
 > не изменилось. Детали — `PLAN_M2_SERVER_PROFILE.md` (§4, коммиты).
+>
+> **M3 «Сетевой периметр» выполнен (07.10.2026, ветка `server-multiuser`):**
+> **T0** — фиксы дефектов M2 из код-ревью: `DisplayName` службы без литерала
+> `<role>`, `run_ui.ps1` берёт `ui.host/ui.port` из конфига (без жёсткого
+> `--port 8765`, проверено e2e в песочнице: UI слушает порт конфига),
+> `HDS_ROOT` переносит состояние резидента даже при `profile: server`.
+> **T1** — reverse-proxy/TLS: образцы `installers/proxy/{Caddyfile,nginx.conf}`
+> (наружу только `/mcp` и `/ui`; фасад `:8010–8012` не публикуется), ключ
+> `trusted_proxy` — без него заголовки прокси игнорируются (подделка IP
+> невозможна), при нём реальный клиент — правая запись `X-Forwarded-For`;
+> `/health` MCP отдаёт `client_ip` (живая диагностика прокси); опциональный
+> шаг прокси в `install_server.*`. **T2** — аудит: `hds-core::audit`, JSONL
+> `<state_dir>/data/logs/audit.jsonl` с ротацией по размеру (`audit.max_mb`);
+> события `login_ok`/`login_fail`/`unauthorized`/`tool_call` (кто/что/проекты)/
+> `admin_op`/`token_revoke`; server — включён по умолчанию, desktop — выключен;
+> пункт в `hds check` и `/api/diagnostics` (проверено живым сервером).
+> **T3** — rate-limit: token-bucket в `hds-core::ratelimit`, ключ — токен
+> иначе IP; `/auth/login` жёстче (по IP, антибрутфорс); `max_inflight` на
+> `ask_my_files`; `429` + `Retry-After` + `X-RateLimit-Limit` (проверено
+> живьём: burst 5 → 5×200 + 429). **T4** — hardening: `http.max_body_kb` →
+> `413` без чтения тела, `http.max_conns` → короткий `503` без спавна потоков
+> (ревью F8), единый JSON ошибок `{error,hint}`, F2: `ui_auth_gate`
+> fail-closed в server-поставке при нечитаемом конфиге. Десктоп-профиль не
+> изменён (аудит/лимиты выключены, заголовки прокси игнорируются). Детали —
+> `PLAN_M3_NETWORK_PERIMETER.md` (§4, журнал), `README_SERVER_MULTIUSER.md` §11.
+>
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
 > **Релиз v0.13.0 (02.10.2026):** CI переписан под Rust-first (Windows — блокирующий,

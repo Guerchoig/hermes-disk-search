@@ -498,6 +498,22 @@ hds.example.com {
 > bind UI из секции `ui`; службы Windows (SCM, крейт `windows-service`) и macOS
 > (LaunchDaemon) с установщиками `installers/install_server.*`; headless-UI.
 > Десктоп-профиль не изменён.
+>
+> **Статус M3 — «Сетевой периметр» (сетевая часть Э2) выполнен (07.10.2026,
+> детали и коммиты — `PLAN_M3_NETWORK_PERIMETER.md`):** T0 — фиксы дефектов M2
+> (DisplayName службы, порт из конфига в `run_ui.ps1`, `HDS_ROOT` в llm-host);
+> T1 — образцы TLS reverse-proxy (`installers/proxy/{Caddyfile,nginx.conf}`,
+> наружу только `/mcp` и `/ui`) + заголовки прокси (`trusted_proxy`; без него
+> XFF игнорируется, при нём реальный клиент — правая запись XFF; диагностика —
+> `client_ip` в `/health`); T2 — аудит доступа (JSONL
+> `<state_dir>/data/logs/audit.jsonl`, ротация; login/tool_call/admin_op/
+> unauthorized/token_revoke; server — вкл по умолчанию, desktop — выкл); T3 —
+> rate-limit (token-bucket по токену/IP, `/auth/login` жёстче по IP,
+> `max_inflight` на `ask_my_files`, `429` + `Retry-After`); T4 — hardening
+> (`http.max_body_kb` → 413, `http.max_conns` → 503, единый `{error,hint}`,
+> fail-closed UI-гейт). Десктоп-профиль не изменён. Пункты Э2 «TLS/reverse-proxy,
+> аудит и rate-limit» закрыты; осталось из Э2 — отправка во внешний API
+> (анонимизация — W9).
 
 **Milestone M1 — «Фундамент доступа» = Э2 (только приложение) + Э3 (Проекты).**
 Начинаем с него, потому что:
