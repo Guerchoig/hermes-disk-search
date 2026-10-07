@@ -527,3 +527,28 @@ fn transcribe_post_requires_csrf() {
         400
     );
 }
+
+/// M2 T3: bind-адрес UI — секция `ui` конфига; нет секции/мусор — дефолт.
+#[test]
+fn bind_from_config_defaults_and_section() {
+    use hds_core::config::load_from;
+
+    let tmp = std::env::temp_dir().join(format!("hds-bind-{}.yaml", std::process::id()));
+
+    // Нет секции ui — прежний дефолт 127.0.0.1:8765.
+    std::fs::write(&tmp, "index:\n  roots: []").unwrap();
+    let (h, p) = hds_ui::bind_from_config(&load_from(&tmp).unwrap());
+    assert_eq!((h.as_str(), p), ("127.0.0.1", 8765));
+
+    // Секция задана — берём её.
+    std::fs::write(&tmp, "ui:\n  host: 0.0.0.0\n  port: 9000").unwrap();
+    let (h, p) = hds_ui::bind_from_config(&load_from(&tmp).unwrap());
+    assert_eq!((h.as_str(), p), ("0.0.0.0", 9000));
+
+    // Мусорные значения — дефолт (не падаем).
+    std::fs::write(&tmp, "ui:\n  host: [x]\n  port: not-a-number").unwrap();
+    let (h, p) = hds_ui::bind_from_config(&load_from(&tmp).unwrap());
+    assert_eq!((h.as_str(), p), ("127.0.0.1", 8765));
+
+    let _ = std::fs::remove_file(&tmp);
+}

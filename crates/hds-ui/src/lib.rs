@@ -98,6 +98,18 @@ pub fn qp(query: &str, key: &str) -> Option<String> {
     None
 }
 
+/// Bind-адрес UI из конфига (M2 T3): секция `ui` — `ui.host`/`ui.port`;
+/// CLI-флаги `--host/--port` переопределяют (решает вызывающий).
+/// Дефолт — прежнее поведение: `127.0.0.1:8765`.
+pub fn bind_from_config(cfg: &Config) -> (String, u16) {
+    let host = dig(cfg, "ui.host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1")
+        .to_string();
+    let port = dig(cfg, "ui.port").and_then(|v| v.as_u64()).unwrap_or(8765) as u16;
+    (host, port)
+}
+
 fn connect(cfg: &Config) -> Result<rusqlite::Connection, String> {
     let dim = dig(cfg, "embedding.dim")
         .and_then(|v| v.as_i64())
