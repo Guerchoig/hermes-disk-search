@@ -62,8 +62,11 @@ pub fn route(
             })
             .to_string(),
         ),
-        ("POST", "/auth/login") if env.enabled => handle_login(body, env),
+        ("POST", "/auth/login") if env.enabled => {
+            handle_login(body, env, client_ip, std::time::Instant::now())
+        }
         ("POST", mp) if mp == mcp_path.trim_end_matches('/') => {
+            let started = std::time::Instant::now();
             let msg: Value = match serde_json::from_str(body.trim()) {
                 Ok(v) => v,
                 Err(e) => {
@@ -80,15 +83,65 @@ pub fn route(
             let ctx = if env.enabled {
                 match auth::resolve_bearer(env, auth_header) {
                     Some(c) => Some(c),
-                    None => return unauthorized(),
+                    None => {
+                        // M3 T2: аудит неавторизованного доступа.
+                        if let Some(a) = &env.audit {
+                            a.record(
+                                &hds_core::audit::AuditEvent {
+                                    ts: 0,
+                                    event: "unauthorized".into(),
+                                    user: None,
+                                    ip: client_ip.into(),
+                                    method: method.into(),
+                                    path: req_path.into(),
+                                    tool: None,
+                                    projects: None,
+                                    status: 401,
+                                    ms: started.elapsed().as_millis() as u64,
+                                }
+                                .now(),
+                            );
+                        }
+                        return unauthorized();
+                    }
                 }
             } else {
                 None
             };
-            match server::handle(&msg, ctx.as_ref()) {
+            // M3 T2: аудит вызовов инструментов (кто/какой инструмент/проекты).
+            let tool = (env.enabled
+                && msg.get("method").and_then(|m| m.as_str()) == Some("tools/call"))
+            .then(|| {
+                msg.get("params")
+                    .and_then(|p| p.get("name"))
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string()
+            });
+            let reply = match server::handle(&msg, ctx.as_ref()) {
                 Some(resp) => (200, "application/json", resp.to_string()),
                 None => (202, "application/json", String::new()), // notification
+            };
+            if let (Some(a), Some(tool)) = (&env.audit, tool) {
+                if !tool.is_empty() {
+                    a.record(
+                        &hds_core::audit::AuditEvent {
+                            ts: 0,
+                            event: "tool_call".into(),
+                            user: ctx.as_ref().map(|c| c.user.clone()),
+                            ip: client_ip.into(),
+                            method: method.into(),
+                            path: req_path.into(),
+                            tool: Some(tool),
+                            projects: ctx.as_ref().map(|c| c.projects.clone()),
+                            status: reply.0,
+                            ms: started.elapsed().as_millis() as u64,
+                        }
+                        .now(),
+                    );
+                }
             }
+            reply
         }
         _ => (
             404,
@@ -99,36 +152,65 @@ pub fn route(
 }
 
 /// `POST /auth/login {login,password}` → `{token,expires,user,projects}` | 401.
-fn handle_login(body: &str, env: &AuthEnv) -> Reply {
+///
+/// Аудит (M3 T2): `login_ok` (успех — токен выдан) / `login_fail` (неверные
+/// данные или битое тело); тела запроса и токены не логируются.
+fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::Instant) -> Reply {
+    let audit_ev = |event: &str, user: Option<&str>, status: u16| {
+        env.audit.as_ref().map(|a| {
+            a.record(
+                &hds_core::audit::AuditEvent {
+                    ts: 0,
+                    event: event.into(),
+                    user: user.map(|s| s.into()),
+                    ip: client_ip.into(),
+                    method: "POST".into(),
+                    path: "/auth/login".into(),
+                    tool: None,
+                    projects: None,
+                    status,
+                    ms: started.elapsed().as_millis() as u64,
+                }
+                .now(),
+            )
+        })
+    };
     let v: Value = match serde_json::from_str(body.trim()) {
         Ok(v) => v,
         Err(e) => {
+            audit_ev("login_fail", None, 400);
             return (
                 400,
                 "application/json",
                 json!({ "error": format!("bad json: {e}") }).to_string(),
-            )
+            );
         }
     };
     let login = v.get("login").and_then(|x| x.as_str()).unwrap_or("");
     let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
     match auth::login(env, login, password) {
-        Ok((token, expires, ctx)) => (
-            200,
-            "application/json",
-            json!({
-                "token": token,
-                "expires": expires,
-                "user": ctx.user,
-                "projects": ctx.projects,
-            })
-            .to_string(),
-        ),
-        Err(_) => (
-            401,
-            "application/json",
-            json!({ "error": "неверный логин или пароль" }).to_string(),
-        ),
+        Ok((token, expires, ctx)) => {
+            audit_ev("login_ok", Some(&ctx.user), 200);
+            (
+                200,
+                "application/json",
+                json!({
+                    "token": token,
+                    "expires": expires,
+                    "user": ctx.user,
+                    "projects": ctx.projects,
+                })
+                .to_string(),
+            )
+        }
+        Err(_) => {
+            audit_ev("login_fail", Some(login), 401);
+            (
+                401,
+                "application/json",
+                json!({ "error": "неверный логин или пароль" }).to_string(),
+            )
+        }
     }
 }
 

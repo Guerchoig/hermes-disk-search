@@ -1298,17 +1298,22 @@ pub fn mcp_http_action(action: &str) -> Value {
 /// Гейт UI (M1 T5): при `access.enabled` весь UI — только для админ-токена.
 ///
 /// `access_path` — явный путь (тесты); `None` — `data/access.yaml` по умолчанию.
-/// Десктоп (access disabled) — вход свободный, как раньше.
-fn ui_auth_gate(h: &ReqHeaders, access_path: Option<&std::path::Path>) -> Result<bool, Reply> {
+/// Возвращает `Some(ctx)` — валидный админ (server-режим), `None` — доступ
+/// выключен (десктоп, вход свободный), `Err` — 401 (с аудитом `unauthorized`,
+/// M3 T2 — только если аудит включён конфигом; десктоп по умолчанию не пишет).
+fn ui_auth_gate(
+    h: &ReqHeaders,
+    access_path: Option<&std::path::Path>,
+) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
     let cfg = match load() {
         Ok(c) => c,
-        Err(_) => return Ok(false), // без конфига — прежнее поведение
+        Err(_) => return Ok(None), // без конфига — прежнее поведение
     };
     let enabled = dig(&cfg, "access.enabled")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     if !enabled {
-        return Ok(false);
+        return Ok(None);
     }
     let plain = h.authorization.as_deref().and_then(|x| {
         x.split_once(' ')
@@ -1324,13 +1329,33 @@ fn ui_auth_gate(h: &ReqHeaders, access_path: Option<&std::path::Path>) -> Result
             .and_then(|a| hds_core::access::resolve_token(&a, t, access_now_unix()))
     });
     match ctx {
-        Some(c) if c.admin => Ok(true),
-        _ => Err((
-            401,
-            "application/json",
-            json!({ "error": "unauthorized", "hint": "UI: Bearer admin token (?token=...)" })
-                .to_string(),
-        )),
+        Some(c) if c.admin => Ok(Some(c)),
+        _ => {
+            // M3 T2: аудит отказа (без токена или не-админ).
+            if let Some(a) = hds_core::audit::Audit::from_config(&cfg) {
+                a.record(
+                    &hds_core::audit::AuditEvent {
+                        ts: 0,
+                        event: "unauthorized".into(),
+                        user: None,
+                        ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
+                        method: "-".into(),
+                        path: "-".into(),
+                        tool: None,
+                        projects: None,
+                        status: 401,
+                        ms: 0,
+                    }
+                    .now(),
+                );
+            }
+            Err((
+                401,
+                "application/json",
+                json!({ "error": "unauthorized", "hint": "UI: Bearer admin token (?token=...)" })
+                    .to_string(),
+            ))
+        }
     }
 }
 
@@ -1350,10 +1375,33 @@ pub fn route_with_access(
     body: &str,
     access_path: Option<&std::path::Path>,
 ) -> Reply {
-    let server_mode = match ui_auth_gate(h, access_path) {
-        Ok(v) => v,
+    let (server_mode, admin_user) = match ui_auth_gate(h, access_path) {
+        Ok(v) => (v.is_some(), v.map(|c| c.user)),
         Err(reply) => return reply,
     };
+    // M3 T2: аудит админ-операций UI (POST-маршруты в server-режиме).
+    if server_mode && method == "POST" && path.starts_with("/api/") {
+        if let Some(a) = load()
+            .ok()
+            .and_then(|c| hds_core::audit::Audit::from_config(&c))
+        {
+            a.record(
+                &hds_core::audit::AuditEvent {
+                    ts: 0,
+                    event: "admin_op".into(),
+                    user: admin_user,
+                    ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
+                    method: method.into(),
+                    path: path.into(),
+                    tool: None,
+                    projects: None,
+                    status: 200,
+                    ms: 0,
+                }
+                .now(),
+            );
+        }
+    }
     let p = path.trim_end_matches('/');
     match (method, p) {
         ("GET", "") | ("GET", "/index.html") => {

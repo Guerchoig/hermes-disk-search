@@ -20,6 +20,7 @@
 //! чтобы не двигать проверенный код; перенос в `hds-core` — отдельная задача.
 
 pub mod access;
+pub mod audit;
 pub mod cline;
 pub mod config;
 pub mod db;
@@ -34,6 +35,7 @@ pub use access::{
     tokens_of_user, user_by_login, verify_password, Access, AuthCtx, Token, User,
     DEFAULT_TOKEN_TTL_DAYS,
 };
+pub use audit::{Audit, AuditEvent};
 pub use cline::{cline_dir, mcp_entry, mcp_url, role_ctx_tokens, sync, Report, Step};
 pub use config::{
     config_path, db_abs_path, dig, load, load_from, project_root, replace_file, Config, APP_NAME,

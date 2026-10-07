@@ -27,6 +27,8 @@ pub struct AuthEnv {
     pub access_path: PathBuf,
     /// TTL токенов, дней (`access.token_ttl_days`).
     pub ttl_days: u64,
+    /// Аудит событий доступа (M3 T2); `None` — выключен (desktop по умолчанию).
+    pub audit: Option<hds_core::audit::Audit>,
 }
 
 impl AuthEnv {
@@ -36,15 +38,17 @@ impl AuthEnv {
             enabled: false,
             access_path: PathBuf::from("data/access.yaml"),
             ttl_days: hds_core::access::DEFAULT_TOKEN_TTL_DAYS,
+            audit: None,
         }
     }
 
-    /// Из конфига (`access.enabled`, `access.token_ttl_days`).
+    /// Из конфига (`access.*`, `audit.*`).
     pub fn from_config(cfg: &Config) -> AuthEnv {
         AuthEnv {
             enabled: auth_enabled(cfg),
             access_path: hds_core::access::access_path(),
             ttl_days: hds_core::access::token_ttl_days(cfg),
+            audit: hds_core::audit::Audit::from_config(cfg),
         }
     }
 }

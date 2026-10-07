@@ -296,10 +296,12 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
         }
         "revoke" => {
             let changed;
+            let audit_user: Option<String>;
             if let Some(u) = flag(args, "--user") {
                 let n = revoke_tokens_of_user(&mut acc, &u);
                 println!("Отозвано токенов {u}: {n}");
                 changed = n > 0;
+                audit_user = Some(u);
             } else if let Some(sha) = flag(args, "--sha") {
                 // По префиксу хэша (для копипасты из `token list`).
                 let hit: Vec<String> = acc
@@ -316,9 +318,15 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
                     eprintln!("token revoke: префикс неоднозначен ({} токенов)", hit.len());
                     return 1;
                 }
+                let revoked_user = acc
+                    .tokens
+                    .iter()
+                    .find(|t| t.token_sha256 == hit[0])
+                    .map(|t| t.user.clone());
                 let _ = revoke_token(&mut acc, &hit[0]);
                 println!("Токен отозван");
                 changed = true;
+                audit_user = revoked_user;
             } else {
                 eprintln!("token revoke --sha <префикс хэша> | --user <логин>");
                 return 2;
@@ -327,6 +335,27 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
                 if let Err(e) = save(&path, &acc) {
                     eprintln!("запись: {e}");
                     return 1;
+                }
+                // M3 T2: аудит отзыва токена (если аудит включён конфигом).
+                if let Some(a) = hds_core::config::load()
+                    .ok()
+                    .and_then(|c| hds_core::audit::Audit::from_config(&c))
+                {
+                    a.record(
+                        &hds_core::audit::AuditEvent {
+                            ts: 0,
+                            event: "token_revoke".into(),
+                            user: audit_user,
+                            ip: "-".into(),
+                            method: "-".into(),
+                            path: "hds token revoke".into(),
+                            tool: None,
+                            projects: None,
+                            status: 0,
+                            ms: 0,
+                        }
+                        .now(),
+                    );
                 }
             }
             0

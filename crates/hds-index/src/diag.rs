@@ -713,6 +713,36 @@ fn check_profile(cfg: &Config) -> Check {
     c
 }
 
+/// M3 T2: аудит — вкл/выкл (по профилю/ключу), путь и размер JSONL.
+fn check_audit(cfg: &Config) -> Check {
+    if !hds_core::audit::enabled(cfg) {
+        return Check::new(
+            "audit",
+            "ok",
+            "аудит выключен (desktop по умолчанию; включается audit.enabled)",
+        );
+    }
+    let path = hds_core::audit::default_path(cfg);
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let max = hds_core::audit::max_mb(cfg);
+    Check::new(
+        "audit",
+        "ok",
+        format!(
+            "аудит включён: {} ({})",
+            path.display(),
+            if size >= 1024 * 1024 {
+                format!("{:.1} МиБ", size as f64 / 1024.0 / 1024.0)
+            } else {
+                format!("{} КиБ", size.div_ceil(1024))
+            }
+        ),
+    )
+    .msg(format!(
+        "JSONL-лог событий доступа; ротация при {max} МБ -> audit.jsonl.1"
+    ))
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
@@ -747,6 +777,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     }
 
     checks.push(check_gpu_observability(cfg));
+    checks.push(check_audit(cfg));
     checks.push(
         Check::new(
             "gpu-manual",

@@ -23,6 +23,7 @@ fn env(tag: &str) -> AuthEnv {
         enabled: true,
         access_path: tmpdir(tag).join("access.yaml"),
         ttl_days: 90,
+        audit: None,
     }
 }
 
