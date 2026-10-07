@@ -223,22 +223,35 @@ struct ReqHead {
     x_forwarded_proto: Option<String>,
 }
 
-/// Прочитать один HTTP/1.1-запрос: `(метод, путь, тело, заголовки)`.
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHead)> {
+/// Исход чтения запроса (M3 T4): тело сверх лимита — `413` без чтения тела.
+#[allow(clippy::large_enum_variant)]
+enum ReadOutcome {
+    Ok(String, String, String, ReqHead),
+    /// Content-Length выше `http.max_body_kb` — ответить 413.
+    TooLarge,
+    /// Соединение закрыто/ошибка чтения — молча.
+    Closed,
+}
+
+/// Прочитать один HTTP/1.1-запрос.
+fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     // читаем до конца заголовков
     let header_end = loop {
-        let n = stream.read(&mut tmp).ok()?;
+        let n = match stream.read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return ReadOutcome::Closed,
+        };
         if n == 0 {
-            return None;
+            return ReadOutcome::Closed;
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break i;
         }
         if buf.len() > 1 << 20 {
-            return None;
+            return ReadOutcome::Closed;
         }
     };
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
@@ -264,16 +277,23 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
             h.x_forwarded_proto = Some(v.trim().to_string());
         }
     }
+    // M3 T4 (F8): тело сверх лимита не читаем вовсе — сразу 413.
+    if content_length > max_body {
+        return ReadOutcome::TooLarge;
+    }
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_length {
-        let n = stream.read(&mut tmp).ok()?;
+        let n = match stream.read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return ReadOutcome::Closed,
+        };
         if n == 0 {
             break;
         }
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Some((method, path, String::from_utf8_lossy(&body).into_owned(), h))
+    ReadOutcome::Ok(method, path, String::from_utf8_lossy(&body).into_owned(), h)
 }
 
 fn write_reply(stream: &mut TcpStream, reply: Reply) {
@@ -355,12 +375,30 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
     // T3: rate-limit (None — выключен, desktop по умолчанию).
     let limits: Option<std::sync::Arc<hds_core::ratelimit::Limiter>> =
         hds_core::ratelimit::Limiter::from_config(&cfg).map(std::sync::Arc::new);
+    // T4: лимит тела и предел соединений (`http.max_body_kb`/`http.max_conns`).
+    let max_body = hds_core::net::max_body_bytes(&cfg);
+    let max_conns = hds_core::net::max_conns(&cfg);
+    let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let listener =
         TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                // T4: сверх предела — короткий 503 без спавна потока.
+                if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
+                    write_reply_with(
+                        &mut stream,
+                        (
+                            503,
+                            "application/json",
+                            json!({ "error": "overloaded", "hint": "too many connections, retry later" })
+                                .to_string(),
+                        ),
+                        &[("Retry-After", "2".to_string())],
+                    );
+                    continue;
+                }
                 let peer = stream
                     .peer_addr()
                     .map(|a| a.ip().to_string())
@@ -368,46 +406,35 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
                 let mp = mcp_path.clone();
                 let env = env.clone();
                 let limits = limits.clone();
+                let conns = std::sync::Arc::clone(&conns);
+                conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 std::thread::spawn(move || {
-                    if let Some((m, p, b, head)) = read_request(&mut stream) {
-                        let ip = hds_core::net::real_client_ip(
-                            &peer,
-                            head.x_forwarded_for.as_deref(),
-                            trusted,
-                        );
-                        // T3: ключ лимитов — токен, иначе IP.
-                        let token = auth::bearer_token(head.authorization.as_deref());
-                        let key = token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone());
-                        let is_login = p.split('?').next().unwrap_or("") == "/auth/login";
-                        // Лимит частоты: /auth/login — жёсткий, по IP логина.
-                        let over = match &limits {
-                            Some(l) if is_login => l.check_login(&ip),
-                            Some(l) => l.check(&key),
-                            None => None,
-                        };
-                        if let (Some(l), Some(retry)) = (&limits, over) {
-                            let r = too_many(false, retry);
-                            write_reply_with(&mut stream, r, &rate_limit_headers(l, retry));
-                            return;
+                    let _dec = ConnGuard(&conns);
+                    match read_request(&mut stream, max_body) {
+                        ReadOutcome::TooLarge => {
+                            // T4: тело больше лимита — 413 (F8).
+                            write_reply(
+                                &mut stream,
+                                (
+                                    413,
+                                    "application/json",
+                                    json!({ "error": "payload too large",
+                                            "hint": format!("limit is {} KiB (http.max_body_kb)",
+                                                max_body / 1024) })
+                                    .to_string(),
+                                ),
+                            );
                         }
-                        // Тяжёлый RAG-инструмент — под лимит параллелизма
-                        // (guard живёт до конца обработки запроса).
-                        let heavy = b.contains("tools/call") && b.contains("ask_my_files");
-                        let inflight_guard = match &limits {
-                            Some(l) if heavy => l.inflight_guard(&key),
-                            _ => None,
-                        };
-                        if heavy && inflight_guard.is_none() {
-                            if let Some(l) = &limits {
-                                let r = too_many(true, 1);
-                                write_reply_with(&mut stream, r, &rate_limit_headers(l, 1));
-                                return;
-                            }
+                        ReadOutcome::Ok(m, p, b, head) => {
+                            let ctx = ServeCtx {
+                                mp: &mp,
+                                env: &env,
+                                trusted,
+                                limits: limits.as_deref(),
+                            };
+                            serve_request(&mut stream, &m, &p, &b, head, &peer, &ctx);
                         }
-                        write_reply(
-                            &mut stream,
-                            route(&m, &p, &b, &mp, &env, head.authorization.as_deref(), &ip),
-                        );
+                        ReadOutcome::Closed => {}
                     }
                 });
             }
@@ -415,4 +442,79 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// RAII-декремент счётчика соединений (на выходе потока).
+struct ConnGuard<'a>(&'a std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Контекст сервера для обработки запроса (чтобы не таскать 10 аргументов).
+struct ServeCtx<'a> {
+    mp: &'a str,
+    env: &'a AuthEnv,
+    trusted: bool,
+    limits: Option<&'a hds_core::ratelimit::Limiter>,
+}
+
+/// Обработать прочитанный запрос: rate-limit → audit → route (чистая часть —
+/// в [`route`], сокетная — здесь).
+fn serve_request(
+    stream: &mut TcpStream,
+    m: &str,
+    p: &str,
+    b: &str,
+    head: ReqHead,
+    peer: &str,
+    ctx: &ServeCtx<'_>,
+) {
+    let ServeCtx {
+        mp,
+        env,
+        trusted,
+        limits,
+    } = *ctx;
+    let ip = hds_core::net::real_client_ip(peer, head.x_forwarded_for.as_deref(), trusted);
+    // T3: ключ лимитов — токен, иначе IP.
+    let token = auth::bearer_token(head.authorization.as_deref());
+    let key = token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone());
+    let is_login = p.split('?').next().unwrap_or("") == "/auth/login";
+    // Лимит частоты: /auth/login — жёсткий, по IP логина.
+    let over = match limits {
+        Some(l) if is_login => l.check_login(&ip),
+        Some(l) => l.check(&key),
+        None => None,
+    };
+    if let (Some(l), Some(retry)) = (limits, over) {
+        let r = too_many(false, retry);
+        write_reply_with(stream, r, &rate_limit_headers(l, retry));
+        return;
+    }
+    // Тяжёлый RAG-инструмент — под лимит параллелизма (слот освобождается
+    // после route; лимитер — не Arc здесь, поэтому слот снимаем вручную).
+    let heavy = b.contains("tools/call") && b.contains("ask_my_files");
+    if heavy {
+        let acquired = limits.map(|l| l.inflight_acquire(&key)).unwrap_or(true);
+        if !acquired {
+            if let Some(l) = limits {
+                let r = too_many(true, 1);
+                write_reply_with(stream, r, &rate_limit_headers(l, 1));
+            }
+            return;
+        }
+        let reply = route(m, p, b, mp, env, head.authorization.as_deref(), &ip);
+        if let Some(l) = limits {
+            l.inflight_release(&key);
+        }
+        write_reply(stream, reply);
+        return;
+    }
+    write_reply(
+        stream,
+        route(m, p, b, mp, env, head.authorization.as_deref(), &ip),
+    );
 }

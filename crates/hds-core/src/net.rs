@@ -49,6 +49,27 @@ pub fn request_scheme(xfp: Option<&str>, trusted: bool) -> &'static str {
     "http"
 }
 
+/// Лимит тела запроса в байтах (`http.max_body_kb`, дефолт 512 КиБ;
+/// 0 — без лимита — не рекомендуется). Превышение → `413` (M3 T4, ревью F8).
+pub fn max_body_bytes(cfg: &Config) -> usize {
+    let kb = dig(cfg, "http.max_body_kb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(512);
+    if kb == 0 {
+        return usize::MAX; // 0 — без лимита (не рекомендуется)
+    }
+    usize::try_from(kb.saturating_mul(1024)).unwrap_or(usize::MAX)
+}
+
+/// Предел одновременных соединений (`http.max_conns`, дефолт 32; 0 — без
+/// предела). Сверх предела — короткий `503` без спавна потоков (M3 T4).
+pub fn max_conns(cfg: &Config) -> usize {
+    dig(cfg, "http.max_conns")
+        .and_then(|v| v.as_u64())
+        .map(|v| usize::try_from(v).unwrap_or(0))
+        .unwrap_or(32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{real_client_ip, request_scheme, trusted_proxy};
@@ -107,5 +128,24 @@ mod tests {
             "http",
             "неизвестное — http"
         );
+    }
+
+    /// M3 T4: лимит тела (дефолт 512 КиБ; 0 — без лимита) и соединений (32).
+    #[test]
+    fn body_and_conn_limits() {
+        use super::{max_body_bytes, max_conns};
+        let d = serde_yaml::from_str::<serde_yaml::Value>("").unwrap();
+        assert_eq!(max_body_bytes(&d), 512 * 1024, "дефолт 512 КиБ");
+        assert_eq!(max_conns(&d), 32, "дефолт 32 соединения");
+        let t =
+            serde_yaml::from_str::<serde_yaml::Value>("http:\n  max_body_kb: 64\n  max_conns: 8")
+                .unwrap();
+        assert_eq!(max_body_bytes(&t), 64 * 1024);
+        assert_eq!(max_conns(&t), 8);
+        let off =
+            serde_yaml::from_str::<serde_yaml::Value>("http:\n  max_body_kb: 0\n  max_conns: 0")
+                .unwrap();
+        assert_eq!(max_body_bytes(&off), usize::MAX, "0 — без лимита");
+        assert_eq!(max_conns(&off), 0, "0 — без предела");
     }
 }

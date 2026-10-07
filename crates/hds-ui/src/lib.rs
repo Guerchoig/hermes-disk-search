@@ -1307,7 +1307,29 @@ fn ui_auth_gate(
 ) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
     let cfg = match load() {
         Ok(c) => c,
-        Err(_) => return Ok(None), // без конфига — прежнее поведение
+        Err(_) => {
+            // M3 T4 (F2): в server-поставке нечитаемый/битый config.yaml
+            // молча открывал UI без токена. Fail-closed: если в системном
+            // каталоге состояния лежит конфиг с `profile: server`, гейт
+            // закрывается (401) — безопаснее; десктоп — прежнее поведение.
+            let sys_cfg = hds_core::config::system_state_dir().map(|d| d.join("config.yaml"));
+            let server_cfg = sys_cfg
+                .filter(|p| p.is_file())
+                .and_then(|p| hds_core::config::load_from(&p).ok())
+                .map(|c| hds_core::config::profile(&c).is_server())
+                .unwrap_or(false);
+            if server_cfg {
+                eprintln!("ui: config.yaml не читается при profile: server — fail-closed (401)");
+                return Err((
+                    401,
+                    "application/json",
+                    json!({ "error": "unauthorized",
+                            "hint": "UI: config unreadable in server profile — fix config.yaml" })
+                    .to_string(),
+                ));
+            }
+            return Ok(None); // без конфига — прежнее поведение (desktop)
+        }
     };
     let enabled = dig(&cfg, "access.enabled")
         .and_then(|v| v.as_bool())
@@ -1612,21 +1634,34 @@ pub fn route_with_access(
     }
 }
 
+/// Исход чтения запроса (M3 T4): тело сверх лимита — `413` без чтения тела.
+#[allow(clippy::large_enum_variant)]
+enum ReadOutcome {
+    Ok(String, String, String, ReqHeaders, String),
+    /// Content-Length выше `http.max_body_kb` — ответить 413.
+    TooLarge,
+    /// Соединение закрыто/ошибка чтения — молча.
+    Closed,
+}
+
 /// Читать один HTTP/1.1-запрос: `(метод, путь, query, заголовки, тело)`.
-fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHeaders, String)> {
+fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
     let mut buf = Vec::new();
     let mut tmp = [0u8; 4096];
     let header_end = loop {
-        let n = stream.read(&mut tmp).ok()?;
+        let n = match stream.read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return ReadOutcome::Closed,
+        };
         if n == 0 {
-            return None;
+            return ReadOutcome::Closed;
         }
         buf.extend_from_slice(&tmp[..n]);
         if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
             break i;
         }
         if buf.len() > 1 << 20 {
-            return None;
+            return ReadOutcome::Closed;
         }
     };
     let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
@@ -1659,22 +1694,29 @@ fn read_request(stream: &mut TcpStream) -> Option<(String, String, String, ReqHe
             }
         }
     }
+    // M3 T4 (F8): тело сверх лимита не читаем вовсе — сразу 413.
+    if content_length > max_body {
+        return ReadOutcome::TooLarge;
+    }
     let mut body = buf[header_end + 4..].to_vec();
     while body.len() < content_length {
-        let n = stream.read(&mut tmp).ok()?;
+        let n = match stream.read(&mut tmp) {
+            Ok(n) => n,
+            Err(_) => return ReadOutcome::Closed,
+        };
         if n == 0 {
             break;
         }
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
-    Some((
+    ReadOutcome::Ok(
         method,
         path,
         query,
         h,
         String::from_utf8_lossy(&body).into_owned(),
-    ))
+    )
 }
 
 fn write_reply(stream: &mut TcpStream, reply: Reply) {
@@ -1726,7 +1768,12 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
     let trusted = load()
         .map(|c| hds_core::net::trusted_proxy(&c))
         .unwrap_or(false);
-    // M3 T3: rate-limit (None — выключен, desktop по умолчанию).
+    // M3 T4: лимит тела и предел соединений.
+    let max_body = load()
+        .map(|c| hds_core::net::max_body_bytes(&c))
+        .unwrap_or(512 * 1024);
+    let max_conns = load().map(|c| hds_core::net::max_conns(&c)).unwrap_or(32);
+    let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let limits: Option<std::sync::Arc<hds_core::ratelimit::Limiter>> = load()
         .ok()
         .and_then(|c| hds_core::ratelimit::Limiter::from_config(&c))
@@ -1734,48 +1781,82 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                // M3 T4: сверх предела — короткий 503 без спавна потока.
+                if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
+                    write_reply_with(
+                        &mut stream,
+                        (
+                            503,
+                            "application/json",
+                            json!({ "error": "overloaded", "hint": "too many connections, retry later" })
+                                .to_string(),
+                        ),
+                        &[("Retry-After", "2".to_string())],
+                    );
+                    continue;
+                }
                 let peer = stream
                     .peer_addr()
                     .map(|a| a.ip().to_string())
                     .unwrap_or_else(|_| "unknown".to_string());
                 let limits = limits.clone();
+                let conns2 = std::sync::Arc::clone(&conns);
+                conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 std::thread::spawn(move || {
-                    if let Some((m, p, q, mut h, b)) = read_request(&mut stream) {
-                        // Реальный клиент: remote_addr, за доверенным прокси — XFF.
-                        h.client_ip = Some(hds_core::net::real_client_ip(
-                            &peer,
-                            h.x_forwarded_for.as_deref(),
-                            trusted,
-                        ));
-                        // M3 T3: лимит частоты (ключ — токен, иначе IP).
-                        let token = h.authorization.as_deref().and_then(|a| {
-                            a.split_once(' ')
-                                .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
-                                .map(|(_, t)| t.trim())
-                        });
-                        let key = token
-                            .map(|s| s.to_string())
-                            .unwrap_or_else(|| h.client_ip.clone().unwrap_or_default());
-                        if let (Some(l), Some(retry)) =
-                            (&limits, limits.as_ref().and_then(|l| l.check(&key)))
-                        {
-                            let r = (
-                                429,
-                                "application/json",
-                                serde_json::json!({
-                                    "error": "rate limited",
-                                    "hint": format!("retry after {retry}s")
-                                })
-                                .to_string(),
+                    let _dec = ConnGuard(&conns2);
+                    match read_request(&mut stream, max_body) {
+                        ReadOutcome::TooLarge => {
+                            // M3 T4 (F8): тело больше лимита — 413.
+                            write_reply(
+                                &mut stream,
+                                (
+                                    413,
+                                    "application/json",
+                                    json!({ "error": "payload too large",
+                                            "hint": format!("limit is {} KiB (http.max_body_kb)",
+                                                max_body / 1024) })
+                                    .to_string(),
+                                ),
                             );
-                            let hdrs = vec![
-                                ("Retry-After", retry.to_string()),
-                                ("X-RateLimit-Limit", l.cfg().requests_per_min.to_string()),
-                            ];
-                            write_reply_with(&mut stream, r, &hdrs);
-                            return;
                         }
-                        write_reply(&mut stream, route(&m, &p, &q, &h, &b));
+                        ReadOutcome::Ok(m, p, q, mut h, b) => {
+                            // Реальный клиент: remote_addr, за доверенным прокси — XFF.
+                            h.client_ip = Some(hds_core::net::real_client_ip(
+                                &peer,
+                                h.x_forwarded_for.as_deref(),
+                                trusted,
+                            ));
+                            // M3 T3: лимит частоты (ключ — токен, иначе IP).
+                            let token = h.authorization.as_deref().and_then(|a| {
+                                a.split_once(' ')
+                                    .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
+                                    .map(|(_, t)| t.trim())
+                            });
+                            let key = token
+                                .map(|s| s.to_string())
+                                .unwrap_or_else(|| h.client_ip.clone().unwrap_or_default());
+                            if let (Some(l), Some(retry)) =
+                                (&limits, limits.as_ref().and_then(|l| l.check(&key)))
+                            {
+                                let r = (
+                                    429,
+                                    "application/json",
+                                    serde_json::json!({
+                                        "error": "rate limited",
+                                        "hint": format!("retry after {retry}s")
+                                    })
+                                    .to_string(),
+                                );
+                                let hdrs = vec![
+                                    ("Retry-After", retry.to_string()),
+                                    ("X-RateLimit-Limit", l.cfg().requests_per_min.to_string()),
+                                ];
+                                write_reply_with(&mut stream, r, &hdrs);
+                                return;
+                            }
+                            write_reply(&mut stream, route(&m, &p, &q, &h, &b));
+                        }
+                        ReadOutcome::Closed => {}
                     }
                 });
             }
@@ -1783,6 +1864,15 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// RAII-декремент счётчика соединений (на выходе потока).
+struct ConnGuard<'a>(&'a std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 // --- Доступ (M1 T5): пользователи/проекты/токены. В server-режиме сюда
