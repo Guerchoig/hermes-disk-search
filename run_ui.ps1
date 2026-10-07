@@ -6,6 +6,13 @@
 $root = $PSScriptRoot
 . (Join-Path $root 'hds_bin.ps1')
 $uiPort = 8765
+# Server profile (M2 T5): config lives in %ProgramData%\hermes-disk-search —
+# then the UI is headless (admin-only, behind a reverse proxy): no browser.
+$isServer = $false
+$serverCfg = Join-Path $env:ProgramData "hermes-disk-search\config.yaml"
+if (Test-Path $serverCfg) {
+    $isServer = ((Get-Content $serverCfg -Raw) -match '(?m)^\s*profile:\s*server\s*(#.*)?$')
+}
 # bin\ (packaged release) or target\{release,debug}\ (source checkout).
 $hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
 if (-not $hdsExe) {
@@ -27,7 +34,11 @@ function Test-UiUp([int]$Port) {
 
 if (Test-UiUp $uiPort) {
     Write-Host "[ok] UI server already running on port $uiPort"
-    Start-Process "http://127.0.0.1:$uiPort"
+    if ($isServer) {
+        Write-Host "[ok] server profile: UI is headless (admin-only, use the reverse proxy URL)"
+    } else {
+        Start-Process "http://127.0.0.1:$uiPort"
+    }
     exit 0
 }
 
@@ -51,4 +62,8 @@ if (-not $up) {
     exit 1
 }
 Write-Host "Logs: $errLog"
-Start-Process "http://127.0.0.1:$uiPort"
+if ($isServer) {
+    Write-Host "[ok] server profile: UI is headless (admin-only, use the reverse proxy URL)"
+} else {
+    Start-Process "http://127.0.0.1:$uiPort"
+}

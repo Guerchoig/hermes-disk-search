@@ -4,9 +4,9 @@
 > Структура — по образцу `PLAN_M1_ACCESS_PROJECTS.md`. Промт для нового чата —
 > `M2_HANDOFF_PROMPT.md`.
 >
-> **Статус:** в работе — **T0 (дефекты M1), T1 (профиль), T2 (серверные пути),
-> T3 (bind UI из конфига) выполнены** 07.10.2026 (детали и коммиты — §4); дальше
-> T4 (службы Windows/macOS) → T5 (headless-UI + доклад). Ветка — **`server-multiuser`**.
+> **Статус:** **выполнен 07.10.2026** — T0 (дефекты M1), T1 (профиль), T2 (серверные
+> пути), T3 (bind UI из конфига), T4 (службы Windows/macOS + installers), T5
+> (headless-UI + доклад); детали и коммиты — §4. Ветка — **`server-multiuser`**.
 > **Основание:** решения заказчика 07.10.2026 (`PLAN_SERVER_MULTIUSER.md`, шапка):
 > периметр — **reverse-proxy с TLS**; **UI — только админ**; **службы управляются из UI**
 > (W10, будущий Э7); профиль `desktop | server` — «разделить интерактивный десктоп и
@@ -142,18 +142,34 @@
 - [x] Тесты (`ui_core.rs`: дефолт/секция/мусор). Рантайм: `ui.port: 18790` →
       `hds ui` без флагов слушает 18790 (HTTP 200).
 
-### T4. Службы Windows/macOS — 2,5–3 дн
-- [ ] `hds service run <role>` — единый сервис-хостинг (`watch`/`mcp-http`/`ui`/`llm-host`).
-- [ ] Windows: `install | uninstall | start | stop | status`; **спайк** выбора
-      (`windows-service` vs WinSW/NSSM vs AtStartup-задача).
-- [ ] macOS: генерация/установка LaunchDaemon plist (`install_server.command`).
-- [ ] `installers/install_server.ps1` (Windows) и `installers/install_server.command` (macOS).
-- [ ] Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) сохранить без изменений.
+### T4. Службы Windows/macOS — 2,5–3 дн — **выполнен 07.10.2026**
+- [x] `hds service run <role>` — единый сервис-хостинг (`watch`/`mcp-http`/`ui`/`llm-host`).
+      → `71d6122` `feat(service)`: Windows — SCM-диспетчер (`windows-service` 0.8;
+      спайк: crates.io доступен, крейт скачан в кэш — «Вариант A»), не под SCM —
+      прямой запуск; `llm-host` — спавн/ожидание `bin\llm_host.exe run` (SCM
+      контролирует наш процесс, Stop убивает ребёнка через `taskkill /T`).
+      Инициализация каталога состояния (`ensure_state_dir`) на входе.
+- [x] Windows: `install | uninstall | start | stop | status` — через `sc.exe`
+      (автостарт + авторестарт 5с/5с/30с). Спайк завершён: **SCM-крейт** выбран
+      (WinSW/NSSM не понадобились; AtStartup-фолбэк остаётся в инсталляторе).
+- [x] macOS: генерация/установка LaunchDaemon plist (`RunAtLoad`+`KeepAlive`,
+      `launchctl bootstrap/bootout/kickstart/kill/print`).
+- [x] `installers/install_server.ps1` (state dir + шаблон конфига `profile: server`,
+      службы через SCM, фолбэк AtStartup-задача SYSTEM, снятие десктопных
+      AtLogOn-задач ролей) и `installers/install_server.command` (macOS, sudo).
+- [x] Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) не изменён.
+      Рантайм: прямой запуск `service run ui` отвечает 200; без прав — graceful
+      (`sc query` 1060 → exit 1; `sc create` 5 → exit 5; admin-check скрипта).
+      ⚠ Полный SCM-цикл (install/start/stop) — только из-под администратора,
+      на этой машине шелл без elevated; юнит-тесты покрывают сборку аргументов.
 
-### T5. Headless UI + доклад — 1 дн
-- [ ] `server`: UI без ярлыков/авто-браузера; bind из `ui.*`.
-- [ ] `README.md` (раздел «серверный профиль»), `STATUS.md`, `PLAN_SERVER_MULTIUSER.md` §9
-      (статус M2).
+### T5. Headless UI + доклад — 1 дн — **выполнен 07.10.2026**
+- [x] `server`: UI без ярлыков/авто-браузера; bind из `ui.*`.
+      → `run_ui.ps1` видит `profile: server` в системном конфиге и не открывает
+      браузер (в обеих ветках); bind — из секции `ui` (T3). Ярлыки ставит только
+      десктопный setup.
+- [x] `README.md` (раздел «Серверный профиль и службы (M2)»), `STATUS.md`,
+      `PLAN_SERVER_MULTIUSER.md` §9 (статус M2).
 
 ## 5. Приёмка M2 (черновик)
 

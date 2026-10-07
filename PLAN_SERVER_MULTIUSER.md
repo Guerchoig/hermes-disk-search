@@ -490,6 +490,14 @@ hds.example.com {
 > **Сценарии использования подсистемы доступа — README_SERVER_MULTIUSER.md**
 > (включение server-режима, подключение пользователей и клиентов, ротация токенов,
 > десктоп-режим, шпаргалка команд).
+>
+> **Статус M2 (07.10.2026):** серверный профиль и службы реализованы (детали и
+> коммиты — `PLAN_M2_SERVER_PROFILE.md`): профиль `desktop|server` + предупреждения
+> в `hds check`; каталог состояния server (`%ProgramData%\hermes-disk-search` /
+> `/Library/Application Support/...`) для БД, `access.yaml`, PID/логов/heartbeat;
+> bind UI из секции `ui`; службы Windows (SCM, крейт `windows-service`) и macOS
+> (LaunchDaemon) с установщиками `installers/install_server.*`; headless-UI.
+> Десктоп-профиль не изменён.
 
 **Milestone M1 — «Фундамент доступа» = Э2 (только приложение) + Э3 (Проекты).**
 Начинаем с него, потому что:

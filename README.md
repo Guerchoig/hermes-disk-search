@@ -585,6 +585,35 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 * Управление: `hds user add|list|del|passwd|grant|revoke`, `hds token list|revoke`;
   в UI — карточка «Доступ».
 
+## Серверный профиль и службы (M2)
+
+Профиль задаётся ключом **`profile: desktop | server`** (`desktop` — по умолчанию;
+серверный профиль сам auth **не** включает — доступ определяет только
+`access.enabled`). Состояние `hds check` показывает профиль и предупреждения
+(server без `access.enabled`/`ui` → `warn` с подсказками).
+
+* **Каталог состояния (server):** `%ProgramData%\hermes-disk-search` (macOS —
+  `/Library/Application Support/hermes-disk-search`). Там живут `config.yaml`
+  (если конфига нет в корне установки — берётся отсюда), `index.db`,
+  `data/` (`access.yaml`, PID mcp-http/llm-host, логи, heartbeat).
+  Desktop-профиль — прежнее поведение (всё рядом с программой).
+* **Bind веб-интерфейса:** секция `ui: { host, port }` (по умолчанию
+  `127.0.0.1:8765`); флаги `hds ui --host/--port` переопределяют. Server:
+  держите `127.0.0.1` — наружу публикует reverse-proxy с TLS (`/mcp`, `/ui`).
+* **Службы** (старт при загрузке без интерактивного входа):
+  `hds service run|install|uninstall|start|stop|status <role>`, роли —
+  `watch | mcp-http | ui | llm-host`. Windows — SCM (`hermes-disk-search-<role>`,
+  автостарт + авторестарт при падении; `run` под SCM обслуживает крейт
+  `windows-service`); macOS — LaunchDaemon (`com.hermes-disk-search.<role>`,
+  `RunAtLoad` + `KeepAlive`). Управляющие подкоманды требуют прав администратора.
+* **Установка server-пакета:** `installers\install_server.ps1` (Windows,
+  из-под администратора; службы предпочтительно через SCM, фолбэк — AtStartup-
+  задача SYSTEM; снимает десктопные AtLogOn-задачи ролей) и
+  `installers/install_server.command` (macOS, под sudo).
+* **Headless-UI (server):** без ярлыков и авто-браузера — `run_ui.ps1` видит
+  server-профиль и не открывает браузер; админ ходит через reverse-proxy.
+  Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) не менялся.
+
 ## Настройки (`config.yaml`)
 
 Полный образец — `config.example.yaml`. Основное:

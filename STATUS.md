@@ -20,8 +20,14 @@
 > `/Library/Application Support/...`, `HDS_ROOT` сильнее всего; БД, `access.yaml`,
 > PID/логи/heartbeat — через резолвер; фолбэк конфига в системный каталог). **T3** —
 > `hds ui`/`hds_ui` слушают `ui.host:ui.port` из конфига (флаги переопределяют).
-> Все шаги проверены рантаймом; десктоп-поведение не изменилось. Дальше — T4 (службы)
-> → T5 (headless-UI, доклад). Детали — `PLAN_M2_SERVER_PROFILE.md` (§4, коммиты).
+> **T4** — службы: `hds service run|install|uninstall|start|stop|status <role>`
+> (watch/mcp-http/ui/llm-host); Windows — SCM через крейт `windows-service`
+> (автостарт + авторестарт), macOS — LaunchDaemon; `installers/install_server.ps1`
+> (AtStartup-фолбэк, снимает десктопные AtLogOn-задачи) и `install_server.command`.
+> **T5** — headless-UI (`run_ui.ps1` в server-профиле не открывает браузер) +
+> README «Серверный профиль и службы». Все шаги проверены рантаймом (полный
+> SCM-цикл — только из-под администратора, см. PLAN_M2 §4 T4); десктоп-поведение
+> не изменилось. Детали — `PLAN_M2_SERVER_PROFILE.md` (§4, коммиты).
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
 > **Релиз v0.13.0 (02.10.2026):** CI переписан под Rust-first (Windows — блокирующий,
