@@ -565,10 +565,12 @@ fn check_rerank(cfg: &Config) -> Option<Check> {
 /// (ровно тот случай, который в инциденте §14 выглядел как «резидент не отвечает»).
 /// Отдельно смотрим свежесть лога резидента: heartbeat живой, а лог молчит — движок
 /// держит вызов.
-pub fn check_gpu_observability() -> Check {
-    let root = hds_core::config::project_root();
-    let hb_path = root.join("data").join("llm-host.heartbeat.json");
-    let log_path = root.join("data").join("logs").join("llm-host.log");
+pub fn check_gpu_observability(cfg: &Config) -> Check {
+    // M2 T2: файлы резидента — в каталоге состояния (server — ProgramData /
+    // Application Support), не в корне проекта.
+    let data_root = hds_core::config::state_dir(cfg).join("data");
+    let hb_path = data_root.join("llm-host.heartbeat.json");
+    let log_path = data_root.join("logs").join("llm-host.log");
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -664,9 +666,11 @@ pub fn check_diarization(cfg: &Config) -> Check {
 fn check_profile(cfg: &Config) -> Check {
     let p = hds_core::config::profile(cfg);
     if !p.is_server() {
-        return Check::new("profile", "ok", "профиль установки: desktop").msg(
-            "дефолт: состояние рядом с программой, автозапуск AtLogOn — поведение без изменений",
-        );
+        return Check::new("profile", "ok", "профиль установки: desktop").msg(format!(
+            "дефолт: состояние рядом с программой, автозапуск AtLogOn — поведение без изменений; \
+             каталог состояния: {}",
+            hds_core::config::state_dir(cfg).display()
+        ));
     }
     let enabled = hds_core::config::dig(cfg, "access.enabled")
         .and_then(|v| v.as_bool())
@@ -675,9 +679,10 @@ fn check_profile(cfg: &Config) -> Check {
         .and_then(|v| v.as_mapping())
         .map(|m| !m.is_empty())
         .unwrap_or(false);
-    let mut msgs = vec![
-        "серверный режим: системный каталог состояния, службы без интерактивного входа, headless-UI".to_string(),
-    ];
+    let mut msgs = vec![format!(
+        "серверный режим: системный каталог состояния ({}), службы без интерактивного входа, headless-UI",
+        hds_core::config::state_dir(cfg).display()
+    )];
     let mut fixes: Vec<String> = Vec::new();
     let mut status = "ok";
     if !enabled {
@@ -741,7 +746,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         checks.push(c);
     }
 
-    checks.push(check_gpu_observability());
+    checks.push(check_gpu_observability(cfg));
     checks.push(
         Check::new(
             "gpu-manual",

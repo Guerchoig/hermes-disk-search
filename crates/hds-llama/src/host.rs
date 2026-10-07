@@ -74,6 +74,54 @@ pub fn repo_root() -> PathBuf {
     clean_path(&Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".."))
 }
 
+/// Системный каталог состояния (server-профиль, M2 T2) — зеркально
+/// `hds_core::config::system_state_dir` (hds-llama от hds-core не зависит):
+/// Windows — `%ProgramData%\hermes-disk-search`, macOS —
+/// `/Library/Application Support/hermes-disk-search`.
+pub fn system_state_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("ProgramData")
+            .filter(|v| !v.is_empty())
+            .map(|v| PathBuf::from(v).join("hermes-disk-search"))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            PathBuf::from("/Library")
+                .join("Application Support")
+                .join("hermes-disk-search"),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// data-корень файлов состояния резидента (pid/лог/heartbeat, M2 T2):
+/// `profile: server` в конфиге → системный каталог состояния, иначе корень
+/// проекта (прежнее поведение). Профиль читается по пути конфига.
+pub fn resident_data_root(config_path: &Path) -> PathBuf {
+    let is_server = std::fs::read_to_string(config_path)
+        .ok()
+        .and_then(|t| {
+            serde_yaml::from_str::<serde_yaml::Value>(t.trim_start_matches('\u{feff}')).ok()
+        })
+        .and_then(|v| {
+            v.get("profile")
+                .and_then(|p| p.as_str())
+                .map(|s| s == "server")
+        })
+        .unwrap_or(false);
+    if is_server {
+        if let Some(d) = system_state_dir() {
+            return d;
+        }
+    }
+    repo_root()
+}
+
 /// Корень проекта по каталогу исполняемого файла (чистая функция, зеркально
 /// `hds_core::config::root_from_exe`): `<root>\bin\x.exe` → `<root>`;
 /// `target\{debug,release}[\deps]\x.exe` → корень репозитория; иначе — каталог exe.
@@ -227,6 +275,10 @@ pub struct HostConfig {
     pub dispatcher: bool,
     /// Каталог сигнальных файлов (`index.pause`) — корень проекта.
     pub pause_dir: PathBuf,
+    /// Каталог состояния для pid/лог/heartbeat (M2 T2): desktop — корень проекта,
+    /// `profile: server` — системный каталог (`%ProgramData%\hermes-disk-search` /
+    /// `/Library/Application Support/hermes-disk-search`).
+    pub data_dir: PathBuf,
     /// pid-файл (`None` — не занимать: разовые прогоны, проверки).
     pub pid_file: Option<PathBuf>,
     /// лог-файл (`None` — только консоль).
@@ -240,10 +292,29 @@ pub struct HostConfig {
 impl Default for HostConfig {
     fn default() -> Self {
         let root = repo_root();
+        // M2 T2: конфиг — `HDS_CONFIG` → корень проекта; если в корне его нет
+        // (server-поставка) — системный каталог состояния.
+        let config = match std::env::var("HDS_CONFIG") {
+            Ok(v) if !v.is_empty() => PathBuf::from(v),
+            _ => {
+                let root_cfg = root.join("config.yaml");
+                if root_cfg.is_file() {
+                    root_cfg
+                } else if let Some(sys) = system_state_dir() {
+                    let sys_cfg = sys.join("config.yaml");
+                    if sys_cfg.is_file() {
+                        sys_cfg
+                    } else {
+                        root_cfg
+                    }
+                } else {
+                    root_cfg
+                }
+            }
+        };
+        let data_dir = resident_data_root(&config);
         HostConfig {
-            config: std::env::var("HDS_CONFIG")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| root.join("config.yaml")),
+            config,
             runtime: None,
             engine_dir: None,
             host: None,
@@ -251,9 +322,10 @@ impl Default for HostConfig {
             ngl: None,
             thinking: None,
             dispatcher: true,
-            pause_dir: root.clone(),
-            pid_file: Some(resident::default_pid_path(&root)),
-            log_file: Some(resident::default_log_path(&root)),
+            pause_dir: root,
+            data_dir: data_dir.clone(),
+            pid_file: Some(resident::default_pid_path(&data_dir)),
+            log_file: Some(resident::default_log_path(&data_dir)),
             internal: true,
             nvml_index: 0,
         }
@@ -2448,7 +2520,7 @@ impl Host {
         let arbiter = backend.spawn_arbiter(Arc::clone(&stop));
         // L1: heartbeat резидента — состояние видно снаружи даже когда движок занят и
         // фасад не отвечает (`W4_REPORT.md` §14).
-        let heartbeat_path = resident::default_heartbeat_path(&cfg.pause_dir);
+        let heartbeat_path = resident::default_heartbeat_path(&cfg.data_dir);
         let heartbeat = backend.spawn_heartbeat(heartbeat_path.clone(), Arc::clone(&stop));
         log.line(&format!(
             "фон: heartbeat резидента (такт {} с, {}; «кто держит движок» видно и без HTTP)",

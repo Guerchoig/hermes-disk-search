@@ -46,6 +46,49 @@ impl Drop for Tmp {
     }
 }
 
+/// M2 T2: data-корень файлов резидента — `profile: server` → системный каталог
+/// состояния (если платформа его имеет), иначе корень проекта (прежнее поведение).
+#[test]
+fn resident_data_root_follows_profile() {
+    let tmp = Tmp::new("data-root");
+    let desktop = tmp.dir.join("desktop.yaml");
+    std::fs::write(&desktop, "profile: desktop\n").unwrap();
+    let no_profile = tmp.dir.join("none.yaml");
+    std::fs::write(&no_profile, "").unwrap();
+    let garbage = tmp.dir.join("garbage.yaml");
+    std::fs::write(&garbage, "profile: cluster\n").unwrap();
+    assert_eq!(
+        host::resident_data_root(&desktop),
+        host::repo_root(),
+        "desktop — корень проекта"
+    );
+    assert_eq!(
+        host::resident_data_root(&no_profile),
+        host::repo_root(),
+        "нет ключа profile — корень проекта"
+    );
+    assert_eq!(
+        host::resident_data_root(&garbage),
+        host::repo_root(),
+        "неизвестный профиль — корень проекта"
+    );
+
+    let server = tmp.dir.join("server.yaml");
+    std::fs::write(&server, "profile: server\n").unwrap();
+    match host::system_state_dir() {
+        Some(sys) => assert_eq!(
+            host::resident_data_root(&server),
+            sys,
+            "server — системный каталог состояния"
+        ),
+        None => assert_eq!(
+            host::resident_data_root(&server),
+            host::repo_root(),
+            "нет системного каталога — корень проекта (linux-CI)"
+        ),
+    }
+}
+
 /// Второй экземпляр обязан получить отказ: два `llm-host` — два владельца GPU.
 #[test]
 fn pid_file_blocks_second_instance_and_releases_on_drop() {

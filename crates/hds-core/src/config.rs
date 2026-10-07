@@ -89,10 +89,25 @@ fn lexical_normalize(p: &Path) -> PathBuf {
 }
 
 /// `HDS_CONFIG` (если задан) или `<проект>/config.yaml` — как `config.config_path()`.
+///
+/// M2 T2: если конфига в корне проекта нет, а в **системном каталоге состояния**
+/// есть (server-поставка) — берём его. `HDS_CONFIG` по-прежнему сильнее всего.
 pub fn config_path() -> PathBuf {
     match std::env::var_os("HDS_CONFIG") {
         Some(v) if !v.is_empty() => PathBuf::from(v),
-        _ => project_root().join("config.yaml"),
+        _ => {
+            let root_cfg = project_root().join("config.yaml");
+            if root_cfg.is_file() {
+                return root_cfg;
+            }
+            if let Some(sys) = system_state_dir() {
+                let sys_cfg = sys.join("config.yaml");
+                if sys_cfg.is_file() {
+                    return sys_cfg;
+                }
+            }
+            root_cfg
+        }
     }
 }
 
@@ -120,7 +135,9 @@ pub fn dig<'a>(cfg: &'a Value, dotted: &str) -> Option<&'a Value> {
     Some(cur)
 }
 
-/// `db_abs_path(cfg)`: `db_path` (по умолчанию `index.db`) относительно корня проекта.
+/// `db_abs_path(cfg)`: `db_path` (по умолчанию `index.db`) относительно
+/// **каталога состояния** (`state_dir`; M2 T2): desktop — корень проекта
+/// (прежнее поведение), server — системный каталог.
 pub fn db_abs_path(cfg: &Config) -> PathBuf {
     let raw = dig(cfg, "db_path")
         .and_then(|v| v.as_str())
@@ -129,8 +146,65 @@ pub fn db_abs_path(cfg: &Config) -> PathBuf {
     if p.is_absolute() {
         p
     } else {
-        project_root().join(p)
+        state_dir(cfg).join(p)
     }
+}
+
+/// Имя системного каталога состояния (`PLAN_M2_SERVER_PROFILE.md` §3.2).
+pub const STATE_DIR_NAME: &str = "hermes-disk-search";
+
+/// Системный каталог состояния для server-профиля:
+/// Windows — `%ProgramData%\hermes-disk-search`, macOS —
+/// `/Library/Application Support/hermes-disk-search`. На прочих платформах —
+/// `None` (desktop-поведение).
+pub fn system_state_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        std::env::var_os("ProgramData")
+            .filter(|v| !v.is_empty())
+            .map(|v| PathBuf::from(v).join(STATE_DIR_NAME))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Some(
+            PathBuf::from("/Library")
+                .join("Application Support")
+                .join(STATE_DIR_NAME),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        None
+    }
+}
+
+/// Каталог состояния (M2 T2): где живут `index.db`, `data/` (`access.yaml`,
+/// PID, логи).
+///
+/// Порядок: `HDS_ROOT` переопределяет всё (изоляция тестов/перенос установки) →
+/// `server` — системный каталог ([`system_state_dir`]; если та недоступна —
+/// корень проекта) → `desktop` — корень проекта (прежнее поведение).
+pub fn state_dir(cfg: &Config) -> PathBuf {
+    if let Some(v) = std::env::var_os("HDS_ROOT") {
+        if !v.is_empty() {
+            return lexical_normalize(&PathBuf::from(v));
+        }
+    }
+    if profile(cfg).is_server() {
+        if let Some(d) = system_state_dir() {
+            return d;
+        }
+    }
+    project_root()
+}
+
+/// Инициализация каталога состояния при первом запуске (M2 T2): сам каталог и
+/// `data/` (`access.yaml`, PID, логи). Создание идемпотентно.
+pub fn ensure_state_dir(cfg: &Config) -> std::io::Result<PathBuf> {
+    let d = state_dir(cfg);
+    std::fs::create_dir_all(&d)?;
+    std::fs::create_dir_all(d.join("data"))?;
+    Ok(d)
 }
 
 /// Профиль установки (`profile` в config.yaml, план M2 §3.1).
@@ -200,6 +274,11 @@ fn is_permission(e: &std::io::Error) -> bool {
 mod tests {
     use super::root_from_exe;
     use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    /// Тесты, трогающие env (`HDS_ROOT`/`HDS_CONFIG`/`ProgramData`), идут
+    /// параллельно в потоках — гонка env недопустима.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Путь из частей с разделителем текущей ОС (тесты идут и на ubuntu-CI).
     fn p(parts: &[&str]) -> PathBuf {
@@ -263,5 +342,82 @@ mod tests {
         assert_eq!(profile(&cfg), Profile::Desktop);
         let cfg: Value = serde_yaml::from_str("profile: [server]").unwrap();
         assert_eq!(profile(&cfg), Profile::Desktop);
+    }
+
+    /// M2 T2: `state_dir` — `HDS_ROOT` сильнее всего; desktop — корень проекта;
+    /// server — системный каталог (если платформа его имеет).
+    #[test]
+    fn state_dir_resolution() {
+        let _env = ENV_LOCK.lock().unwrap();
+        use super::{state_dir, system_state_dir};
+        use serde_yaml::Value;
+
+        // HDS_ROOT переопределяет даже server.
+        let cfg: Value = serde_yaml::from_str("profile: server").unwrap();
+        std::env::set_var("HDS_ROOT", "Z:\\tmp-hds-state");
+        assert_eq!(
+            state_dir(&cfg),
+            std::path::PathBuf::from("Z:\\tmp-hds-state")
+        );
+        std::env::remove_var("HDS_ROOT");
+
+        // desktop — корень проекта.
+        let cfg: Value = serde_yaml::from_str("profile: desktop").unwrap();
+        assert_eq!(state_dir(&cfg), super::project_root());
+
+        // server — системный каталог состояния (или корень проекта, если
+        // платформа без системного каталога, как linux-CI).
+        let cfg: Value = serde_yaml::from_str("profile: server").unwrap();
+        let expected = system_state_dir().unwrap_or_else(super::project_root);
+        assert_eq!(state_dir(&cfg), expected);
+        if system_state_dir().is_some() {
+            assert!(expected.ends_with(super::STATE_DIR_NAME));
+        }
+    }
+
+    /// M2 T2: `config_path` — при отсутствии конфига в корне проекта берём
+    /// конфиг из системного каталога состояния (server-поставка).
+    #[cfg(windows)]
+    #[test]
+    fn config_path_falls_back_to_system_state_dir() {
+        let _env = ENV_LOCK.lock().unwrap();
+        use super::config_path;
+
+        // Временный каталог-заглушка вместо ProgramData: внутри — системный
+        // каталог состояния с конфигом (server-поставка).
+        let fake_pd = std::env::temp_dir().join(format!("hds-sysdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&fake_pd);
+        let sys = fake_pd.join(super::STATE_DIR_NAME);
+        std::fs::create_dir_all(&sys).unwrap();
+        std::fs::write(sys.join("config.yaml"), "profile: server\n").unwrap();
+
+        // Изолированный корень проекта: пустой (чистим на старте — pid
+        // на Windows переиспользуются, каталог мог остаться от прошлого прогона).
+        let empty_root = std::env::temp_dir().join(format!("hds-emptyroot-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty_root);
+        std::fs::create_dir_all(&empty_root).unwrap();
+
+        let prev_pd = std::env::var_os("ProgramData");
+        std::env::set_var("ProgramData", &fake_pd);
+        std::env::remove_var("HDS_CONFIG");
+        std::env::set_var("HDS_ROOT", &empty_root);
+
+        // Конфига в корне проекта нет — берём конфиг из системного каталога.
+        let p = config_path();
+        assert_eq!(p, sys.join("config.yaml"), "p={}", p.display());
+
+        // Конфиг в корне проекта существует — он сильнее системного.
+        std::fs::write(empty_root.join("config.yaml"), "profile: desktop\n").unwrap();
+        let p = config_path();
+        assert_eq!(p, empty_root.join("config.yaml"), "p={}", p.display());
+
+        // Восстановление окружения.
+        match prev_pd {
+            Some(v) => std::env::set_var("ProgramData", v),
+            None => std::env::remove_var("ProgramData"),
+        }
+        std::env::remove_var("HDS_ROOT");
+        let _ = std::fs::remove_dir_all(&fake_pd);
+        let _ = std::fs::remove_dir_all(&empty_root);
     }
 }

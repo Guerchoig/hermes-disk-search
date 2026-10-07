@@ -65,8 +65,8 @@ fn parse_args() -> std::result::Result<Args, String> {
             },
             // резидентность: разовый прогон её не берёт, если не попросили явно
             "--residency" => {
-                host.pid_file = Some(hds_llama::resident::default_pid_path(&host.pause_dir));
-                host.log_file = Some(hds_llama::resident::default_log_path(&host.pause_dir));
+                host.pid_file = Some(hds_llama::resident::default_pid_path(&host.data_dir));
+                host.log_file = Some(hds_llama::resident::default_log_path(&host.data_dir));
             }
             "--pid" => host.pid_file = Some(PathBuf::from(take("--pid")?)),
             "--log" => host.log_file = Some(PathBuf::from(take("--log")?)),

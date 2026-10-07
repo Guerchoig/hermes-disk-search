@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
-use crate::config::{dig, project_root, replace_file, Config};
+use crate::config::{dig, replace_file, Config};
 use crate::error::{CoreError, Result};
 
 /// TTL токена по умолчанию, дней (`access.token_ttl_days`).
@@ -98,9 +98,14 @@ fn argon2id() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::default())
 }
 
-/// Путь `data/access.yaml` относительно корня проекта (для тестов — `load_at`).
+/// Путь `data/access.yaml` в **каталоге состояния** (M2 T2): desktop —
+/// `<корень проекта>/data`, server — `<ProgramData|Application Support>/data`.
+/// (Для тестов — `load_at`/`save_at` с явным путём.)
 pub fn access_path() -> PathBuf {
-    project_root().join("data").join("access.yaml")
+    let cfg = crate::config::load().unwrap_or(serde_yaml::Value::Null);
+    crate::config::state_dir(&cfg)
+        .join("data")
+        .join("access.yaml")
 }
 
 /// Загрузка хранилища по умолчанию (`data/access.yaml`).

@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hds_core::config::{dig, load, project_root, Config};
+use hds_core::config::{dig, load, Config};
 use hds_core::http;
 use serde_json::{json, Value};
 
@@ -68,8 +68,13 @@ fn probe(host: &str, port: u16) -> (String, Value) {
     }
 }
 
+/// PID-файл — в каталоге состояния (M2 T2): desktop — `<корень>/data`,
+/// server — `<ProgramData>/data` (независимо от расположения exe).
 fn pid_file() -> PathBuf {
-    project_root().join("data").join("mcp_http.pid")
+    let cfg = load().unwrap_or_default();
+    hds_core::config::state_dir(&cfg)
+        .join("data")
+        .join("mcp_http.pid")
 }
 
 fn read_pid() -> Option<u32> {
@@ -267,13 +272,22 @@ pub fn cmd_mcp_http(
             }
             0
         }
-        "run" => match hds_mcp::run_http(&host, port, &path) {
-            Ok(()) => 0,
-            Err(e) => {
-                eprintln!("{e}");
-                1
+        "run" => {
+            // M2 T2: инициализация каталога состояния до подъёма инстанса
+            // (server: ProgramData / Application Support).
+            if let Ok(cfg) = load() {
+                if let Err(e) = hds_core::config::ensure_state_dir(&cfg) {
+                    eprintln!("mcp-http: каталог состояния: {e}");
+                }
             }
-        },
+            match hds_mcp::run_http(&host, port, &path) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("{e}");
+                    1
+                }
+            }
+        }
         "start" | "restart" => {
             if sub == "restart" {
                 if let Some(pid) = read_pid() {

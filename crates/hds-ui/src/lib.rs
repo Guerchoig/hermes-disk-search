@@ -800,8 +800,13 @@ pub fn llm_host_restart() -> Value {
                 "msg": "не найден бинарь llm_host (рядом с hds / bin / target/{release,debug})" })
         }
     };
-    let root = project_root();
-    let pid_file = root.join("data").join("llm-host.pid");
+    // M2 T2: pid-файл резидента — в каталоге состояния (server — ProgramData).
+    let pid_file = {
+        let cfg = load().unwrap_or(serde_yaml::Value::Null);
+        hds_core::config::state_dir(&cfg)
+            .join("data")
+            .join("llm-host.pid")
+    };
 
     // 1. Остановка, если резидент отвечает (или остался pid-файл).
     llm_progress("остановка", "прошу резидента завершиться (/internal/stop)");
@@ -863,6 +868,9 @@ pub fn llm_host_restart() -> Value {
     }
 
     // 3. Запуск заново (detached, без окна) — общий хелпер `spawn_detached`.
+    // cwd резидента — корень проекта (как раньше: рантайм движка/модели рядом с exe);
+    // файлы состояния (pid/log/heartbeat) резидент сам кладёт в state_dir (M2 T2).
+    let root = project_root();
     let pid = match spawn_detached(&exe, &["run"], &root) {
         Ok(p) => p,
         Err(e) => {

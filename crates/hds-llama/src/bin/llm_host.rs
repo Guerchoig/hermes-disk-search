@@ -304,7 +304,7 @@ fn cmd_status(args: &Args) -> Result<()> {
         );
         // L1: HTTP молчит — читаем heartbeat резидента: его пишет отдельный поток, поэтому
         // «кто держит движок и сколько» видно и при мёртвом HTTP (`W4_REPORT.md` §14).
-        let hb_path = resident::default_heartbeat_path(&args.host.pause_dir);
+        let hb_path = resident::default_heartbeat_path(&args.host.data_dir);
         let now = resident::unix_now();
         match resident::Heartbeat::read(&hb_path) {
             Some(hb) if hb.is_live(now) => {
