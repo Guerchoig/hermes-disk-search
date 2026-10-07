@@ -5,13 +5,36 @@
 # ASCII-only on purpose (Windows PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 $root = $PSScriptRoot
 . (Join-Path $root 'hds_bin.ps1')
-$uiPort = 8765
 # Server profile (M2 T5): config lives in %ProgramData%\hermes-disk-search —
 # then the UI is headless (admin-only, behind a reverse proxy): no browser.
 $isServer = $false
 $serverCfg = Join-Path $env:ProgramData "hermes-disk-search\config.yaml"
 if (Test-Path $serverCfg) {
     $isServer = ((Get-Content $serverCfg -Raw) -match '(?m)^\s*profile:\s*server\s*(#.*)?$')
+}
+# UI bind (M3 T0 F4): read ui.host/ui.port from config.yaml the same way the
+# binary resolves it (hds-core::config_path): project config.yaml first, then
+# the system state dir. We do NOT pass --host/--port below: hds ui reads the
+# config itself (M2 T3), and a hard-coded flag would silently override it.
+# The values parsed here are only for the "already running" probe and browser.
+$cfgPath = Join-Path $root "config.yaml"
+if (-not (Test-Path $cfgPath)) {
+    if ($serverCfg -and (Test-Path $serverCfg)) { $cfgPath = $serverCfg }
+}
+$uiPort = 8765
+if (Test-Path $cfgPath) {
+    $inUi = $false
+    foreach ($line in (Get-Content $cfgPath)) {
+        if ($line -match '^\s') {
+            if ($inUi) {
+                if ($line -match '^\s+port\s*:\s*"?([0-9]+)"?') { $uiPort = [int]$Matches[1] }
+            }
+            continue
+        }
+        # top-level key (or comment): the ui: section starts here and ends
+        # at the next non-indented line
+        $inUi = ($line -match '^ui\s*:')
+    }
 }
 # bin\ (packaged release) or target\{release,debug}\ (source checkout).
 $hdsExe = Get-HdsBinPath -Root $root -Name "hds.exe"
@@ -42,10 +65,11 @@ if (Test-UiUp $uiPort) {
     exit 0
 }
 
-Write-Host "[..] starting UI server on port $uiPort..."
+Write-Host "[..] starting UI server on port $uiPort (from config $cfgPath)..."
 # -WindowStyle Hidden: иначе у консольного hds.exe появляется отдельное окно, которое
 # висит, пока жив сервер. Лаунчерское окно при успехе закрывается, при ошибке остаётся.
-Start-Process $hdsExe -ArgumentList 'ui','--port',"$uiPort" `
+# No --port/--host flags (M3 T0 F4): hds ui reads ui.host/ui.port from config.
+Start-Process $hdsExe -ArgumentList 'ui' `
     -WorkingDirectory $root -WindowStyle Hidden `
     -RedirectStandardOutput $outLog -RedirectStandardError $errLog
 
