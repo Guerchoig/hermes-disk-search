@@ -593,6 +593,35 @@ queue:
 Ограничение: очередь живёт в `hds mcp-http`; админский `ask` веб-UI лимитируется своими
 лимитами M3 (общая очередь на два процесса — вне M4).
 
+### Квоты и приоритеты по пользователю (M4 T4)
+
+Ключ лимитов и квот — **пользователь**, а не токен: `user:<логин>` по валидному Bearer,
+иначе `ip:<адрес>`. Поэтому «два токена одного пользователя» делят одну квоту
+(исправлен дефект M3 F10.3); `rate_limit.per_token: true` возвращает прежний
+пер-токенный ключ, но частота всё равно дополнительно ограничивается агрегатом на
+пользователя (`requests_per_min_per_user`).
+
+```yaml
+rate_limit:
+  max_inflight: 4            # ИСПОЛНЕНИЕ (глобально; лимит слотов очереди)
+  max_inflight_per_user: 2   # ...и на пользователя: 3-й одновременный RAG того же
+                             #   пользователя -> 429 + hint (rate_limit.max_inflight_per_user)
+  requests_per_min_per_user: 120  # агрегат частоты на пользователя (при per_token: true)
+  per_token: false           # true = ключ лимитов — токен (поведение M3)
+```
+
+Пер-пользовательский предел исполнения учитывается, только если он **строже**
+глобального `max_inflight` (иначе он ничего не добавляет — запрос просто ждёт слот в
+очереди). В очереди (T3) отказ по нему — немедленный `429` с `X-Queue-Depth: 0` и
+hint'ом; счётчик виден в снапшоте (`rejected_user`) и в `hds check`. Без очереди
+(desktop / `queue.enabled: false`) тот же предел применяет лимитер (эффективный
+предел = `min(max_inflight_per_user, max_inflight)`).
+
+Инвариант «индексация уступает» обеспечивают M4 T1 (WAL + `db.read_only_conns`:
+читатели RAG не ждут писателя БД) и `gpu.pause_index_on_query` (файл `index.pause`,
+владелец — `hds-llama`): тяжёлый RAG не блокируется индексным писателем, а индекс
+встаёт на паузу на время запроса.
+
 ## sidecar — Python-воркер извлечения
 
 Автономный процесс `sidecar\hds_extract\worker.py` (stdio + JSON-RPC 2.0, NDJSON): `hello`,
@@ -690,10 +719,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   `token_revoke`. Включение: `audit.enabled`; без ключа — server: вкл,
   desktop: выкл. Тела запросов и токены не логируются. Состояние —
   `hds check` и `/api/diagnostics` (`audit`).
-* **Rate-limit:** token-bucket (ключ — токен, иначе реальный IP);
+* **Rate-limit:** token-bucket (ключ — **пользователь**: `user:<логин>`, иначе
+  реальный IP; `rate_limit.per_token: true` — прежний пер-токенный ключ);
   `rate_limit: { enabled, requests_per_min: 120, burst: 30, login_per_min: 10,
-  max_inflight: 4 }`; `POST /auth/login` ограничен жёстче (антибрутфорс, по
-  IP); `ask_my_files` — лимит параллелизма. Превышение → `429` +
+  max_inflight: 4, max_inflight_per_user: 2, requests_per_min_per_user: 120,
+  per_token: false }`; `POST /auth/login` ограничен жёстче (антибрутфорс, по
+  IP); `ask_my_files` — лимит параллелизма (глобально `max_inflight`, на
+  пользователя `max_inflight_per_user`). Превышение → `429` +
   `Retry-After` + `X-RateLimit-Limit`. Без ключа: server — вкл, desktop —
   выкл; лимиты в памяти процесса (mcp-http и ui считаются независимо).
 * **Hardening:** `http.max_body_kb` (дефолт 512; 0 — без лимита) → тело
@@ -724,7 +756,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   desktop — 30000/false; бэкап только `VACUUM INTO`/`.backup`).
 * **`queue`** — `enabled`, `max_depth`, `wait_timeout_sec`, `policy` (M4 T3: очередь тяжёлых RAG,
   fair-share по пользователю; см. §«Слоты и SLA»).
-* **`rate_limit`** — `enabled`, `requests_per_min`, `burst`, `login_per_min`, `max_inflight` (M3).
+* **`rate_limit`** — `enabled`, `requests_per_min`, `burst`, `login_per_min`, `max_inflight` (M3);
+  `max_inflight_per_user`, `requests_per_min_per_user`, `per_token` (M4 T4 — квоты по пользователю;
+  ключ лимитов — `user:<логин>`, иначе IP; см. §«Слоты и SLA»).
 * **`http`** — `max_body_kb`, `max_conns`, `read_timeout_sec` (M3 T4).
 * **`mcp_http`** — `host`/`port`/`path`/`autostart`/`start_timeout`.
 * **`search`** — `vec_k`/`fts_k`/`rrf_k`/веса/`snippet_chars`.
