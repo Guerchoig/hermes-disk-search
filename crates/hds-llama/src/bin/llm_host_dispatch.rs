@@ -159,14 +159,12 @@ fn need_for_role(
     let file_mib = std::fs::metadata(&path).map(|m| m.len() >> 20).unwrap_or(0);
     let meta = read_meta(&path)?;
     let n_ctx = rc.n_ctx.max(0) as i64;
-    let kv = kv_cache_mib(&meta, n_ctx, cfg.parallel.max(1) as i64, KvBits::F16);
-    let need = estimate_need_mib(
-        &meta,
-        file_mib,
-        n_ctx,
-        cfg.parallel.max(1) as i64,
-        KvBits::F16,
-    );
+    let parallel = cfg.parallel.max(1) as i64;
+    // n_ctx — общий (parallel × ctx_per_slot), llama.cpp делит его между слотами:
+    // KV считаем от контекста слота (M4 §3.1).
+    let per_slot = hds_llama::budget::per_slot_ctx(n_ctx, parallel);
+    let kv = kv_cache_mib(&meta, per_slot, parallel, KvBits::F16);
+    let need = estimate_need_mib(&meta, file_mib, per_slot, parallel, KvBits::F16);
     println!(
         "роль '{role}': файл {file_mib} МиБ, слоёв {}, голов KV {}, n_ctx {n_ctx}, KV f16 {kv:.0} МиБ \
          → потребность {need} МиБ",

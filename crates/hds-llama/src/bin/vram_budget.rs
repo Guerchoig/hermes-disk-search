@@ -169,11 +169,14 @@ fn run() -> Result<()> {
             }
         };
         let n_ctx = inst.spec.n_ctx.unwrap_or(0) as i64;
-        let n_parallel = cfg.parallel as i64;
-        let kv_f16 = kv_cache_mib(&meta, n_ctx, n_parallel, KvBits::F16);
-        let kv_q8 = kv_cache_mib(&meta, n_ctx, n_parallel, KvBits::Q8_0);
+        let n_parallel = cfg.parallel.max(1) as i64;
+        // n_ctx — общий (parallel × ctx_per_slot), llama.cpp делит его между
+        // слотами: KV считаем от контекста слота (M4 §3.1).
+        let per_slot = hds_llama::budget::per_slot_ctx(n_ctx, n_parallel);
+        let kv_f16 = kv_cache_mib(&meta, per_slot, n_parallel, KvBits::F16);
+        let kv_q8 = kv_cache_mib(&meta, per_slot, n_parallel, KvBits::Q8_0);
         // честная оценка W2 — f16: у cluster API нет ручки типа KV (см. модуль)
-        let need = estimate_need_mib(&meta, file_mib, n_ctx, n_parallel, KvBits::F16);
+        let need = estimate_need_mib(&meta, file_mib, per_slot, n_parallel, KvBits::F16);
         let fit = check_fit(free_mib, need, reserve);
         if inst.role == "chat" && !fit.is_ok() {
             chat_ok = false;

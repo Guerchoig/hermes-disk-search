@@ -82,7 +82,22 @@ llm_server:                 # роли LLM (движок openresearchtools); в�
   host: "127.0.0.1"
   autostart: true
   start_timeout: 300
-  parallel: 1
+  # parallel — число СЛОТОВ чата (n_parallel llama-server). Дефолт по профилю:
+  # server → 5 (SLA M4: 5 одновременных RAG), desktop → 1. Явное значение
+  # сильнее дефолта. Общий контекст = parallel × ctx_per_slot, KV-кэш растёт
+  # линейно по общим токенам. Если при старте чат не влезает в VRAM — llm-host
+  # падает с ЯВНОЙ ошибкой «нужно/свободно» и подсказкой; рычаги: снизить
+  # parallel, ctx_per_slot или задать llm.chat.n_batch: 512 (компактнее
+  # compute-буфер, −1,5 ГиБ).
+  # Замеры на RTX 3060 12 ГБ (08.10.2026, tools/parity/out/m4_slots_*.json;
+  # замер: 5 одновременных запросов чата, ответ 300 токенов, KV q8_0):
+  #   parallel 2, ctx_per_slot 32768 → VRAM 8129 МиБ, 5 запросов за 33,7 с (p95 ≈33)
+  #   parallel 3, ctx_per_slot 32768 → VRAM 8723 МиБ, за 27,1 с (p95 ≈26,5)
+  #   parallel 5, ctx_per_slot 16384 → VRAM 8553 МиБ, за 21,3 с (все параллельно)
+  #   parallel 5, ctx_per_slot 32768 → ОТКАЗ гейта (нужно 10668 + резерв 1024 > 11385)
+  # Итог: на 12 ГБ с живым рабочим столом — либо 5 слотов × 16384 токена
+  # (тогда chat.max_context_chars ≲ 32000), либо 2–3 слота × 32768.
+  # parallel: 5               # раскомментируйте, чтобы задать вручную
   # model — GGUF-файл инстанса роли. "shared:<role>" = модель из ОБЩЕГО llama-рантайма
   # машины (%LOCALAPPDATA%\llama-runtime\models\<role>\, манифест current.json):
   # один набор моделей и одна сборка движка на машину, смена активной модели

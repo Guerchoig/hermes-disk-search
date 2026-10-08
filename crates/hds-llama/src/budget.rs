@@ -22,6 +22,15 @@ use crate::gguf::{GgufMeta, KvBits};
 /// где `kv_layers` — **не** все слои: у гибридных моделей полное внимание только
 /// в каждом `full_attention_interval`-м слое (Qwen3.5-9B: 8 из 32 — находка A4
 /// шага 2, подтверждена дампом метаданных `bin/gguf_dump`).
+///
+/// ⚠ Здесь `n_ctx` — контекст **одного слота**, `n_parallel` — число слотов
+/// (M4 §3.1). llama.cpp `--ctx-size` задаёт **общий** контекст и делит его между
+/// слотами (`slot.n_ctx = n_ctx_total / n_parallel`), поэтому там, где известен
+/// только общий контекст, передают per-slot: `ceil(n_ctx_total / n_parallel)`.
+/// KV растёт **линейно** по общему числу токенов: 5 слотов по 16384 ≡ один
+/// контекст 81920 (тест `kv_is_linear_in_total_tokens`). Если передать общий
+/// контекст как per-slot, оценка завышается в `n_parallel` раз (до M4 parallel
+/// был 1, и ошибка не проявлялась).
 pub fn kv_cache_mib(meta: &GgufMeta, n_ctx: i64, n_parallel: i64, bits: KvBits) -> f64 {
     let kv_layers = meta.kv_layer_count() as f64;
     if kv_layers == 0.0 {
@@ -33,6 +42,16 @@ pub fn kv_cache_mib(meta: &GgufMeta, n_ctx: i64, n_parallel: i64, bits: KvBits) 
     let per_token = meta.head_count_kv as f64 * (k_dim + v_dim) * bits.bytes_per_element();
     let elements = (n_ctx.max(0) * n_parallel.max(1)) as f64 * kv_layers * per_token;
     elements / (1024.0 * 1024.0)
+}
+
+/// Контекст **одного слота** по общему `n_ctx_total` (M4 §3.1).
+///
+/// llama.cpp делит общий `--ctx-size` между слотами, поэтому оценка KV роли
+/// должна считаться от per-slot контекста. Округление вверх — оценка
+/// консервативна (нужду не занижаем).
+pub fn per_slot_ctx(n_ctx_total: i64, n_parallel: i64) -> i64 {
+    let parallel = n_parallel.max(1);
+    (n_ctx_total.max(0) + parallel - 1) / parallel
 }
 
 /// Оценка полной потребности инстанса: веса модели + KV + буферы (≈5 % веса).
@@ -189,5 +208,24 @@ mod tests {
             compute_buffer_mib(&m, 0) >= 0.0,
             "ubatch 0 не ломает формулу"
         );
+    }
+
+    /// M4 §3.1: KV растёт линейно по **общему** числу токенов — 5 слотов по
+    /// 16384 ≡ один контекст 81920. Умножение общего контекста на parallel
+    /// ещё раз (старый дефект мест вызова) дало бы пятикратное завышение.
+    #[test]
+    fn kv_is_linear_in_total_tokens() {
+        let m = meta(4096, 32); // kv_layers = 32 (causal, без interval)
+        let five_slots = kv_cache_mib(&m, 16_384, 5, KvBits::F16);
+        let one_big = kv_cache_mib(&m, 81_920, 1, KvBits::F16);
+        assert!(
+            (five_slots - one_big).abs() < 0.001,
+            "kv(16384×5) = {five_slots}, kv(81920×1) = {one_big}"
+        );
+        // per-slot из общего контекста: 81920 / 5 = 16384 ровно; 81921 → 16385.
+        assert_eq!(per_slot_ctx(81_920, 5), 16_384);
+        assert_eq!(per_slot_ctx(81_921, 5), 16_385);
+        assert_eq!(per_slot_ctx(0, 5), 0);
+        assert_eq!(per_slot_ctx(16_384, 0), 16_384, "parallel 0 → 1 слот");
     }
 }

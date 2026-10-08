@@ -376,17 +376,45 @@ pub fn check_roots(cfg: &Config) -> Check {
 }
 
 /// Пункт 3: чат-роль (не критично для поиска).
+///
+/// M4 §3.1: показываем **фактическое** число слотов (`/props.total_slots`) рядом
+/// с настроенным `llm_server.parallel` (с профильным дефолтом, см.
+/// `hds_core::config::llm_parallel`); расхождение — warning с числами (резидент
+/// поднят со старым конфигом). Занятая/свободная VRAM — в пункте
+/// `gpu-observability`.
 fn check_chat(cfg: &Config) -> Check {
     let model = dig(cfg, "chat.model")
         .and_then(|v| v.as_str())
         .unwrap_or("?")
         .to_string();
+    let configured = hds_core::config::llm_parallel(cfg);
     match probe_role(cfg, "chat", PROBE_TIMEOUT) {
-        Probe::Llama(_) => Check::new(
-            "chat",
-            "ok",
-            format!("Чат-сервер llama.cpp отвечает ('{model}')"),
-        ),
+        Probe::Llama(props) => {
+            let actual = props
+                .get("total_slots")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            if actual > 0 && actual != configured {
+                Check::new(
+                    "chat",
+                    "warn",
+                    format!(
+                        "Чат-сервер отвечает ('{model}'), но слотов {actual}, а настроено \
+                         llm_server.parallel: {configured} — резидент поднят со старым конфигом"
+                    ),
+                )
+                .fix(
+                    "Перезапустите владельца портов (`llm_host stop`, затем `llm_host run`) \
+                     или поправьте llm_server.parallel в config.yaml.",
+                )
+            } else {
+                Check::new(
+                    "chat",
+                    "ok",
+                    format!("Чат-сервер llama.cpp отвечает ('{model}'), слотов {actual}"),
+                )
+            }
+        }
         Probe::Foreign => {
             let port = role_addr(cfg, "chat").1;
             Check::new(

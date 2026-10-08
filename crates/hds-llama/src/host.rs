@@ -221,8 +221,12 @@ pub fn role_needs(cfg: &LlmHostConfig, runtime_root: &Path) -> BTreeMap<String, 
         };
         let need = match read_meta(&model_path) {
             Ok(meta) => {
-                let base =
-                    estimate_need_mib(&meta, file_mib, rc.n_ctx.max(0) as i64, parallel, kv_bits);
+                // `rc.n_ctx` — общий контекст (parallel × ctx_per_slot); llama.cpp
+                // делит его между слотами, поэтому KV считаем от контекста слота
+                // (M4 §3.1). Умножение общего контекста на parallel ещё раз
+                // завышало оценку в `parallel` раз (при parallel = 1 не видно).
+                let per_slot = crate::budget::per_slot_ctx(rc.n_ctx.max(0) as i64, parallel);
+                let base = estimate_need_mib(&meta, file_mib, per_slot, parallel, kv_bits);
                 // compute-буфер движка: масштабируется `n_ubatch`, и на больших значениях
                 // (legacy embedding `--ubatch-size 8192`) это гигабайты — прежняя оценка
                 // «модель + KV» их не видела вовсе.
@@ -594,8 +598,12 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
 /// ([`ClusterShared::try_with`]) и честно отдавать `Busy`.
 pub struct ClusterShared(crate::gate::Gate<Cluster>);
 
-// SAFETY: доступ к кластеру идёт только через `with()`/`with_tagged()`/`try_with()`,
-// то есть под мьютексом гейта — параллельных вызовов одного объекта кластера не бывает.
+// SAFETY: доступ к кластеру идёт только через шлюз ([`crate::gate::Gate`]):
+// `with()`/`with_tagged()`/`try_with()` — эксклюзивно (управление кластером),
+// `with_shared()`/`try_with_shared()` — параллельно для генерации (M4 T2).
+// Методы `Cluster` берут `&self` (FFI-вызовы внутри), поэтому разделяемый доступ
+// безопасен на уровне Rust; конкурентность самих запросов внутри движка
+// обеспечивают слоты инстанса (патч P1: `wait_for_instance_slot` с дедлайном).
 unsafe impl Send for ClusterShared {}
 unsafe impl Sync for ClusterShared {}
 
@@ -659,6 +667,25 @@ impl ClusterShared {
         f: impl FnOnce(&Cluster) -> T,
     ) -> std::result::Result<T, crate::gate::Busy> {
         self.0.try_with(what, budget, f)
+    }
+
+    /// **Разделяемый** вызов для генерации (M4 T2): параллельно с другими
+    /// генерациями, но не с управлением кластером (загрузка/выгрузка/арбитр).
+    ///
+    /// Метка занятости — `engine` (как у [`ClusterShared::with`]): страж брошенных
+    /// запросов и heartbeat продолжают её узнавать.
+    pub fn with_shared<T>(&self, f: impl FnOnce(&Cluster) -> T) -> T {
+        self.0.with_shared_tagged("engine", f)
+    }
+
+    /// Разделяемый вызов с бюджетом: `Err(Busy)` — идёт управление кластером.
+    pub fn try_with_shared<T>(
+        &self,
+        what: &str,
+        budget: Duration,
+        f: impl FnOnce(&Cluster) -> T,
+    ) -> std::result::Result<T, crate::gate::Busy> {
+        self.0.try_with_shared(what, budget, f)
     }
 
     /// Дождаться готовности инстанса, **не удерживая шлюз**: опрос шагами, между
@@ -1117,6 +1144,26 @@ impl ClusterBackend {
         })
     }
 
+    /// Загружена ли роль прямо сейчас (M4 T2).
+    ///
+    /// Разделяемый доступ: эксклюзивный `with` при занятом генерацией движке
+    /// просто встал бы в очередь за ней и вернул бы сериализацию, которую T2 и
+    /// убирает. Ошибки/занятость трактуем как «не загружена» — тогда вызывающий
+    /// идёт штатным путём (`prepare` + `ensure_loaded`).
+    fn role_loaded(&self, role: &str) -> bool {
+        let (Ok(cl), Ok(id)) = (self.cl(), self.id_of(role)) else {
+            return false;
+        };
+        cl.try_with_shared("check", OBSERVE_BUDGET, |c| {
+            c.instance_by_id(id)
+                .ok()
+                .flatten()
+                .map(|i| i.is_loaded())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+    }
+
     /// Загрузить роль, если она выгружена, и дождаться готовности.
     ///
     /// Нужен не только для `LOAD_ON_DEMAND`: диспетчер может выгрузить чат, чтобы
@@ -1565,9 +1612,24 @@ impl ClusterBackend {
 
 impl Backend for ClusterBackend {
     fn chat(&self, req: &ChatRequest) -> Result<(String, Usage)> {
-        let _lease = self.prepare("chat")?;
-        let id = self.ensure_loaded("chat")?;
-        let out = self.cl()?.with(|c| {
+        // M4 T2: чат — KEEP_LOADED и в типичном случае уже загружен. `prepare` и
+        // `ensure_loaded` берут ЭКСКЛЮЗИВНЫЙ доступ, поэтому при загруженной роли
+        // идём сразу в разделяемую генерацию: иначе 5 параллельных RAG вставали
+        // строго по очереди, а слоты движка простаивали (замер 08.10.2026,
+        // `tools/parity/out/m4_slots_*.json`). Пауза индексации сохраняется —
+        // её держит сам lease, без обращения к кластеру.
+        let ready = self.role_loaded("chat");
+        let _lease = if ready {
+            self.pause.lease("запрос роли chat").ok()
+        } else {
+            self.prepare("chat")?
+        };
+        let id = if ready {
+            self.id_of("chat")?
+        } else {
+            self.ensure_loaded("chat")?
+        };
+        let out = self.cl()?.with_shared(|c| {
             c.chat_complete(
                 id,
                 &req.prompt,
@@ -1597,11 +1659,22 @@ impl Backend for ClusterBackend {
     }
 
     fn embeddings(&self, body_json: &str) -> Result<String> {
-        let _lease = self.prepare("embedding")?;
-        let id = self.ensure_loaded("embedding")?;
+        // M4 T2: та же схема, что у чата — при загруженной роли разделяемая
+        // генерация (несколько запросов эмбеддингов не выстраиваются в очередь).
+        let ready = self.role_loaded("embedding");
+        let _lease = if ready {
+            self.pause.lease("запрос роли embedding").ok()
+        } else {
+            self.prepare("embedding")?
+        };
+        let id = if ready {
+            self.id_of("embedding")?
+        } else {
+            self.ensure_loaded("embedding")?
+        };
         let out = self
             .cl()?
-            .with(|c| c.embeddings_json(id, body_json, true))?;
+            .with_shared(|c| c.embeddings_json(id, body_json, true))?;
         self.note_used("embedding");
         out.ensure_ok()
             .map_err(|e| EngineError::Other(e.to_string()))?;
@@ -1609,9 +1682,19 @@ impl Backend for ClusterBackend {
     }
 
     fn rerank(&self, body_json: &str) -> Result<String> {
-        let _lease = self.prepare("rerank")?;
-        let id = self.ensure_loaded("rerank")?;
-        let out = self.cl()?.with(|c| c.rerank_json(id, body_json))?;
+        // M4 T2: см. `chat`/`embeddings`.
+        let ready = self.role_loaded("rerank");
+        let _lease = if ready {
+            self.pause.lease("запрос роли rerank").ok()
+        } else {
+            self.prepare("rerank")?
+        };
+        let id = if ready {
+            self.id_of("rerank")?
+        } else {
+            self.ensure_loaded("rerank")?
+        };
+        let out = self.cl()?.with_shared(|c| c.rerank_json(id, body_json))?;
         self.note_used("rerank");
         out.ensure_ok()
             .map_err(|e| EngineError::Other(e.to_string()))?;
@@ -2373,6 +2456,7 @@ impl Host {
                     let spec: InstanceSpec = inst.spec.clone();
                     // Размер с учётом шардов (первый фрагмент → сумма всех частей).
                     let file_mib = crate::gguf::file_total_mib(&inst.model_path);
+                    let mut need_mib: Option<u64> = None;
                     if let Ok(meta) = read_meta(&inst.model_path) {
                         let n_ctx = spec.n_ctx.unwrap_or(0) as i64;
                         let parallel = resolved.parallel.max(1) as i64;
@@ -2384,8 +2468,15 @@ impl Host {
                         };
                         let n_ubatch = spec.n_ubatch.or(spec.n_batch).unwrap_or(2048).max(1) as i64;
                         let buffer_mib = compute_buffer_mib(&meta, n_ubatch);
+                        // KV считается от контекста **слота**: llama.cpp делит общий
+                        // n_ctx (= parallel × ctx_per_slot) между слотами (M4 §3.1).
+                        // Передача общего контекста как per-slot завышала оценку
+                        // KV в `parallel` раз — при parallel = 1 это было не видно.
+                        let per_slot = crate::budget::per_slot_ctx(n_ctx, parallel);
+                        let need = estimate_need_mib(&meta, file_mib, per_slot, parallel, kv_bits)
+                            + buffer_mib.ceil() as u64;
                         log.line(&format!(
-                            "роль {}: модель {file_mib} МиБ, KV {} {:.0} МиБ (KV-слоёв {} из {}), \
+                            "роль {}: модель {file_mib} МиБ, KV {} {:.0} МиБ (слот {per_slot} токенов × {parallel}, KV-слоёв {} из {}), \
                              compute-буфер {:.0} МиБ (n_ubatch {}), n_batch {}, нужно {} МиБ",
                             inst.role,
                             if kv_bits == KvBits::Q8_0 {
@@ -2393,15 +2484,15 @@ impl Host {
                             } else {
                                 "f16"
                             },
-                            crate::budget::kv_cache_mib(&meta, n_ctx, parallel, kv_bits),
+                            crate::budget::kv_cache_mib(&meta, per_slot, parallel, kv_bits),
                             meta.kv_layer_count(),
                             meta.block_count,
                             buffer_mib,
                             n_ubatch,
                             spec.n_batch.unwrap_or(2048),
-                            estimate_need_mib(&meta, file_mib, n_ctx, parallel, kv_bits)
-                                + buffer_mib.ceil() as u64
+                            need
                         ));
+                        need_mib = Some(need);
                         // Смысл предупреждения: при тесной карте compute-буфер съедает
                         // до 2 ГиБ, а уменьшение `n_batch` — самый дешёвый рычаг
                         // (замер 30.09.2026: 2048 → 512 даёт −1503 МиБ, §10.5).
@@ -2411,6 +2502,54 @@ impl Host {
                                  (compute-буфер ≈2 ГиБ). При тесной карте задайте \
                                  `llm.chat.n_batch: 512` (+ `n_ubatch: 512`): замер дал −1503 МиБ VRAM",
                             );
+                        }
+                    }
+                    // M4 §3.1: fit-гейт до создания инстанса — «модель + KV×parallel +
+                    // compute-буфер» против свободной VRAM с резервом. Молчаливая
+                    // деградация запрещена (решение заказчика): не влезает — явная
+                    // ошибка с числами и подсказкой, а не невнятный отказ движка.
+                    let gpu_role =
+                        spec.n_gpu_layers.is_some_and(|v| v != 0) || inst.role == "whisper";
+                    if gpu_role {
+                        if let Some(need) = need_mib {
+                            let measured = vram_probe
+                                .as_ref()
+                                .and_then(|p| p.snapshot())
+                                .map(|v| v.free_mib);
+                            let free = resolved.gpu.effective_free_mib(measured);
+                            let reserve = resolved.gpu.reserve_mb;
+                            let parallel = resolved.parallel.max(1) as i64;
+                            match crate::budget::check_fit(free, need, reserve) {
+                                crate::budget::Fit::NotEnough {
+                                    free_mib,
+                                    need_mib,
+                                    reserve_mib,
+                                    short_mib,
+                                } if inst.role == "chat" => {
+                                    return Err(EngineError::Other(format!(
+                                        "роль chat не влезает в VRAM: нужно {need_mib} МиБ \
+                                         (модель + KV×{parallel} слотов + compute-буфер), свободно \
+                                         {free_mib} МиБ, резерв {reserve_mib} МиБ — не хватает \
+                                         {short_mib} МиБ. Снизьте `llm_server.parallel` (сейчас \
+                                         {parallel}) или `llm_server.chat.ctx_per_slot`; при тесной \
+                                         карте помогает `llm.chat.n_batch: 512`"
+                                    )));
+                                }
+                                crate::budget::Fit::NotEnough {
+                                    free_mib, need_mib, ..
+                                } => {
+                                    // Роль грузится по запросу (LOAD_ON_DEMAND) —
+                                    // стартуем, но честно предупреждаем с числами:
+                                    // при обращении диспетчер вытеснит простые роли.
+                                    log.note(&format!(
+                                        "роль {}: сейчас может не влезть в VRAM (нужно {need_mib} МиБ, \
+                                         свободно {free_mib} МиБ) — LOAD_ON_DEMAND, при обращении \
+                                         диспетчер вытеснит простые роли по приоритетам",
+                                        inst.role
+                                    ));
+                                }
+                                crate::budget::Fit::Fits { .. } => {}
+                            }
                         }
                     }
                     let id = cls.create_instance(&spec)?;
@@ -2832,6 +2971,9 @@ mod whisper_device_tests {
         let mk = |what: &str, secs: u64| Busy {
             what: what.to_string(),
             since: std::time::Instant::now() - Duration::from_secs(secs),
+            // M4 T2: при параллельной генерации держателей больше одного —
+            // на семантику стража (метка `engine`) это не влияет.
+            holders: 1,
         };
         // запрос чата висит дольше порога → остановка
         assert!(abandoned_request_guard(&mk("engine", 901), "engine", 900));

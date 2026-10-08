@@ -156,6 +156,19 @@ fn plan_role(
     if rc.n_ctx > 0 {
         spec.n_ctx = Some(rc.n_ctx);
     }
+    // M4 §3.1: слоты чата. До этого поле не выставлялось вовсе, и движок поднимал
+    // инстанс с ОДНИМ слотом: при `llm_server.parallel: 5` пять одновременных
+    // запросов выстраивались в очередь (а наш `/props` показывал 5 — своё значение,
+    // расхождение поймано замером 08.10.2026, `tools/parity/out/m4_slots_*.json`).
+    // Индексирующим ролям (embedding/rerank/whisper) параллельные слоты не нужны и
+    // вредны: у них делится контекст слота, а батч эмбеддингов у нас один
+    // (`--batch-size 8192`) — слот получил бы 1/parallel контекста и ломал индексацию.
+    let slots = if rc.role == "chat" {
+        config.parallel.max(1)
+    } else {
+        1
+    };
+    spec.n_parallel = Some(slots);
     spec.n_batch = rc.n_batch;
     spec.n_ubatch = rc.n_ubatch;
     spec.n_threads = rc.n_threads;

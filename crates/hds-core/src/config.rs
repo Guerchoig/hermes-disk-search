@@ -278,6 +278,27 @@ pub fn db_read_only_conns(cfg: &Config) -> bool {
         .unwrap_or_else(|| db_read_only_conns_default(profile(cfg)))
 }
 
+/// Дефолт `llm_server.parallel` (слоты чата) по профилю (M4 §3.1).
+///
+/// `server` — 5 (цель SLA: 5 одновременных `ask_my_files`); `desktop` — 1
+/// (прежнее поведение). Правило то же, что в `hds-llama::config::build`:
+/// явное значение в YAML сильнее дефолта.
+pub fn llm_parallel_default(p: Profile) -> i64 {
+    if p.is_server() {
+        5
+    } else {
+        1
+    }
+}
+
+/// `llm_server.parallel`: число слотов чата (для диагностик/UI).
+pub fn llm_parallel(cfg: &Config) -> i64 {
+    dig(cfg, "llm_server.parallel")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| llm_parallel_default(profile(cfg)))
+        .max(1)
+}
+
 /// `db.journal_mode`: режим журнала, который писатель (`open_rw`) ставит PRAGMA'ой.
 ///
 /// Дефолт `wal` (порт Python). WAL персистентен в файле базы — read-only читатели
@@ -365,6 +386,22 @@ mod tests {
         assert_eq!(
             root_from_exe(&p(&["portable", "hds.exe"])).unwrap(),
             p(&["portable"])
+        );
+    }
+
+    /// M4 §3.1: `llm_server.parallel` — server-дефолт 5, desktop 1, явное сильнее.
+    #[test]
+    fn llm_parallel_defaults_by_profile() {
+        use super::{llm_parallel, llm_parallel_default, Profile};
+        assert_eq!(llm_parallel_default(Profile::Server), 5);
+        assert_eq!(llm_parallel_default(Profile::Desktop), 1);
+        let mk = |yaml: &str| -> super::Config { serde_yaml::from_str(yaml).unwrap() };
+        assert_eq!(llm_parallel(&mk("profile: server")), 5);
+        assert_eq!(llm_parallel(&mk("profile: desktop")), 1);
+        assert_eq!(
+            llm_parallel(&mk("profile: server\nllm_server:\n  parallel: 2")),
+            2,
+            "явное значение сильнее профильного дефолта"
         );
     }
 

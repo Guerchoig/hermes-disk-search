@@ -346,7 +346,17 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
         }
     }
 
-    let parallel = dig_i64(root, "llm_server.parallel").unwrap_or(1).max(1) as i32;
+    // Слоты чата (M4 §3.1): дефолт по профилю — `server` → 5, иначе (desktop/
+    // без профиля) 1 — прежнее поведение. Явное `llm_server.parallel` всегда
+    // сильнее дефолта. Профиль читаем из того же YAML (`profile: server`).
+    let default_parallel = if dig_str(root, "profile").as_deref() == Some("server") {
+        5
+    } else {
+        1
+    };
+    let parallel = dig_i64(root, "llm_server.parallel")
+        .unwrap_or(default_parallel)
+        .max(1) as i32;
     let mut roles: Vec<RoleConfig> = Vec::new();
     for role in ROLES {
         if let Some(rc) = build_role(root, role, parallel, &gpu, &mut warnings) {
@@ -752,6 +762,25 @@ llm_server:
             !cfg.warnings.iter().any(|w| w.contains("--cache-type-k")),
             "предупреждения про KV-флаги быть не должно: {:?}",
             cfg.warnings
+        );
+    }
+
+    /// M4 §3.1: слоты чата по профилю — `profile: server` без явного
+    /// `llm_server.parallel` → 5; desktop/без профиля → 1; явное значение сильнее.
+    #[test]
+    fn parallel_defaults_by_profile() {
+        let server: Value =
+            serde_yaml::from_str("profile: server\nllm_server: {host: \"127.0.0.1\"}").unwrap();
+        assert_eq!(build(Path::new("t.yaml"), &server).parallel, 5);
+        let desktop: Value = serde_yaml::from_str("llm_server: {host: \"127.0.0.1\"}").unwrap();
+        assert_eq!(build(Path::new("t.yaml"), &desktop).parallel, 1);
+        let explicit: Value =
+            serde_yaml::from_str("profile: server\nllm_server: {host: \"127.0.0.1\", parallel: 2}")
+                .unwrap();
+        assert_eq!(
+            build(Path::new("t.yaml"), &explicit).parallel,
+            2,
+            "явное значение сильнее профильного дефолта"
         );
     }
 
