@@ -254,3 +254,68 @@ fn ui_auth_socket_parses_authorization() {
     std::env::remove_var("HDS_ROOT");
     std::env::remove_var("HDS_CONFIG");
 }
+
+/// T0 F2/F3 (код-ревью M3): UI-аудит обязан писать `admin_op` с ФАКТИЧЕСКИМ
+/// статусом ответа (после маршрута, а не всегда 200) и `unauthorized` с
+/// реальными `method`/`path` (а не `-`).
+#[test]
+fn ui_audit_admin_op_status_and_unauthorized_fields() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmpdir("audit");
+    let audit_path = dir.join("audit.jsonl");
+    let audit_yaml = audit_path.to_string_lossy().replace('\\', "/");
+    let cfg_path = dir.join("config.yaml");
+    std::fs::write(
+        &cfg_path,
+        format!("access:\n  enabled: true\naudit:\n  enabled: true\n  path: \"{audit_yaml}\"\n"),
+    )
+    .unwrap();
+    std::env::set_var("HDS_CONFIG", &cfg_path);
+
+    let acc_path = dir.join("access.yaml");
+    add_user(&acc_path, "boss", true);
+    let token = issue_token(&acc_path, "boss");
+    let h = headers(Some(&format!("Bearer {token}")));
+
+    // POST на несуществующий /api/... под админ-токеном → 404.
+    // Аудит admin_op должен записать 404 (раньше всегда 200 и до маршрута).
+    let (status, _, _) =
+        route_with_access("POST", "/api/does-not-exist", "", &h, "{}", Some(&acc_path));
+    assert_eq!(status, 404);
+
+    // GET без токена → 401 + unauthorized с реальными method/path.
+    let (status, _, _) = route_with_access(
+        "GET",
+        "/api/status",
+        "",
+        &headers(None),
+        "",
+        Some(&acc_path),
+    );
+    assert_eq!(status, 401);
+
+    let text = std::fs::read_to_string(&audit_path).unwrap();
+    let evs: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let admin = evs
+        .iter()
+        .find(|v| v["event"] == "admin_op")
+        .expect("admin_op");
+    assert_eq!(admin["status"], 404, "фактический статус, не 200: {admin}");
+    assert_eq!(admin["method"], "POST");
+    assert_eq!(admin["path"], "/api/does-not-exist");
+    assert_eq!(admin["user"], "boss");
+
+    let un = evs
+        .iter()
+        .find(|v| v["event"] == "unauthorized")
+        .expect("unauthorized");
+    assert_eq!(un["method"], "GET", "реальный метод, не '-': {un}");
+    assert_eq!(un["path"], "/api/status", "реальный путь, не '-': {un}");
+    assert_eq!(un["status"], 401);
+
+    std::env::remove_var("HDS_CONFIG");
+    let _ = std::fs::remove_dir_all(&dir);
+}

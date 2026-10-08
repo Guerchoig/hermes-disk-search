@@ -1304,6 +1304,8 @@ pub fn mcp_http_action(action: &str) -> Value {
 fn ui_auth_gate(
     h: &ReqHeaders,
     access_path: Option<&std::path::Path>,
+    method: &str,
+    path: &str,
 ) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
     let cfg = match load() {
         Ok(c) => c,
@@ -1361,8 +1363,8 @@ fn ui_auth_gate(
                         event: "unauthorized".into(),
                         user: None,
                         ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
-                        method: "-".into(),
-                        path: "-".into(),
+                        method: method.into(),
+                        path: path.into(),
                         tool: None,
                         projects: None,
                         token: None,
@@ -1398,12 +1400,225 @@ pub fn route_with_access(
     body: &str,
     access_path: Option<&std::path::Path>,
 ) -> Reply {
-    let (server_mode, admin_user) = match ui_auth_gate(h, access_path) {
+    let (server_mode, admin_user) = match ui_auth_gate(h, access_path, method, path) {
         Ok(v) => (v.is_some(), v.map(|c| c.user)),
         Err(reply) => return reply,
     };
-    // M3 T2: аудит админ-операций UI (POST-маршруты в server-режиме).
-    if server_mode && method == "POST" && path.starts_with("/api/") {
+    // M3 T2 / F2 (T0): админ-операции UI (POST-маршруты в server-режиме).
+    // Аудит пишем ПОСЛЕ маршрута, с фактическим статусом ответа (раньше
+    // запись шла до маршрута и всегда со `status: 200` — аудит «врал»).
+    let is_admin_op = server_mode && method == "POST" && path.starts_with("/api/");
+    let p = path.trim_end_matches('/');
+    let reply = (|| -> Reply {
+        match (method, p) {
+            ("GET", "") | ("GET", "/index.html") => {
+                (200, "text/html; charset=utf-8", page::PAGE.to_string())
+            }
+            ("GET", "/api/status") => json_ok(status_json()),
+            ("GET", "/api/tree") => json_ok(tree::tree_json(
+                qp(query, "walk").is_some(),
+                qp(query, "refresh").is_some(),
+            )),
+            ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
+            ("GET", "/api/watch/daemon") => json_ok(watch_status()),
+            ("GET", "/api/chat-model") => json_ok(chat_model_json()),
+            ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
+            ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
+            ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
+            ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
+            ("GET", "/api/transcribe/file") => {
+                let name = qp(query, "name").unwrap_or_default();
+                if name.trim().is_empty() {
+                    return (
+                        400,
+                        "application/json",
+                        json!({ "error": "нет параметра name" }).to_string(),
+                    );
+                }
+                json_ok(transcribe::file_json(&name))
+            }
+            ("GET", "/api/config") => json_ok(config_edit::get_config()),
+            ("GET", "/api/access/users") => json_ok(access_users_json(access_path)),
+            ("GET", "/api/access/projects") => json_ok(access_projects_json(access_path)),
+            ("GET", "/api/search") => {
+                let q = qp(query, "q").unwrap_or_default();
+                if q.trim().is_empty() {
+                    return (
+                        400,
+                        "application/json",
+                        json!({ "error": "нет параметра q" }).to_string(),
+                    );
+                }
+                let limit = qp(query, "limit").and_then(|v| v.parse().ok()).unwrap_or(8);
+                let kinds = qp(query, "kinds").unwrap_or_default();
+                json_ok(search_json(&q, limit, &kinds))
+            }
+            ("GET", "/api/ask") => {
+                let q = qp(query, "q").unwrap_or_default();
+                if q.trim().is_empty() {
+                    return (
+                        400,
+                        "application/json",
+                        json!({ "error": "нет параметра q" }).to_string(),
+                    );
+                }
+                json_ok(ask_json(&q))
+            }
+            ("POST", _) => {
+                if !csrf_ok(h, server_mode) {
+                    return (
+                        403,
+                        "application/json",
+                        json!({ "error": "cross-origin/тип запроса отклонён" }).to_string(),
+                    );
+                }
+                match p {
+                    "/api/access/user/add" => access_user_add(body, access_path),
+                    "/api/access/user/del" => access_user_del(body, access_path),
+                    "/api/access/user/passwd" => access_user_passwd(body, access_path),
+                    "/api/access/user/grant" => access_user_grant(body, access_path),
+                    "/api/access/token/revoke" => access_token_revoke(body, access_path),
+                    "/api/index/start" => {
+                        let full = qp(query, "full")
+                            .map(|v| v == "1" || v == "true")
+                            .unwrap_or(false);
+                        json_ok(index_action("start", full))
+                    }
+                    "/api/index/stop" => json_ok(index_action("stop", false)),
+                    "/api/index/pause" => json_ok(index_action("pause", false)),
+                    "/api/index/resume" => json_ok(index_action("resume", false)),
+                    "/api/roots/save" => {
+                        let roots = body_list(body, "roots");
+                        json_ok(config_edit::set_roots(&roots))
+                    }
+                    "/api/llm-host/restart" => {
+                        if !llm_job_start("llm-host-restart", "перезапуск по кнопке карточки")
+                        {
+                            return (
+                                409,
+                                "application/json",
+                                json!({ "ok": false,
+                                "msg": "операция llm-host уже идёт — прогресс в карточке" })
+                                .to_string(),
+                            );
+                        }
+                        std::thread::spawn(|| {
+                            let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                            llm_host_restart,
+                        ))
+                        .unwrap_or_else(|_| {
+                            json!({ "ok": false, "msg": "внутренняя ошибка потока перезапуска" })
+                        });
+                            llm_job_finish(res);
+                        });
+                        json_ok(json!({
+                            "ok": true, "started": true,
+                            "msg": "перезапуск запущен — прогресс в карточке"
+                        }))
+                    }
+                    "/api/chat-model/set" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let file = v
+                            .get("file")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        json_ok(chat_model_set_json(&file))
+                    }
+                    "/api/mcp-http" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let action = v
+                            .get("action")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("status")
+                            .to_string();
+                        json_ok(mcp_http_action(&action))
+                    }
+                    "/api/cline/sync" => json_ok(cline_sync_json()),
+                    "/api/config/excludes" => {
+                        let paths = body_list(body, "paths");
+                        json_ok(config_edit::set_exclude_paths(&paths))
+                    }
+                    "/api/transcribe/speakers" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let name = v
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if name.trim().is_empty() {
+                            return (
+                                400,
+                                "application/json",
+                                json!({ "error": "нет поля name" }).to_string(),
+                            );
+                        }
+                        let names = v.get("names").cloned().unwrap_or_else(|| json!({}));
+                        json_ok(transcribe::speakers_json(&name, &names))
+                    }
+                    "/api/transcribe/apply" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let name = v
+                            .get("name")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        if name.trim().is_empty() {
+                            return (
+                                400,
+                                "application/json",
+                                json!({ "error": "нет поля name" }).to_string(),
+                            );
+                        }
+                        json_ok(transcribe::apply_json(&name))
+                    }
+                    "/api/watch/daemon" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let action = v
+                            .get("action")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("status")
+                            .to_string();
+                        json_ok(watch_json(&action))
+                    }
+                    "/api/transcribe/daemon" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let action = v
+                            .get("action")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("status")
+                            .to_string();
+                        json_ok(transcribe::daemon_json(&action))
+                    }
+                    "/api/config/transcribe-dirs" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let inbox = v
+                            .get("inbox_dir")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        let out = v
+                            .get("out_dir")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        json_ok(config_edit::set_transcribe_dirs(&inbox, &out))
+                    }
+                    _ => (
+                        404,
+                        "application/json",
+                        json!({ "error": "not found", "path": path }).to_string(),
+                    ),
+                }
+            }
+            _ => (
+                404,
+                "application/json",
+                json!({ "error": "not found", "path": path }).to_string(),
+            ),
+        }
+    })();
+    if is_admin_op {
         if let Some(a) = load()
             .ok()
             .and_then(|c| hds_core::audit::Audit::from_config(&c))
@@ -1419,221 +1634,14 @@ pub fn route_with_access(
                     tool: None,
                     projects: None,
                     token: None,
-                    status: 200,
+                    status: reply.0,
                     ms: 0,
                 }
                 .now(),
             );
         }
     }
-    let p = path.trim_end_matches('/');
-    match (method, p) {
-        ("GET", "") | ("GET", "/index.html") => {
-            (200, "text/html; charset=utf-8", page::PAGE.to_string())
-        }
-        ("GET", "/api/status") => json_ok(status_json()),
-        ("GET", "/api/tree") => json_ok(tree::tree_json(
-            qp(query, "walk").is_some(),
-            qp(query, "refresh").is_some(),
-        )),
-        ("GET", "/api/diagnostics") => json_ok(diagnostics_json()),
-        ("GET", "/api/watch/daemon") => json_ok(watch_status()),
-        ("GET", "/api/chat-model") => json_ok(chat_model_json()),
-        ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
-        ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
-        ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
-        ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
-        ("GET", "/api/transcribe/file") => {
-            let name = qp(query, "name").unwrap_or_default();
-            if name.trim().is_empty() {
-                return (
-                    400,
-                    "application/json",
-                    json!({ "error": "нет параметра name" }).to_string(),
-                );
-            }
-            json_ok(transcribe::file_json(&name))
-        }
-        ("GET", "/api/config") => json_ok(config_edit::get_config()),
-        ("GET", "/api/access/users") => json_ok(access_users_json(access_path)),
-        ("GET", "/api/access/projects") => json_ok(access_projects_json(access_path)),
-        ("GET", "/api/search") => {
-            let q = qp(query, "q").unwrap_or_default();
-            if q.trim().is_empty() {
-                return (
-                    400,
-                    "application/json",
-                    json!({ "error": "нет параметра q" }).to_string(),
-                );
-            }
-            let limit = qp(query, "limit").and_then(|v| v.parse().ok()).unwrap_or(8);
-            let kinds = qp(query, "kinds").unwrap_or_default();
-            json_ok(search_json(&q, limit, &kinds))
-        }
-        ("GET", "/api/ask") => {
-            let q = qp(query, "q").unwrap_or_default();
-            if q.trim().is_empty() {
-                return (
-                    400,
-                    "application/json",
-                    json!({ "error": "нет параметра q" }).to_string(),
-                );
-            }
-            json_ok(ask_json(&q))
-        }
-        ("POST", _) => {
-            if !csrf_ok(h, server_mode) {
-                return (
-                    403,
-                    "application/json",
-                    json!({ "error": "cross-origin/тип запроса отклонён" }).to_string(),
-                );
-            }
-            match p {
-                "/api/access/user/add" => access_user_add(body, access_path),
-                "/api/access/user/del" => access_user_del(body, access_path),
-                "/api/access/user/passwd" => access_user_passwd(body, access_path),
-                "/api/access/user/grant" => access_user_grant(body, access_path),
-                "/api/access/token/revoke" => access_token_revoke(body, access_path),
-                "/api/index/start" => {
-                    let full = qp(query, "full")
-                        .map(|v| v == "1" || v == "true")
-                        .unwrap_or(false);
-                    json_ok(index_action("start", full))
-                }
-                "/api/index/stop" => json_ok(index_action("stop", false)),
-                "/api/index/pause" => json_ok(index_action("pause", false)),
-                "/api/index/resume" => json_ok(index_action("resume", false)),
-                "/api/roots/save" => {
-                    let roots = body_list(body, "roots");
-                    json_ok(config_edit::set_roots(&roots))
-                }
-                "/api/llm-host/restart" => {
-                    if !llm_job_start("llm-host-restart", "перезапуск по кнопке карточки")
-                    {
-                        return (
-                            409,
-                            "application/json",
-                            json!({ "ok": false,
-                                "msg": "операция llm-host уже идёт — прогресс в карточке" })
-                            .to_string(),
-                        );
-                    }
-                    std::thread::spawn(|| {
-                        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                            llm_host_restart,
-                        ))
-                        .unwrap_or_else(|_| {
-                            json!({ "ok": false, "msg": "внутренняя ошибка потока перезапуска" })
-                        });
-                        llm_job_finish(res);
-                    });
-                    json_ok(json!({
-                        "ok": true, "started": true,
-                        "msg": "перезапуск запущен — прогресс в карточке"
-                    }))
-                }
-                "/api/chat-model/set" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let file = v
-                        .get("file")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    json_ok(chat_model_set_json(&file))
-                }
-                "/api/mcp-http" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let action = v
-                        .get("action")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("status")
-                        .to_string();
-                    json_ok(mcp_http_action(&action))
-                }
-                "/api/cline/sync" => json_ok(cline_sync_json()),
-                "/api/config/excludes" => {
-                    let paths = body_list(body, "paths");
-                    json_ok(config_edit::set_exclude_paths(&paths))
-                }
-                "/api/transcribe/speakers" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let name = v
-                        .get("name")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if name.trim().is_empty() {
-                        return (
-                            400,
-                            "application/json",
-                            json!({ "error": "нет поля name" }).to_string(),
-                        );
-                    }
-                    let names = v.get("names").cloned().unwrap_or_else(|| json!({}));
-                    json_ok(transcribe::speakers_json(&name, &names))
-                }
-                "/api/transcribe/apply" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let name = v
-                        .get("name")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    if name.trim().is_empty() {
-                        return (
-                            400,
-                            "application/json",
-                            json!({ "error": "нет поля name" }).to_string(),
-                        );
-                    }
-                    json_ok(transcribe::apply_json(&name))
-                }
-                "/api/watch/daemon" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let action = v
-                        .get("action")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("status")
-                        .to_string();
-                    json_ok(watch_json(&action))
-                }
-                "/api/transcribe/daemon" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let action = v
-                        .get("action")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("status")
-                        .to_string();
-                    json_ok(transcribe::daemon_json(&action))
-                }
-                "/api/config/transcribe-dirs" => {
-                    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
-                    let inbox = v
-                        .get("inbox_dir")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let out = v
-                        .get("out_dir")
-                        .and_then(|x| x.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    json_ok(config_edit::set_transcribe_dirs(&inbox, &out))
-                }
-                _ => (
-                    404,
-                    "application/json",
-                    json!({ "error": "not found", "path": path }).to_string(),
-                ),
-            }
-        }
-        _ => (
-            404,
-            "application/json",
-            json!({ "error": "not found", "path": path }).to_string(),
-        ),
-    }
+    reply
 }
 
 /// Исход чтения запроса (M3 T4): тело сверх лимита — `413` без чтения тела.
