@@ -569,6 +569,30 @@ bin\llm_host.exe stop      # graceful: выгрузить инстансы, сн
 До `parallel`-фикса M4 слоты простаивали: вызовы шли строго по очереди (43,4 с на те же 5 запросов)
 — мьютекс шлюза держался всю генерацию, а `n_parallel` вообще не доходил до инстанса движка.
 
+### Очередь тяжёлых RAG и fair-share (M4 T3)
+
+`ask_my_files` (тяжёлый RAG) в server-профиле при занятых слотах не отклоняется, а
+**ждёт**: round-robin между пользователями (ключ — логин из Bearer, иначе IP) и FIFO
+внутри пользователя — «жадный» пользователь не забирает все слоты, пока ждут другие.
+Очередь полна → `429` (`queue.max_depth`); не дождался за `queue.wait_timeout_sec` →
+`503`; оба с `Retry-After` (+ `X-Queue-Depth`). Обрыв клиента в ожидании освобождает
+место.
+
+```yaml
+queue:
+  enabled: true            # server по умолчанию; desktop — выключено (поведение M3)
+  max_depth: 20            # сколько ЖДУТ (исполнение ограничивает rate_limit.max_inflight)
+  wait_timeout_sec: 240    # держите < 300 — таймаута MCP-клиента
+  policy: rr               # rr (fair-share) | fifo (строго по времени прихода)
+```
+
+Метрики очереди (глубина, ожидание p50/p95, отказы, «кто кого ждёт») видны в `hds check`
+и `/api/diagnostics`: процесс `hds mcp-http` пишет снапшот
+`<state_dir>/data/mcp-queue.json` раз в 2 с, а `check` предупреждает, если статус не
+пишется или устарел (MCP не запущен). Ожидание пишется в аудит событием `queue_wait`.
+Ограничение: очередь живёт в `hds mcp-http`; админский `ask` веб-UI лимитируется своими
+лимитами M3 (общая очередь на два процесса — вне M4).
+
 ## sidecar — Python-воркер извлечения
 
 Автономный процесс `sidecar\hds_extract\worker.py` (stdio + JSON-RPC 2.0, NDJSON): `hello`,
@@ -696,6 +720,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   (`chat`/`embedding`/`rerank`). Модель роли — `shared:<role>` (из общего рантайма) или путь.
 * **`gpu`** — `policy`, `device_index` (0=CPU, 1=первый GPU), `n_gpu_layers`, `reserve_mb`,
   `evict_idle_sec`, `pause_index_on_query`, `priorities`.
+* **`db`** — `busy_timeout_ms`, `read_only_conns`, `journal_mode` (M4 T1: server — 5000/wal/true,
+  desktop — 30000/false; бэкап только `VACUUM INTO`/`.backup`).
+* **`queue`** — `enabled`, `max_depth`, `wait_timeout_sec`, `policy` (M4 T3: очередь тяжёлых RAG,
+  fair-share по пользователю; см. §«Слоты и SLA»).
+* **`rate_limit`** — `enabled`, `requests_per_min`, `burst`, `login_per_min`, `max_inflight` (M3).
+* **`http`** — `max_body_kb`, `max_conns`, `read_timeout_sec` (M3 T4).
 * **`mcp_http`** — `host`/`port`/`path`/`autostart`/`start_timeout`.
 * **`search`** — `vec_k`/`fts_k`/`rrf_k`/веса/`snippet_chars`.
 * **`rerank`** — `enabled`/`url`/`model`/`timeout`/`max_latency`.
