@@ -862,6 +862,131 @@ fn is_loopback(host: &str) -> bool {
     h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]"
 }
 
+/// M4 T3: очередь тяжёлых RAG — как настроена и что показывает фактический
+/// статус MCP-процесса (снапшот `<state_dir>/data/mcp-queue.json`, пишется
+/// раз в 2 с: глубина, ожидание p50/p95, отказы, «кто кого ждёт»).
+///
+/// Очередь живёт в процессе `hds mcp-http`, поэтому отсутствие/устаревание
+/// снапшота при включённой очереди — это диагноз (MCP не запущен либо поднят
+/// старым бинарём), а не «всё хорошо».
+fn check_queue(cfg: &Config) -> Check {
+    let q = hds_core::queue::QueueConfig::from_config(cfg);
+    let snap = if q.enabled {
+        hds_core::queue::read_snapshot(&hds_core::queue::snapshot_path(cfg))
+    } else {
+        None
+    };
+    queue_check(cfg, &q, snap)
+}
+
+/// Ядро `check_queue` без файлового ввода-вывода (снапшот передаётся снаружи) —
+/// так статусы проверяются юнит-тестами без песочницы.
+fn queue_check(cfg: &Config, q: &hds_core::queue::QueueConfig, snap: Option<Value>) -> Check {
+    if !q.enabled {
+        return Check::new(
+            "queue",
+            "ok",
+            "очередь тяжёлых RAG выключена (desktop по умолчанию; включается queue.enabled)",
+        );
+    }
+    let path = hds_core::queue::snapshot_path(cfg);
+    let mut fixes: Vec<String> = Vec::new();
+    if q.wait_timeout_sec >= hds_core::queue::CLIENT_TIMEOUT_SEC {
+        fixes.push(format!(
+            "queue.wait_timeout_sec < {} (таймаут MCP-клиента): иначе клиент обрывает \
+             запрос раньше, чем придёт 503",
+            hds_core::queue::CLIENT_TIMEOUT_SEC
+        ));
+    }
+    let configured = format!(
+        "очередь включена: политика {}, глубина ожидания ≤ {}, одновременно исполняется ≤ {}, \
+         ожидание ≤ {} с",
+        q.policy.as_str(),
+        q.max_depth,
+        q.max_inflight,
+        q.wait_timeout_sec
+    );
+    match snap {
+        Some(v) => {
+            let age = hds_core::queue::snapshot_age_secs(&v).unwrap_or(f64::MAX);
+            let n = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+            let users: Vec<String> = v
+                .get("per_user")
+                .and_then(|p| p.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|u| {
+                            Some(format!(
+                                "{}: ждёт {}, исполняет {}",
+                                u.get("user")?.as_str()?,
+                                u.get("waiting")?.as_u64()?,
+                                u.get("executing")?.as_u64()?
+                            ))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let msg = format!(
+                "{configured}; сейчас: исполняется {}, ждёт {}, ожидание p50/p95 {} / {} мс, \
+                 отказов (очередь полна) {}, таймаутов ожидания {}, обрывов клиента {}{}",
+                n("executing"),
+                n("depth"),
+                n("wait_p50_ms"),
+                n("wait_p95_ms"),
+                n("rejected_full"),
+                n("timeouts"),
+                n("aborted"),
+                if users.is_empty() {
+                    String::new()
+                } else {
+                    format!("; кто ждёт — {}", users.join(", "))
+                }
+            );
+            if age > hds_core::queue::SNAPSHOT_STALE_SEC {
+                Check::new(
+                    "queue",
+                    "warn",
+                    format!("очередь включена, но статус устарел ({age:.0} с назад)"),
+                )
+                .msg(msg)
+                .fix(
+                    "Проверьте процесс MCP-http (`hds mcp-http status`/`start`) — снапшот \
+                     data/mcp-queue.json должен обновляться каждые 2 с; старый бинарь его не пишет.",
+                )
+            } else if fixes.is_empty() {
+                Check::new(
+                    "queue",
+                    "ok",
+                    format!("очередь тяжёлых RAG ({} с)", age.round()),
+                )
+                .msg(msg)
+            } else {
+                Check::new("queue", "warn", "очередь тяжёлых RAG: проверьте настройки")
+                    .msg(msg)
+                    .fix(fixes.join("; "))
+            }
+        }
+        None => Check::new(
+            "queue",
+            "warn",
+            "очередь тяжёлых RAG включена, но её статус не пишется",
+        )
+        .msg(format!(
+            "{configured}; снапшот {} отсутствует",
+            path.display()
+        ))
+        .fix(if fixes.is_empty() {
+            "Запустите MCP-http (`hds mcp-http start`) — снапшот очереди пишет только он."
+                .to_string()
+        } else {
+            format!(
+                "Запустите MCP-http (`hds mcp-http start`); {}",
+                fixes.join("; ")
+            )
+        }),
+    }
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
@@ -898,6 +1023,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_gpu_observability(cfg));
     checks.push(check_audit(cfg));
     checks.push(check_perimeter(cfg));
+    checks.push(check_queue(cfg));
     checks.push(
         Check::new(
             "gpu-manual",
@@ -916,6 +1042,81 @@ mod tests {
 
     fn cfg(text: &str) -> Value {
         serde_yaml::from_str(text).unwrap()
+    }
+
+    /// M4 T3: статусы пункта `queue` — выключено/нет снапшота/свежий/устаревший
+    /// и предупреждение про `wait_timeout_sec` ≥ клиентского таймаута.
+    #[test]
+    fn queue_check_statuses() {
+        use super::queue_check;
+        use hds_core::queue::{QueueConfig, CLIENT_TIMEOUT_SEC};
+        use serde_json::json;
+
+        let snapshot = |ts: f64| {
+            json!({
+                "ts": ts,
+                "enabled": true,
+                "policy": "rr",
+                "max_inflight": 4,
+                "max_depth": 20,
+                "wait_timeout_sec": 240,
+                "depth": 2,
+                "executing": 1,
+                "granted": 7,
+                "rejected_full": 1,
+                "timeouts": 2,
+                "aborted": 0,
+                "total_wait_ms": 4200,
+                "wait_p50_ms": 1200,
+                "wait_p95_ms": 3000,
+                "per_user": [{ "user": "user:anna", "waiting": 2, "executing": 1 }],
+            })
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs_f64();
+
+        // desktop (по умолчанию) — очередь выключена, пункт ok.
+        let c = cfg("index:\n  roots: []");
+        let q = QueueConfig::from_config(&c);
+        let chk = queue_check(&c, &q, None);
+        assert_eq!(chk.status, "ok");
+        assert!(chk.title.contains("выключена"), "title={}", chk.title);
+
+        // server без снапшота — warn: статус никто не пишет (MCP не запущен).
+        let c = cfg("profile: server");
+        let q = QueueConfig::from_config(&c);
+        let chk = queue_check(&c, &q, None);
+        assert_eq!(chk.status, "warn", "msg={}", chk.msg);
+        assert!(chk.msg.contains("отсутствует"), "msg={}", chk.msg);
+        assert!(chk.fix.contains("mcp-http"), "fix={}", chk.fix);
+
+        // server + свежий снапшот — ok с числами и «кто кого ждёт».
+        let chk = queue_check(&c, &q, Some(snapshot(now)));
+        assert_eq!(chk.status, "ok", "msg={}", chk.msg);
+        assert!(chk.msg.contains("исполняется 1"), "msg={}", chk.msg);
+        assert!(chk.msg.contains("ждёт 2"), "msg={}", chk.msg);
+        assert!(chk.msg.contains("1200 / 3000"), "msg={}", chk.msg);
+        assert!(chk.msg.contains("user:anna: ждёт 2"), "msg={}", chk.msg);
+
+        // server + устаревший снапшот — warn с подсказкой про MCP-процесс.
+        let chk = queue_check(&c, &q, Some(snapshot(now - 120.0)));
+        assert_eq!(chk.status, "warn");
+        assert!(chk.title.contains("устарел"), "title={}", chk.title);
+        assert!(chk.fix.contains("mcp-http"), "fix={}", chk.fix);
+
+        // server + ожидание ≥ клиентского таймаута — warn с числами.
+        let c2 = cfg("profile: server\nqueue:\n  wait_timeout_sec: 300");
+        let q2 = QueueConfig::from_config(&c2);
+        assert!(q2.wait_timeout_sec >= CLIENT_TIMEOUT_SEC);
+        let chk = queue_check(&c2, &q2, Some(snapshot(now)));
+        assert_eq!(chk.status, "warn");
+        assert!(
+            chk.fix.contains(&CLIENT_TIMEOUT_SEC.to_string()),
+            "fix={}",
+            chk.fix
+        );
     }
 
     /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.

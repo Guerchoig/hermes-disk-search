@@ -27,6 +27,7 @@ pub mod db;
 pub mod error;
 pub mod http;
 pub mod net;
+pub mod queue;
 pub mod ratelimit;
 pub mod roots;
 
@@ -45,4 +46,5 @@ pub use config::{
 pub use db::{connect, has_vec, vec_ok, DbError, FileRow, Stats};
 pub use error::{CoreError, Result};
 pub use net::{real_client_ip, request_scheme, trusted_proxy};
+pub use queue::{HeavyQueue, QueueConfig, QueuePolicy, QueueReject, QueueStats, QueueTicket};
 pub use roots::{default_project, project_for_path, roots_from_cfg, roots_paths, Root};

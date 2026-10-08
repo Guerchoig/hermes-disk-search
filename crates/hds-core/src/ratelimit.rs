@@ -38,7 +38,9 @@ pub struct RateLimit {
 }
 
 impl RateLimit {
-    fn from_config(cfg: &Config) -> RateLimit {
+    /// Параметры лимитов из конфига (M4 T3: тем же путём берётся
+    /// `max_inflight` для очереди — единый источник дефолта).
+    pub fn from_config(cfg: &Config) -> RateLimit {
         let u = |k: &str, d: u32| -> u32 {
             dig(cfg, k)
                 .and_then(|v| v.as_u64())

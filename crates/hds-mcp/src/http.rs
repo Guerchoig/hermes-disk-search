@@ -14,6 +14,8 @@ use std::net::{TcpListener, TcpStream};
 
 use serde_json::{json, Value};
 
+use hds_core::queue::{HeavyQueue, QueueConfig, QueueReject};
+
 use crate::auth::{self, AuthEnv};
 use crate::server;
 
@@ -403,11 +405,7 @@ pub fn rate_limit_headers(
 ) -> Vec<(&'static str, String)> {
     // F10.2 (T0): на 429 отдаём ещё Remaining/Reset (0 — исчерпано;
     // Reset — момент пополнения в unix-секундах).
-    let reset = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-        + retry;
+    let reset = epoch_secs() + retry;
     vec![
         ("Retry-After", retry.to_string()),
         (
@@ -417,6 +415,140 @@ pub fn rate_limit_headers(
         ("X-RateLimit-Remaining", "0".to_string()),
         ("X-RateLimit-Reset", reset.to_string()),
     ]
+}
+
+fn epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Ответ отказа очереди (M4 T3 §3.2): `429` (очередь полна) / `503` (таймаут).
+pub fn queue_reply(reject: &QueueReject) -> Reply {
+    match reject {
+        QueueReject::Full { max_depth, .. } => (
+            429,
+            "application/json",
+            json!({
+                "error": "rate limited",
+                "hint": format!("очередь тяжёлых запросов заполнена (queue.max_depth: {max_depth}); \
+                                 повторите позже")
+            })
+            .to_string(),
+        ),
+        QueueReject::Timeout { waited_sec, .. } => (
+            503,
+            "application/json",
+            json!({
+                "error": "queue timeout",
+                "hint": format!("не дождался слота за {waited_sec} с \
+                                 (queue.wait_timeout_sec); повторите позже")
+            })
+            .to_string(),
+        ),
+        QueueReject::Aborted => (
+            503,
+            "application/json",
+            json!({ "error": "client gone" }).to_string(),
+        ),
+    }
+}
+
+/// `Retry-After` для отказа очереди: полная — скоро, таймаут — по потолку
+/// ожидания (не дольше минуты; клиентский таймаут 300 с больше и того, и другого).
+fn queue_retry_after(reject: &QueueReject, cfg: &QueueConfig) -> u64 {
+    match reject {
+        QueueReject::Full { .. } => 5,
+        QueueReject::Timeout { .. } => cfg.wait_timeout_sec.clamp(1, 60),
+        QueueReject::Aborted => 1,
+    }
+}
+
+/// Заголовки отказа очереди: `Retry-After` + фактическая глубина ожидания +
+/// (если лимитер включён) `X-RateLimit-*`, как на обычном 429.
+fn queue_headers(
+    reject: &QueueReject,
+    retry: u64,
+    limits: Option<&hds_core::ratelimit::Limiter>,
+) -> Vec<(&'static str, String)> {
+    let depth = match reject {
+        QueueReject::Full { depth, .. } | QueueReject::Timeout { depth, .. } => *depth,
+        QueueReject::Aborted => 0,
+    };
+    let mut h = vec![
+        ("Retry-After", retry.to_string()),
+        ("X-Queue-Depth", depth.to_string()),
+    ];
+    if let Some(l) = limits {
+        h.push(("X-RateLimit-Limit", l.cfg().requests_per_min.to_string()));
+        h.push(("X-RateLimit-Remaining", "0".to_string()));
+        h.push(("X-RateLimit-Reset", (epoch_secs() + retry).to_string()));
+    }
+    h
+}
+
+/// Ключ fair-share очереди (M4 T3 §3.2): валидный токен → `user:<login>`,
+/// иначе при включённой авторизации → `ip:<addr>`, иначе (desktop/stdio) —
+/// `local`.
+fn user_key(env: &AuthEnv, auth_header: Option<&str>, ip: &str) -> String {
+    if !env.enabled {
+        return "local".to_string();
+    }
+    match auth::resolve_bearer(env, auth_header) {
+        Some(ctx) => format!("user:{}", ctx.user),
+        None => format!("ip:{ip}"),
+    }
+}
+
+/// Клиент ещё на связи? Проверяем сокет, пока запрос ждёт слот
+/// (`peek` с коротким таймаутом: `Ok(0)` — FIN, таймаут — данных нет, но связь
+/// жива). Обрыв при ОЖИДАНИИ освобождает место в очереди; обрыв во время
+/// генерации вызов движка не отменяет (страж `gpu.abandoned_request_sec`).
+fn client_alive(stream: &mut TcpStream, read_timeout: u64) -> bool {
+    let prev = match read_timeout {
+        0 => None,
+        s => Some(std::time::Duration::from_secs(s)),
+    };
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_millis(150)));
+    let mut probe = [0u8; 1];
+    let alive = match stream.peek(&mut probe) {
+        Ok(0) => false,
+        Ok(_) => true,
+        Err(e)
+            if e.kind() == std::io::ErrorKind::WouldBlock
+                || e.kind() == std::io::ErrorKind::TimedOut =>
+        {
+            true
+        }
+        Err(_) => false,
+    };
+    let _ = stream.set_read_timeout(prev);
+    alive
+}
+
+/// Аудит ожидания в очереди (M4 T3 §4: «журнал/аудит ожидания»): событие
+/// `queue_wait` с длительностью ожидания (`ms`) и фактическим статусом ответа;
+/// аудит самого вызова инструмента пишет `route` (`tool_call`).
+fn audit_queue_wait(env: &AuthEnv, user: &str, ip: &str, path: &str, waited_ms: u64, status: u16) {
+    if let Some(a) = &env.audit {
+        a.record(
+            &hds_core::audit::AuditEvent {
+                ts: 0,
+                event: "queue_wait".into(),
+                user: Some(user.to_string()),
+                ip: ip.into(),
+                method: "POST".into(),
+                path: path.into(),
+                tool: Some("ask_my_files".into()),
+                projects: None,
+                token: None,
+                status,
+                ms: waited_ms,
+            }
+            .now(),
+        );
+    }
 }
 
 /// Запустить HTTP-MCP сервер (блокирующе). `path` — endpoint (например `/mcp`).
@@ -445,6 +577,24 @@ pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String
     let max_conns = hds_core::net::max_conns(&cfg);
     // F10.6 (T0): таймаут чтения запроса (медленный клиент не держит поток).
     let read_timeout = hds_core::net::read_timeout_sec(&cfg);
+    // M4 T3: очередь тяжёлых RAG (server-профиль — включена по умолчанию,
+    // desktop — выключена: поведение M3 «сразу 429» не меняется). Снапшот
+    // очереди пишется в `<state_dir>/data/mcp-queue.json` — его читают
+    // `hds check`/`/api/diagnostics` (это другие процессы).
+    let queue: Option<std::sync::Arc<HeavyQueue>> = {
+        let qc = QueueConfig::from_config(&cfg);
+        qc.enabled.then(|| std::sync::Arc::new(HeavyQueue::new(qc)))
+    };
+    let snapshot_stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let snapshot_path = queue.as_ref().map(|_| hds_core::queue::snapshot_path(&cfg));
+    if let (Some(q), Some(p)) = (&queue, &snapshot_path) {
+        let _ = hds_core::queue::spawn_snapshot_writer(
+            std::sync::Arc::clone(q),
+            p.clone(),
+            std::time::Duration::from_secs(2),
+            std::sync::Arc::clone(&snapshot_stop),
+        );
+    }
     let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
@@ -482,6 +632,7 @@ pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String
                 let mp = mcp_path.clone();
                 let env = env.clone();
                 let limits = limits.clone();
+                let queue = queue.clone();
                 let conns = std::sync::Arc::clone(&conns);
                 conns.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 std::thread::spawn(move || {
@@ -507,6 +658,8 @@ pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String
                                 env: &env,
                                 trusted,
                                 limits: limits.as_deref(),
+                                queue: queue.as_ref(),
+                                read_timeout,
                             };
                             serve_request(&mut stream, &m, &p, &b, head, &peer, &ctx);
                         }
@@ -516,6 +669,12 @@ pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String
             }
             Err(_) => continue,
         }
+    }
+    // Снапшот очереди больше не обновляется — убираем, чтобы `hds check` не
+    // читал «мёртвый» статус (писатель останавливаем, поток-daemon завершится).
+    snapshot_stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(p) = snapshot_path {
+        let _ = std::fs::remove_file(p);
     }
     Ok(())
 }
@@ -535,6 +694,10 @@ struct ServeCtx<'a> {
     env: &'a AuthEnv,
     trusted: bool,
     limits: Option<&'a hds_core::ratelimit::Limiter>,
+    /// Очередь тяжёлых RAG (M4 T3); `None` — выключена (desktop: сразу 429).
+    queue: Option<&'a std::sync::Arc<HeavyQueue>>,
+    /// `http.read_timeout_sec` — восстанавливается после проверки живости клиента.
+    read_timeout: u64,
 }
 
 /// Обработать прочитанный запрос: rate-limit → audit → route (чистая часть —
@@ -553,6 +716,8 @@ fn serve_request(
         env,
         trusted,
         limits,
+        queue,
+        read_timeout,
     } = *ctx;
     let ip = hds_core::net::real_client_ip(peer, head.x_forwarded_for.as_deref(), trusted);
     // T3: ключ лимитов — токен, иначе IP.
@@ -583,6 +748,35 @@ fn serve_request(
     // (иначе текст запроса со словом `ask_my_files` ложно попадал под лимит).
     let heavy = is_heavy_request(b);
     if heavy {
+        // M4 T3: очередь тяжёлых RAG (server-профиль). Запрос ЖДЁТ слот с
+        // fair-share по пользователю; `queue.enabled: false` (desktop) —
+        // прежнее поведение M3 (мгновенный 429).
+        if let Some(q) = queue {
+            let ukey = user_key(env, head.authorization.as_deref(), &ip);
+            let ticket = match q.acquire(&ukey, || client_alive(stream, read_timeout)) {
+                Ok(t) => t,
+                Err(rej) => {
+                    if rej == QueueReject::Aborted {
+                        return; // клиента нет — отвечать некуда
+                    }
+                    let retry = queue_retry_after(&rej, q.cfg());
+                    write_reply_with(
+                        stream,
+                        queue_reply(&rej),
+                        &queue_headers(&rej, retry, limits),
+                    );
+                    return;
+                }
+            };
+            let waited = ticket.waited_ms();
+            let reply = route(m, p, b, mp, env, head.authorization.as_deref(), &ip);
+            if waited > 0 {
+                audit_queue_wait(env, &ukey, &ip, p, waited, reply.0);
+            }
+            write_reply(stream, reply);
+            drop(ticket);
+            return;
+        }
         let acquired = limits.map(|l| l.inflight_acquire(&key)).unwrap_or(true);
         if !acquired {
             if let Some(l) = limits {
