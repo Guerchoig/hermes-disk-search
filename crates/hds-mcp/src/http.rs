@@ -96,6 +96,7 @@ pub fn route(
                                     path: req_path.into(),
                                     tool: None,
                                     projects: None,
+                                    token: None,
                                     status: 401,
                                     ms: started.elapsed().as_millis() as u64,
                                 }
@@ -134,6 +135,7 @@ pub fn route(
                             path: req_path.into(),
                             tool: Some(tool),
                             projects: ctx.as_ref().map(|c| c.projects.clone()),
+                            token: None,
                             status: reply.0,
                             ms: started.elapsed().as_millis() as u64,
                         }
@@ -156,7 +158,7 @@ pub fn route(
 /// Аудит (M3 T2): `login_ok` (успех — токен выдан) / `login_fail` (неверные
 /// данные или битое тело); тела запроса и токены не логируются.
 fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::Instant) -> Reply {
-    let audit_ev = |event: &str, user: Option<&str>, status: u16| {
+    let audit_ev = |event: &str, user: Option<&str>, token: Option<&str>, status: u16| {
         env.audit.as_ref().map(|a| {
             a.record(
                 &hds_core::audit::AuditEvent {
@@ -168,6 +170,7 @@ fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::
                     path: "/auth/login".into(),
                     tool: None,
                     projects: None,
+                    token: token.map(|s| s.into()),
                     status,
                     ms: started.elapsed().as_millis() as u64,
                 }
@@ -178,7 +181,7 @@ fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::
     let v: Value = match serde_json::from_str(body.trim()) {
         Ok(v) => v,
         Err(e) => {
-            audit_ev("login_fail", None, 400);
+            audit_ev("login_fail", None, None, 400);
             return (
                 400,
                 "application/json",
@@ -190,7 +193,12 @@ fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::
     let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
     match auth::login(env, login, password) {
         Ok((token, expires, ctx)) => {
-            audit_ev("login_ok", Some(&ctx.user), 200);
+            // F1 (T0): фиксируем выдачу токена — `token_issue` с отпечатком
+            // (префикс sha256; сам токен не логируется).
+            let fp = hds_core::access::token_sha256_hex(&token);
+            let fp = &fp[..12.min(fp.len())];
+            audit_ev("login_ok", Some(&ctx.user), None, 200);
+            audit_ev("token_issue", Some(&ctx.user), Some(fp), 200);
             (
                 200,
                 "application/json",
@@ -204,7 +212,7 @@ fn handle_login(body: &str, env: &AuthEnv, client_ip: &str, started: std::time::
             )
         }
         Err(_) => {
-            audit_ev("login_fail", Some(login), 401);
+            audit_ev("login_fail", Some(login), None, 401);
             (
                 401,
                 "application/json",

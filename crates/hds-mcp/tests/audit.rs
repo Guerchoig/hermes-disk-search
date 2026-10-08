@@ -80,7 +80,7 @@ fn login_ok_and_fail_are_audited() {
         "10.1.2.3",
     );
     let evs = events(&path);
-    assert_eq!(evs.len(), 2, "{evs:?}");
+    assert_eq!(evs.len(), 3, "{evs:?}");
     assert_eq!(evs[0]["event"], "login_ok");
     assert_eq!(evs[0]["user"], "alice");
     assert_eq!(evs[0]["ip"], "10.1.2.3");
@@ -89,8 +89,20 @@ fn login_ok_and_fail_are_audited() {
         evs[0].get("projects").is_none(),
         "токены/тела не логируются"
     );
-    assert_eq!(evs[1]["event"], "login_fail");
-    assert_eq!(evs[1]["status"], 401);
+    // F1 (T0): выдача токена фиксируется отдельным событием с отпечатком.
+    assert_eq!(evs[1]["event"], "token_issue");
+    assert_eq!(evs[1]["user"], "alice");
+    assert_eq!(evs[1]["status"], 200);
+    assert!(
+        evs[1]["token"]
+            .as_str()
+            .map(|s| s.len() >= 8)
+            .unwrap_or(false),
+        "отпечаток токена (префикс хэша) в событии: {}",
+        evs[1]
+    );
+    assert_eq!(evs[2]["event"], "login_fail");
+    assert_eq!(evs[2]["status"], 401);
 }
 
 #[test]

@@ -1365,6 +1365,7 @@ fn ui_auth_gate(
                         path: "-".into(),
                         tool: None,
                         projects: None,
+                        token: None,
                         status: 401,
                         ms: 0,
                     }
@@ -1417,6 +1418,7 @@ pub fn route_with_access(
                     path: path.into(),
                     tool: None,
                     projects: None,
+                    token: None,
                     status: 200,
                     ms: 0,
                 }

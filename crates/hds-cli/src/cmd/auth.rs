@@ -351,6 +351,7 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
                             path: "hds token revoke".into(),
                             tool: None,
                             projects: None,
+                            token: None,
                             status: 0,
                             ms: 0,
                         }

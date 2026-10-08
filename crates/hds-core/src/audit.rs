@@ -37,7 +37,9 @@ pub struct Audit {
 }
 
 /// Событие аудита (`{ts, event, user?, ip, method, path, tool?, projects?,
-/// status, ms}`); `user` — логин/имя пользователя, `projects` — проекты токена.
+/// token?, status, ms}`); `user` — логин/имя пользователя, `projects` — проекты
+/// токена, `token` — **префикс** хэша токена (для `token_issue`/`token_revoke`,
+/// без самого токена: по нему видно «какой токен», но восстановить нельзя).
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEvent {
     /// Unix-время события (сек).
@@ -57,6 +59,9 @@ pub struct AuditEvent {
     pub tool: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub projects: Option<Vec<String>>,
+    /// Префикс `token_sha256` выданного/отозванного токена (без самого токена).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     /// HTTP-статус ответа (0 — для CLI).
     pub status: u16,
     /// Длительность обработки, мс.
@@ -177,6 +182,7 @@ mod tests {
             path: "/auth/login".into(),
             tool: None,
             projects: None,
+            token: None,
             status: 200,
             ms: 12,
         }
