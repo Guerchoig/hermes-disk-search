@@ -96,7 +96,7 @@ fn disk_index(
 /// Из БД: `<dir> -> (всего файлов, проиндексировано, max indexed_at)`.
 fn db_info(cfg: &hds_core::config::Config) -> HashMap<PathBuf, (i64, i64, f64)> {
     let mut info: HashMap<PathBuf, (i64, i64, f64)> = HashMap::new();
-    if let Ok(conn) = crate::connect(cfg) {
+    if let Ok(conn) = crate::connect_ro(cfg) {
         if let Ok(mut st) = conn.prepare("SELECT path, status, indexed_at FROM files") {
             if let Ok(rows) = st.query_map([], |r| {
                 Ok((

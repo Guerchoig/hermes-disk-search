@@ -284,10 +284,34 @@ fn build_sidecar(root: &Path) -> Result<Sidecar> {
 }
 
 /// Проверка БД (пункт 1): `ok`, либо `fail`/`warn` (занята).
+///
+/// Пишущее соединение (`open_rw`) — пункт должен создать схему на свежей базе
+/// и показать фактические PRAGMA (M4 T1: journal_mode/busy_timeout — числа).
 pub fn check_db(cfg: &Config) -> Check {
     let path = config::db_abs_path(cfg);
-    match db::connect(&path, dim_of(cfg)) {
-        Ok(_) => Check::new("db", "ok", format!("База данных: {}", path.display())),
+    let opts = db::DbOptions {
+        busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+        journal_mode: config::db_journal_mode(cfg),
+    };
+    match db::open_rw(&path, dim_of(cfg), &opts) {
+        Ok(conn) => {
+            let jm: String = conn
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap_or_default();
+            let bt: i64 = conn
+                .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+                .unwrap_or(0);
+            Check::new(
+                "db",
+                "ok",
+                format!(
+                    "База данных: {} (journal_mode={}, busy_timeout={} мс)",
+                    path.display(),
+                    jm,
+                    bt
+                ),
+            )
+        }
         Err(e) => {
             let es = e.message();
             let locked = es.to_lowercase().contains("locked") && path.exists();

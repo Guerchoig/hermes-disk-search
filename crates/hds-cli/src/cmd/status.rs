@@ -3,7 +3,7 @@
 use hds_core::db::Stats;
 use serde_json::{json, Value};
 
-use crate::support::{fmt_local_datetime, open_conn};
+use crate::support::{fmt_local_datetime, open_conn_ro};
 
 /// JSON `db.stats` — те же поля, что `dict` в Python
 /// (`by_kind`/`by_status`/`chunks`/`last_indexed_at`/`errors`; пары — массивами).
@@ -63,7 +63,7 @@ pub fn cmd_status(as_json: bool) -> i32 {
             return 1;
         }
     };
-    let conn = match open_conn(&cfg) {
+    let conn = match open_conn_ro(&cfg) {
         Ok(c) => c,
         Err(e) => {
             println!("База данных недоступна: {}", e.message());

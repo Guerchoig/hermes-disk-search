@@ -104,10 +104,63 @@ pub fn has_vec(conn: &Connection) -> bool {
     .unwrap_or(false)
 }
 
-/// Порт `hds/db.py:connect`: подключение + PRAGMA + схема + vec0.
+/// Опции соединения с БД (M4 T1, `PLAN_M4_CONCURRENCY_SLA.md` §3.4).
+///
+/// Заполняется из ключей `db.*` (см. `config::db_*`): `busy_timeout_ms`
+/// (server — 5000, desktop — 30000) и `journal_mode` (дефолт `wal`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DbOptions {
+    /// Ожидание блокировки SQLite, мс (`db.busy_timeout_ms`).
+    pub busy_timeout_ms: i64,
+    /// Режим журнала (`db.journal_mode`); WAL персистентен в файле базы.
+    pub journal_mode: String,
+}
+
+impl Default for DbOptions {
+    fn default() -> Self {
+        Self {
+            busy_timeout_ms: 30_000,
+            journal_mode: "wal".to_string(),
+        }
+    }
+}
+
+impl DbOptions {
+    /// `journal_mode` без опасных символов (значение подставляется в PRAGMA).
+    fn safe_journal_mode(&self) -> String {
+        let s: String = self
+            .journal_mode
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if s.is_empty() {
+            "wal".to_string()
+        } else {
+            s
+        }
+    }
+}
+
+/// Порт `hds/db.py:connect`: подключение **писателя** + PRAGMA + схема + vec0
+/// (DDL схемы, дроп устаревшей схемы, бэкфилл `indexed_at`).
 ///
 /// Сообщения `[db] …` печатаются в stdout, как в Python-версии (формат сохранён).
+///
+/// M4 T1 (`PLAN_M4_CONCURRENCY_SLA.md` §3.4): `busy_timeout`/`journal_mode`
+/// больше не зашиты — вызывающие, знающие конфиг, передают их через [`open_rw`]
+/// (`db.busy_timeout_ms`, `db.journal_mode`). `connect` сохраняет прежнее
+/// поведение (WAL + 30000 мс) для Python-паритета и существующих тестов.
 pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
+    open_rw(db_path, dim, &DbOptions::default())
+}
+
+/// Соединение **писателя** (`open_rw`): WAL + `synchronous=NORMAL` +
+/// `foreign_keys=ON` + `busy_timeout` из `db.busy_timeout_ms`.
+///
+/// Писатель один — конвейер индексации/watcher (плюс CLI-запись и админ-операции,
+/// которые пишут той же дорогой). Читатели (MCP/UI/CLI-поиск) открываются через
+/// [`open_ro`] и DDL не выполняют.
+pub fn open_rw(db_path: &Path, dim: i64, opts: &DbOptions) -> Result<Connection> {
     let dim = dim.max(1);
     if let Some(dir) = db_path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -116,12 +169,14 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
     }
     register_vec0();
     let conn = Connection::open(db_path)?;
-    conn.execute_batch(
-        "PRAGMA journal_mode=WAL;\n\
+    conn.execute_batch(&format!(
+        "PRAGMA journal_mode={};\n\
          PRAGMA synchronous=NORMAL;\n\
          PRAGMA foreign_keys=ON;\n\
-         PRAGMA busy_timeout=30000;",
-    )?;
+         PRAGMA busy_timeout={};",
+        opts.safe_journal_mode(),
+        opts.busy_timeout_ms.max(0)
+    ))?;
 
     // M1 (PLAN_M1_ACCESS_PROJECTS.md T2): старая схема без `project` у files —
     // согласованный дроп и переиндексация. Дети перед родителем, meta — последней.
@@ -239,6 +294,32 @@ pub fn connect(db_path: &Path, dim: i64) -> Result<Connection> {
             [&want],
         )?;
     }
+    Ok(conn)
+}
+
+/// Соединение **читателя** (`open_ro`): read-only, без DDL и записи (M4 T1).
+///
+/// WAL персистентен в файле базы и выставляется писателем — читатель его **не**
+/// переключает (на read-only соединении это ошибка). Важно (грабля WAL):
+/// SQLite на read-only WAL-базе требует доступа к `-shm` (если файл уже есть —
+/// к нему, иначе — на запись в каталог базы). На server это один аккаунт
+/// службы/администратора, поэтому конфликта нет; `immutable=1` сознательно
+/// не применяем — база меняется на ходу. Отсутствующей базы `open_ro` не
+/// создаёт: явная ошибка (индекс сначала должен создать `hds check`/`hds index`).
+pub fn open_ro(db_path: &Path, opts: &DbOptions) -> Result<Connection> {
+    if !db_path.is_file() {
+        return Err(CoreError::Other(format!(
+            "базы {} ещё нет — read-only читателю нужен уже созданный индекс \
+             (запустите 'hds check' или 'hds index')",
+            db_path.display()
+        )));
+    }
+    register_vec0();
+    let conn = Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    conn.execute_batch(&format!(
+        "PRAGMA busy_timeout={};",
+        opts.busy_timeout_ms.max(0)
+    ))?;
     Ok(conn)
 }
 

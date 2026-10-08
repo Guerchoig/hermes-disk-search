@@ -21,7 +21,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use hds_core::config::{db_abs_path, dig, load, project_root, Config};
+use hds_core::config::{self, db_abs_path, dig, load, project_root, Config};
 use hds_core::{db, http};
 use hds_index::heartbeat::{self, HeartbeatFile};
 use hds_index::{Embedder, Sidecar};
@@ -114,7 +114,26 @@ fn connect(cfg: &Config) -> Result<rusqlite::Connection, String> {
     let dim = dig(cfg, "embedding.dim")
         .and_then(|v| v.as_i64())
         .unwrap_or(1024);
-    db::connect(&db_abs_path(cfg), dim).map_err(|e| e.message())
+    let opts = db::DbOptions {
+        busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+        journal_mode: config::db_journal_mode(cfg),
+    };
+    db::open_rw(&db_abs_path(cfg), dim, &opts).map_err(|e| e.message())
+}
+
+/// Подключение **читателя**: при `db.read_only_conns` (server-дефолт) —
+/// read-only соединение без DDL; иначе прежнее rw-поведение (desktop, M4 T1).
+/// Читатели: `/api/status`, `/api/search`, `/api/ask`, дерево (`tree.rs`).
+fn connect_ro(cfg: &Config) -> Result<rusqlite::Connection, String> {
+    if config::db_read_only_conns(cfg) {
+        let opts = db::DbOptions {
+            busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+            journal_mode: config::db_journal_mode(cfg),
+        };
+        db::open_ro(&db_abs_path(cfg), &opts).map_err(|e| e.message())
+    } else {
+        connect(cfg)
+    }
 }
 
 fn sidecar() -> Result<Sidecar, String> {
@@ -137,7 +156,7 @@ pub fn status_json() -> Value {
         Err(e) => return json!({ "error": e.message() }),
     };
     let mut index = json!({ "running": index_running(), "paused": project_root().join("index.pause").exists() });
-    if let Ok(conn) = connect(&cfg) {
+    if let Ok(conn) = connect_ro(&cfg) {
         if let Ok(st) = db::stats(&conn) {
             index["chunks"] = json!(st.chunks);
             index["statuses"] = json!(st
@@ -293,7 +312,7 @@ pub fn search_json(query: &str, limit: i64, kinds: &str) -> Value {
         Ok(c) => c,
         Err(e) => return json!({ "error": e.message() }),
     };
-    let conn = match connect(&cfg) {
+    let conn = match connect_ro(&cfg) {
         Ok(c) => c,
         Err(e) => return json!({ "error": e }),
     };
@@ -343,7 +362,7 @@ pub fn ask_json(question: &str) -> Value {
         Ok(c) => c,
         Err(e) => return json!({ "error": e.message() }),
     };
-    let conn = match connect(&cfg) {
+    let conn = match connect_ro(&cfg) {
         Ok(c) => c,
         Err(e) => return json!({ "error": e }),
     };

@@ -5,7 +5,7 @@
 
 use hds_core::config::project_root;
 
-use crate::support::{build_embedder, build_sidecar, open_conn, parse_kinds};
+use crate::support::{build_embedder, build_sidecar, open_conn_ro, parse_kinds};
 
 /// `cmd_search`: 0 — успех (в т.ч. когда ничего не найдено — как Python: 1);
 /// возвращает 1 при пустой выдаче, 1 при ошибке конфигурации/воркера.
@@ -17,7 +17,7 @@ pub fn cmd_search(query: String, kinds: Option<String>, limit: usize, json: bool
             return 1;
         }
     };
-    let conn = match open_conn(&cfg) {
+    let conn = match open_conn_ro(&cfg) {
         Ok(c) => c,
         Err(e) => {
             println!("База данных недоступна: {}", e.message());

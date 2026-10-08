@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use hds_core::access::AuthCtx;
-use hds_core::config::{db_abs_path, dig, load, project_root, Config};
+use hds_core::config::{self, db_abs_path, dig, load, project_root, Config};
 use hds_core::db;
 use hds_index::heartbeat::{self, HeartbeatFile};
 use hds_index::transcribe::MediaRouter;
@@ -16,12 +16,31 @@ use hds_search::{format_location, SearchResult};
 /// Запущена ли фоновая индексация этим процессом MCP (порт `_idx_state["running"]`).
 static INDEXING: AtomicBool = AtomicBool::new(false);
 
-/// Подключение к БД (порт `_conn`).
+/// Подключение к БД **писателя** (порт `_conn`; `reindex_path`/`run_indexing`).
 fn connect(cfg: &Config) -> Result<rusqlite::Connection, String> {
     let dim = dig(cfg, "embedding.dim")
         .and_then(|v| v.as_i64())
         .unwrap_or(1024);
-    db::connect(&db_abs_path(cfg), dim).map_err(|e| e.message())
+    let opts = db::DbOptions {
+        busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+        journal_mode: config::db_journal_mode(cfg),
+    };
+    db::open_rw(&db_abs_path(cfg), dim, &opts).map_err(|e| e.message())
+}
+
+/// Подключение к БД **читателя**: при `db.read_only_conns` (server-дефолт) —
+/// read-only соединение без DDL; иначе прежнее rw-поведение (desktop, M4 T1).
+/// Читатели: `search_local_files`, `ask_my_files`, `index_status`.
+fn connect_ro(cfg: &Config) -> Result<rusqlite::Connection, String> {
+    if config::db_read_only_conns(cfg) {
+        let opts = db::DbOptions {
+            busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+            journal_mode: config::db_journal_mode(cfg),
+        };
+        db::open_ro(&db_abs_path(cfg), &opts).map_err(|e| e.message())
+    } else {
+        connect(cfg)
+    }
 }
 
 /// Запустить Python-воркер (лемматизация/извлечение) — как `build_sidecar` в CLI.
@@ -100,7 +119,7 @@ pub fn search_local_files(auth: Option<&AuthCtx>, query: &str, limit: i64, kinds
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
     };
-    let conn = match connect(&cfg) {
+    let conn = match connect_ro(&cfg) {
         Ok(c) => c,
         Err(e) => return format!("База данных недоступна: {e}"),
     };
@@ -158,7 +177,7 @@ pub fn ask_my_files(auth: Option<&AuthCtx>, question: &str, limit: i64) -> Strin
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
     };
-    let conn = match connect(&cfg) {
+    let conn = match connect_ro(&cfg) {
         Ok(c) => c,
         Err(e) => return format!("База данных недоступна: {e}"),
     };
@@ -209,7 +228,7 @@ pub fn index_status() -> String {
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
     };
-    let conn = match connect(&cfg) {
+    let conn = match connect_ro(&cfg) {
         Ok(c) => c,
         Err(e) => return format!("База данных недоступна: {e}"),
     };

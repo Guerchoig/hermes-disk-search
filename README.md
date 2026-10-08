@@ -372,6 +372,13 @@ hds mcp-http check|start|stop|status|restart|run
 Общее: `-h`/`--help`. Конфиг — `config.yaml` (путь можно переопределить `HDS_CONFIG`).
 Индексация кооперативно останавливается файлом `index.stop` и приостанавливается `index.pause`.
 
+БД живёт в WAL-режиме (`journal_mode=wal`, ключ `db.journal_mode`): **бэкап — только
+через `VACUUM INTO`/`.backup`** (sqlite3), копировать файлы `index.db`/`index.db-wal`
+«на горячую» нельзя (см. Э10). Ожидание блокировки — `db.busy_timeout_ms` (server —
+5000, desktop — 30000). При `db.read_only_conns: true` (server-дефолт) читатели
+(MCP/UI/CLI-поиск/`ask`) открывают базу read-only, писатель — только конвейер
+индексации/watcher; `hds check` показывает фактические `journal_mode`/`busy_timeout`.
+
 ## Веб-интерфейс (`hds ui`)
 
 Ярлык «Hermes Disk Search» (рабочий стол) запускает `run_ui.ps1` → `bin\hds.exe ui` и открывает

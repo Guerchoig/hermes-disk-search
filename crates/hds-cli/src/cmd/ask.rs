@@ -2,7 +2,7 @@
 
 use hds_core::config::project_root;
 
-use crate::support::{build_embedder, build_sidecar, open_conn};
+use crate::support::{build_embedder, build_sidecar, open_conn_ro};
 
 /// `cmd_ask`: печатает `answer` (или JSON `{answer, sources}`); 0 — как Python.
 pub fn cmd_ask(question: String, limit: usize, json: bool) -> i32 {
@@ -13,7 +13,7 @@ pub fn cmd_ask(question: String, limit: usize, json: bool) -> i32 {
             return 1;
         }
     };
-    let conn = match open_conn(&cfg) {
+    let conn = match open_conn_ro(&cfg) {
         Ok(c) => c,
         Err(e) => {
             println!("База данных недоступна: {}", e.message());

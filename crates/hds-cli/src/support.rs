@@ -29,9 +29,32 @@ pub fn dim_of(cfg: &Config) -> i64 {
         .unwrap_or(1024)
 }
 
-/// Подключение к индексной БД (`db::connect` + `db_abs_path`) — как `cli._conn`.
+/// Подключение **писателя** к индексной БД (`open_rw` + `db_abs_path`).
+///
+/// Писатели: `index`, `reindex`, `reindex-fts`, `forget`, `clip-index`, `watch`.
+/// `busy_timeout` — из `db.busy_timeout_ms` (M4 T1).
 pub fn open_conn(cfg: &Config) -> Result<rusqlite::Connection> {
-    db::connect(&config::db_abs_path(cfg), dim_of(cfg))
+    let opts = hds_core::db::DbOptions {
+        busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+        journal_mode: config::db_journal_mode(cfg),
+    };
+    db::open_rw(&config::db_abs_path(cfg), dim_of(cfg), &opts)
+}
+
+/// Подключение **читателя** к индексной БД: при `db.read_only_conns` (server-дефолт)
+/// — read-only соединение без DDL; иначе прежнее rw-поведение (desktop, M4 T1).
+///
+/// Читатели: `status`, `search`, `ask`.
+pub fn open_conn_ro(cfg: &Config) -> Result<rusqlite::Connection> {
+    if config::db_read_only_conns(cfg) {
+        let opts = hds_core::db::DbOptions {
+            busy_timeout_ms: config::db_busy_timeout_ms(cfg),
+            journal_mode: config::db_journal_mode(cfg),
+        };
+        db::open_ro(&config::db_abs_path(cfg), &opts)
+    } else {
+        open_conn(cfg)
+    }
 }
 
 /// Клиент эмбеддингов (фасад `:8011`) — как `cli._emb`/`make_embedder`.

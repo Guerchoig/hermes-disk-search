@@ -40,6 +40,17 @@ index:
 # путь к индексной БД; относительный путь считается от корня проекта
 db_path: 'index.db'
 
+# --- БД под конкурентность (M4, PLAN_M4_CONCURRENCY_SLA.md §3.4) ---
+# Дефолты по профилю: server — busy_timeout 5000, read_only_conns true;
+# desktop — 30000/false (прежнее поведение). Читатели (MCP/UI/CLI-поиск) при
+# read_only_conns: true открывают базу read-only, писатель — только конвейер
+# индексации/watcher. Бэкап — только VACUUM INTO/.backup (WAL нельзя копировать
+# файлом «на горячую»).
+# db:
+#   busy_timeout_ms: 5000    # ожидание блокировки SQLite, мс
+#   read_only_conns: true    # читатели — read-only
+#   journal_mode: wal        # режим журнала писателя (персистентен в файле БД)
+
 chunk:
   size: 800                 # символов на чанк (≈400 токенов)
   overlap: 120              # перекрытие соседних чанков (целые предложения)

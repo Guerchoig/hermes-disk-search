@@ -243,6 +243,53 @@ pub fn profile(cfg: &Config) -> Profile {
     }
 }
 
+/// Дефолт `db.busy_timeout_ms` (ожидание блокировки SQLite) по профилю (M4 §3.4).
+///
+/// `server` — 5000 мс (читатель не должен висеть на писателе дольше SLA-бюджета);
+/// `desktop` — 30000 мс (прежнее зашитое значение `connect`, поведение M3).
+pub fn db_busy_timeout_default(p: Profile) -> i64 {
+    if p.is_server() {
+        5000
+    } else {
+        30_000
+    }
+}
+
+/// `db.busy_timeout_ms`: ожидание блокировки SQLite, мс (M4 T1).
+pub fn db_busy_timeout_ms(cfg: &Config) -> i64 {
+    dig(cfg, "db.busy_timeout_ms")
+        .and_then(|v| v.as_i64())
+        .unwrap_or_else(|| db_busy_timeout_default(profile(cfg)))
+        .max(0)
+}
+
+/// Дефолт `db.read_only_conns` по профилю (M4 §3.4).
+///
+/// `server` — true: читатели (MCP/UI/CLI-поиск) открывают БД read-only, писатель —
+/// только конвейер индексации/watcher. `desktop` — false (прежнее поведение).
+pub fn db_read_only_conns_default(p: Profile) -> bool {
+    p.is_server()
+}
+
+/// `db.read_only_conns`: открывать читателям БД в read-only режиме.
+pub fn db_read_only_conns(cfg: &Config) -> bool {
+    dig(cfg, "db.read_only_conns")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| db_read_only_conns_default(profile(cfg)))
+}
+
+/// `db.journal_mode`: режим журнала, который писатель (`open_rw`) ставит PRAGMA'ой.
+///
+/// Дефолт `wal` (порт Python). WAL персистентен в файле базы — read-only читатели
+/// наследуют его и сами PRAGMA не ставят. Бэкап — только `VACUUM INTO`/`.backup`
+/// (копировать файлы WAL «на горячую» нельзя — пометка для Э10).
+pub fn db_journal_mode(cfg: &Config) -> String {
+    dig(cfg, "db.journal_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("wal")
+        .to_string()
+}
+
 /// Атомарная замена файла с ретраями на `PermissionError` (как `config.replace_file`).
 ///
 /// Windows: UI читает `config.yaml` каждые 2 с из соседнего потока, а `os.replace`
