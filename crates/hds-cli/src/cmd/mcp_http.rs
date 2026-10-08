@@ -78,11 +78,25 @@ fn pid_file() -> PathBuf {
 }
 
 fn read_pid() -> Option<u32> {
-    std::fs::read_to_string(pid_file())
-        .ok()?
-        .trim()
-        .parse()
+    read_pid_meta().map(|(pid, _)| pid)
+}
+
+/// PID-файл: строка 1 — pid, строка 2 — имя образа процесса (для проверки
+/// личности: тот же PID мог быть переиспользован чужой программой).
+fn read_pid_meta() -> Option<(u32, String)> {
+    let text = std::fs::read_to_string(pid_file()).ok()?;
+    let mut it = text.lines();
+    let pid = it.next()?.trim().parse().ok()?;
+    let name = it.next().unwrap_or("").trim().to_string();
+    Some((pid, name))
+}
+
+/// Имя файла текущего исполняемого файла (`hds.exe` / `llm_host.exe`).
+fn current_exe_name() -> String {
+    std::env::current_exe()
         .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_default()
 }
 
 fn write_pid(pid: u32) {
@@ -90,11 +104,57 @@ fn write_pid(pid: u32) {
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&p, pid.to_string());
+    let _ = std::fs::write(&p, format!("{pid}\n{}\n", current_exe_name()));
 }
 
 fn remove_pid_file() {
     let _ = std::fs::remove_file(pid_file());
+}
+
+/// Имя образа процесса по PID (Windows — `tasklist /FO CSV`; иначе — `/proc`).
+fn pid_image_name(pid: u32) -> Option<String> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let out = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+            .creation_flags(0x0800_0000)
+            .output()
+            .ok()?;
+        let text = String::from_utf8_lossy(&out.stdout);
+        // Первое поле CSV-строки: "hds.exe","1234",...
+        let first = text.lines().next()?.trim();
+        let name = first.trim_start_matches('"').split('"').next()?;
+        if name.is_empty() || name.contains("не найдено") || name.contains("No tasks") {
+            None
+        } else {
+            Some(name.to_string())
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+        let name = comm.trim().to_string();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+}
+
+/// Наш ли это процесс: имя образа совпадает (пустое ожидание → имя текущего exe).
+/// Не смогли определить имя/процесс → `false` — чужой PID не убиваем.
+fn pid_is_ours(pid: u32, expected: &str) -> bool {
+    let expected = if expected.is_empty() {
+        current_exe_name()
+    } else {
+        expected.to_string()
+    };
+    match pid_image_name(pid) {
+        Some(n) => n.eq_ignore_ascii_case(&expected),
+        None => false,
+    }
 }
 
 /// Жив ли процесс (Windows — `tasklist`, иначе `kill -0`).
@@ -117,6 +177,30 @@ fn pid_alive(pid: u32) -> bool {
             .map(|s| s.success())
             .unwrap_or(false)
     }
+}
+
+/// Остановить инстанс: kill — только если PID живой И это наш процесс
+/// (M2-F5: иначе можно убить чужой процесс с переиспользованным PID).
+fn stop_instance() -> i32 {
+    match read_pid_meta() {
+        Some((pid, name)) if pid_alive(pid) => {
+            if pid_is_ours(pid, &name) {
+                kill_pid(pid);
+                remove_pid_file();
+                println!("остановлен (pid {pid})");
+            } else {
+                eprintln!(
+                    "mcp-http: PID-файл указывает на чужой процесс (pid {pid}) — не убиваю; файл удаляю"
+                );
+                remove_pid_file();
+            }
+        }
+        _ => {
+            remove_pid_file();
+            println!("не запущен (PID-файла нет)");
+        }
+    }
+    0
 }
 
 fn kill_pid(pid: u32) {
@@ -262,16 +346,7 @@ pub fn cmd_mcp_http(
             );
             0
         }
-        "stop" => {
-            if let Some(pid) = read_pid() {
-                kill_pid(pid);
-                remove_pid_file();
-                println!("остановлен (pid {pid})");
-            } else {
-                println!("не запущен (PID-файла нет)");
-            }
-            0
-        }
+        "stop" => stop_instance(),
         "run" => {
             // M2 T2: инициализация каталога состояния до подъёма инстанса
             // (server: ProgramData / Application Support).
@@ -280,7 +355,12 @@ pub fn cmd_mcp_http(
                     eprintln!("mcp-http: каталог состояния: {e}");
                 }
             }
-            match hds_mcp::run_http(&host, port, &path) {
+            // M2-F5 (T0): роль службы (`hds mcp-http run`) тоже ведёт PID-файл и
+            // чистит его на выходе (раньше файл писал только `start`).
+            write_pid(std::process::id());
+            let res = hds_mcp::run_http(&host, port, &path);
+            remove_pid_file();
+            match res {
                 Ok(()) => 0,
                 Err(e) => {
                     eprintln!("{e}");
@@ -290,8 +370,11 @@ pub fn cmd_mcp_http(
         }
         "start" | "restart" => {
             if sub == "restart" {
-                if let Some(pid) = read_pid() {
-                    kill_pid(pid);
+                // M2-F5 (T0): kill только если PID живой И это наш процесс.
+                if let Some((pid, name)) = read_pid_meta() {
+                    if pid_alive(pid) && pid_is_ours(pid, &name) {
+                        kill_pid(pid);
+                    }
                     remove_pid_file();
                 }
                 for _ in 0..40 {
