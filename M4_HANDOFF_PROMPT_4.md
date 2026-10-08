@@ -15,6 +15,19 @@
 дерево чистое. Станция: Windows, RTX 3060 12 ГБ (+ AMD-карта), Ryzen 7 5700G, 64 ГБ RAM,
 rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только sidecar.
 
+## Точка входа (5 минут)
+1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -6`  # HEAD — промт T3–T6
+2. `git --no-pager -C C:\Users\Sasha\hermes-disk-search status --short`    # чисто
+3. `cargo test --workspace` (если падает «отказано в доступе» на `target\debug\hds.exe` —
+   живы `hds watch`/`hds mcp-http`/`hds transcribe-watch`: либо остановить их, либо
+   `cargo test --workspace --exclude hds-cli`; см. «Грабли»)
+4. `cargo clippy --workspace --all-targets -- -D warnings` и `cargo fmt --all --check`
+5. Прочитать: `PLAN_M4_CONCURRENCY_SLA.md` §3 (контракты) → **§4 T3–T6** → §5 (приёмка) →
+   §8a (журнал: что уже сделано в T0–T2); затем `README.md` §«Слоты и SLA»,
+   `config.example.yaml` (`llm_server.parallel`, `queue.*` пока нет), `STATUS.md` (M4).
+6. Проверить факт боевого состояния: `bin\llm_host.exe status` (роли, VRAM, `parallel 1`),
+   `Test-Path .\index.pause` (боевая пауза индексации — не снимать без решения владельца).
+
 ## Коммиты этапа M4 по порядку
 258cb74 → 9d14980 → f2cf449 → 1a6e80d → f07fbea → d4af8b3 → 86df668 → 4ba31ec →
 bcd689e (доки T0) → df37fa8 (тест-премиса T1) → dfc0530 (доки: промт-2) →
@@ -88,10 +101,20 @@ desktop: 30000/false — прежнее поведение); `open_rw` (един
 ## Что осталось (T3–T6) — по §3/§4/§5 плана
 
 ### T3. Очередь и fair-share по пользователю — 2–3 дн
-- Модуль очереди (в `hds-mcp` или `hds-core`, чистая логика — тестируемая без сети):
-  ключ пользователя (`AuthCtx.user` из Bearer-токена, без токена — `local`), политика
-  `round-robin между пользователями` + FIFO внутри пользователя (`queue.policy: rr|fifo`),
-  лимит глубины, таймаут ожидания.
+- **Где именно врезаться** (проверено по коду): `crates/hds-mcp/src/http.rs` —
+  `serve_request` (≈542), ветка тяжёлого запроса (≈584: `is_heavy_request(b)` →
+  `limits.inflight_acquire(&key)` → `route(...)` → `inflight_release`), `too_many(inflight,
+  retry)` (≈383) и `rate_limit_headers` (≈400); ключ лимитов сейчас — токен|IP (≈558-560).
+  `crates/hds-core/src/ratelimit.rs` — `Limiter::{check,check_login,inflight_acquire,
+  inflight_release,inflight_guard}` (≈111-192), конфиг `rate_limit.*` (≈27-57, `max_inflight`
+  дефолт 4). Пользователь: `crates/hds-mcp/src/auth.rs::resolve_bearer` (≈87) →
+  `AuthCtx.user` (`crates/hds-core/src/access.rs` ≈83-85) — из него `user:<login>`, иначе
+  `ip:<addr>`. Роут/инструмент: `crates/hds-mcp/src/schema.rs` (≈81) → `tools::ask_my_files`
+  (`tools.rs` ≈175).
+- Модуль очереди (в `hds-mcp` или `hds-core`, чтобы переиспользовать; чистая логика —
+  тестируемая без сети): ключ пользователя, round-robin между пользователями + FIFO внутри
+  пользователя (`queue.policy: rr|fifo`), лимит глубины, таймаут ожидания; слот
+  `max_inflight` (M3) остаётся лимитом **исполнения**, очередь — ожидания.
 - Интеграция в `serve_request` **перед** тяжёлым `ask_my_files` (вместо нынешнего «сразу
   429»): `429` при переполнении, `503`+`Retry-After` при таймауте; освобождение места при
   обрыве клиента (проверка живости соединения / `gpu.abandoned_request_sec`).
