@@ -241,6 +241,25 @@ enum ReadOutcome {
     Closed,
 }
 
+/// Дочитать (и отбросить) тело запроса после заголовков — перед отказом.
+///
+/// F4 (T0): если ответить и закрыть сокет, не прочитав тело, ОС шлёт RST
+/// (в приёмном буфере остались непрочитанные данные) — клиент видит
+/// «connection reset» вместо кода. Читаем до `content_length`, но не более
+/// `CAP` (защита от бесконечного «дочитывания» у враждебного клиента).
+fn drain_body(stream: &mut TcpStream, already: usize, content_length: usize) {
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut remaining = content_length.min(CAP).saturating_sub(already);
+    let mut tmp = [0u8; 8192];
+    while remaining > 0 {
+        let want = remaining.min(tmp.len());
+        match stream.read(&mut tmp[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => remaining -= n,
+        }
+    }
+}
+
 /// Прочитать один HTTP/1.1-запрос.
 fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
     let mut buf = Vec::new();
@@ -285,8 +304,11 @@ fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
             h.x_forwarded_proto = Some(v.trim().to_string());
         }
     }
-    // M3 T4 (F8): тело сверх лимита не читаем вовсе — сразу 413.
+    // M3 T4 (F8): тело сверх лимита — сразу 413. F4 (T0): дочитываем тело
+    // (в пределах cap), иначе закрытие с непрочитанным телом → RST.
     if content_length > max_body {
+        let already = buf.len().saturating_sub(header_end + 4);
+        drain_body(stream, already, content_length);
         return ReadOutcome::TooLarge;
     }
     let mut body = buf[header_end + 4..].to_vec();
@@ -375,6 +397,14 @@ pub fn rate_limit_headers(
 /// Параметры авторизации читаются из `config.yaml` (`access.enabled`,
 /// `access.token_ttl_days`); хранилище — `data/access.yaml` (M1 T4).
 pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
+    let listener =
+        TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
+    run_http_listener(listener, path)
+}
+
+/// Служить на готовом слушателе (отдельно — для сокет-тестов: тест биндит
+/// порт `0` и сам узнаёт адрес).
+pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String> {
     let cfg = hds_core::config::load().map_err(|e| e.message())?;
     let env = AuthEnv::from_config(&cfg);
     // T1: доверие forwarded-заголовкам — ключ конфига `trusted_proxy` (раз
@@ -387,14 +417,17 @@ pub fn run_http(host: &str, port: u16, path: &str) -> Result<(), String> {
     let max_body = hds_core::net::max_body_bytes(&cfg);
     let max_conns = hds_core::net::max_conns(&cfg);
     let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    let listener =
-        TcpListener::bind((host, port)).map_err(|e| format!("bind {host}:{port}: {e}"))?;
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
                 // T4: сверх предела — короткий 503 без спавна потока.
                 if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
+                    // F4 (T0): сначала дочитываем запрос (короткий таймаут), иначе
+                    // закрытие сокета с непрочитанными данными даёт RST — клиент
+                    // не получает 503.
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let _ = read_request(&mut stream, max_body);
                     write_reply_with(
                         &mut stream,
                         (

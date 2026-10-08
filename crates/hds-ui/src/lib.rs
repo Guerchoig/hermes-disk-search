@@ -1654,6 +1654,23 @@ enum ReadOutcome {
     Closed,
 }
 
+/// Дочитать (и отбросить) тело запроса после заголовков — перед отказом.
+///
+/// F4 (T0): ответ и закрытие сокета с непрочитанным телом даёт RST (в буфере
+/// приёма остались данные) — клиент видит «connection reset» вместо кода.
+fn drain_body(stream: &mut TcpStream, already: usize, content_length: usize) {
+    const CAP: usize = 8 * 1024 * 1024;
+    let mut remaining = content_length.min(CAP).saturating_sub(already);
+    let mut tmp = [0u8; 8192];
+    while remaining > 0 {
+        let want = remaining.min(tmp.len());
+        match stream.read(&mut tmp[..want]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => remaining -= n,
+        }
+    }
+}
+
 /// Читать один HTTP/1.1-запрос: `(метод, путь, query, заголовки, тело)`.
 fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
     let mut buf = Vec::new();
@@ -1704,8 +1721,11 @@ fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
             }
         }
     }
-    // M3 T4 (F8): тело сверх лимита не читаем вовсе — сразу 413.
+    // M3 T4 (F8): тело сверх лимита — сразу 413. F4 (T0): дочитываем тело
+    // (в пределах cap), иначе закрытие с непрочитанным телом → RST.
     if content_length > max_body {
+        let already = buf.len().saturating_sub(header_end + 4);
+        drain_body(stream, already, content_length);
         return ReadOutcome::TooLarge;
     }
     let mut body = buf[header_end + 4..].to_vec();
@@ -1793,6 +1813,10 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
             Ok(mut stream) => {
                 // M3 T4: сверх предела — короткий 503 без спавна потока.
                 if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
+                    // F4 (T0): дочитываем запрос (короткий таймаут) перед отказом —
+                    // иначе клиент получит RST вместо 503.
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+                    let _ = read_request(&mut stream, max_body);
                     write_reply_with(
                         &mut stream,
                         (

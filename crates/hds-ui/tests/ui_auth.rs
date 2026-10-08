@@ -319,3 +319,90 @@ fn ui_audit_admin_op_status_and_unauthorized_fields() {
     std::env::remove_var("HDS_CONFIG");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Сырой HTTP-запрос через реальный сокет: пишем всё, затем читаем ответ.
+fn raw(addr: std::net::SocketAddr, req: &[u8]) -> String {
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(addr).expect("connect");
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    s.write_all(req).expect("write");
+    let mut resp = String::new();
+    let _ = s.read_to_string(&mut resp);
+    resp
+}
+
+fn spawn_ui(cfg: &std::path::Path) -> std::net::SocketAddr {
+    std::env::set_var("HDS_CONFIG", cfg);
+    let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let addr = l.local_addr().unwrap();
+    std::thread::spawn(move || {
+        let _ = hds_ui::run_http_listener(l);
+    });
+    addr
+}
+
+/// F4 (T0): тело сверх `http.max_body_kb` → UI отдаёт `413`, не RST.
+#[test]
+fn ui_too_large_body_reaches_client_with_413() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmpdir("ui413");
+    let cfg = dir.join("config.yaml");
+    std::fs::write(&cfg, "http:\n  max_body_kb: 1\n  max_conns: 0\n").unwrap();
+    let addr = spawn_ui(&cfg);
+
+    // Двухфазная отправка (см. MCP-тест): тело остаётся непрочитанным — без
+    // дочитывания закрытие даёт RST и 413 до клиента не дойдёт.
+    use std::io::Write;
+    let mut s = std::net::TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let clen = 200_000usize;
+    let head = format!(
+        "POST /api/nope HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\nContent-Length: {clen}\r\nConnection: close\r\n\r\n"
+    );
+    s.write_all(head.as_bytes()).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = s.write_all(&vec![b'x'; clen]);
+    let mut resp = String::new();
+    use std::io::Read;
+    let _ = s.read_to_string(&mut resp);
+    assert!(
+        resp.starts_with("HTTP/1.1 413"),
+        "ожидался 413: {:.120}",
+        resp
+    );
+
+    std::env::remove_var("HDS_CONFIG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// F4 (T0): сверх `http.max_conns` → UI отдаёт `503`, не RST.
+#[test]
+fn ui_over_conn_limit_reaches_client_with_503() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmpdir("ui503");
+    let cfg = dir.join("config.yaml");
+    std::fs::write(&cfg, "http:\n  max_body_kb: 512\n  max_conns: 1\n").unwrap();
+    let addr = spawn_ui(&cfg);
+
+    // Слот занят: первое соединение с неполным запросом.
+    use std::io::Write;
+    let mut a = std::net::TcpStream::connect(addr).unwrap();
+    a.write_all(b"GET / HTTP/1.1\r\nHost: t\r\n").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+
+    let resp = raw(
+        addr,
+        b"GET / HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(
+        resp.starts_with("HTTP/1.1 503"),
+        "ожидался 503: {:.120}",
+        resp
+    );
+
+    drop(a);
+    std::env::remove_var("HDS_CONFIG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
