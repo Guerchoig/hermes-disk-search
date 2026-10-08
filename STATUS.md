@@ -64,9 +64,16 @@
 > `/health`, заголовки `X-RateLimit-*`, read-timeout сокета, 404 без эха пути) и
 > хвосты M2 (логи LaunchDaemon, тест `role_from_args`, `access_path_from`, тест
 > паритета `system_state_dir`). Открыто: F9 (`Host`) и вопросы заказчику
-> (автотранскрибация в server-профиле, пароль в argv `hds login`). Треки **T1–T6**
-> (БД/WAL, слоты/VRAM, очередь и fair-share, квоты, нагрузочная приёмка, доклад) —
-> следующие. Детали — `PLAN_M4_CONCURRENCY_SLA.md` §8a, `M3_CODE_REVIEW.md` §7.
+> (автотранскрибация в server-профиле, пароль в argv `hds login`). Трек **T1**
+> (БД под конкурентность) закрыт `0395ab7`: ключи
+> `db.{busy_timeout_ms,journal_mode,read_only_conns}` (server: 5000/wal/true;
+> desktop: 30000/false — прежнее поведение), разделение соединений `open_rw`
+> (единственный писатель) / `open_ro` (читатели read-only), `hds check` с
+> фактическими PRAGMA, стресс «5 читателей + писатель» без `SQLITE_BUSY`
+> (debug+release) + рантайм (писатель `hds index` + читатели — 0 «locked»).
+> Треки **T2–T6** (слоты/VRAM, очередь и fair-share, квоты, нагрузочная приёмка,
+> доклад) — следующие. Детали — `PLAN_M4_CONCURRENCY_SLA.md` §8a,
+> `M3_CODE_REVIEW.md` §7.
 >
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >
