@@ -135,6 +135,46 @@ fn health_is_exempt_from_rate_limit() {
         b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
     );
     assert!(r2.starts_with("HTTP/1.1 429"), "rate limited: {:.90}", r2);
+    // F10.2 (T0): заголовки лимита на 429.
+    assert!(r2.contains("Retry-After:"), "{r2}");
+    assert!(r2.contains("X-RateLimit-Reset:"), "{r2}");
+    assert!(r2.contains("X-RateLimit-Remaining: 0"), "{r2}");
+
+    std::env::remove_var("HDS_CONFIG");
+}
+
+/// Тело ответа (после пустой строки заголовков).
+fn body_of(resp: &str) -> String {
+    resp.split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default()
+}
+
+/// F5 (T0): `client_ip` в `/health` — из XFF только при `trusted_proxy: true`
+/// (без доверия заголовок подделать IP не даёт).
+#[test]
+fn health_reports_client_ip_from_xff_only_when_trusted() {
+    let _env = ENV_LOCK.lock().unwrap();
+
+    // trusted_proxy: false → XFF игнорируется, client_ip = адрес соединения.
+    let cfg1 = tmp_cfg("xff-off", "http:\n  max_conns: 0\ntrusted_proxy: false\n");
+    let a1 = spawn_server(&cfg1);
+    let r1 = http_raw(
+        a1,
+        b"GET /health HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 1.2.3.4\r\nConnection: close\r\n\r\n",
+    );
+    let v1: serde_json::Value = serde_json::from_str(body_of(&r1).trim()).unwrap();
+    assert_eq!(v1["client_ip"], "127.0.0.1", "без доверия XFF: {r1}");
+
+    // trusted_proxy: true → правая (нашим прокси дописанная) запись XFF.
+    let cfg2 = tmp_cfg("xff-on", "http:\n  max_conns: 0\ntrusted_proxy: true\n");
+    let a2 = spawn_server(&cfg2);
+    let r2 = http_raw(
+        a2,
+        b"GET /health HTTP/1.1\r\nHost: t\r\nX-Forwarded-For: 9.9.9.9, 1.2.3.4\r\nConnection: close\r\n\r\n",
+    );
+    let v2: serde_json::Value = serde_json::from_str(body_of(&r2).trim()).unwrap();
+    assert_eq!(v2["client_ip"], "1.2.3.4", "правая запись XFF: {r2}");
 
     std::env::remove_var("HDS_CONFIG");
 }

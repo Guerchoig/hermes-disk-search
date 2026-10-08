@@ -54,10 +54,10 @@ pub fn route(
             "application/json",
             json!({
                 "app": hds_core::config::APP_NAME,
-                "version": env!("CARGO_PKG_VERSION"),
                 "transport": "streamable-http",
                 // T1: как сервер видит клиента — живая диагностика прокси
                 // (без trusted_proxy здесь будет IP прокси, не клиента).
+                // F10.1 (T0): версию не публикуем (README: «без версий»).
                 "client_ip": client_ip
             })
             .to_string(),
@@ -110,15 +110,17 @@ pub fn route(
                 None
             };
             // M3 T2: аудит вызовов инструментов (кто/какой инструмент/проекты).
-            let tool = (env.enabled
-                && msg.get("method").and_then(|m| m.as_str()) == Some("tools/call"))
-            .then(|| {
-                msg.get("params")
-                    .and_then(|p| p.get("name"))
-                    .and_then(|n| n.as_str())
-                    .unwrap_or("")
-                    .to_string()
-            });
+            // F10.4 (T0): определяем инструмент НЕЗАВИСИМО от `access.enabled` —
+            // иначе при `access.enabled: false` + `audit.enabled: true` вызовы
+            // инструментов не логировались.
+            let tool =
+                (msg.get("method").and_then(|m| m.as_str()) == Some("tools/call")).then(|| {
+                    msg.get("params")
+                        .and_then(|p| p.get("name"))
+                        .and_then(|n| n.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                });
             let reply = match server::handle(&msg, ctx.as_ref()) {
                 Some(resp) => (200, "application/json", resp.to_string()),
                 None => (202, "application/json", String::new()), // notification
@@ -148,7 +150,8 @@ pub fn route(
         _ => (
             404,
             "application/json",
-            json!({ "error": "not found", "path": req_path }).to_string(),
+            // F10.5 (T0): путь не эхоим (пользы нет, безопаснее без него).
+            json!({ "error": "not found" }).to_string(),
         ),
     }
 }
@@ -398,12 +401,21 @@ pub fn rate_limit_headers(
     limits: &hds_core::ratelimit::Limiter,
     retry: u64,
 ) -> Vec<(&'static str, String)> {
+    // F10.2 (T0): на 429 отдаём ещё Remaining/Reset (0 — исчерпано;
+    // Reset — момент пополнения в unix-секундах).
+    let reset = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        + retry;
     vec![
         ("Retry-After", retry.to_string()),
         (
             "X-RateLimit-Limit",
             limits.cfg().requests_per_min.to_string(),
         ),
+        ("X-RateLimit-Remaining", "0".to_string()),
+        ("X-RateLimit-Reset", reset.to_string()),
     ]
 }
 
@@ -431,11 +443,19 @@ pub fn run_http_listener(listener: TcpListener, path: &str) -> Result<(), String
     // T4: лимит тела и предел соединений (`http.max_body_kb`/`http.max_conns`).
     let max_body = hds_core::net::max_body_bytes(&cfg);
     let max_conns = hds_core::net::max_conns(&cfg);
+    // F10.6 (T0): таймаут чтения запроса (медленный клиент не держит поток).
+    let read_timeout = hds_core::net::read_timeout_sec(&cfg);
     let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let mcp_path = path.to_string();
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                // F10.6 (T0): читаем запрос с таймаутом — «медленный» клиент
+                // иначе держит поток (и слот `max_conns`) бесконечно.
+                if read_timeout > 0 {
+                    let _ =
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(read_timeout)));
+                }
                 // T4: сверх предела — короткий 503 без спавна потока.
                 if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
                     // F4 (T0): сначала дочитываем запрос (короткий таймаут), иначе

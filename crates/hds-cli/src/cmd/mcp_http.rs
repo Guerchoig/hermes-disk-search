@@ -334,13 +334,13 @@ pub fn cmd_mcp_http(
             }
         }
         "status" => {
-            let (state, info) = probe(&host, port);
+            let (state, _) = probe(&host, port);
             let pid = read_pid().filter(|p| pid_alive(*p));
             println!(
                 "{}",
                 serde_json::to_string_pretty(&json!({
                     "state": state, "url": u, "pid": pid,
-                    "version": info.get("version").cloned().unwrap_or(Value::Null),
+                    "version": env!("CARGO_PKG_VERSION"),
                 }))
                 .unwrap_or_default()
             );
@@ -398,12 +398,12 @@ pub fn cmd_mcp_http(
                 Ok(pid) => {
                     write_pid(pid);
                     if wait_up(&host, port, timeout) {
-                        let (_, info) = probe(&host, port);
+                        let _ = probe(&host, port);
                         println!(
                             "{}",
                             serde_json::to_string_pretty(&json!({
                                 "state": STATE_MCP, "url": u, "pid": pid,
-                                "version": info.get("version").cloned().unwrap_or(Value::Null),
+                                "version": env!("CARGO_PKG_VERSION"),
                             }))
                             .unwrap_or_default()
                         );

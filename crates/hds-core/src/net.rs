@@ -70,6 +70,15 @@ pub fn max_conns(cfg: &Config) -> usize {
         .unwrap_or(32)
 }
 
+/// Таймаут чтения запроса, секунды (`http.read_timeout_sec`, дефолт 30; 0 —
+/// без таймаута). F10.6 (T0): без него «медленный» клиент держит поток
+/// (и слот `max_conns`) бесконечно.
+pub fn read_timeout_sec(cfg: &Config) -> u64 {
+    dig(cfg, "http.read_timeout_sec")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(30)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{real_client_ip, request_scheme, trusted_proxy};

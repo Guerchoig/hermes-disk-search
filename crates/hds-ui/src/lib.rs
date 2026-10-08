@@ -1607,14 +1607,15 @@ pub fn route_with_access(
                     _ => (
                         404,
                         "application/json",
-                        json!({ "error": "not found", "path": path }).to_string(),
+                        // F10.5 (T0): путь не эхоим.
+                        json!({ "error": "not found" }).to_string(),
                     ),
                 }
             }
             _ => (
                 404,
                 "application/json",
-                json!({ "error": "not found", "path": path }).to_string(),
+                json!({ "error": "not found" }).to_string(),
             ),
         }
     })();
@@ -1803,6 +1804,10 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
         .map(|c| hds_core::net::max_body_bytes(&c))
         .unwrap_or(512 * 1024);
     let max_conns = load().map(|c| hds_core::net::max_conns(&c)).unwrap_or(32);
+    // F10.6 (T0): таймаут чтения запроса.
+    let read_timeout = load()
+        .map(|c| hds_core::net::read_timeout_sec(&c))
+        .unwrap_or(30);
     let conns = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let limits: Option<std::sync::Arc<hds_core::ratelimit::Limiter>> = load()
         .ok()
@@ -1811,6 +1816,11 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
     for conn in listener.incoming() {
         match conn {
             Ok(mut stream) => {
+                // F10.6 (T0): таймаут чтения запроса (медленный клиент).
+                if read_timeout > 0 {
+                    let _ =
+                        stream.set_read_timeout(Some(std::time::Duration::from_secs(read_timeout)));
+                }
                 // M3 T4: сверх предела — короткий 503 без спавна потока.
                 if max_conns > 0 && conns.load(std::sync::atomic::Ordering::Relaxed) >= max_conns {
                     // F4 (T0): дочитываем запрос (короткий таймаут) перед отказом —
