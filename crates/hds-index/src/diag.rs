@@ -743,6 +743,69 @@ fn check_audit(cfg: &Config) -> Check {
     ))
 }
 
+/// F8 (T0 M4): «сетевой периметр» — фактическая привязка host (`ui`/`mcp_http`),
+/// доверие forwarded-заголовкам и состояние rate-limit. Не-loopback host
+/// публикует сервис напрямую (в обход reverse-proxy) — предупреждаем; связка
+/// «не-loopback + trusted_proxy» позволяет подделать IP заголовком.
+fn check_perimeter(cfg: &Config) -> Check {
+    let ui_host = hds_core::config::dig(cfg, "ui.host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+    let mcp_host = hds_core::config::dig(cfg, "mcp_http.host")
+        .and_then(|v| v.as_str())
+        .unwrap_or("127.0.0.1");
+    let trusted = hds_core::net::trusted_proxy(cfg);
+    let rl_enabled = hds_core::config::dig(cfg, "rate_limit.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| hds_core::config::profile(cfg).is_server());
+    let non_loop = !is_loopback(ui_host) || !is_loopback(mcp_host);
+    let mut msgs = vec![format!(
+        "ui.host={ui_host}, mcp_http.host={mcp_host}; trusted_proxy={trusted}; rate_limit={}",
+        if rl_enabled { "включён" } else { "выключен" }
+    )];
+    let mut fixes: Vec<String> = Vec::new();
+    let mut status = "ok";
+    if non_loop {
+        status = "warn";
+        msgs.push(format!(
+            "host не loopback (ui={ui_host}, mcp={mcp_host}): сервис опубликован напрямую — наружу \
+             должен публиковать reverse-proxy с TLS (installers/proxy/), а приложение слушать 127.0.0.1"
+        ));
+        fixes.push(
+            "ui.host/mcp_http.host: \"127.0.0.1\" (наружу — только через reverse-proxy)".into(),
+        );
+    }
+    if trusted && non_loop {
+        status = "warn";
+        msgs.push(
+            "trusted_proxy: true при не-loopback host: клиент может ПОДДЕЛАТЬ IP заголовком \
+             X-Forwarded-For (обход IP-лимитов и подмена в аудите)"
+                .into(),
+        );
+        fixes.push(
+            "trusted_proxy включать только когда прокси в приватной сети, а прямой доступ к \
+             :8787/:8765 закрыт"
+                .into(),
+        );
+    }
+    let mut c = Check::new(
+        "perimeter",
+        status,
+        "сетевой периметр (host/trusted_proxy/rate-limit)",
+    )
+    .msg(msgs.join("; "));
+    if !fixes.is_empty() {
+        c = c.fix(fixes.join("; "));
+    }
+    c
+}
+
+/// loopback ли адрес (`127.0.0.1`/`localhost`/`::1`).
+fn is_loopback(host: &str) -> bool {
+    let h = host.trim().to_ascii_lowercase();
+    h == "127.0.0.1" || h == "localhost" || h == "::1" || h == "[::1]"
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
@@ -778,6 +841,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
 
     checks.push(check_gpu_observability(cfg));
     checks.push(check_audit(cfg));
+    checks.push(check_perimeter(cfg));
     checks.push(
         Check::new(
             "gpu-manual",
@@ -791,7 +855,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
-    use super::check_profile;
+    use super::{check_perimeter, check_profile};
     use serde_yaml::Value;
 
     fn cfg(text: &str) -> Value {
@@ -824,5 +888,38 @@ mod tests {
             "profile: server\naccess:\n  enabled: true\nui:\n  host: 127.0.0.1\n  port: 8765",
         ));
         assert_eq!(c.status, "ok");
+    }
+
+    /// F8 (T0 M4): периметр — loopback → ok; не-loopback host → warn;
+    /// не-loopback + trusted_proxy → предупреждение о подделке IP.
+    #[test]
+    fn perimeter_check_statuses() {
+        // Дефолт (loopback) — ok, состояние видно в msg.
+        let c = check_perimeter(&cfg("index:\n  roots: []"));
+        assert_eq!(c.status, "ok", "msg={}", c.msg);
+        assert!(c.msg.contains("trusted_proxy=false"), "msg={}", c.msg);
+        assert!(c.msg.contains("rate_limit=выключен"), "msg={}", c.msg);
+
+        // Не-loopback host — warn с подсказкой.
+        let c = check_perimeter(&cfg("ui:\n  host: 0.0.0.0\n"));
+        assert_eq!(c.status, "warn", "msg={}", c.msg);
+        assert!(c.msg.contains("не loopback"), "msg={}", c.msg);
+        assert!(!c.fix.is_empty());
+
+        // Не-loopback + trusted_proxy — warn про подделку IP.
+        let c = check_perimeter(&cfg(
+            "trusted_proxy: true\nmcp_http:\n  host: 0.0.0.0\n",
+        ));
+        assert_eq!(c.status, "warn");
+        assert!(c.msg.contains("ПОДДЕЛАТЬ"), "msg={}", c.msg);
+
+        // trusted_proxy при loopback — не предупреждаем.
+        let c = check_perimeter(&cfg("trusted_proxy: true\nui:\n  host: 127.0.0.1\n"));
+        assert_eq!(c.status, "ok", "msg={}", c.msg);
+        assert!(c.msg.contains("trusted_proxy=true"), "msg={}", c.msg);
+
+        // server-профиль → rate_limit включён в состоянии.
+        let c = check_perimeter(&cfg("profile: server\nui:\n  host: 127.0.0.1\n"));
+        assert!(c.msg.contains("rate_limit=включён"), "msg={}", c.msg);
     }
 }
