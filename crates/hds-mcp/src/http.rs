@@ -361,6 +361,21 @@ fn write_reply_with(
     let _ = stream.flush();
 }
 
+/// Тяжёлый запрос? F6 (T0): разбираем JSON-RPC — `tools/call` с
+/// `params.name == "ask_my_files"`. Подстрочный поиск ловил бы любые тела,
+/// где встречается это слово (например, текст самого вопроса).
+pub fn is_heavy_request(body: &str) -> bool {
+    let v: Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    v.get("method").and_then(|m| m.as_str()) == Some("tools/call")
+        && v.get("params")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            == Some("ask_my_files")
+}
+
 /// Ответ `429 Too Many Requests` (M3 T3).
 pub fn too_many(inflight: bool, retry: u64) -> Reply {
     (
@@ -523,12 +538,19 @@ fn serve_request(
     // T3: ключ лимитов — токен, иначе IP.
     let token = auth::bearer_token(head.authorization.as_deref());
     let key = token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone());
-    let is_login = p.split('?').next().unwrap_or("") == "/auth/login";
-    // Лимит частоты: /auth/login — жёсткий, по IP логина.
-    let over = match limits {
-        Some(l) if is_login => l.check_login(&ip),
-        Some(l) => l.check(&key),
-        None => None,
+    let p_only = p.split('?').next().unwrap_or("");
+    let is_login = p_only == "/auth/login";
+    // F7 (T0): `/health` — служебная проба менеджера `hds mcp-http`; под лимиты
+    // не попадает (иначе живой СВОЙ инстанс отвергался как «чужой сервис»).
+    let is_health = p_only == "/health";
+    let over = if is_health {
+        None
+    } else {
+        match limits {
+            Some(l) if is_login => l.check_login(&ip),
+            Some(l) => l.check(&key),
+            None => None,
+        }
     };
     if let (Some(l), Some(retry)) = (limits, over) {
         let r = too_many(false, retry);
@@ -537,7 +559,9 @@ fn serve_request(
     }
     // Тяжёлый RAG-инструмент — под лимит параллелизма (слот освобождается
     // после route; лимитер — не Arc здесь, поэтому слот снимаем вручную).
-    let heavy = b.contains("tools/call") && b.contains("ask_my_files");
+    // F6 (T0): «тяжёлый» определяем разбором JSON-RPC, а не подстрокой тела
+    // (иначе текст запроса со словом `ask_my_files` ложно попадал под лимит).
+    let heavy = is_heavy_request(b);
     if heavy {
         let acquired = limits.map(|l| l.inflight_acquire(&key)).unwrap_or(true);
         if !acquired {

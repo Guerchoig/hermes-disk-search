@@ -72,3 +72,22 @@ fn bad_json_is_parse_error() {
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
     assert_eq!(v["error"]["code"], -32700);
 }
+
+/// F6 (T0): «тяжёлый» запрос определяется разбором JSON-RPC (`tools/call` +
+/// `params.name == ask_my_files`), а не подстрокой в теле.
+#[test]
+fn heavy_request_is_jsonrpc_not_substring() {
+    // Настоящий вызов RAG — тяжёлый.
+    assert!(hds_mcp::is_heavy_request(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_my_files","arguments":{"query":"x"}}}"#
+    ));
+    // Слово `ask_my_files` в аргументах — НЕ тяжёлый (иначе ложный лимит).
+    assert!(!hds_mcp::is_heavy_request(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_local_files","arguments":{"query":"ask_my_files"}}}"#
+    ));
+    // Другой метод — не тяжёлый.
+    assert!(!hds_mcp::is_heavy_request(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#
+    ));
+    assert!(!hds_mcp::is_heavy_request("{not json"));
+}

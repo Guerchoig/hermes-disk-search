@@ -104,3 +104,37 @@ fn over_conn_limit_reaches_client_with_503() {
     drop(a);
     std::env::remove_var("HDS_CONFIG");
 }
+
+/// F7 (T0): `/health` вне rate-limit — проба менеджера не должна получать 429
+/// (иначе живой свой инстанс принимался за «чужой сервис», STATE_FOREIGN).
+#[test]
+fn health_is_exempt_from_rate_limit() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let cfg = tmp_cfg(
+        "health",
+        "http:\n  max_body_kb: 512\n  max_conns: 0\nrate_limit:\n  enabled: true\n  requests_per_min: 60\n  burst: 1\n  login_per_min: 10\n  max_inflight: 4\n",
+    );
+    let addr = spawn_server(&cfg);
+
+    // Три запроса /health подряд — всегда 200 (под лимит не попадают).
+    for _ in 0..3 {
+        let resp = http_raw(
+            addr,
+            b"GET /health HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+        );
+        assert!(resp.starts_with("HTTP/1.1 200"), "health: {:.90}", resp);
+    }
+    // Не-health путь под лимитом: burst 1 → первый 404, второй 429.
+    let r1 = http_raw(
+        addr,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(r1.starts_with("HTTP/1.1 404"), "{:.90}", r1);
+    let r2 = http_raw(
+        addr,
+        b"GET /x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n",
+    );
+    assert!(r2.starts_with("HTTP/1.1 429"), "rate limited: {:.90}", r2);
+
+    std::env::remove_var("HDS_CONFIG");
+}

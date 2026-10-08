@@ -14,5 +14,5 @@ pub mod server;
 pub mod tools;
 
 pub use auth::{resolve_bearer, AuthEnv};
-pub use http::{run_http, run_http_listener};
+pub use http::{is_heavy_request, run_http, run_http_listener};
 pub use server::{handle, handle_line, run_stdio};
