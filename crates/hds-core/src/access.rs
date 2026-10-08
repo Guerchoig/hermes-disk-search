@@ -103,7 +103,13 @@ fn argon2id() -> Argon2<'static> {
 /// (Для тестов — `load_at`/`save_at` с явным путём.)
 pub fn access_path() -> PathBuf {
     let cfg = crate::config::load().unwrap_or(serde_yaml::Value::Null);
-    crate::config::state_dir(&cfg)
+    access_path_from(&cfg)
+}
+
+/// Путь `data/access.yaml` для **готового** конфига — без повторной загрузки
+/// (F10.4, M2-ревью: гейт/аудит уже держат `cfg`, не парсим конфиг заново).
+pub fn access_path_from(cfg: &Config) -> PathBuf {
+    crate::config::state_dir(cfg)
         .join("data")
         .join("access.yaml")
 }

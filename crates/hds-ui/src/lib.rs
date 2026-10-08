@@ -1346,7 +1346,9 @@ fn ui_auth_gate(
     });
     let acc = match access_path {
         Some(p) => hds_core::access::load_at(p),
-        None => hds_core::access::load(),
+        // F10.4 (M2-ревью): конфиг уже загружен (`cfg`) — путь строим из него,
+        // не парсим config.yaml повторно на каждый запрос.
+        None => hds_core::access::load_at(&hds_core::access::access_path_from(&cfg)),
     };
     let ctx = plain.and_then(|t| {
         acc.ok()

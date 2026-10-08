@@ -256,8 +256,13 @@ mod scm {
 
 #[cfg(windows)]
 fn current_service_role() -> String {
-    // Роль — аргумент команды `service run <role>` в собственном argv.
-    let args: Vec<String> = std::env::args().collect();
+    role_from_args(&std::env::args().collect::<Vec<_>>())
+}
+
+/// Роль из argv (`service run <role>`) — чистая функция (F10.3, M2-ревью:
+/// эвристика по `argv` теперь покрыта тестом).
+#[cfg(windows)]
+fn role_from_args(args: &[String]) -> String {
     match args.windows(2).rev().find(|w| w[0] == "run") {
         Some(w) => w[1].clone(),
         None => "ui".to_string(),
@@ -372,7 +377,17 @@ fn service_install_macos(role: &str, label: &str) -> i32 {
             return 1;
         }
     };
-    let body = daemon_plist(&exe.display().to_string(), role, &label);
+    let log_dir = hds_core::config::system_state_dir()
+        .map(|d| d.join("data").join("logs"))
+        .unwrap_or_else(|| std::path::PathBuf::from("/var/log/hermes-disk-search"));
+    // F10.2 (M2-ревью): каталог логов должен существовать до старта демона.
+    let _ = std::fs::create_dir_all(&log_dir);
+    let body = daemon_plist(
+        &exe.display().to_string(),
+        role,
+        &label,
+        &log_dir.display().to_string(),
+    );
     let path = plist_path(label);
     if std::fs::write(&path, body).is_err() {
         eprintln!(
@@ -385,8 +400,10 @@ fn service_install_macos(role: &str, label: &str) -> i32 {
 }
 
 /// Содержимое LaunchDaemon-плейста (RunAtLoad + KeepAlive — старт при загрузке
-/// без интерактивного входа и перезапуск при падении).
-pub fn daemon_plist(exe: &str, role: &str, label: &str) -> String {
+/// без интерактивного входа и перезапуск при падении). `log_dir` — каталог для
+/// `StandardOutPath`/`StandardErrorPath` (F10.2, M2-ревью: иначе логи демона
+/// теряются).
+pub fn daemon_plist(exe: &str, role: &str, label: &str, log_dir: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -402,6 +419,8 @@ pub fn daemon_plist(exe: &str, role: &str, label: &str) -> String {
     </array>
     <key>RunAtLoad</key><true/>
     <key>KeepAlive</key><true/>
+    <key>StandardOutPath</key><string>{log_dir}/{role}.out.log</string>
+    <key>StandardErrorPath</key><string>{log_dir}/{role}.err.log</string>
 </dict>
 </plist>
 "#
@@ -434,6 +453,26 @@ mod tests {
         assert_eq!(daemon_label("llm-host"), "com.hermes-disk-search.llm-host");
     }
 
+    /// F10.3 (M2-ревью): роль из argv распознаётся (эвристика `service run <role>`).
+    #[cfg(windows)]
+    #[test]
+    fn role_from_args_reads_service_role() {
+        let a = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            super::role_from_args(&a(&["hds.exe", "service", "run", "mcp-http"])),
+            "mcp-http"
+        );
+        assert_eq!(
+            super::role_from_args(&a(&["hds.exe", "service", "run", "llm-host"])),
+            "llm-host"
+        );
+        // Нет `run <role>` — дефолт `ui`.
+        assert_eq!(
+            super::role_from_args(&a(&["hds.exe", "service", "status"])),
+            "ui"
+        );
+    }
+
     /// Аргументы sc.exe: install строит binPath с вложенными кавыками вокруг exe.
     #[cfg(windows)]
     #[test]
@@ -458,17 +497,28 @@ mod tests {
         }
     }
 
-    /// LaunchDaemon-плейст: Label/ProgramArguments/RunAtLoad/KeepAlive.
+    /// LaunchDaemon-плейст: Label/ProgramArguments/RunAtLoad/KeepAlive + логи.
     #[test]
     fn plist_has_required_keys() {
-        let p = daemon_plist("/opt/hds/bin/hds", "ui", "com.hermes-disk-search.ui");
+        let p = daemon_plist(
+            "/opt/hds/bin/hds",
+            "ui",
+            "com.hermes-disk-search.ui",
+            "/Library/Application Support/hermes-disk-search/data/logs",
+        );
         for key in [
             "<key>Label</key>",
             "<key>RunAtLoad</key><true/>",
             "<key>KeepAlive</key><true/>",
+            // F10.2 (M2-ревью): логи демона не теряются.
+            "<key>StandardOutPath</key>",
+            "<key>StandardErrorPath</key>",
         ] {
             assert!(p.contains(key), "нет {key}");
         }
+        assert!(!p.contains("{ui}.out.log"), "шаблон не подставлен");
+        assert!(p.contains("/ui.out.log"), "лог stdout роли: {p}");
+        assert!(p.contains("/ui.err.log"), "лог stderr роли: {p}");
         assert!(p.contains("<string>/opt/hds/bin/hds</string>"));
         assert!(p.contains("<string>service</string>"));
         assert!(p.contains("<string>ui</string>"));

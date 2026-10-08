@@ -136,8 +136,9 @@ gpu:
 
 # MCP-сервер в режиме streamable-http: ОДИН инстанс на машину (клиенты идут
 # по URL). При stdio каждый клиент (Cline, Hermes, ...) поднимает свой процесс.
+# --- Профиль (M2) ---
+profile: desktop            # desktop | server (серверный профиль — с access.enabled: true)
 # --- Доступ (M1, PLAN_M1_ACCESS_PROJECTS.md) ---
-profile: desktop            # desktop | server (M2: серверный профиль — с access.enabled: true)
 access:
   enabled: false            # true = Bearer-токены обязательны (hds-mcp/hds-ui), 401 без токена
   token_ttl_days: 90        # TTL авто-выданных токенов (users/tokens в data/access.yaml)
