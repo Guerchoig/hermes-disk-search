@@ -241,9 +241,11 @@ fn queue_disabled_keeps_m3_behaviour() {
         "ожидался 429 без ожидания, получено: {:.200}",
         r
     );
+    // M4 T4: без очереди лимит ключуется пользователем, и hint адресный —
+    // про пер-пользовательский предел (был общий «too many concurrent …»).
     assert!(
-        body_of(&r).contains("too many concurrent heavy requests"),
-        "подсказка M3: {}",
+        body_of(&r).contains("rate_limit.max_inflight_per_user"),
+        "подсказка про пер-пользовательский предел: {}",
         body_of(&r)
     );
 

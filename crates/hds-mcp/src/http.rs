@@ -398,6 +398,24 @@ pub fn too_many(inflight: bool, retry: u64) -> Reply {
     )
 }
 
+/// `429` по пер-пользовательскому пределу параллелизма (M4 T4 §3.3): `hint`
+/// называет `rate_limit.max_inflight_per_user` — отказ адресный (ждать не
+/// поможет: превышен предел самого пользователя).
+pub fn too_many_user(retry: u64, limit: u32) -> Reply {
+    (
+        429,
+        "application/json",
+        serde_json::json!({
+            "error": "rate limited",
+            "hint": format!(
+                "per-user concurrency limit reached \
+                 (rate_limit.max_inflight_per_user: {limit}); retry after {retry}s"
+            )
+        })
+        .to_string(),
+    )
+}
+
 /// Заголовки `Retry-After`/`X-RateLimit-Limit` для ответа 429.
 pub fn rate_limit_headers(
     limits: &hds_core::ratelimit::Limiter,
@@ -447,6 +465,18 @@ pub fn queue_reply(reject: &QueueReject) -> Reply {
             })
             .to_string(),
         ),
+        QueueReject::PerUser { limit } => (
+            429,
+            "application/json",
+            json!({
+                "error": "rate limited",
+                "hint": format!(
+                    "per-user concurrency limit reached \
+                     (rate_limit.max_inflight_per_user: {limit}); повторите позже"
+                )
+            })
+            .to_string(),
+        ),
         QueueReject::Aborted => (
             503,
             "application/json",
@@ -460,6 +490,7 @@ pub fn queue_reply(reject: &QueueReject) -> Reply {
 fn queue_retry_after(reject: &QueueReject, cfg: &QueueConfig) -> u64 {
     match reject {
         QueueReject::Full { .. } => 5,
+        QueueReject::PerUser { .. } => 5,
         QueueReject::Timeout { .. } => cfg.wait_timeout_sec.clamp(1, 60),
         QueueReject::Aborted => 1,
     }
@@ -474,7 +505,7 @@ fn queue_headers(
 ) -> Vec<(&'static str, String)> {
     let depth = match reject {
         QueueReject::Full { depth, .. } | QueueReject::Timeout { depth, .. } => *depth,
-        QueueReject::Aborted => 0,
+        QueueReject::PerUser { .. } | QueueReject::Aborted => 0,
     };
     let mut h = vec![
         ("Retry-After", retry.to_string()),
@@ -491,10 +522,24 @@ fn queue_headers(
 /// Ключ fair-share очереди (M4 T3 §3.2): валидный токен → `user:<login>`,
 /// иначе при включённой авторизации → `ip:<addr>`, иначе (desktop/stdio) —
 /// `local`.
-fn user_key(env: &AuthEnv, auth_header: Option<&str>, ip: &str) -> String {
+pub fn user_key(env: &AuthEnv, auth_header: Option<&str>, ip: &str) -> String {
     if !env.enabled {
         return "local".to_string();
     }
+    match auth::resolve_bearer(env, auth_header) {
+        Some(ctx) => format!("user:{}", ctx.user),
+        None => format!("ip:{ip}"),
+    }
+}
+
+/// Ключ лимитов/квот (M4 T4 §3.3): валидный Bearer → `user:<login>`, иначе —
+/// `ip:<addr>`. В отличие от fair-share [`user_key`], без авторизации ключ
+/// остаётся **IP** (а не `local`): лимиты M3 были пер-IP, и этот контракт
+/// сохраняем — иначе все клиенты без токена делили бы один bucket.
+///
+/// Благодаря пер-пользовательскому ключу «два токена одного пользователя»
+/// больше не удваивают квоту (регресс M3 F10.3).
+pub fn limit_key(env: &AuthEnv, auth_header: Option<&str>, ip: &str) -> String {
     match auth::resolve_bearer(env, auth_header) {
         Some(ctx) => format!("user:{}", ctx.user),
         None => format!("ip:{ip}"),
@@ -720,9 +765,19 @@ fn serve_request(
         read_timeout,
     } = *ctx;
     let ip = hds_core::net::real_client_ip(peer, head.x_forwarded_for.as_deref(), trusted);
-    // T3: ключ лимитов — токен, иначе IP.
+    // M4 T4 (§3.3): ключ лимитов/квот — ПОЛЬЗОВАТЕЛЬ (`user:<login>` по
+    // валидному Bearer, иначе `ip:<addr>`), а не токен: у пользователя с двумя
+    // токенами квота больше не удваивается (регресс M3 F10.3). Fair-share
+    // очередь по-прежнему ключуется `user_key`.
     let token = auth::bearer_token(head.authorization.as_deref());
-    let key = token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone());
+    let ukey = user_key(env, head.authorization.as_deref(), &ip);
+    let qkey = limit_key(env, head.authorization.as_deref(), &ip);
+    let per_token = limits.map(|l| l.cfg().per_token).unwrap_or(false);
+    let rate_key = if per_token {
+        token.map(|s| s.to_string()).unwrap_or_else(|| ip.clone())
+    } else {
+        qkey.clone()
+    };
     let p_only = p.split('?').next().unwrap_or("");
     let is_login = p_only == "/auth/login";
     // F7 (T0): `/health` — служебная проба менеджера `hds mcp-http`; под лимиты
@@ -733,7 +788,13 @@ fn serve_request(
     } else {
         match limits {
             Some(l) if is_login => l.check_login(&ip),
-            Some(l) => l.check(&key),
+            Some(l) => {
+                let freq = l.check(&rate_key);
+                // При `per_token` частота ключуется токеном, поэтому отдельно
+                // ограничиваем агрегат на пользователя (F10.3).
+                let user_freq = if per_token { l.check_user(&qkey) } else { None };
+                freq.or(user_freq)
+            }
             None => None,
         }
     };
@@ -752,7 +813,6 @@ fn serve_request(
         // fair-share по пользователю; `queue.enabled: false` (desktop) —
         // прежнее поведение M3 (мгновенный 429).
         if let Some(q) = queue {
-            let ukey = user_key(env, head.authorization.as_deref(), &ip);
             let ticket = match q.acquire(&ukey, || client_alive(stream, read_timeout)) {
                 Ok(t) => t,
                 Err(rej) => {
@@ -777,17 +837,21 @@ fn serve_request(
             drop(ticket);
             return;
         }
-        let acquired = limits.map(|l| l.inflight_acquire(&key)).unwrap_or(true);
+        // M4 T4: без очереди (desktop / `queue.enabled: false`) тяжёлый RAG
+        // ограничивается пер-пользовательским пределом (ключ — `qkey`).
+        let acquired = limits
+            .map(|l| l.user_inflight_acquire(&qkey))
+            .unwrap_or(true);
         if !acquired {
             if let Some(l) = limits {
-                let r = too_many(true, 1);
+                let r = too_many_user(1, l.user_inflight_limit());
                 write_reply_with(stream, r, &rate_limit_headers(l, 1));
             }
             return;
         }
         let reply = route(m, p, b, mp, env, head.authorization.as_deref(), &ip);
         if let Some(l) = limits {
-            l.inflight_release(&key);
+            l.user_inflight_release(&qkey);
         }
         write_reply(stream, reply);
         return;

@@ -899,11 +899,12 @@ fn queue_check(cfg: &Config, q: &hds_core::queue::QueueConfig, snap: Option<Valu
         ));
     }
     let configured = format!(
-        "очередь включена: политика {}, глубина ожидания ≤ {}, одновременно исполняется ≤ {}, \
-         ожидание ≤ {} с",
+        "очередь включена: политика {}, глубина ожидания ≤ {}, одновременно исполняется ≤ {} \
+         (на пользователя ≤ {}), ожидание ≤ {} с",
         q.policy.as_str(),
         q.max_depth,
         q.max_inflight,
+        q.max_inflight_per_user,
         q.wait_timeout_sec
     );
     match snap {
@@ -928,12 +929,14 @@ fn queue_check(cfg: &Config, q: &hds_core::queue::QueueConfig, snap: Option<Valu
                 .unwrap_or_default();
             let msg = format!(
                 "{configured}; сейчас: исполняется {}, ждёт {}, ожидание p50/p95 {} / {} мс, \
-                 отказов (очередь полна) {}, таймаутов ожидания {}, обрывов клиента {}{}",
+                 отказов (очередь полна) {}, отказов (предел пользователя) {}, таймаутов ожидания {}, \
+                 обрывов клиента {}{}",
                 n("executing"),
                 n("depth"),
                 n("wait_p50_ms"),
                 n("wait_p95_ms"),
                 n("rejected_full"),
+                n("rejected_user"),
                 n("timeouts"),
                 n("aborted"),
                 if users.is_empty() {

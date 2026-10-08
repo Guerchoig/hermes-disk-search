@@ -101,6 +101,11 @@ pub struct QueueConfig {
     /// Лимит ИСПОЛНЕНИЯ (одновременных тяжёлых запросов) —
     /// `rate_limit.max_inflight` (единый дефолт с лимитером M3).
     pub max_inflight: u32,
+    /// Предел одновременных RAG **на пользователя** (M4 T4,
+    /// `rate_limit.max_inflight_per_user`): «жадный» пользователь не забирает
+    /// все слоты; превышение → `429` сразу (`QueueReject::PerUser`).
+    /// Учитывается, только если он строже глобального (`max_inflight`).
+    pub max_inflight_per_user: u32,
 }
 
 impl QueueConfig {
@@ -122,6 +127,11 @@ impl QueueConfig {
                 .and_then(QueuePolicy::parse)
                 .unwrap_or(DEFAULT_POLICY),
             max_inflight: crate::ratelimit::RateLimit::from_config(cfg).max_inflight,
+            max_inflight_per_user: {
+                let r = crate::ratelimit::RateLimit::from_config(cfg);
+                // Эффективный предел: не выше глобального `max_inflight`.
+                r.max_inflight_per_user.min(r.max_inflight)
+            },
         }
     }
 
@@ -153,6 +163,8 @@ struct State {
     rejected_full: u64,
     timeouts: u64,
     aborted: u64,
+    /// Отказы по пер-пользовательскому пределу (M4 T4).
+    rejected_user: u64,
     /// Окно последних завершённых ожиданий (мс) — p50/p95.
     waits_ms: VecDeque<u64>,
     total_wait_ms: u64,
@@ -186,6 +198,10 @@ pub enum QueueReject {
     /// Не дождался слота за `queue.wait_timeout_sec` → `503`; `depth` — сколько
     /// ждало в момент отказа (включая этот запрос).
     Timeout { waited_sec: u64, depth: u32 },
+    /// Пер-пользовательский предел одновременных RAG (M4 T4,
+    /// `rate_limit.max_inflight_per_user`) → `429` сразу (ждать не поможет:
+    /// лимит на самого пользователя, а не на свободные слоты).
+    PerUser { limit: u32 },
     /// Клиент оборвал соединение, пока ждал — ответ отправлять некуда.
     Aborted,
 }
@@ -254,6 +270,24 @@ impl HeavyQueue {
         let mut enqueued: Option<u64> = None;
         let mut st = self.lock();
         loop {
+            // 0) Пер-пользовательский предел (M4 T4 §3.3) — только для запроса,
+            //    который ЕЩЁ НЕ в очереди: ждать бесполезно, это лимит на
+            //    пользователя, а не на свободные слоты → сразу `429`.
+            //    Уже стоящего в очереди не перепроверяем (до него дойдёт ход по
+            //    fair-share, и он не поднимет число исполняющихся выше предела).
+            //    Предел участвует, лишь когда он СТРОЖЕ глобального: иначе он
+            //    ничего не добавляет (очередь работает как раньше — ждёт слот).
+            if self.cfg.max_inflight_per_user < self.cfg.max_inflight
+                && enqueued.is_none()
+                && st.users.get(user).map(|q| q.executing).unwrap_or(0)
+                    >= self.cfg.max_inflight_per_user
+            {
+                st.rejected_user += 1;
+                drop(st);
+                return Err(QueueReject::PerUser {
+                    limit: self.cfg.max_inflight_per_user,
+                });
+            }
             // 1) Быстрый путь: слот свободен и мы — следующие (или очередь пуста).
             if self.can_admit(&st, user) {
                 if let Some(seq) = enqueued.take() {
@@ -371,12 +405,14 @@ impl HeavyQueue {
             enabled: self.cfg.enabled,
             policy: self.cfg.policy,
             max_inflight: self.cfg.max_inflight,
+            max_inflight_per_user: self.cfg.max_inflight_per_user,
             max_depth: self.cfg.max_depth,
             wait_timeout_sec: self.cfg.wait_timeout_sec,
             depth: st.waiting_total() as u32,
             executing: st.executing,
             granted: st.granted,
             rejected_full: st.rejected_full,
+            rejected_user: st.rejected_user,
             timeouts: st.timeouts,
             aborted: st.aborted,
             total_wait_ms: st.total_wait_ms,
@@ -395,12 +431,14 @@ impl HeavyQueue {
             "enabled": s.enabled,
             "policy": s.policy.as_str(),
             "max_inflight": s.max_inflight,
+            "max_inflight_per_user": s.max_inflight_per_user,
             "max_depth": s.max_depth,
             "wait_timeout_sec": s.wait_timeout_sec,
             "depth": s.depth,
             "executing": s.executing,
             "granted": s.granted,
             "rejected_full": s.rejected_full,
+            "rejected_user": s.rejected_user,
             "timeouts": s.timeouts,
             "aborted": s.aborted,
             "total_wait_ms": s.total_wait_ms,
@@ -452,6 +490,8 @@ pub struct QueueStats {
     pub enabled: bool,
     pub policy: QueuePolicy,
     pub max_inflight: u32,
+    /// Предел одновременных RAG на пользователя (M4 T4).
+    pub max_inflight_per_user: u32,
     pub max_depth: u32,
     pub wait_timeout_sec: u64,
     /// Ждут сейчас.
@@ -460,6 +500,8 @@ pub struct QueueStats {
     pub executing: u32,
     pub granted: u64,
     pub rejected_full: u64,
+    /// Отказы по пер-пользовательскому пределу (M4 T4).
+    pub rejected_user: u64,
     pub timeouts: u64,
     pub aborted: u64,
     pub total_wait_ms: u64,
@@ -610,6 +652,9 @@ mod tests {
             wait_timeout_sec: wait_sec,
             policy,
             max_inflight,
+            // Тесты RR/FIFO (до T4) шлют от одного пользователя несколько
+            // запросов подряд — пер-пользовательский предел тут не участвует.
+            max_inflight_per_user: u32::MAX,
         }
     }
 
@@ -647,6 +692,10 @@ mod tests {
             server.wait_timeout_sec < CLIENT_TIMEOUT_SEC,
             "ожидание короче клиентского таймаута"
         );
+        assert_eq!(
+            server.max_inflight_per_user, 2,
+            "дефолт rate_limit.max_inflight_per_user (M4 T4)"
+        );
 
         let custom = QueueConfig::from_config(&cfg_of(
             "profile: server\nqueue:\n  enabled: false\n  max_depth: 3\n  wait_timeout_sec: 30\n  policy: fifo\nrate_limit:\n  max_inflight: 2\n",
@@ -667,6 +716,45 @@ mod tests {
         assert_eq!(QueuePolicy::parse(" RR "), Some(QueuePolicy::RoundRobin));
         assert_eq!(QueuePolicy::parse("fifo"), Some(QueuePolicy::Fifo));
         assert_eq!(QueuePolicy::parse(""), None);
+    }
+
+    /// M4 T4 (§3.3): пер-пользовательский предел — 3-й одновременный RAG
+    /// одного пользователя отвергается СРАЗУ (`PerUser`), хотя глобальный слот
+    /// свободен; освобождение слота возвращает возможность стартовать.
+    #[test]
+    fn per_user_limit_rejects_immediately() {
+        let cfg = QueueConfig {
+            enabled: true,
+            max_depth: 5,
+            wait_timeout_sec: 2,
+            policy: QueuePolicy::RoundRobin,
+            max_inflight: 3,
+            max_inflight_per_user: 1,
+        };
+        let q = Arc::new(HeavyQueue::new(cfg));
+        let a = q.acquire("user:anna", || true).expect("слот свободен");
+        // Второй запрос ЭТОГО пользователя — сразу отказ (ждать нечего).
+        match q.acquire("user:anna", || true) {
+            Err(QueueReject::PerUser { limit }) => assert_eq!(limit, 1),
+            other => panic!("ожидался PerUser, получено {other:?}"),
+        }
+        // Другой пользователь — свой счётчик.
+        let b = q.acquire("user:boris", || true).expect("свой слот");
+        let st = q.stats();
+        assert_eq!(st.executing, 2, "anna + boris");
+        assert_eq!(st.depth, 0, "в очередь никто не встал");
+        assert_eq!(st.rejected_user, 1);
+        assert_eq!(st.max_inflight_per_user, 1);
+        // Снапшот показывает лимит и счётчик отказов.
+        let v = q.snapshot_json();
+        assert_eq!(v["max_inflight_per_user"], 1);
+        assert_eq!(v["rejected_user"], 1);
+        // Освобождение слота — пользователь снова может стартовать.
+        drop(a);
+        let a2 = q.acquire("user:anna", || true).expect("слот вернулся");
+        drop(a2);
+        drop(b);
+        assert_eq!(q.stats().executing, 0);
     }
 
     /// Свободные слоты — быстрый путь: без ожидания, `waited_ms == 0`.
