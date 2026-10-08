@@ -526,3 +526,31 @@ pub fn stats(conn: &Connection) -> Result<Stats> {
         errors,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::connect;
+
+    /// Конкурентность (M4 §1/§3): `connect` включает **WAL** и `busy_timeout`,
+    /// то есть чтение под нагрузкой нескольких читателей + одного писателя уже
+    /// поддержано. (Факт §1 плана M4 «PRAGMA/busy_timeout не задаются нигде»
+    /// неточен — это зафиксировано здесь.)
+    #[test]
+    fn connect_sets_wal_and_busy_timeout() {
+        let dir = std::env::temp_dir().join(format!("hds-db-pragma-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("index.db");
+        let conn = connect(&path, 8).expect("connect");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal", "journal_mode={mode}");
+        let bt: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert!(bt >= 5000, "busy_timeout={bt} — ожидался ≥5000 мс");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
