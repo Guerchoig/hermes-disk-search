@@ -761,7 +761,11 @@ fn check_perimeter(cfg: &Config) -> Check {
     let non_loop = !is_loopback(ui_host) || !is_loopback(mcp_host);
     let mut msgs = vec![format!(
         "ui.host={ui_host}, mcp_http.host={mcp_host}; trusted_proxy={trusted}; rate_limit={}",
-        if rl_enabled { "включён" } else { "выключен" }
+        if rl_enabled {
+            "включён"
+        } else {
+            "выключен"
+        }
     )];
     let mut fixes: Vec<String> = Vec::new();
     let mut status = "ok";
@@ -907,9 +911,7 @@ mod tests {
         assert!(!c.fix.is_empty());
 
         // Не-loopback + trusted_proxy — warn про подделку IP.
-        let c = check_perimeter(&cfg(
-            "trusted_proxy: true\nmcp_http:\n  host: 0.0.0.0\n",
-        ));
+        let c = check_perimeter(&cfg("trusted_proxy: true\nmcp_http:\n  host: 0.0.0.0\n"));
         assert_eq!(c.status, "warn");
         assert!(c.msg.contains("ПОДДЕЛАТЬ"), "msg={}", c.msg);
 

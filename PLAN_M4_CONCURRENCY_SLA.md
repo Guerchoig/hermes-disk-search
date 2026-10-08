@@ -304,7 +304,18 @@ _(заполняется по ходу этапа: шаг → коммит → �
 
 | Шаг | Коммит | Что сделано / рантайм-проверки |
 |---|---|---|
-| — | — | (пусто) |
+| T0 F1 | `258cb74` | `token_issue` в аудите при логине + поле `token` (префикс sha256, без самого токена) в `AuditEvent`; обновлены все конструкторы. Рантайм: живой логин → `data/logs/audit.jsonl` содержит `login_ok` + `token_issue` (отпечаток). Юнит: `hds-mcp/tests/audit.rs`. |
+| T0 F2/F3 | `9d14980` | UI: `admin_op` пишется ПОСЛЕ маршрута с фактическим статусом (match обёрнут в замыкание, ранние `return` учтены); `unauthorized` — с реальными `method`/`path`. Рантайм: POST 404 → в логе `status: 404`; GET без токена → `method: GET, path: /api/status`. Тест `ui_auth.rs`. |
+| T0 F4 | `f2cf449` | Дочитывание (`drain_body`, cap 8 МиБ) тела перед `413`, чтение запроса (таймаут 2 с) перед `503` в MCP и UI; `run_http_listener` в MCP для сокет-тестов. Сокет-тесты `http_socket.rs`/`ui_auth.rs` (двухфазная отправка — детектор RST; без дочитывания `413`-тест падает). |
+| T0 F6/F7 | `1a6e80d` | «Тяжёлый» запрос определяется разбором JSON-RPC (`tools/call` + `name==ask_my_files`); `/health` исключён из rate-limit. Тесты: `heavy_request_is_jsonrpc_not_substring`, сокет-тест `health_is_exempt_from_rate_limit`. |
+| T0 F5 (M2) | `f07fbea` | PID-файл `mcp-http`: `run` пишет (pid + имя образа), чистит на выходе; `stop`/`restart` убивают только СВОЙ процесс (проверка имени образа). Рантайм: `run`→stop убивает; чужой pid (powershell) НЕ убивается. Тест `mcp_http_pid.rs`. |
+| T0 F8 | `d4af8b3` | Пункт «периметр» в `hds check`/`/api/diagnostics`: не-loopback host → предупреждение; `trusted_proxy` + не-loopback → «IP подделывается»; показ состояния host/trusted_proxy/rate_limit. Рантайм: `hds check` при `0.0.0.0`+`trusted_proxy: true` показывает оба предупреждения. Юнит `perimeter_check_statuses`. |
+| T0 F10/F5 | `86df668` | `/health` без `version`; 404 без эха пути (MCP+UI); `429` c `X-RateLimit-Remaining/Reset`; `tool_call` аудитится и без `access.enabled`; read-timeout сокета `http.read_timeout_sec` (30 с) в обоих серверах. Сокет-тесты XFF (доверие) + заголовки лимитов. |
+| T0 F6/F10 (M2) | `4ba31ec` | Хвосты M2: логи LaunchDaemon (`StandardOutPath/ErrorPath`), тест `role_from_args`, комментарий `profile:` в `config.example.yaml`, `access_path_from` (без повторной загрузки конфига), тест паритета `system_state_dir`. |
+| T0 F9 | — | **Не реализовано:** `Host` не читается; по ревью правильнее поправить формулировку `PLAN_M3_NETWORK_PERIMETER.md` §3.1 (боевой план не переписываем — оставлено открытым). |
+| T0.9 | — | **Вопросы заказчику (не код):** автотранскрибация в server-профиле (`install_server.ps1:69` снимает задачу без замены) и `hds login` без пароля в argv — см. `M3_CODE_REVIEW.md` §5 F7/F9. |
+| T1–T6 | — | **Не начаты** (БД под конкурентность, слоты/VRAM, очередь/fair-share, квоты, нагрузочная приёмка, доклад) — см. §4–§6. |
+
 
 ## 9. Ссылки
 
