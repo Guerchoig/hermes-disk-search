@@ -94,11 +94,33 @@ impl GpuPolicy {
     }
 }
 
+/// Раскладка одной карты (M6 §3.1): наш индекс + роли, которым она назначена.
+///
+/// Источник — `gpu.devices` в `config.yaml`:
+///
+/// ```yaml
+/// gpu:
+///   devices:
+///     - { index: 1, roles: [chat] }
+///     - { index: 2, roles: [embedding, rerank, whisper] }
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GpuDeviceAssignment {
+    /// Наш индекс устройства: `0` — CPU, `1..N` — ускорители в порядке перечисления
+    /// движка (то же семантика, что у `gpu.device_index`).
+    pub index: i32,
+    /// Роли, назначенные этой карте (имена из `ROLES`).
+    pub roles: Vec<String>,
+}
+
 /// `gpu.*`: бюджет VRAM, устройство и приоритеты вытеснения (§A4).
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
     /// Наш индекс устройства: `0` — CPU, `1` — первый GPU (§A2).
     pub device_index: i32,
+    /// Раскладка ролей по картам (M6 §3.1, `gpu.devices`). Пустой список —
+    /// раскладки нет, все роли идут на карту `device_index` (компат).
+    pub devices: Vec<GpuDeviceAssignment>,
     /// Явно ли задан `gpu.n_gpu_layers` в конфиге (иначе уважаем legacy `-ngl`).
     pub n_gpu_layers_set: bool,
     pub n_gpu_layers: i32,
@@ -134,6 +156,7 @@ impl Default for GpuConfig {
         priorities.insert("whisper".to_string(), 20);
         GpuConfig {
             device_index: 1, // первый GPU: без явного выбора движок может уйти на CPU (R32)
+            devices: Vec::new(),
             n_gpu_layers_set: false,
             n_gpu_layers: -1,
             reserve_mb: 1024,
@@ -175,6 +198,19 @@ impl GpuConfig {
         self.priorities.get(role).copied().unwrap_or(0)
     }
 
+    /// Карта роли из раскладки `gpu.devices` (M6 §3.1).
+    ///
+    /// Возвращает индексы **всех** карт, на которых назначена роль (по порядку
+    /// в конфиге); пусто — роль не назначена явно. Валидность («ровно одна
+    /// карта на роль», §3.5) проверяет планировщик (`registry::plan_role`).
+    pub fn role_assignments(&self, role: &str) -> Vec<i32> {
+        self.devices
+            .iter()
+            .filter(|a| a.roles.iter().any(|r| r == role))
+            .map(|a| a.index)
+            .collect()
+    }
+
     /// Строка о бюджете для `hdsw llm-host status` / логов (точные цифры).
     pub fn budget_note(&self) -> String {
         format!(
@@ -213,6 +249,10 @@ pub struct RoleConfig {
     /// Legacy `-ngl` из `llm_server.<role>.extra_args` (используется, если
     /// `gpu.n_gpu_layers` не задан явно).
     pub legacy_n_gpu_layers: Option<i32>,
+    /// Явная карта роли (M6 §3.1): `llm_server.<role>.device` — наш индекс
+    /// (`0` = CPU, `1..N` = ускорители). `None` — из `gpu.devices[].roles`,
+    /// иначе компат `gpu.device_index`.
+    pub device: Option<i32>,
     /// Замечания по роли (идут в `warnings` и `hdsw check`).
     pub notes: Vec<String>,
 }
@@ -284,6 +324,52 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
     let mut gpu = GpuConfig::default();
     if let Some(v) = dig_i64(root, "gpu.device_index") {
         gpu.device_index = v as i32;
+    }
+    // M6 §3.1: раскладка ролей по картам (`gpu.devices: [{index, roles}]`).
+    // Неизвестные имена ролей и кривые записи — не молча: предупреждение с номером
+    // записи; битые записи пропускаются (остаток раскладки продолжает работать).
+    if let Some(list) = dig(root, "gpu.devices").and_then(|v| v.as_sequence()) {
+        for (i, item) in list.iter().enumerate() {
+            let index = item.get("index").and_then(|v| v.as_i64());
+            let roles: Vec<String> = item
+                .get("roles")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|r| r.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            match index {
+                Some(ix) if ix >= 0 && !roles.is_empty() => {
+                    for r in &roles {
+                        if !ROLES.contains(&r.as_str()) {
+                            warnings.push(format!(
+                                "gpu.devices[{i}]: неизвестная роль «{r}» — ожидается одна из: {}",
+                                ROLES.join(", ")
+                            ));
+                        }
+                    }
+                    gpu.devices.push(GpuDeviceAssignment {
+                        index: ix as i32,
+                        roles,
+                    });
+                }
+                _ => warnings.push(format!(
+                    "gpu.devices[{i}]: запись пропущена — нужны поля index (число ≥ 0) \
+                     и непустой список roles"
+                )),
+            }
+        }
+        if !gpu.devices.is_empty() && gpu.device_index > 0 {
+            warnings.push(format!(
+                "заданы и gpu.devices, и gpu.device_index={}: раскладка приоритетна для \
+                 назначенных ролей, остальные — на карте device_index (компат)",
+                gpu.device_index
+            ));
+        }
     }
     if let Some(v) = dig_i64(root, "gpu.n_gpu_layers") {
         gpu.n_gpu_layers = v as i32;
@@ -447,6 +533,23 @@ fn build_role(
     let port = dig_i64(root, &format!("llm.{role}.port"))
         .or_else(|| dig_i64(root, &format!("llm_server.{role}.port")))
         .unwrap_or(def_port as i64) as u16;
+    // M6 §3.1: явная карта роли (`llm.<role>.device` приоритетнее
+    // `llm_server.<role>.device`, как у остальных ключей роли).
+    let device = dig_i64(root, &format!("llm.{role}.device"))
+        .or_else(|| dig_i64(root, &format!("llm_server.{role}.device")))
+        .filter(|v| *v >= 0)
+        .map(|v| v as i32);
+    if device.is_none()
+        && dig_i64(root, &format!("llm_server.{role}.device")).map(|v| v < 0) == Some(true)
+    {
+        let msg = format!(
+            "{role}: llm_server.{role}.device = {v} (< 0) игнорируется — индексы \
+             устройств: 0 = CPU, 1..N = ускорители (см. llm-host devices)",
+            v = dig_i64(root, &format!("llm_server.{role}.device")).unwrap_or_default()
+        );
+        warnings.push(msg.clone());
+        notes.push(msg);
+    }
     let ctx_per_slot =
         dig_i64(root, &format!("llm_server.{role}.ctx_per_slot")).unwrap_or(def_ctx as i64);
     // как у llama-server: --ctx-size = parallel * ctx_per_slot
@@ -579,6 +682,7 @@ fn build_role(
         cache_type_k,
         cache_type_v,
         legacy_n_gpu_layers,
+        device,
         notes,
     })
 }
@@ -927,6 +1031,100 @@ llm:
         assert!(
             cfg.warnings.iter().any(|w| w.contains("n_ubatch")),
             "n_ubatch > n_batch — предупреждаем: {:?}",
+            cfg.warnings
+        );
+    }
+
+    /// T1: `gpu.devices` разбирается, неизвестные роли и кривые записи — warn
+    /// (не молча), остальная раскладка продолжает работать.
+    #[test]
+    fn gpu_devices_layout_parsed_with_warnings() {
+        let yaml = r#"
+index:
+  whisper_model_path: ""
+gpu:
+  device_index: 2
+  devices:
+    - { index: 1, roles: [chat] }
+    - { index: 2, roles: [embedding, rerank] }
+    - { index: 3, roles: [unknown_role] }
+    - { index: бяка, roles: [] }
+    - { index: 4 }
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+"#;
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(
+            cfg.gpu.role_assignments("chat"),
+            vec![1],
+            "карта chat из раскладки"
+        );
+        assert_eq!(
+            cfg.gpu.role_assignments("embedding"),
+            vec![2],
+            "карта embedding из раскладки"
+        );
+        assert_eq!(
+            cfg.gpu.role_assignments("rerank"),
+            vec![2],
+            "embedding/rerank легально делят одну карту (§3.5: «лёгкая добавка»)"
+        );
+        assert!(cfg.gpu.role_assignments("whisper").is_empty());
+        assert!(
+            cfg.warnings.iter().any(|w| w.contains("unknown_role")),
+            "неизвестная роль — предупреждение: {:?}",
+            cfg.warnings
+        );
+        assert!(
+            cfg.warnings.iter().any(|w| w.contains("gpu.devices[3]")),
+            "кривые записи — предупреждение: {:?}",
+            cfg.warnings
+        );
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("gpu.device_index=2")),
+            "смешение стилей (devices + device_index) — предупреждение"
+        );
+    }
+
+    /// T1: `llm_server.<role>.device` парсится; `llm.<role>.device` сильнее;
+    /// отрицательный индекс игнорируется с предупреждением.
+    #[test]
+    fn role_device_key_parsed() {
+        let yaml = r#"
+index:
+  whisper_model_path: ""
+llm_server:
+  chat:
+    port: 8010
+    model: "shared:chat"
+    device: 2
+  rerank:
+    port: 8012
+    device: -5
+llm:
+  chat:
+    device: 3
+"#;
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(
+            cfg.role("chat").unwrap().device,
+            Some(3),
+            "llm.<role>.device приоритетнее llm_server.<role>.device"
+        );
+        assert_eq!(
+            cfg.role("rerank").unwrap().device,
+            None,
+            "отрицательный индекс игнорируется"
+        );
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("rerank") && w.contains("-5")),
+            "отрицательный device — предупреждение: {:?}",
             cfg.warnings
         );
     }

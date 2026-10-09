@@ -353,3 +353,171 @@ fn runtime_paths_follow_env() {
         }
     );
 }
+
+/// Фейковые устройства как в факте T0 (с Vulkan-бэкендом): ловушка компата —
+/// `index=2` ускорителя — это AMD iGPU, а не NVIDIA.
+fn fake_devices_with_vulkan() -> Vec<Device> {
+    vec![
+        Device {
+            bridge_device_index: 0,
+            device_type: 1,
+            memory_free: 11_801_722_880,
+            memory_total: 12_884_377_600,
+            backend: "CUDA".to_string(),
+            name: "CUDA0".to_string(),
+            description: "NVIDIA GeForce RTX 3060".to_string(),
+        },
+        Device {
+            bridge_device_index: 1,
+            device_type: 0,
+            memory_free: 31_000_000_000,
+            memory_total: 34_300_000_000,
+            backend: "Vulkan".to_string(),
+            name: "Vulkan0".to_string(),
+            description: "AMD Radeon(TM) Graphics".to_string(),
+        },
+        Device {
+            bridge_device_index: 2,
+            device_type: 1,
+            memory_free: 12_024_475_648,
+            memory_total: 12_930_293_760,
+            backend: "Vulkan".to_string(),
+            name: "Vulkan1".to_string(),
+            description: "NVIDIA GeForce RTX 3060".to_string(),
+        },
+        Device {
+            bridge_device_index: 3,
+            device_type: 0,
+            memory_free: 44_040_192_000,
+            memory_total: 67_108_864_000,
+            backend: "CPU".to_string(),
+            name: "CPU".to_string(),
+            description: "AMD Ryzen 7 5700G".to_string(),
+        },
+    ]
+}
+
+fn failed(plans: &[registry::RolePlan], role: &str) -> String {
+    match plans.iter().find(|p| p.role() == role).expect(role) {
+        registry::RolePlan::Ready(p) => panic!("роль {role} не должна планироваться: {p:?}"),
+        registry::RolePlan::Failed { error, .. } => error.clone(),
+    }
+}
+
+/// M6 T1 (§3.1): раскладка `gpu.devices` ведёт роли на назначенные карты,
+/// backend карты виден в плане/статусе (`device_backend`, `summary`).
+#[test]
+fn layout_assigns_roles_to_cards_and_reports_backend() {
+    let env = Env::new("m6layout");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 1, roles: [chat] }
+    - { index: 2, roles: [embedding] }
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+  embedding: { port: 8011, model: "shared:embedding" }
+"#;
+    env.model("chat", "chat.gguf");
+    env.model("embedding", "bge.gguf");
+    let cfg_path = env.write_config("m6.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices_with_vulkan());
+
+    let chat = ready(&plans, "chat");
+    assert_eq!(
+        chat.spec.manual_devices_csv.as_deref(),
+        Some("0"),
+        "карта 1 = первый ускоритель = CUDA0 (bridge 0)"
+    );
+    assert_eq!(chat.device_backend.as_deref(), Some("CUDA"));
+    let embedding = ready(&plans, "embedding");
+    assert_eq!(
+        embedding.spec.manual_devices_csv.as_deref(),
+        Some("1"),
+        "карта 2 = второй ускоритель = Vulkan0 (AMD iGPU, bridge 1) — ловушка компата"
+    );
+    assert_eq!(
+        embedding.device_backend.as_deref(),
+        Some("Vulkan"),
+        "backend карты обязан быть виден в плане/статусе (§3.1)"
+    );
+    assert!(
+        embedding.summary().contains("backend=Vulkan"),
+        "summary печатает backend: {}",
+        embedding.summary()
+    );
+}
+
+/// M6 T1 (§3.5): «одна роль — ровно одна карта» — двойное назначение
+/// (llm_server.<role>.device и gpu.devices одновременно) — fail-fast с числами.
+#[test]
+fn double_assignment_fails_with_numbers() {
+    let env = Env::new("m6double");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 1, roles: [chat, embedding] }
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+  embedding: { port: 8011, model: "shared:embedding", device: 2 }
+"#;
+    env.model("chat", "chat.gguf");
+    env.model("embedding", "bge.gguf");
+    let cfg_path = env.write_config("m6d.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices_with_vulkan());
+    let err = failed(&plans, "embedding");
+    assert!(err.contains("более чем на одну карту"), "{err}");
+    assert!(err.contains("llm_server.embedding.device=2"), "{err}");
+    assert!(err.contains("карта 1"), "{err}");
+    // Ошибка одной роли не блокирует остальные (паритет Python-версии).
+    let _ = ready(&plans, "chat");
+}
+
+/// M6 T1 (§3.1): карта из раскладки, которой нет среди ускорителей — fail-fast
+/// с числом ускорителей и именем роли (не молча, как в грабле «Vulkan не видно»).
+#[test]
+fn missing_card_fails_with_role_and_numbers() {
+    let env = Env::new("m6missing");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 3, roles: [chat] }
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+"#;
+    env.model("chat", "chat.gguf");
+    let cfg_path = env.write_config("m6m.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    // Только один ускоритель (CUDA0) — карты 3 нет.
+    let devices = vec![fake_devices_with_vulkan()[0].clone()];
+    let plans = registry::plan(&cfg, &env.runtime, &devices);
+    let err = failed(&plans, "chat");
+    assert!(err.contains("роль 'chat'"), "{err}");
+    assert!(err.contains("ускорителей найдено 1"), "{err}");
+    assert!(err.contains("llm-host devices"), "{err}");
+}
+
+/// M6 T1: явная карта из раскладки печатается в notes плана (диагностика статуса).
+#[test]
+fn layout_note_explains_explicit_card() {
+    let env = Env::new("m6note");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 2, roles: [embedding] }
+llm_server:
+  embedding: { port: 8011, model: "shared:embedding" }
+"#;
+    env.model("embedding", "bge.gguf");
+    let cfg_path = env.write_config("m6n.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices_with_vulkan());
+    let emb = ready(&plans, "embedding");
+    assert!(
+        emb.notes.iter().any(|n| n.contains("явная карта 2")),
+        "notes: {:?}",
+        emb.notes
+    );
+}

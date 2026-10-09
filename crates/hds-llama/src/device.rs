@@ -107,6 +107,21 @@ pub fn selection_from_config_index(index: i32, devices: &[Device]) -> Result<Dev
     }
 }
 
+/// То же, что [`selection_from_config_index`], но в ошибке указана роль
+/// (M6 §3.1: раскладка ролей по картам; fail-fast с числами, не молча).
+///
+/// Тот же компат-риск, что найден в T0: с появлением Vulkan-бэкенда порядок
+/// ускорителей меняется (на нашей станции индекс 2 — AMD iGPU), поэтому
+/// `gpu.devices` в проде стоит задавать с проверкой по `llm-host devices`.
+pub fn selection_for_role(
+    config_index: i32,
+    devices: &[Device],
+    role: &str,
+) -> Result<DeviceSelection> {
+    selection_from_config_index(config_index, devices)
+        .map_err(|e| EngineError::Other(format!("роль '{role}': {e}")))
+}
+
 /// Обратное преобразование: ускоритель с таким `bridge_device_index` → `gpu.device_index`.
 pub fn config_index_for(devices: &[Device], bridge_index: i32) -> Option<i32> {
     accelerators(devices)

@@ -1861,6 +1861,9 @@ impl Backend for ClusterBackend {
                     "bridge_device_index": d.bridge_device_index,
                     "backend": d.backend,
                     "name": d.name,
+                    // M6 T1: описание устройства (имя GPU) — по нему пункт `gpu_roles`
+                    // в `hds check` определяет вендора и iGPU/UMA.
+                    "description": d.description,
                     "memory_free_mib": d.memory_free_mib(),
                     "memory_total_mib": d.memory_total as f64 / (1024.0 * 1024.0),
                 }))

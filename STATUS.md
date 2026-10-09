@@ -238,6 +238,24 @@
 > — хвост). Следующий шаг — **T1**: конфиг `gpu.devices` + `llm_server.<role>.device`,
 > компат-пин по `backend+name`, валидация §3.5, пункт `gpu_roles` в `hds check`.
 >
+> **M6/T1 выполнен (10.10.2026).** Конфиг: `gpu.devices: [{ index, roles }]` +
+> `llm_server.<role>.device` (`llm.<role>.device` приоритетнее); приоритет карты:
+> role-ключ → `gpu.devices[].roles` → компат `gpu.device_index` (десктоп не изменён).
+> Валидация §3.5 — fail-fast с числами: «одна роль — ровно одна карта» (двойное
+> назначение → `RolePlan::Failed` с перечнем источников), недоступная карта → «роль 'X':
+> … ускорителей найдено N». В плане/статусе — `backend=` карты
+> (`PlannedInstance.device_backend`, `summary`). Пункт `gpu_roles` в `hds check`
+> (без HTTP, если раскладки нет): с раскладкой — живые устройства фасада
+> `/internal/devices` (+ поле `description`), warn на недоступную карту, двойное
+> назначение, смешанные вендоры и iGPU/UMA. `config.example.yaml` — образец.
+> Тесты: config.rs +2, `registry_plan.rs` +4 (на устройствах T0: CUDA0/Vulkan0/Vulkan1/CPU),
+> diag.rs +1; clippy/fmt чисто. Рантайм: `llm_host_plan` с песочной раскладкой
+> (chat → `backend=CUDA` + note «явная карта 1»; embedding → fail-fast «ускорителей
+> найдено 1 (CUDA0)» — боевой движок без Vulkan); `hds check --json` живьём —
+> `gpu_roles` ok, боевой desktop-профиль не изменён. Следующий шаг — **T2**:
+> раскладка в `host.rs`, чат-реплики, whisper по картам, один фасад + внутренняя
+> маршрутизация (§3.6).
+>
 
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >

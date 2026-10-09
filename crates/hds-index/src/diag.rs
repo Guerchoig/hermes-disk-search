@@ -1044,6 +1044,277 @@ fn check_chat_provider(cfg: &Config) -> Check {
     }
 }
 
+/// Разобрать раскладку `gpu.devices` из YAML (`Value` из `config.yaml`).
+///
+/// Возвращает `(назначения, предупреждения)`: назначения — `{индекс карты → роли}`,
+/// предупреждения — кривые записи и неизвестные роли (как в llm-host `config.rs`,
+/// но из YAML `hds_core::Config`: `hds-index` не зависит от `hds-llama`).
+fn gpu_layout_from_yaml(cfg: &Config) -> (Vec<(i32, Vec<String>)>, Vec<String>) {
+    let mut out = Vec::new();
+    let mut warns = Vec::new();
+    let roles = ["chat", "embedding", "rerank", "whisper"];
+    if let Some(list) = dig(cfg, "gpu.devices").and_then(|v| v.as_sequence()) {
+        for (i, item) in list.iter().enumerate() {
+            let index = item.get("index").and_then(|v| v.as_i64());
+            let assigned: Vec<String> = item
+                .get("roles")
+                .and_then(|v| v.as_sequence())
+                .map(|seq| {
+                    seq.iter()
+                        .filter_map(|r| r.as_str())
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default();
+            match index {
+                Some(ix) if ix >= 0 && !assigned.is_empty() => {
+                    for r in &assigned {
+                        if !roles.contains(&r.as_str()) {
+                            warns.push(format!(
+                                "gpu.devices[{i}]: неизвестная роль «{r}» — ожидается одна из: {}",
+                                roles.join(", ")
+                            ));
+                        }
+                    }
+                    out.push((ix as i32, assigned));
+                }
+                _ => warns.push(format!(
+                    "gpu.devices[{i}]: запись пропущена — нужны поля index (число ≥ 0) \
+                     и непустой список roles"
+                )),
+            }
+        }
+    }
+    (out, warns)
+}
+
+/// Карта роли из конфига с приоритетами M6 §3.1: `llm_server.<role>.device` →
+/// `gpu.devices[].roles`. Возвращает `(индекс, число источников)`.
+fn role_device_from_cfg(cfg: &Config, role: &str) -> (Option<i32>, usize) {
+    let mut sources = 0usize;
+    let mut index: Option<i32> = None;
+    if let Some(ix) = dig(cfg, &format!("llm_server.{role}.device")).and_then(|v| v.as_i64()) {
+        if ix >= 0 {
+            sources += 1;
+            index = Some(ix as i32);
+        }
+    }
+    let (layout, _) = gpu_layout_from_yaml(cfg);
+    for (n, ix) in layout
+        .iter()
+        .filter(|(_, rs)| rs.iter().any(|r| r == role))
+        .map(|(ix, _)| *ix)
+        .enumerate()
+    {
+        sources += 1;
+        if n == 0 && index.is_none() {
+            index = Some(ix);
+        }
+    }
+    (index, sources)
+}
+
+/// Вендор ускорителя по описанию движка (имя GPU): nvidia | amd | intel | apple | прочее.
+fn device_vendor(desc: &str) -> &'static str {
+    let d = desc.to_lowercase();
+    if d.contains("nvidia") || d.contains("geforce") {
+        "nvidia"
+    } else if d.contains("amd") || d.contains("radeon") {
+        "amd"
+    } else if d.contains("intel") {
+        "intel"
+    } else if d.contains("apple") {
+        "apple"
+    } else {
+        "unknown"
+    }
+}
+
+/// Похоже ли устройство на iGPU/UMA по описанию (эвристика по именам вендоров:
+/// `AMD Radeon(TM) Graphics`, `Intel(R) UHD/Iris Graphics` — интегрированные).
+fn looks_like_igpu(desc: &str) -> bool {
+    let d = desc.to_lowercase();
+    d.contains("(tm) graphics") || d.contains("uhd graphics") || d.contains("iris")
+}
+
+/// M6 T1 (`PLAN_M6_GPU_MULTIVENDOR.md` §3.1/§3.5/§5): пункт `gpu_roles` —
+/// раскладка ролей по картам и границы поддержки.
+///
+/// Проверяет по конфигу: «одна роль — ровно одна карта» (двойное назначение —
+/// warn с числами), наличие карт. По живым устройствам фасада
+/// (`GET /internal/devices`): backend/свободная VRAM карты каждой роли, warn на
+/// недоступную карту, смешанные вендоры (§2: не поддерживаются) и iGPU/UMA.
+fn check_gpu_roles(cfg: &Config) -> Check {
+    let (_, mut warns) = gpu_layout_from_yaml(cfg);
+    // «Одна роль — ровно одна карта» + карты явно не на CPU, если их нет.
+    let mut role_lines: Vec<String> = Vec::new();
+    for role in ["chat", "embedding", "rerank", "whisper"] {
+        let (ix, sources) = role_device_from_cfg(cfg, role);
+        match (ix, sources) {
+            (Some(ix), 1) => role_lines.push(format!("{role} → карта {ix}")),
+            (Some(_), n) if n > 1 => warns.push(format!(
+                "{role}: роль назначена более чем на одну карту ({n} источника: \
+                 llm_server.{role}.device и/или gpu.devices) — одна роль работает \
+                 ровно на одной карте (§3.1)"
+            )),
+            _ => {}
+        }
+    }
+
+    let empty_layout = role_lines.is_empty()
+        && !warns
+            .iter()
+            .any(|w| w.contains("роль назначена") || w.contains("gpu.devices"));
+    if empty_layout && warns.is_empty() {
+        // Компат: раскладки нет — все роли на карте device_index.
+        let di = dig(cfg, "gpu.device_index")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(1);
+        return Check::new(
+            "gpu_roles",
+            "ok",
+            "раскладка ролей по картам не задана (gpu.devices) — все роли на карте gpu.device_index",
+        )
+        .msg(format!(
+            "gpu.device_index={di} (0 = CPU, 1..N = ускорители движка); \
+             раскладка задаётся списком gpu.devices: [{{ index: 1, roles: [chat] }}, …]"
+        ));
+    }
+
+    self::check_gpu_roles_live(cfg, role_lines, warns)
+}
+
+/// Часть пункта `gpu_roles` с живыми устройствами (отделена для читаемости).
+fn check_gpu_roles_live(cfg: &Config, role_lines: Vec<String>, warns: Vec<String>) -> Check {
+    // Живые устройства фасада (`/internal/devices`).
+    let (host, port) = role_addr(cfg, "chat");
+    let live = http::request(
+        &host,
+        port,
+        "GET",
+        "/internal/devices",
+        &[],
+        None,
+        PROBE_TIMEOUT,
+    )
+    .ok()
+    .filter(|r| (200..300).contains(&r.status))
+    .and_then(|r| r.json().ok());
+    let Some(dev_json) = live else {
+        let mut check = Check::new(
+            "gpu_roles",
+            "warn",
+            "раскладка ролей по картам задана, но устройства резидента недоступны",
+        )
+        .msg(format!(
+            "{}; резидент не отвечает на GET {host}:{port}/internal/devices — \
+             проверить карты/бэкенды можно `llm-host devices`",
+            if role_lines.is_empty() {
+                "раскладка из конфига прочитана".to_string()
+            } else {
+                role_lines.join("; ")
+            }
+        ));
+        for w in &warns {
+            check = check.fix(w.clone());
+        }
+        return check;
+    };
+
+    let devices: Vec<Value> = dev_json
+        .get("devices")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let accelerators: Vec<&Value> = devices
+        .iter()
+        .filter(|d| {
+            d.get("backend")
+                .and_then(|v| v.as_str())
+                .map(|b| !b.eq_ignore_ascii_case("CPU"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    let mut lines: Vec<String> = Vec::new();
+    let mut fixes: Vec<String> = warns;
+    // Для каждой роли: карта существует? backend? свободная VRAM?
+    for line in role_lines {
+        let role = line.split(" → ").next().unwrap_or("").to_string();
+        let ix = role_device_from_cfg(cfg, &role).0.unwrap_or(0);
+        if ix == 0 {
+            if let Some(cpu) = devices
+                .iter()
+                .find(|d| d.get("backend").and_then(|v| v.as_str()) == Some("CPU"))
+            {
+                let free = cpu
+                    .get("memory_free_mib")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                lines.push(format!("{line} (CPU, свободно {free:.0} МиБ)"));
+            } else {
+                lines.push(format!("{line} (CPU)"));
+            }
+            continue;
+        }
+        match accelerators.get((ix - 1) as usize) {
+            Some(acc) => {
+                let backend = acc.get("backend").and_then(|v| v.as_str()).unwrap_or("?");
+                let desc = acc
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let free = acc
+                    .get("memory_free_mib")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                lines.push(format!(
+                    "{line} ({backend} {desc}, свободно {free:.0} МиБ — замер движка, R29 \
+                     недостоверен для бюджета)"
+                ));
+                if looks_like_igpu(desc) {
+                    fixes.push(format!(
+                        "карта {ix} ({desc}) похожа на iGPU/UMA — UMA не поддерживается в \
+                         проде (§2); назначайте роли на дискретные карты"
+                    ));
+                }
+            }
+            None => fixes.push(format!(
+                "{line}: карта {ix} не найдена — ускорителей в движке {}; проверьте индексы \
+                 `llm-host devices` (с Vulkan-бэкендом порядок ускорителей меняется!)",
+                accelerators.len()
+            )),
+        }
+    }
+
+    // §2: смешанные вендоры не поддерживаются.
+    let mut vendors: Vec<&str> = accelerators
+        .iter()
+        .filter_map(|d| d.get("description").and_then(|v| v.as_str()))
+        .map(device_vendor)
+        .filter(|v| *v != "unknown")
+        .collect();
+    vendors.sort_unstable();
+    vendors.dedup();
+    if vendors.len() > 1 {
+        fixes.push(format!(
+            "смешанные вендоры ускорителей ({}) не поддерживаются (§2): прод — карты \
+             одного семейства (NVIDIA или AMD под Windows; либо один Mac/Metal)",
+            vendors.join(" + ")
+        ));
+    }
+
+    let status = if fixes.is_empty() { "ok" } else { "warn" };
+    Check::new(
+        "gpu_roles",
+        status,
+        "раскладка ролей по картам (gpu.devices)",
+    )
+    .msg(lines.join("; "))
+    .fix(fixes.join("; "))
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
@@ -1078,6 +1349,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     }
 
     checks.push(check_gpu_observability(cfg));
+    checks.push(check_gpu_roles(cfg));
     checks.push(check_audit(cfg));
     checks.push(check_perimeter(cfg));
     checks.push(check_queue(cfg));
@@ -1238,6 +1510,35 @@ mod tests {
             "секрет не печатается: {}",
             c.msg
         );
+    }
+
+    /// M6 T1 (§3.1/§3.5): пункт `gpu_roles` — без раскладки ok (компат);
+    /// двойное назначение роли и кривые записи — warn (fix содержит числа).
+    /// HTTP-ветка (живые устройства) в юнит-тестах не проверяется — правила
+    /// «одна роль — одна карта» дублируются fail-fast'ом реестра (registry_plan.rs).
+    #[test]
+    fn gpu_roles_check_statuses() {
+        use super::check_gpu_roles;
+
+        // Раскладки нет — ok, компат device_index.
+        let c = check_gpu_roles(&cfg("index:\n  roots: []"));
+        assert_eq!(c.status, "ok", "msg={}", c.msg);
+        assert!(c.title.contains("не задана"), "title={}", c.title);
+        assert!(c.msg.contains("gpu.device_index=1"), "msg={}", c.msg);
+
+        // Двойное назначение embedding (devices + role-ключ) — warn с числами.
+        let c = check_gpu_roles(&cfg(
+            "gpu:\n  devices:\n    - { index: 1, roles: [chat, embedding] }\n\
+             llm_server:\n  embedding:\n    device: 2",
+        ));
+        assert_eq!(c.status, "warn", "msg={}", c.msg);
+        assert!(c.fix.contains("более чем на одну карту"), "fix={}", c.fix);
+        assert!(c.fix.contains("embedding"), "fix={}", c.fix);
+
+        // Кривая запись gpu.devices — warn с номером записи, молча не пропускается.
+        let c = check_gpu_roles(&cfg("gpu:\n  devices:\n    - {}"));
+        assert_eq!(c.status, "warn", "msg={}", c.msg);
+        assert!(c.fix.contains("gpu.devices[0]"), "fix={}", c.fix);
     }
 
     /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.

@@ -13,8 +13,8 @@ use std::path::{Path, PathBuf};
 
 use crate::cluster::{Device, InstanceSpec};
 use crate::config::{LlmHostConfig, RoleConfig};
-use crate::device::{cpu_device, selection_from_config_index, DeviceSelection};
-use crate::error::Result;
+use crate::device::{cpu_device, selection_for_role, DeviceSelection};
+use crate::error::{EngineError, Result};
 use crate::runtime;
 
 /// Один запланированный инстанс: роль + готовые параметры + пояснения.
@@ -25,6 +25,8 @@ pub struct PlannedInstance {
     pub model_spec: String,
     pub model_path: PathBuf,
     pub spec: InstanceSpec,
+    /// Backend выбранной карты (`CUDA`/`Vulkan`/`Metal`/`CPU`) — для статуса/логов.
+    pub device_backend: Option<String>,
     /// Пояснения для лога/`hdsw status` (перенос legacy-ключей, CPU-роль и пр.).
     pub notes: Vec<String>,
 }
@@ -33,12 +35,13 @@ impl PlannedInstance {
     /// Человекочитаемая строка для `llm-host status`/логов.
     pub fn summary(&self) -> String {
         format!(
-            "{:<9} port={:<5} kind={:<10} devices={:<6} n_ctx={:<6} ngl={:<4} allow_cpu={:<5} \
-             retention={} model={}",
+            "{:<9} port={:<5} kind={:<10} devices={:<6} backend={:<7} n_ctx={:<6} ngl={:<4} \
+             allow_cpu={:<5} retention={} model={}",
             self.role,
             self.port,
             self.spec.model_kind.unwrap_or(-1),
             self.spec.manual_devices_csv.as_deref().unwrap_or("—"),
+            self.device_backend.as_deref().unwrap_or("—"),
             self.spec.n_ctx.unwrap_or(0),
             self.spec.n_gpu_layers.unwrap_or(-1),
             self.spec.allow_cpu.unwrap_or(true),
@@ -130,6 +133,30 @@ fn plan_role(
     };
     let cpu_role = n_gpu_layers == 0 && rc.role != "whisper";
 
+    // M6 §3.1: раскладка ролей по картам. Приоритет: `llm_server.<role>.device` →
+    // `gpu.devices[].roles` → компат `gpu.device_index`. «Одна роль — ровно одна
+    // карта» (§3.5): двойное назначение — fail-fast с числами (роль в двух
+    // записях `devices` и/или одновременно в `devices` и role-ключе).
+    let via_devices = config.gpu.role_assignments(&rc.role);
+    let mut explicit_sources: Vec<String> = Vec::new();
+    if let Some(ix) = rc.device {
+        explicit_sources.push(format!("llm_server.{}.device={ix}", rc.role));
+    }
+    for ix in &via_devices {
+        explicit_sources.push(format!("gpu.devices: карта {ix}"));
+    }
+    let explicit_index = rc.device.or_else(|| via_devices.first().copied());
+    if explicit_sources.len() > 1 {
+        return Err(EngineError::Other(format!(
+            "{}: роль назначена более чем на одну карту ({} источника: {}) — одна роль \
+             работает ровно на одной карте (§3.1); разделяйте карты по ролям, а не \
+             роли по картам",
+            rc.role,
+            explicit_sources.len(),
+            explicit_sources.join("; ")
+        )));
+    }
+
     let selection: DeviceSelection = if cpu_role {
         notes.push(format!(
             "{}: n_gpu_layers = 0 → роль на CPU (как было в llama-server); чтобы перенести \
@@ -141,8 +168,19 @@ fn plan_role(
             None => DeviceSelection::Auto,
         }
     } else {
-        selection_from_config_index(config.gpu.device_index, devices)?
+        let index = explicit_index.unwrap_or(config.gpu.device_index);
+        if let Some(ix) = explicit_index {
+            notes.push(format!("{}: явная карта {ix} из раскладки (§3.1)", rc.role));
+        }
+        selection_for_role(index, devices, &rc.role)?
     };
+
+    // Backend выбранного устройства (для статуса/логов; M6 §3.1).
+    let device_backend = selection
+        .csv()
+        .and_then(|c| c.trim().parse::<i32>().ok())
+        .and_then(|ix| devices.iter().find(|d| d.bridge_device_index == ix))
+        .map(|d| d.backend.clone());
 
     let mut spec = InstanceSpec::new(&rc.role, &model_path.to_string_lossy());
     spec.manual_devices_csv = selection.csv();
@@ -185,6 +223,7 @@ fn plan_role(
         model_spec: rc.model_spec.clone(),
         model_path,
         spec,
+        device_backend,
         notes,
     })
 }
