@@ -528,6 +528,32 @@ hds.example.com {
 > остаточный выброс ~305–315 с при on-demand загрузке `embedding` — отдельный
 > разбор); T6 — доклад. Десктоп-профиль не изменён (очередь/квоты выключены,
 > `parallel: 1`, `db.*` 30000/false).
+>
+> **Статус M5 — «Хвосты M4 + внешняя чат-модель remote» (T0-хвосты ревью M4 +
+> Э6/W9) выполнен (10.10.2026, детали и коммиты — `PLAN_M5_EXTERNAL_CHAT.md` §8a,
+> закрытие находок — `M4_CODE_REVIEW.md` §8):** **F1 (SLA)** — root-cause:
+> on-demand перезагрузка `embedding` при тесной VRAM упиралась в рост fit-шага
+> движка `llama_params_fit_impl` (~299 с к 4-й загрузке в процессе); фикс —
+> server-профиль: embedding/rerank `retention: keep` по умолчанию (явный
+> `llm.<role>.retention` сильнее; desktop — `load_on_demand`, поведение
+> прежнее) + прогрев embedding/rerank при старте llm-host; приёмка **3/3 в SLA —
+> 34,1 / 34,0 / 33,9 с** (`m4_load_f1_fix_r1..r3.json`). **F2 (DoS)** — Bearer
+> проверяется до `queue.acquire`: неавторизованный тяжёлый запрос — мгновенный
+> `401`, очередь не занимает. **F3** — дефолт `rate_limit.max_inflight` по
+> профилю (server 5 = `llm_server.parallel`, desktop 4) + warn `hds check` о
+> рассинхроне. **F4–F8** — FIFO внутри пользователя по `seq`, `notify_all` при
+> постановке, `Retry-After` от `wait_timeout`, allowlist `journal_mode` с
+> фолбэком `wal`, мёртвый путь лимитера удалён. **Э6 (remote, T1–T4):**
+> `chat.provider: local|remote` + `chat.api_key` (контракт §3.5 плана M4);
+> RAG ходит в `chat.base_url` через TLS-клиент rustls (только исходящие;
+> периметр — reverse-proxy M3) с `Authorization: Bearer`; llm-host при `remote`
+> не держит chat-роль в VRAM; `hds check` — пункт `chat_provider`; приёмка
+> стенда (`load5.py --chat-remote fake`): 5 × `ask_my_files` → 200×5, p95 6,8 с,
+> VRAM 1102 → 1121 МиБ (chat-роль освободила ~7,8 ГиБ — «рычаг SLA»).
+> Тесты: 87 наборов, 0 failed; fmt/clippy `-D warnings` чисты. Десктоп-профиль
+> не изменён. Осталось из Э6: анонимизация (W9) — без неё `remote` допустим
+> только для доверенных API; хвост — рост fit-шага движка (кандидат
+> `engine-patch` P5).
 
 **Milestone M1 — «Фундамент доступа» = Э2 (только приложение) + Э3 (Проекты).**
 Начинаем с него, потому что:
