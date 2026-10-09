@@ -33,6 +33,7 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 REPO = Path(r"C:\Users\Sasha\hermes-disk-search")
@@ -319,6 +320,48 @@ def percentile(vals, p):
     return s[int(round((len(s) - 1) * p))]
 
 
+def start_fake_openai(port, latency):
+    """M5 T4: built-in fake OpenAI-compatible chat server (provider: remote).
+
+    Answers POST /v1/chat/completions after `latency` seconds with a short
+    OpenAI-shaped reply. Counts requests and whether Authorization arrived.
+    """
+    state = {"requests": 0, "auth_ok": 0, "last_status": None}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0) or 0)
+            self.rfile.read(n)
+            state["requests"] += 1
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer sk-"):
+                state["auth_ok"] += 1
+            state["last_status"] = 200
+            time.sleep(latency)
+            content = (
+                "Проекты автоматизации описаны в doc_005 и doc_006: этапы внедрения, "
+                "роли, интеграции с 1С и учётными системами, риски и KPI. [1] [2]"
+            )
+            reply = json.dumps(
+                {"choices": [{"message": {"content": content}}]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, *a):  # silence per-request stderr noise
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    srv.daemon_threads = True
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    log("fake openai up port=%d latency=%.1fs" % (port, latency))
+    return srv, state
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tag", required=True)
@@ -333,6 +376,12 @@ def main():
                     help="start `hds index --full` in the sandbox concurrently with the load")
     ap.add_argument("--no-rerank", action="store_true",
                     help="disable the reranker in the MCP config (isolate role-load thrash)")
+    ap.add_argument("--chat-remote", default=None, metavar="fake|URL",
+                    help="point chat at an EXTERNAL provider (chat.provider: remote); "
+                         "'fake' starts a built-in fake OpenAI server on --remote-port")
+    ap.add_argument("--remote-port", type=int, default=8799)
+    ap.add_argument("--remote-latency", type=float, default=2.0,
+                    help="fake remote reply latency, seconds")
     args = ap.parse_args()
 
     per_user = args.per_user if args.per_user is not None else max(2, args.clients)
@@ -361,11 +410,28 @@ def main():
               "clients": args.clients, "max_inflight_per_user": per_user,
               "question": args.question, "sandbox": str(sand)}
 
+    # M5 T4: external chat provider (chat.provider: remote). 'fake' -> built-in
+    # fake OpenAI server; any other value -> used as chat.base_url as-is.
+    fake = None
+    fake_state = None
+    remote_url = None
+    if args.chat_remote:
+        if args.chat_remote == "fake":
+            fake, fake_state = start_fake_openai(args.remote_port, args.remote_latency)
+            remote_url = "http://127.0.0.1:%d/v1" % args.remote_port
+        else:
+            remote_url = args.chat_remote
+        result["chat_remote"] = remote_url
+
     build_corpus(corpus)
     make_ixroot(ixroot)
 
     llm_cfg = sand / "llm_config.yaml"
-    write_text(llm_cfg, LLM_CFG.format(parallel=args.parallel, ctx=args.ctx))
+    llm_text = LLM_CFG.format(parallel=args.parallel, ctx=args.ctx)
+    if remote_url:
+        # llm-host must NOT keep the chat role in VRAM (M5 §3.2).
+        llm_text += "\nchat:\n  provider: remote\n"
+    write_text(llm_cfg, llm_text)
     ix_cfg = sand / "index_config.yaml"
     write_text(ix_cfg, IX_CFG.format(db=db, corpus=corpus))
     # the sidecar worker loads <root>/config.yaml (root = sandbox project root)
@@ -374,6 +440,11 @@ def main():
     mcp_text = MCP_CFG.format(db=db, parallel=args.parallel, per_user=per_user)
     if args.no_rerank:
         mcp_text = mcp_text.replace("rerank:\n  enabled: true", "rerank:\n  enabled: false")
+    if remote_url:
+        mcp_text = mcp_text.replace(
+            'chat:\n  base_url: "http://127.0.0.1:8010/v1"\n  model: "chat"',
+            'chat:\n  provider: remote\n  base_url: "%s"\n  api_key: "sk-fake-remote"\n  model: "fake-model"' % remote_url,
+        )
     write_text(mcp_cfg, mcp_text)
 
     snap_before = (STATE / "data" / "mcp-queue.json").exists()
@@ -385,11 +456,16 @@ def main():
     mcp = None
     try:
         llm = start_llm(llm_cfg, root)
-        wait_http("http://127.0.0.1:8010/health", 420, "sandbox llm_host chat")
-        props = json.loads(urllib.request.urlopen("http://127.0.0.1:8010/props", timeout=5).read())
-        result["total_slots"] = props.get("total_slots")
-        result["n_ctx_props"] = (props.get("default_generation_settings") or {}).get("n_ctx")
-        log("llm_host up slots=%s n_ctx=%s" % (result["total_slots"], result["n_ctx_props"]))
+        if remote_url:
+            # chat role is NOT planned (remote): wait for the embedding facade.
+            wait_http("http://127.0.0.1:8011/health", 420, "sandbox llm_host embedding")
+            log("llm_host up (chat remote -> %s)" % remote_url)
+        else:
+            wait_http("http://127.0.0.1:8010/health", 420, "sandbox llm_host chat")
+            props = json.loads(urllib.request.urlopen("http://127.0.0.1:8010/props", timeout=5).read())
+            result["total_slots"] = props.get("total_slots")
+            result["n_ctx_props"] = (props.get("default_generation_settings") or {}).get("n_ctx")
+            log("llm_host up slots=%s n_ctx=%s" % (result["total_slots"], result["n_ctx_props"]))
 
         rc, _ = build_index(ix_cfg, ixroot)
         if rc != 0:
@@ -461,6 +537,8 @@ def main():
         result["snap_after"] = read_snapshot()
         result["polls"] = polls
         result["responses"] = responses
+        if fake_state is not None:
+            result["remote"] = dict(fake_state)
         oks = [r["ms"] for r in responses if r["status"] == 200]
         result["latencies_ms"] = oks
         result["statuses"] = [r["status"] for r in responses]
@@ -476,6 +554,8 @@ def main():
             except Exception:
                 pass
             stop_proc(llm)
+        if fake is not None:
+            fake.shutdown()
         if not snap_before:
             try:
                 (STATE / "data" / "mcp-queue.json").unlink()
