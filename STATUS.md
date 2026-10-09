@@ -224,6 +224,20 @@
 > Стенд: владельца сейчас интересует прежде всего **транскрибация** (использует изредка) —
 > приёмка T5 переориентирована на неё; боевой резидент возвращён в работу, `index.pause` не снят.
 >
+> **M6/T0 закрыт — GO (10.10.2026, промт `M6_HANDOFF_PROMPT_2.md`).** `ggml-vulkan.dll`
+> собран из нашего дерева (`ENGINEbuilds`; скрипт `tools/parity/out/build_ggml_vulkan.cmd` +
+> `-DLLAMA_BUILD_{SERVER,TOOLS,COMMON}=OFF`; 56 МБ; импорты ⊆ нашей `ggml-base.dll`, 0 missing)
+> и подложен в песочницу `tools/parity/out/engine-vulkan` (чужие сборки непригодны — краш без
+> бампа `GGML_BACKEND_API_VERSION`, §8a). С Vulkan-бэкендом движок перечисляет CUDA0 /
+> Vulkan0=AMD iGPU (UMA) / Vulkan1=RTX 3060 / CPU — ловушка компата подтверждена: индекс 2
+> теперь AMD → пин по `backend+name` обязателен (T1). `a7_multiinstance_probe --no-chat`:
+> embed (bge-m3) на Vulkan0 — 2/2 раунда без ошибок (load 2,1–3,1 с, embeddings 183–243 мс,
+> unload ~0,3 с, NVML не тронута). В пробу добавлено `embed_spec.embedding = Some(true)`
+> (без него 501 «server does not support embeddings»). Отчёт — `tools/parity/SPIKES.md` §15;
+> числа — `tools/parity/out/m6_spike_vulkan_embed.json`. Свидетельство на iGPU (дискретный AMD
+> — хвост). Следующий шаг — **T1**: конфиг `gpu.devices` + `llm_server.<role>.device`,
+> компат-пин по `backend+name`, валидация §3.5, пункт `gpu_roles` в `hds check`.
+>
 
 > Ветка миграции **`w2-llm-host`** (`main` = `9ed8452` не тронут). **Миграция завершена: W1–W5.**
 >

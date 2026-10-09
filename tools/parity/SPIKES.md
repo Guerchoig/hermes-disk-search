@@ -444,3 +444,82 @@ llama-server» (chat-роль остановлена; `reasoning="off"` пров
 
 Воспроизведение: `python -m hds.llama_server start chat` при `llm_server.chat.model: shared:chat`
 и «пустом» `<project>/models/chat`. На Windows это воспроизводится стабильно.
+
+## 15. Спайк M6-T0 (ревизия 2): Vulkan-бэкенд нашего дерева и роль на Vulkan-устройстве — ✅ GO (10.10.2026)
+
+> План: `PLAN_M6_GPU_MULTIVENDOR.md` §4 T0 (ревизия 2: сценарий «CUDA+Vulkan в одном
+> `llm-host`» снят; T0 = «Vulkan-бэкенд доступен сборке, роли AMD-инсталляции реально
+> идут на Vulkan-карты»). Инструмент: `a7_multiinstance_probe --no-chat` (коммит `39980b7`).
+> Артефакты: `tools/parity/out/{m6_spike_vulkan_embed.json, m6_spike_vulkan_log.txt,
+> m6_a1_vulkan.json, m6_a1_vulkan_log.txt, build_vulkan_log.txt, m6_vk_imports.txt,
+> m6_base_exports.txt}`.
+
+### 15.1. Сборка Vulkan-бэкенда из нашего дерева — ✅
+
+* Дерево `C:\Users\Sasha\ENGINEbuilds` (то же, что у CUDA-сборки движка), Vulkan SDK
+  1.4.335.0 (облегчённый, без админа), `Ninja Multi-Config` из VS18.
+  Скрипт — `tools/parity/out/build_ggml_vulkan.cmd`; к флагам конфига добавлены
+  `-DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_COMMON=OFF
+  -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF` (без первых трёх configure падал:
+  «LLAMA_HTTPLIB is OFF, cannot build llama-server»).
+* Артефакт: `…\build-ggml-vulkan\bin\Release\ggml-vulkan.dll` (56 001 024 байта).
+  Зависимости (dumpbin /DEPENDENTS): `ggml-base.dll`, `vulkan-1.dll` (System32),
+  MSVC runtime — ничего лишнего.
+* Совместимость ABI проверена статически: 30 импортов `ggml_*` из нашей
+  `ggml-base.dll` — **0 missing** (`m6_vk_imports.txt` / `m6_base_exports.txt`).
+  Чужие сборки (b11528/b11200) по-прежнему непригодны — см. §8a плана (краш без бампа
+  `GGML_BACKEND_API_VERSION`).
+* Песочная копия движка `tools\parity\out\engine-vulkan`: чужая b11200-DLL сохранена как
+  `ggml-vulkan.dll.foreign_b11200`, подложена наша. Боевой каталог движка не тронут.
+
+### 15.2. Перечисление устройств (`a1_device_probe`) — ✅, ловушка компата подтверждена
+
+С Vulkan-бэкендом движок перечисляет **4 устройства** (наша бета видит 4, ранее 2):
+
+| bridge | backend | имя | desc | free/total, МиБ |
+|---|---|---|---|---|
+| 0 | CUDA | CUDA0 | NVIDIA GeForce RTX 3060 | 11 255 / 12 288 |
+| 1 | Vulkan | Vulkan0 | AMD Radeon(TM) Graphics (**iGPU, UMA**) | 31 087 / 32 723 |
+| 2 | Vulkan | Vulkan1 | NVIDIA GeForce RTX 3060 (через Vulkan) | 11 458 / 12 329 |
+| 3 | CPU | CPU | AMD Ryzen 7 5700G | ~42 000 / 64 935 |
+
+`gpu.device_index=1` по-прежнему → CUDA0 (первый ускоритель) — компат не ломается;
+**но индекс 2 теперь = AMD**, поэтому пин по `backend+name` (T1) обязателен.
+
+### 15.3. Роль embedding на Vulkan-устройстве (`a7 --no-chat`) — ✅ 2/2 раунда
+
+Прогон: embed (bge-m3-Q8_0, n_ctx 4096) на Vulkan0 (AMD iGPU, UMA), 2 раунда
+load → embeddings ×2 → unload; NVML-мониторинг RTX 3060 рядом (боевой резидент
+держал chat на CUDA, used ≈ 8 603 МиБ — не менялся весь прогон).
+
+| Метрика | Раунд 1 | Раунд 2 |
+|---|---|---|
+| load embed (Vulkan0) | 3 120 мс | 2 075 мс |
+| embeddings#1 (3 текста) | 243 мс | 209 мс |
+| embeddings#2 | 183 мс | 186 мс |
+| unload | 289 мс | 317 мс |
+| NVML после загрузки/выгрузки | 8 603 / 8 603 МиБ (не тронута — UMA) | 8 603 / 8 603 МиБ |
+
+`engine_mem` после load: Vulkan0 free 30 134 (было 30 382 → модель ≈ 250 МиБ у счётчика
+движка), CUDA0/CPU без изменений. Ошибок/зависаний нет, признаки-«призраки» вычищены
+(`clean_ghost`).
+
+**Попутная правка пробы:** в `embed_spec` не задавалось `embedding = Some(true)` —
+инстанс поднимался без `--embeddings`, каждый запрос давал 501 («This server does not
+support embeddings»). Исправлено (загрузка/выгрузка и так работали, но embed-запросы
+были невозможны); сборка/тесты/clippy/fmt — зелёные.
+
+### 15.4. Вывод T0 (ревизия 2)
+
+1. **GO**: Vulkan-бэкенд собирается из нашего дерева без изменений апстрима, движок
+   его молча подхватывает (`GGML_BACKEND_DL=ON`, каталог движка + cwd), роли
+   AMD-инсталляции реально идут на Vulkan-устройства: load/unload повторяемы,
+   embeddings считаются. Свидетельство получено на iGPU (UMA) — дискретной AMD на
+   станции нет (хвост плана).
+2. Ловушка компата реальна: с Vulkan-бэкендом в списке появляется AMD **раньше**
+   NVIDIA-Vulkan (`Vulkan0` < `Vulkan1`) — `gpu.device_index` без пина по
+   `backend+name` будет указывать не на ту карту. Учитывать в T1 (§3.2).
+3. UMA-особенность: `memory_free` движка по AMD (~30 ГиБ) — это **общая** память;
+   NVML её не видит. Для «лёгких добавок» на AMD-машине свободную VRAM мерить
+   движком/DXGI, не NVML.
+

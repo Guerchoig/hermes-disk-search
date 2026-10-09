@@ -330,6 +330,9 @@ fn run() -> Result<()> {
     embed_spec.manual_devices_csv = Some(vulkan.bridge_device_index.to_string());
     embed_spec.allow_cpu = Some(false);
     embed_spec.model_kind = Some(model_kind::EMBEDDINGS);
+    // Без этого движок поднимет инстанс без `--embeddings` и вернёт 501
+    // ("This server does not support embeddings") на каждый запрос.
+    embed_spec.embedding = Some(true);
     embed_spec.retention_mode = Some(retention::KEEP_LOADED);
     embed_spec.load_on_demand_grace_seconds = Some(300);
     embed_spec.n_ctx = Some(args.n_ctx_embed);
