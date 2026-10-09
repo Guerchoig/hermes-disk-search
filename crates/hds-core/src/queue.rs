@@ -289,7 +289,19 @@ impl HeavyQueue {
                 });
             }
             // 1) Быстрый путь: слот свободен и мы — следующие (или очередь пуста).
-            if self.can_admit(&st, user) {
+            //    F4 (M5 T0.4): строгий FIFO ВНУТРИ пользователя — слот берёт
+            //    заявка с минимальным `seq` этого пользователя: более ранние
+            //    заявки СВОЕГО пользователя не обгоняем (иначе порядок внутри
+            //    пользователя определяла гонка пробуждений).
+            let ahead_of_me = match enqueued {
+                Some(seq) => st
+                    .users
+                    .get(user)
+                    .and_then(|q| q.waiting.front())
+                    .is_some_and(|front| *front < seq),
+                None => st.users.get(user).is_some_and(|q| !q.waiting.is_empty()),
+            };
+            if self.can_admit(&st, user) && !ahead_of_me {
                 if let Some(seq) = enqueued.take() {
                     remove_waiter(&mut st, user, seq);
                     rotate_rr(&mut st, user);
@@ -328,6 +340,10 @@ impl HeavyQueue {
                     st.order.push_back(user.to_string());
                 }
                 enqueued = Some(seq);
+                // F5 (M5 T0.5): слот мог освободиться между `release()` и нашей
+                // постановкой — будим всех, чтобы свободный слот не простаивал
+                // до среза WAIT_SLICE (150 мс).
+                self.cv.notify_all();
             }
             // 3) Потолок ожидания.
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -937,5 +953,42 @@ mod tests {
         assert!(!path.with_extension("json.tmp").exists(), "tmp-файл убран");
         assert!(read_snapshot(&dir.join("nope.json")).is_none());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F4 (M5 T0.4): строгий FIFO внутри пользователя — после освобождения
+    /// слота его получает заявка с МЕНЬШИМ `seq` (вставшая раньше), а не
+    /// «какая нить проснулась первой»; порядок выдачи слотов = порядок
+    /// постановки в очередь.
+    #[test]
+    fn fifo_within_user_by_seq() {
+        let q = queue(QueuePolicy::RoundRobin, 1, 5, 30);
+        let holder = q.acquire("user:u", || true).expect("слот свободен");
+
+        // Две заявки того же пользователя ждут (глубина 2)...
+        let order = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
+        let mut joins = Vec::new();
+        for i in 0..2 {
+            let q = Arc::clone(&q);
+            let order = Arc::clone(&order);
+            joins.push(std::thread::spawn(move || {
+                let t = q.acquire("user:u", || true).expect("дождались слота");
+                order.lock().unwrap().push(i);
+                drop(t); // слот уходит следующей заявке
+            }));
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while q.stats().depth < 2 {
+            assert!(Instant::now() < deadline, "заявки не встали в очередь");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // ...тогда освобождаем слот: обе разбужены, но сначала — заявка с
+        // меньшим seq (i=0), вторая дожидается своего хода.
+        drop(holder);
+        for j in joins {
+            j.join().unwrap();
+        }
+        let order = order.lock().unwrap().clone();
+        assert_eq!(order, vec![0, 1], "FIFO внутри пользователя: {order:?}");
     }
 }

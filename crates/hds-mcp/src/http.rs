@@ -485,13 +485,18 @@ pub fn queue_reply(reject: &QueueReject) -> Reply {
     }
 }
 
-/// `Retry-After` для отказа очереди: полная — скоро, таймаут — по потолку
-/// ожидания (не дольше минуты; клиентский таймаут 300 с больше и того, и другого).
+/// `Retry-After` для отказа очереди: полная/лимит пользователя — скоро,
+/// таймаут — от потолка ожидания (F7, M5 T0.7: раньше «через 60 с» при
+/// ожидании до 240 с; теперь — половина `wait_timeout_sec`, не меньше 5 с;
+/// клиентский таймаут 300 с больше и этого).
 fn queue_retry_after(reject: &QueueReject, cfg: &QueueConfig) -> u64 {
     match reject {
         QueueReject::Full { .. } => 5,
         QueueReject::PerUser { .. } => 5,
-        QueueReject::Timeout { .. } => cfg.wait_timeout_sec.clamp(1, 60),
+        QueueReject::Timeout { .. } => {
+            let w = cfg.wait_timeout_sec.max(5);
+            (w / 2).clamp(5, w)
+        }
         QueueReject::Aborted => 1,
     }
 }
@@ -889,4 +894,70 @@ fn serve_request(
         stream,
         route(m, p, b, mp, env, head.authorization.as_deref(), &ip),
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{queue_reply, queue_retry_after};
+    use hds_core::queue::{QueueConfig, QueuePolicy, QueueReject};
+
+    fn qcfg(wait_sec: u64) -> QueueConfig {
+        QueueConfig {
+            enabled: true,
+            max_depth: 5,
+            wait_timeout_sec: wait_sec,
+            policy: QueuePolicy::RoundRobin,
+            max_inflight: 1,
+            max_inflight_per_user: u32::MAX,
+        }
+    }
+
+    /// F7 (M5 T0.7): `Retry-After` таймаута очереди привязан к потолку
+    /// ожидания (половина `wait_timeout_sec`, не меньше 5), а не жёстко ≤60;
+    /// полная очередь / пер-пользовательский предел — по-прежнему 5, обрыв — 1.
+    #[test]
+    fn queue_retry_after_follows_wait_timeout() {
+        let timeout = QueueReject::Timeout {
+            waited_sec: 240,
+            depth: 1,
+        };
+        assert_eq!(queue_retry_after(&timeout, &qcfg(240)), 120, "240 → 120");
+        assert_eq!(queue_retry_after(&timeout, &qcfg(300)), 150, "300 → 150");
+        // Короткий потолок — не меньше 5 с (раньше был cap 60, но и floor 1).
+        assert_eq!(queue_retry_after(&timeout, &qcfg(4)), 5, "4 → floor 5");
+
+        let full = QueueReject::Full {
+            max_depth: 5,
+            depth: 5,
+        };
+        assert_eq!(queue_retry_after(&full, &qcfg(240)), 5);
+        let per_user = QueueReject::PerUser { limit: 2 };
+        assert_eq!(queue_retry_after(&per_user, &qcfg(240)), 5);
+        assert_eq!(queue_retry_after(&QueueReject::Aborted, &qcfg(240)), 1);
+    }
+
+    /// Коды отказов доходят до клиента: `429`/`503` и понятные hint'и.
+    #[test]
+    fn queue_reply_codes_and_hints() {
+        let full = QueueReject::Full {
+            max_depth: 20,
+            depth: 20,
+        };
+        let (code, _, body) = queue_reply(&full);
+        assert_eq!(code, 429);
+        assert!(body.contains("queue.max_depth"), "{body}");
+
+        let timeout = QueueReject::Timeout {
+            waited_sec: 240,
+            depth: 3,
+        };
+        let (code, _, body) = queue_reply(&timeout);
+        assert_eq!(code, 503);
+        assert!(body.contains("queue.wait_timeout_sec"), "{body}");
+
+        let per_user = QueueReject::PerUser { limit: 2 };
+        let (code, _, body) = queue_reply(&per_user);
+        assert_eq!(code, 429);
+        assert!(body.contains("max_inflight_per_user"), "{body}");
+    }
 }

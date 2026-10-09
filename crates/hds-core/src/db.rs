@@ -126,17 +126,21 @@ impl Default for DbOptions {
 }
 
 impl DbOptions {
-    /// `journal_mode` без опасных символов (значение подставляется в PRAGMA).
+    /// `journal_mode` — allowlist (F8, M5 T0.8): значение подставляется в
+    /// PRAGMA, поэтому принимаем только известные SQLite-режимы. Опечатка
+    /// (`wal2`) раньше доезжала до `PRAGMA journal_mode=wal2` и падала
+    /// невнятной ошибкой открытия — теперь громкий фолбэк на дефолт `wal`.
     fn safe_journal_mode(&self) -> String {
-        let s: String = self
-            .journal_mode
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .collect();
-        if s.is_empty() {
-            "wal".to_string()
-        } else {
+        const ALLOWED: [&str; 6] = ["delete", "truncate", "persist", "memory", "wal", "off"];
+        let s = self.journal_mode.trim().to_ascii_lowercase();
+        if ALLOWED.contains(&s.as_str()) {
             s
+        } else {
+            eprintln!(
+                "[db] неизвестный db.journal_mode '{}' — использую 'wal' (allowlist: delete/truncate/persist/memory/wal/off)",
+                self.journal_mode
+            );
+            "wal".to_string()
         }
     }
 }
@@ -631,6 +635,43 @@ mod tests {
             .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
             .unwrap();
         assert!(bt >= 5000, "busy_timeout={bt} — ожидался ≥5000 мс");
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F8 (M5 T0.8): `journal_mode` — allowlist: известные режимы проходят,
+    /// опечатка (`wal2`) и мусор дают фолбэк `wal` (открытие не падает
+    /// невнятной ошибкой PRAGMA), регистр/пробелы нормализуются.
+    #[test]
+    fn journal_mode_allowlist_falls_back_to_wal() {
+        let opts = |m: &str| super::DbOptions {
+            busy_timeout_ms: 100,
+            journal_mode: m.to_string(),
+        };
+        // Известные режимы — как есть (в нижнем регистре, trimmed).
+        for m in [
+            "wal", "WAL", " delete ", "truncate", "persist", "memory", "off",
+        ] {
+            assert_eq!(
+                opts(m).safe_journal_mode(),
+                m.trim().to_ascii_lowercase(),
+                "режим {m:?}"
+            );
+        }
+        // Опечатка/мусор/пусто — фолбэк `wal`.
+        for m in ["wal2", "journal!", "<sql>", ""] {
+            assert_eq!(opts(m).safe_journal_mode(), "wal", "мусор {m:?}");
+        }
+        // Живое открытие с опечаткой — успешно (фолбэк), а не ошибка PRAGMA.
+        let dir = std::env::temp_dir().join(format!("hds-db-jm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let conn = super::open_rw(&dir.join("index.db"), 8, &opts("wal2"))
+            .expect("опечатка journal_mode → фолбэк wal, открытие успешно");
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode.to_ascii_lowercase(), "wal");
         drop(conn);
         let _ = std::fs::remove_dir_all(&dir);
     }
