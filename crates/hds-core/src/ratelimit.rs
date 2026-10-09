@@ -22,7 +22,7 @@
 //! per-user inflight 2); всё перекрывается ключами конфига `rate_limit.*`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Instant;
 
 use crate::config::{dig, Config};
