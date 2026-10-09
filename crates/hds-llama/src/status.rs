@@ -38,6 +38,10 @@ pub struct RoleStatus {
     /// Настроенный контекст (`parallel * ctx_per_slot`, как `ctx_configured`).
     pub n_ctx: i32,
     pub devices_csv: String,
+    /// Bridge-индекс карты роли (M6 T2 §3.2): свидетельство раскладки.
+    pub card: Option<i32>,
+    /// Backend карты роли (`CUDA`/`Vulkan`/`Metal`/`CPU`) — M6 T1/T2.
+    pub backend: String,
     pub n_gpu_layers: i32,
     /// `keep` | `on_demand`.
     pub retention: String,
@@ -63,8 +67,8 @@ impl RoleStatus {
             .map(|v| format!(" замер≈{v} МиБ"))
             .unwrap_or_default();
         format!(
-            "{:<9} port={:<5} state={:<8} retention={:<9} n_ctx={:<6} devices={:<4} ngl={:<4} \
-             нужно {:>6} МиБ{} модель={}",
+            "{:<9} port={:<5} state={:<8} retention={:<9} n_ctx={:<6} devices={:<4} card={:<4} \
+             backend={:<7} ngl={:<4} нужно {:>6} МиБ{} модель={}",
             self.role,
             self.port,
             self.state,
@@ -74,6 +78,14 @@ impl RoleStatus {
                 "—"
             } else {
                 self.devices_csv.as_str()
+            },
+            self.card
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "—".to_string()),
+            if self.backend.is_empty() {
+                "—"
+            } else {
+                self.backend.as_str()
             },
             self.n_gpu_layers,
             self.need_mib,
@@ -365,6 +377,9 @@ impl StatusReport {
                     "model_ready": r.model_ready,
                     "n_ctx": r.n_ctx,
                     "devices_csv": r.devices_csv,
+                    // M6 T2: карта и backend роли — свидетельство раскладки.
+                    "card": r.card,
+                    "backend": r.backend,
                     "n_gpu_layers": r.n_gpu_layers,
                     "active_request_count": r.active_requests,
                     "queued_request_count": r.queued_requests,
@@ -467,6 +482,10 @@ fn role_status(
         n_ctx: planned.and_then(|p| p.spec.n_ctx).unwrap_or(rc.n_ctx),
         devices_csv: planned
             .and_then(|p| p.spec.manual_devices_csv.clone())
+            .unwrap_or_default(),
+        card: planned.and_then(|p| p.bridge_device_index),
+        backend: planned
+            .and_then(|p| p.device_backend.clone())
             .unwrap_or_default(),
         n_gpu_layers,
         retention: retention_label(retention_mode),

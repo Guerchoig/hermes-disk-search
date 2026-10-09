@@ -9,10 +9,11 @@
 //!   явное CPU-устройство + `allow_cpu = true`;
 //! * модель резолвится через общий рантайм (`shared:<role>` → `current.json`).
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Device, InstanceSpec};
-use crate::config::{LlmHostConfig, RoleConfig};
+use crate::config::{role_base, single_instance_violation, LlmHostConfig, RoleConfig};
 use crate::device::{cpu_device, selection_for_role, DeviceSelection};
 use crate::error::{EngineError, Result};
 use crate::runtime;
@@ -25,6 +26,10 @@ pub struct PlannedInstance {
     pub model_spec: String,
     pub model_path: PathBuf,
     pub spec: InstanceSpec,
+    /// Bridge-индекс назначенной карты (M6 T2 §3.2) — ключ бюджета VRAM и
+    /// свидетельство раскладки в статусе: `None` — устройство «на усмотрение
+    /// движка» (`Auto`).
+    pub bridge_device_index: Option<i32>,
     /// Backend выбранной карты (`CUDA`/`Vulkan`/`Metal`/`CPU`) — для статуса/логов.
     pub device_backend: Option<String>,
     /// Пояснения для лога/`hdsw status` (перенос legacy-ключей, CPU-роль и пр.).
@@ -35,11 +40,14 @@ impl PlannedInstance {
     /// Человекочитаемая строка для `llm-host status`/логов.
     pub fn summary(&self) -> String {
         format!(
-            "{:<9} port={:<5} kind={:<10} devices={:<6} backend={:<7} n_ctx={:<6} ngl={:<4} \
-             allow_cpu={:<5} retention={} model={}",
+            "{:<9} port={:<5} kind={:<10} card={:<5} devices={:<6} backend={:<7} n_ctx={:<6} \
+             ngl={:<4} allow_cpu={:<5} retention={} model={}",
             self.role,
             self.port,
             self.spec.model_kind.unwrap_or(-1),
+            self.bridge_device_index
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "—".to_string()),
             self.spec.manual_devices_csv.as_deref().unwrap_or("—"),
             self.device_backend.as_deref().unwrap_or("—"),
             self.spec.n_ctx.unwrap_or(0),
@@ -88,7 +96,7 @@ impl RolePlan {
 /// независимо (`SPIKES.md` §14.7 — чат падал с «модель не найдена», остальные
 /// роли при этом работали), поэтому вызывающий видит состояние каждой роли.
 pub fn plan(config: &LlmHostConfig, runtime_root: &Path, devices: &[Device]) -> Vec<RolePlan> {
-    config
+    let mut out: Vec<RolePlan> = config
         .roles
         .iter()
         .map(|rc| match plan_role(config, rc, runtime_root, devices) {
@@ -98,7 +106,54 @@ pub fn plan(config: &LlmHostConfig, runtime_root: &Path, devices: &[Device]) -> 
                 error: e.to_string(),
             },
         })
-        .collect()
+        .collect();
+    // M6 T2 §3.5: правила, которые видны только на всём наборе ролей —
+    // индексация в одном экземпляре и не более одного whisper на карту.
+    cross_validate(&mut out);
+    out
+}
+
+/// Кросс-проверки раскладки (§3.5): `embedding`/`rerank` — ровно один экземпляр
+/// на машину; `whisper` — не более одного экземпляра на карту. Нарушение делает
+/// роль `Failed` с числами (не молча) — остальные роли стартуют как раньше.
+fn cross_validate(plans: &mut [RolePlan]) {
+    let mut whisper_card: BTreeMap<i32, String> = BTreeMap::new();
+    let mut fail: Vec<(usize, String)> = Vec::new();
+    for (i, p) in plans.iter().enumerate() {
+        let RolePlan::Ready(inst) = p else { continue };
+        if let Some(base) = single_instance_violation(&inst.role) {
+            fail.push((
+                i,
+                format!(
+                    "«{}»: «{base}» существует ровно в одном экземпляре на машину (§3.5) — \
+                     реплики индексных ролей не поддерживаются (один набор моделей \
+                     индексации обрабатывает один файл одновременно)",
+                    inst.role
+                ),
+            ));
+            continue;
+        }
+        // whisper-подобные роли: один экземпляр на карту (§3.5)
+        if role_base(&inst.role) == "whisper" {
+            if let Some(card) = inst.bridge_device_index {
+                if let Some(prev) = whisper_card.insert(card, inst.role.clone()) {
+                    fail.push((
+                        i,
+                        format!(
+                            "«{}» и «{prev}» назначены на одну карту {card} — whisper \
+                             допускает не более одного экземпляра на карту (§3.5): разведите \
+                             их по картам (`gpu.devices`) или оставьте один экземпляр",
+                            inst.role
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    for (i, error) in fail {
+        let role = plans[i].role().to_string();
+        plans[i] = RolePlan::Failed { role, error };
+    }
 }
 
 /// Строгий вариант: ошибка на первой неуспешной роли (для старта `llm-host`,
@@ -131,7 +186,7 @@ fn plan_role(
     } else {
         rc.legacy_n_gpu_layers.unwrap_or(config.gpu.n_gpu_layers)
     };
-    let cpu_role = n_gpu_layers == 0 && rc.role != "whisper";
+    let cpu_role = n_gpu_layers == 0 && role_base(&rc.role) != "whisper";
 
     // M6 §3.1: раскладка ролей по картам. Приоритет: `llm_server.<role>.device` →
     // `gpu.devices[].roles` → компат `gpu.device_index`. «Одна роль — ровно одна
@@ -175,10 +230,10 @@ fn plan_role(
         selection_for_role(index, devices, &rc.role)?
     };
 
-    // Backend выбранного устройства (для статуса/логов; M6 §3.1).
-    let device_backend = selection
-        .csv()
-        .and_then(|c| c.trim().parse::<i32>().ok())
+    // Backend выбранного устройства (для статуса/логов; M6 §3.1) и bridge-индекс
+    // карты роли (M6 T2 §3.2) — ключ бюджета VRAM и свидетельство раскладки.
+    let bridge_device_index = selection.csv().and_then(|c| c.trim().parse::<i32>().ok());
+    let device_backend = bridge_device_index
         .and_then(|ix| devices.iter().find(|d| d.bridge_device_index == ix))
         .map(|d| d.backend.clone());
 
@@ -201,7 +256,7 @@ fn plan_role(
     // Индексирующим ролям (embedding/rerank/whisper) параллельные слоты не нужны и
     // вредны: у них делится контекст слота, а батч эмбеддингов у нас один
     // (`--batch-size 8192`) — слот получил бы 1/parallel контекста и ломал индексацию.
-    let slots = if rc.role == "chat" {
+    let slots = if role_base(&rc.role) == "chat" {
         config.parallel.max(1)
     } else {
         1
@@ -223,6 +278,7 @@ fn plan_role(
         model_spec: rc.model_spec.clone(),
         model_path,
         spec,
+        bridge_device_index,
         device_backend,
         notes,
     })

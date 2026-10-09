@@ -207,7 +207,7 @@ pub fn role_needs(cfg: &LlmHostConfig, runtime_root: &Path) -> BTreeMap<String, 
         } else {
             rc.legacy_n_gpu_layers.unwrap_or(cfg.gpu.n_gpu_layers)
         };
-        if n_gpu_layers == 0 && rc.role != "whisper" {
+        if n_gpu_layers == 0 && config::role_base(&rc.role) != "whisper" {
             needs.insert(rc.role.clone(), 0);
             continue;
         }
@@ -897,8 +897,20 @@ pub struct ClusterBackend {
     mode: Mode,
     /// Базовые URL внешнего владельца по ролям (режим `facade`).
     upstream: BTreeMap<String, String>,
-    /// W3: ленивый транскрибатор whisper (роль whisper, bridge-API движка).
-    whisper: Mutex<Option<WhisperCell>>,
+    /// W3 + M6 T2 §3.5: транскрибаторы whisper **по картам** (bridge-индекс → клетка).
+    /// Один экземпляр на карту, один файл за раз (per-card mutex); разные файлы на
+    /// разных картах идут параллельно. Ключ `-1` — CPU.
+    whisper: Mutex<BTreeMap<i32, Arc<WhisperCell>>>,
+    /// M6 T2 §3.6: роли-реплики чата (`chat`, `chat-2`, …) — запросы фасада
+    /// раскидываются по ним **least-busy**, при равенстве — round-robin.
+    chat_roles: Vec<String>,
+    /// Счётчик round-robin между равнозагруженными репликами (атомарный: фасад
+    /// обслуживает запросы в потоках сокетов).
+    chat_rr: std::sync::atomic::AtomicUsize,
+    /// M6 T2 §3.5/§3.6: карты, на которых разрешена транскрибация (роли
+    /// `whisper`, `whisper-2`, …): один экземпляр на карту, карту под файл
+    /// выбираем по свободной VRAM (числа — в логе).
+    whisper_cards: Vec<(String, i32)>,
     /// T3.1 (§6): сейчас идёт задание автотранскрибации — индексация и предохранитель
     /// простоя не вытесняют транскрибатор, пока он работает. Запрос чата/поиска
     /// вытеснить его **может** (приоритет 1 > 2).
@@ -1039,6 +1051,33 @@ fn transcribe_need_mib(whisper: &Path, diar: Option<&Path>) -> u64 {
     size(whisper) + diar.map(size).unwrap_or(0) + WHISPER_OVERHEAD_MIB
 }
 
+/// Выбор реплики под запрос (M6 §3.6): **least-busy**, при равенстве —
+/// round-robin. Чистая функция (загрузки передаются аргументом) — тестируется
+/// без движка; порядок реплик — как в конфиге (`chat`, `chat-2`, …).
+pub fn pick_replica<'a>(
+    roles: &'a [String],
+    loads: &BTreeMap<String, i32>,
+    rr: &std::sync::atomic::AtomicUsize,
+) -> Option<&'a str> {
+    if roles.is_empty() {
+        return None;
+    }
+    if roles.len() == 1 {
+        return Some(roles[0].as_str());
+    }
+    let min = roles
+        .iter()
+        .map(|r| loads.get(r).copied().unwrap_or(0))
+        .min()
+        .unwrap_or(0);
+    let idle: Vec<&String> = roles
+        .iter()
+        .filter(|r| loads.get(*r).copied().unwrap_or(0) == min)
+        .collect();
+    let idx = rr.fetch_add(1, Ordering::Relaxed) % idle.len();
+    Some(idle[idx].as_str())
+}
+
 impl ClusterBackend {
     /// Кластер движка или объяснение, почему его нет (режим `llm_server.mode`).
     fn cl(&self) -> Result<&Arc<ClusterShared>> {
@@ -1132,6 +1171,81 @@ impl ClusterBackend {
             (Some(p), None) => Some(p),
             (None, Some(e)) => Some(e),
             (None, None) => None,
+        }
+    }
+
+    /// Свободная VRAM **заданной** карты (проба по bridge-индексу, минимум с
+    /// числами движка) — для выбора карты под транскрибацию (M6 §3.6).
+    ///
+    /// `None` — замера нет (например UMA/AMD: NVML карту не мерит) — это честное
+    /// «нет замера», а не догадка; решение тогда по числам движка/фолбэку.
+    fn card_free_mib(&self, bridge_index: i32) -> Option<u64> {
+        if bridge_index < 0 {
+            return None;
+        }
+        let by_probe = self
+            .probes
+            .get(&bridge_index)
+            .and_then(|p| p.snapshot())
+            .map(|v| v.free_mib);
+        match (by_probe, self.engine_free_mib(bridge_index)) {
+            (Some(p), Some(e)) => Some(p.min(e)),
+            (Some(p), None) => Some(p),
+            (None, Some(e)) => Some(e),
+            (None, None) => None,
+        }
+    }
+
+    /// Карта под файл транскрибации (M6 §3.6): среди настроенных ролей
+    /// `whisper*` выбираем карту с максимальной свободной VRAM (числа — в логе),
+    /// один файл — одна карта (split отвергнут). Ролей не настроено — остаётся
+    /// исторический дефолт (bridge-индекс 0, дальше решает `whisper_device`).
+    fn pick_whisper_card(&self, model_mib: u64) -> i32 {
+        if self.whisper_cards.is_empty() {
+            return 0;
+        }
+        let need = model_mib + WHISPER_OVERHEAD_MIB + self.gpu.reserve_mb;
+        let mut best: Option<(i32, u64, String)> = None;
+        for (role, card) in &self.whisper_cards {
+            let free = self.card_free_mib(*card);
+            self.log.line(&format!(
+                "[whisper] карта {card} (роль {role}): свободно {} — нужно {need} МиБ \
+                 (модель {model_mib} + буфер {WHISPER_OVERHEAD_MIB} + резерв {})",
+                free.map(|f| f.to_string())
+                    .unwrap_or_else(|| "нет замера".to_string()),
+                self.gpu.reserve_mb
+            ));
+            let fits = free.map(|f| f >= need).unwrap_or(true);
+            if fits {
+                // «нет замера» считаем свободной: движок сам решит (как раньше)
+                let score = free.unwrap_or(u64::MAX);
+                match &best {
+                    Some((_, s, _)) if *s >= score => {}
+                    _ => best = Some((*card, score, role.clone())),
+                }
+            }
+        }
+        match best {
+            Some((card, score, role)) => {
+                self.log.line(&format!(
+                    "[whisper] выбрана карта {card} (роль {role}): свободно {} МиБ ≥ нужно \
+                     {need} МиБ — файл пойдёт на неё (§3.6: один файл — одна карта)",
+                    if score == u64::MAX {
+                        "нет замера".to_string()
+                    } else {
+                        score.to_string()
+                    }
+                ));
+                card
+            }
+            None => {
+                let card = self.whisper_cards[0].1;
+                self.log.line(&format!(
+                    "[whisper] ни одна карта не даёт {need} МиБ — берём карту {card}: \
+                     `whisper_device` уведёт на CPU по VRAM-бюджету (§3.6)"
+                ));
+                card
+            }
         }
     }
 
@@ -1243,6 +1357,41 @@ impl ClusterBackend {
             }
         }
         uses
+    }
+
+    /// Загрузка чат-реплик (M6 §3.6): активные + ожидающие запросы инстанса.
+    ///
+    /// Читается неблокирующе (`OBSERVE_BUDGET`): занят движок — считаем, что
+    /// загрузки неизвестны (0), и решает round-robin; запрос всё равно попадёт
+    /// в реплику.
+    fn chat_loads(&self) -> BTreeMap<String, i32> {
+        let instances = self
+            .cluster
+            .as_ref()
+            .and_then(|c| {
+                c.try_with("chat:pick", OBSERVE_BUDGET, |x| x.instances())
+                    .ok()
+            })
+            .and_then(|r| r.ok())
+            .unwrap_or_default();
+        self.chat_roles
+            .iter()
+            .map(|role| {
+                let load = self
+                    .ids
+                    .get(role)
+                    .and_then(|id| instances.iter().find(|i| i.id == *id))
+                    .map(|i| i.active_request_count + i.queued_request_count)
+                    .unwrap_or(0);
+                (role.clone(), load)
+            })
+            .collect()
+    }
+
+    /// Реплика чата под запрос: least-busy, при равенстве — round-robin (§3.6).
+    /// `None` — чат-роль не поднята вовсе.
+    fn pick_chat_role(&self) -> Option<String> {
+        pick_replica(&self.chat_roles, &self.chat_loads(), &self.chat_rr).map(|s| s.to_string())
     }
 
     /// Перед запросом: решить по VRAM и применить решение (ARB-1/ARB-2).
@@ -1514,11 +1663,13 @@ impl ClusterBackend {
         }
         if let Some(sec) = self.idle_map().get("whisper").copied() {
             if sec >= self.gpu.evict_idle_sec {
-                let mut slot = self.whisper.lock().unwrap();
-                if slot.take().is_some() {
+                let mut map = self.whisper.lock().unwrap();
+                let cards: Vec<i32> = map.keys().copied().collect();
+                if !cards.is_empty() {
+                    map.clear();
                     self.log.line(&format!(
-                        "[arbiter/idle] whisper: простой {sec} с ≥ {} — выгружен \
-                         (VRAM освобождена)",
+                        "[arbiter/idle] whisper: простой {sec} с ≥ {} — выгружены \
+                         транскрибаторы карт {cards:?} (VRAM освобождена)",
                         self.gpu.evict_idle_sec
                     ));
                 }
@@ -1618,16 +1769,20 @@ impl Backend for ClusterBackend {
         // строго по очереди, а слоты движка простаивали (замер 08.10.2026,
         // `tools/parity/out/m4_slots_*.json`). Пауза индексации сохраняется —
         // её держит сам lease, без обращения к кластеру.
-        let ready = self.role_loaded("chat");
+        //
+        // M6 T2 §3.6: наружу один вход (порт 8010), а запрос уходит в свободную
+        // реплику — least-busy, при равенстве round-robin (здесь, внутри хоста).
+        let role = self.pick_chat_role().unwrap_or_else(|| "chat".to_string());
+        let ready = self.role_loaded(&role);
         let _lease = if ready {
-            self.pause.lease("запрос роли chat").ok()
+            self.pause.lease(&format!("запрос роли {role}")).ok()
         } else {
-            self.prepare("chat")?
+            self.prepare(&role)?
         };
         let id = if ready {
-            self.id_of("chat")?
+            self.id_of(&role)?
         } else {
-            self.ensure_loaded("chat")?
+            self.ensure_loaded(&role)?
         };
         let out = self.cl()?.with_shared(|c| {
             c.chat_complete(
@@ -1638,7 +1793,7 @@ impl Backend for ClusterBackend {
                 req.reasoning(),
             )
         })?;
-        self.note_used("chat");
+        self.note_used(&role);
         if !out.ok {
             return Err(EngineError::Other(format!(
                 "чат-инстанс вернул ошибку: {}",
@@ -1964,7 +2119,6 @@ impl Backend for ClusterBackend {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .unwrap_or_else(|| "4.5".to_string());
-        let mut gpu = body.get("gpu").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let model = body
             .get("model")
             .and_then(|v| v.as_str())
@@ -1987,11 +2141,21 @@ impl Backend for ClusterBackend {
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
+        //
+        // M6 T2 §3.5/§3.6: карту под файл выбирает **хост** по свободной VRAM
+        // (числа — в логе); `whisper`/`whisper-2`/… дают по экземпляру на карту,
+        // один файл — одна карта (split отвергнут). Явный `gpu` в теле запроса
+        // (`index.whisper_gpu`/`auto_transcribe.whisper_gpu`) сильнее выбора.
         let model_mib = std::fs::metadata(&model)
             .map(|m| m.len() >> 20)
             .unwrap_or(0);
+        let explicit_gpu = body.get("gpu").and_then(|v| v.as_i64()).map(|v| v as i32);
+        let mut gpu = match explicit_gpu {
+            Some(v) => v,
+            None => self.pick_whisper_card(model_mib),
+        };
         let (dev, fallback) =
-            whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.target_free_mib());
+            whisper_device(gpu, model_mib, self.gpu.reserve_mb, self.card_free_mib(gpu));
         if let Some(reason) = fallback {
             self.log.line(&format!(
                 "[whisper] {reason} — транскрибация на CPU (VRAM-бюджет)"
@@ -1999,21 +2163,30 @@ impl Backend for ClusterBackend {
         }
         gpu = dev;
 
-        let mut slot = self.whisper.lock().unwrap();
-        if slot.is_none() {
-            self.log.line(&format!(
-                "[whisper] создаю транскрибатор: модель {} ({})",
-                model.display(),
-                if gpu >= 0 {
-                    format!("gpu {gpu}")
-                } else {
-                    "CPU".to_string()
+        // Один транскрибатор на карту (клетки в `Arc`: держим блокировку только
+        // своей карты, поэтому разные файлы на разных картах идут параллельно).
+        let cell: Arc<WhisperCell> = {
+            let mut map = self.whisper.lock().unwrap();
+            match map.get(&gpu) {
+                Some(existing) => Arc::clone(existing),
+                None => {
+                    self.log.line(&format!(
+                        "[whisper] создаю транскрибатор: модель {} ({})",
+                        model.display(),
+                        if gpu >= 0 {
+                            format!("bridge-карта {gpu}")
+                        } else {
+                            "CPU".to_string()
+                        }
+                    ));
+                    let api = crate::bridge_audio::BridgeAudio::load(engine_dir)?;
+                    let w = crate::whisper::Whisper::new(api, &model, gpu, -1)?;
+                    let cell = Arc::new(WhisperCell(Mutex::new(w)));
+                    map.insert(gpu, Arc::clone(&cell));
+                    cell
                 }
-            ));
-            let api = crate::bridge_audio::BridgeAudio::load(engine_dir)?;
-            let w = crate::whisper::Whisper::new(api, &model, gpu, -1)?;
-            *slot = Some(WhisperCell(Mutex::new(w)));
-        }
+            }
+        };
         // Диаризацию собираем после финального решения об устройстве whisper: по
         // умолчанию отдаём движку имя его устройства (как референс — `CUDA0`).
         let diar = if diarization {
@@ -2078,7 +2251,7 @@ impl Backend for ClusterBackend {
             self.gpu.priority_of(config::TRANSCRIBE_ROLE)
         ));
 
-        let w = slot.as_ref().unwrap().0.lock().unwrap();
+        let w = cell.0.lock().unwrap();
         let tr = w.transcribe_file(Path::new(path), mode, &custom, diar.as_ref())?;
         drop(w);
         // активность роли whisper — для вытеснения по простою (ARB-5, W3)
@@ -2135,7 +2308,7 @@ fn apply_ngl_override(
     let mut applied = 0;
     for p in planned.iter_mut() {
         if let RolePlan::Ready(inst) = p {
-            if inst.role == "whisper" {
+            if config::role_base(&inst.role) == "whisper" {
                 continue; // у аудио-роли свои правила устройства (W3)
             }
             if ngl == 0 {
@@ -2178,6 +2351,10 @@ fn apply_ngl_override(
 pub fn port_roles(cfg: &LlmHostConfig, base: Option<u16>) -> Vec<(String, u16)> {
     cfg.roles
         .iter()
+        // M6 T2 §3.6: наружу публикуется **один фасад** (chat/embedding/rerank);
+        // роли-реплики (`chat-2`, `whisper-2`) — внутренние: их порты только
+        // справочные (печатаются в статусе/`hds check`), клиенты ходят на 8010.
+        .filter(|rc| !config::is_replica(&rc.role))
         .filter_map(|rc| {
             let port = match base {
                 Some(b) => match rc.role.as_str() {
@@ -2260,6 +2437,32 @@ fn upstream_map(yaml: &serde_yaml::Value, cfg: &LlmHostConfig) -> BTreeMap<Strin
         m.insert("*".to_string(), url);
     }
     m
+}
+
+/// Строка раскладки «роль → карта/backend» (M6 T2 §3.2) для лога/статуса.
+///
+/// Роли, не поднятые (`RolePlan::Failed`), в строку не входят — о них пишет
+/// отдельная строка лога с числами.
+pub fn layout_line(planned: &[RolePlan]) -> String {
+    let items: Vec<String> = planned
+        .iter()
+        .filter_map(|p| p.ready())
+        .map(|i| {
+            format!(
+                "{} → карта {} ({})",
+                i.role,
+                i.bridge_device_index
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "—".to_string()),
+                i.device_backend.as_deref().unwrap_or("—")
+            )
+        })
+        .collect();
+    if items.is_empty() {
+        "нет поднятых ролей".to_string()
+    } else {
+        items.join(", ")
+    }
 }
 
 /// Человеческое описание апстримов для лога.
@@ -2345,6 +2548,12 @@ impl Host {
             .map_err(|e| EngineError::Other(format!("конфиг {}: {e}", cfg.config.display())))?;
         for w in &resolved.warnings {
             log.note(&format!("конфиг: {w}"));
+        }
+        // M6 T2 §3.5: нарушение контракта раскладки (реплики индексных ролей,
+        // дубли портов) — fail-fast с числами, а не «подняли половину ролей».
+        if let Some(note) = resolved.contract_note() {
+            log.note(&note);
+            return Err(EngineError::Other(note));
         }
         let paths = match &cfg.runtime {
             Some(r) => RuntimePaths::new(r.clone()),
@@ -2448,6 +2657,10 @@ impl Host {
                 if let Some(ngl) = cfg.ngl {
                     apply_ngl_override(&mut planned, ngl, &devices, &log);
                 }
+                // M6 T2 §3.2: раскладка «роль → карта/backend» печатается при
+                // старте — это ключевое свидетельство приёмки (роли реально идут
+                // на назначенные карты).
+                log.line(&format!("раскладка ролей: {}", layout_line(&planned)));
                 for p in &planned {
                     let inst = match p {
                         RolePlan::Ready(i) => i,
@@ -2511,8 +2724,8 @@ impl Host {
                     // compute-буфер» против свободной VRAM с резервом. Молчаливая
                     // деградация запрещена (решение заказчика): не влезает — явная
                     // ошибка с числами и подсказкой, а не невнятный отказ движка.
-                    let gpu_role =
-                        spec.n_gpu_layers.is_some_and(|v| v != 0) || inst.role == "whisper";
+                    let gpu_role = spec.n_gpu_layers.is_some_and(|v| v != 0)
+                        || config::role_base(&inst.role) == "whisper";
                     if gpu_role {
                         if let Some(need) = need_mib {
                             let measured = vram_probe
@@ -2528,7 +2741,7 @@ impl Host {
                                     need_mib,
                                     reserve_mib,
                                     short_mib,
-                                } if inst.role == "chat" => {
+                                } if config::role_base(&inst.role) == "chat" => {
                                     return Err(EngineError::Other(format!(
                                         "роль chat не влезает в VRAM: нужно {need_mib} МиБ \
                                          (модель + KV×{parallel} слотов + compute-буфер), свободно \
@@ -2638,6 +2851,37 @@ impl Host {
             );
         }
         let stop = Arc::new(AtomicBool::new(false));
+        // M6 T2 §3.5/§3.6: чат-реплики (по ним фасад раскидывает запросы) и карты
+        // транскрибации (по одной на карту). Собираем из поднятого плана.
+        let chat_roles: Vec<String> = planned
+            .iter()
+            .filter_map(|p| p.ready())
+            .filter(|i| config::role_base(&i.role) == "chat")
+            .map(|i| i.role.clone())
+            .collect();
+        let whisper_cards: Vec<(String, i32)> = planned
+            .iter()
+            .filter_map(|p| p.ready())
+            .filter(|i| config::role_base(&i.role) == "whisper")
+            .filter_map(|i| i.bridge_device_index.map(|c| (i.role.clone(), c)))
+            .collect();
+        if chat_roles.len() > 1 {
+            log.line(&format!(
+                "чат-реплики ({}): {} — маршрутизация least-busy → round-robin (§3.6)",
+                chat_roles.len(),
+                chat_roles.join(", ")
+            ));
+        }
+        if !whisper_cards.is_empty() {
+            log.line(&format!(
+                "транскрибация по картам: {} — один файл на карту (§3.5/§3.6)",
+                whisper_cards
+                    .iter()
+                    .map(|(r, c)| format!("{r} → карта {c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         // Пробы VRAM, привязанные к устройствам движка по имени: диспетчер мерит
         // именно то устройство, на которое поедет модель (iGPU vs dGPU!).
         let device_probes = bind_device_probes(&engine_devices, cfg.nvml_index);
@@ -2683,7 +2927,10 @@ impl Host {
             log_path: cfg.log_path(),
             mode,
             upstream,
-            whisper: Mutex::new(None),
+            whisper: Mutex::new(BTreeMap::new()),
+            chat_roles,
+            chat_rr: std::sync::atomic::AtomicUsize::new(0),
+            whisper_cards,
             transcribe_active: Arc::new(AtomicBool::new(false)),
             abandoned_request_sec: resolved.gpu.abandoned_request_sec,
         });
@@ -2995,6 +3242,7 @@ impl Drop for Host {
 #[cfg(test)]
 mod whisper_device_tests {
     use super::names_match;
+    use super::pick_replica;
     use super::strip_index_self_pause;
     use super::whisper_device;
     use crate::dispatch::{Action, Plan};
@@ -3032,6 +3280,30 @@ mod whisper_device_tests {
         ));
         // страж выключен (порог 0) → никогда
         assert!(!abandoned_request_guard(&mk("engine", 5_000), "engine", 0));
+    }
+
+    /// M6 T2 §3.6: выбор чат-реплики — least-busy, при равенстве round-robin
+    /// (чистая логика: загрузки передаются аргументом).
+    #[test]
+    fn replica_pick_is_least_busy_then_round_robin() {
+        use std::collections::BTreeMap;
+        use std::sync::atomic::AtomicUsize;
+        let roles = vec!["chat".to_string(), "chat-2".to_string()];
+        let rr = AtomicUsize::new(0);
+        // least-busy: свободная реплика важнее порядка
+        let mut loads = BTreeMap::new();
+        loads.insert("chat".to_string(), 3);
+        loads.insert("chat-2".to_string(), 0);
+        assert_eq!(pick_replica(&roles, &loads, &rr), Some("chat-2"));
+        // равенство (в т.ч. «нет замера») → round-robin по кругу
+        let empty = BTreeMap::new();
+        let rr2 = AtomicUsize::new(0);
+        assert_eq!(pick_replica(&roles, &empty, &rr2), Some("chat"));
+        assert_eq!(pick_replica(&roles, &empty, &rr2), Some("chat-2"));
+        assert_eq!(pick_replica(&roles, &empty, &rr2), Some("chat"));
+        // одна реплика — она и есть; ролей нет — None
+        assert_eq!(pick_replica(&roles[..1], &empty, &rr), Some("chat"));
+        assert_eq!(pick_replica(&[], &empty, &rr), None);
     }
 
     /// Роли индексации не ставят паузу индексации сами себе (фликер в UI).

@@ -499,6 +499,113 @@ llm_server:
     assert!(err.contains("llm-host devices"), "{err}");
 }
 
+/// M6 T2 (§3.1/§3.5): bridge-индекс карты роли виден в плане (ключ бюджета VRAM
+/// и свидетельство раскладки в статусе).
+#[test]
+fn plan_reports_bridge_device_index() {
+    let env = Env::new("m6bridge");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 2, roles: [embedding] }
+llm_server:
+  embedding: { port: 8011, model: "shared:embedding" }
+"#;
+    env.model("embedding", "bge.gguf");
+    let cfg_path = env.write_config("m6b.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices_with_vulkan());
+    let emb = ready(&plans, "embedding");
+    assert_eq!(
+        emb.bridge_device_index,
+        Some(1),
+        "карта 2 = Vulkan0 (bridge 1)"
+    );
+    assert!(emb.summary().contains("card=1"), "{}", emb.summary());
+}
+
+/// M6 T2 (§3.5/§3.6): чат-реплики — одинаковые роли (`chat`, `chat-2`) со своими
+/// портами и слотами; допускаются на одной карте (делят её VRAM), маршрутизация
+/// по ним — внутри хоста (§3.6).
+#[test]
+fn chat_replica_shares_card_and_keeps_slots() {
+    let env = Env::new("m6replica");
+    let yaml = r#"
+llm_server:
+  parallel: 5
+  chat: { port: 8010, model: "shared:chat" }
+  chat-2: { port: 8030, model: "shared:chat" }
+"#;
+    env.model("chat", "chat.gguf");
+    let cfg_path = env.write_config("m6r.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    assert!(cfg.errors.is_empty(), "{:?}", cfg.errors);
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices());
+    let chat = ready(&plans, "chat");
+    let chat2 = ready(&plans, "chat-2");
+    assert_eq!(
+        chat2.model_path, chat.model_path,
+        "реплики — одна модель (§3.5)"
+    );
+    assert_eq!(
+        chat2.spec.manual_devices_csv, chat.spec.manual_devices_csv,
+        "реплика на той же карте (можно и на другой — раскладкой)"
+    );
+    assert_eq!(chat2.port, 8030, "свой порт реплики");
+    assert_eq!(chat2.spec.n_parallel, Some(5), "слоты реплики — как у чата");
+    assert_eq!(chat2.bridge_device_index, chat.bridge_device_index);
+}
+
+/// M6 T2 (§3.5): `whisper` — не более одного экземпляра на карту: два на одной
+/// карте — fail-fast с числами (карта и роли названы).
+#[test]
+fn whisper_twice_on_one_card_fails() {
+    let env = Env::new("m6whisper");
+    let yaml = r#"
+gpu:
+  devices:
+    - { index: 1, roles: [whisper, whisper-2] }
+index:
+  whisper_model_path: "shared:whisper"
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+"#;
+    env.model("chat", "chat.gguf");
+    env.model("whisper", "ggml-turbo.gguf");
+    let cfg_path = env.write_config("m6w.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let plans = registry::plan(&cfg, &env.runtime, &fake_devices());
+    let err = failed(&plans, "whisper-2");
+    assert!(err.contains("карту 0"), "число карты: {err}");
+    assert!(err.contains("§3.5"), "правило: {err}");
+    assert!(
+        err.contains("whisper-2") && err.contains("whisper"),
+        "{err}"
+    );
+}
+
+/// M6 T2 (§3.5): индексация — ровно один экземпляр на машину; реплика индексной
+/// роли — ошибка контракта конфига (`errors`), роль не создаётся.
+#[test]
+fn index_role_replica_is_rejected() {
+    let env = Env::new("m6idxrepl");
+    let yaml = r#"
+llm:
+  embedding-2: { model: "shared:embedding" }
+llm_server:
+  chat: { port: 8010, model: "shared:chat" }
+"#;
+    env.model("chat", "chat.gguf");
+    let cfg_path = env.write_config("m6i.yaml", yaml);
+    let cfg = config::load(&cfg_path).expect("config");
+    let note = cfg.contract_note().expect("ошибка контракта");
+    assert!(
+        note.contains("embedding-2") && note.contains("§3.5"),
+        "{note}"
+    );
+    assert!(cfg.role("embedding-2").is_none(), "роль не создаётся");
+}
+
 /// M6 T1: явная карта из раскладки печатается в notes плана (диагностика статуса).
 #[test]
 fn layout_note_explains_explicit_card() {

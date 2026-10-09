@@ -119,6 +119,13 @@ fn run() -> Result<()> {
     for w in &cfg.warnings {
         println!("  [warn] {w}");
     }
+    // M6 T2 §3.5: нарушения контракта — fail-fast с числами (как `Host::start`).
+    if let Some(note) = cfg.contract_note() {
+        for e in &cfg.errors {
+            println!("  [error] {e}");
+        }
+        return Err(EngineError::Other(note));
+    }
 
     let paths = match &args.runtime {
         Some(r) => RuntimePaths::new(r.clone()),
@@ -146,6 +153,10 @@ fn run() -> Result<()> {
     }
 
     let planned = registry::plan(&cfg, &paths.root, &devices);
+    println!(
+        "\nраскладка ролей (роль → карта/backend): {}",
+        hds_llama::host::layout_line(&planned)
+    );
     println!("\nплан инстансов ({}):", planned.len());
     let mut failed = 0usize;
     for p in &planned {
@@ -172,8 +183,8 @@ fn run() -> Result<()> {
     )?;
     if failed > 0 {
         println!(
-            "\nролей без модели: {failed} — положите файлы в общий рантайм \
-             (installers/ensure_llama_runtime.ps1) или укажите путь в конфиге"
+            "\nролей не спланировано: {failed} (причины — выше; чаще всего нет модели в общем \
+             рантайме: installers/ensure_llama_runtime.ps1 или путь в конфиге)"
         );
         std::process::exit(1);
     }

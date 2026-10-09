@@ -25,6 +25,62 @@ use crate::vram::VramSource;
 /// Роли, которые поднимает `llm-host` (порядок важен для логов/`status`).
 pub const ROLES: [&str; 4] = ["chat", "embedding", "rerank", "whisper"];
 
+/// Роли, существующие **ровно в одном экземпляре на машину** (§3.5): индексация
+/// («один набор моделей индексации обрабатывает один файл одновременно»).
+pub const SINGLE_INSTANCE_ROLES: [&str; 2] = ["embedding", "rerank"];
+
+/// База имени с номером: `chat-2` → `Some("chat")`, `rerank-2` → `Some("rerank")`,
+/// `embedding` → `None` (числа нет).
+fn numbered_base(role: &str) -> Option<&str> {
+    let (base, num) = role.rsplit_once('-')?;
+    if base.is_empty() || num.is_empty() || !num.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(base)
+}
+
+/// Базовая роль имени: `chat-2`/`chat-3` → `chat`, `whisper-2` → `whisper`,
+/// `embedding`/`rerank-2` → сами себя (M6 §3.5: реплики отличаются от базовой
+/// роли только именем, портом и слотами — модель/контекст у них те же; реплики
+/// допустимы только у чата и транскрибации).
+pub fn role_base(role: &str) -> &str {
+    for base in ["chat", "whisper"] {
+        if role
+            .strip_prefix(base)
+            .and_then(|r| r.strip_prefix('-'))
+            .is_some()
+        {
+            if let Some(nb) = numbered_base(role) {
+                if nb == base {
+                    return base;
+                }
+            }
+        }
+    }
+    role
+}
+
+/// Номер реплики (`chat-2` → `Some(2)`, `chat`/`embedding`/`rerank-2` → `None`).
+pub fn replica_index(role: &str) -> Option<u32> {
+    let base = role_base(role);
+    if base == role {
+        return None;
+    }
+    role[base.len() + 1..].parse::<u32>().ok()
+}
+
+/// Роль-реплика (номерная роль с поддерживаемой базой: `chat-2`, `whisper-3`).
+pub fn is_replica(role: &str) -> bool {
+    replica_index(role).is_some()
+}
+
+/// Запрещённая реплика роли, существующей в единственном экземпляре (§3.5):
+/// `embedding-2`, `rerank-3` и т.п. Возвращает базовую роль.
+pub fn single_instance_violation(role: &str) -> Option<&'static str> {
+    let base = numbered_base(role)?;
+    SINGLE_INSTANCE_ROLES.iter().copied().find(|b| *b == base)
+}
+
 /// Псевдо-роль автотранскрибации (`PLAN_AUTO_TRANSCRIBE` §10 T1.4).
 ///
 /// Своего инстанса движка у неё нет — демон `hds transcribe-watch` ходит в bridge
@@ -270,13 +326,44 @@ pub struct LlmHostConfig {
     pub model_policy: String,
     pub gpu: GpuConfig,
     pub roles: Vec<RoleConfig>,
+    /// Некритичные замечания (идут в `hdsw check`).
     pub warnings: Vec<String>,
+    /// Нарушения контракта §3.5 (fail-fast с числами): повторное назначение
+    /// индексной роли, дубликаты портов и т.п. Непустой список = конфиг
+    /// запускать нельзя (`Host::start`/`llm_host_plan` отказываются с текстом).
+    pub errors: Vec<String>,
 }
 
 impl LlmHostConfig {
     /// Роль по имени.
     pub fn role(&self, name: &str) -> Option<&RoleConfig> {
         self.roles.iter().find(|r| r.role == name)
+    }
+
+    /// Роли-реплики базовой роли (например все `chat*`): базовая — первой,
+    /// затем `chat-2`, `chat-3`… по номеру (M6 §3.5/§3.6: одинаковые реплики,
+    /// запросы раскидываются по ним внутри хоста).
+    pub fn replicas_of(&self, base: &str) -> Vec<&RoleConfig> {
+        let mut out: Vec<&RoleConfig> = self
+            .roles
+            .iter()
+            .filter(|r| role_base(&r.role) == base)
+            .collect();
+        out.sort_by_key(|r| replica_index(&r.role).unwrap_or(0));
+        out
+    }
+
+    /// Нарушения контракта (§3.5) в текстовом виде — для бинарей/логов.
+    pub fn contract_note(&self) -> Option<String> {
+        if self.errors.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "конфиг нарушает правила раскладки ролей (§3.5) — {} ошибка(и):\n  {}",
+                self.errors.len(),
+                self.errors.join("\n  ")
+            ))
+        }
     }
 }
 
@@ -444,13 +531,18 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
         .unwrap_or(default_parallel)
         .max(1) as i32;
     let mut roles: Vec<RoleConfig> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     // M5 §3.2 (PLAN_M5_EXTERNAL_CHAT.md): `chat.provider: remote` — llm-host
     // НЕ держит chat-роль в VRAM (RAG идёт во внешний API `chat.base_url`);
     // embedding/rerank поднимаются как раньше. Это и есть «рычаг SLA».
     let chat_remote = dig_str(root, "chat.provider")
         .map(|v| v.trim().eq_ignore_ascii_case("remote"))
         .unwrap_or(false);
-    for role in ROLES {
+    // M6 T2 (§3.5): имена ролей = базовые `ROLES` + явные реплики чата/транскрибации
+    // из конфига (`llm.<role>.*`, `llm_server.<role>.*`, `gpu.devices[].roles`).
+    // Реплики индексных ролей запрещены: индексация — ровно один экземпляр.
+    for role in config_role_names(root, &gpu, &mut errors) {
+        let role = role.as_str();
         if role == "chat" && chat_remote {
             warnings.push(
                 "chat: provider remote — chat-роль в llm-host не поднимается (RAG ходит \
@@ -463,6 +555,8 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
             roles.push(rc);
         }
     }
+    // §3.5: уникальные порты ролей/реплик (иначе два фасада рвутся за один порт).
+    check_unique_ports(&roles, &mut errors);
 
     LlmHostConfig {
         path: path.to_path_buf(),
@@ -479,20 +573,93 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
         gpu,
         roles,
         warnings,
+        errors,
+    }
+}
+
+/// Имена ролей из конфига: базовые [`ROLES`] + явные реплики чата/транскрибации
+/// (`llm.<role>.*`, `llm_server.<role>.*`, `gpu.devices[].roles`).
+///
+/// Реплики индексных ролей (`embedding-2`, `rerank-3`) — нарушение §3.5
+/// («индексация — ровно один экземпляр на машину»): попадают в `errors`
+/// (fail-fast с числами), роль не создаётся.
+fn config_role_names(root: &Value, gpu: &GpuConfig, errors: &mut Vec<String>) -> Vec<String> {
+    let mut extra: Vec<String> = Vec::new();
+    for section in ["llm", "llm_server"] {
+        if let Some(map) = dig(root, section).and_then(|v| v.as_mapping()) {
+            for (k, _) in map {
+                if let Some(name) = k.as_str() {
+                    extra.push(name.trim().to_string());
+                }
+            }
+        }
+    }
+    for a in &gpu.devices {
+        extra.extend(a.roles.iter().cloned());
+    }
+    let mut replicas: Vec<String> = Vec::new();
+    for name in extra {
+        if name.is_empty() || ROLES.contains(&name.as_str()) || replicas.contains(&name) {
+            continue;
+        }
+        if let Some(base) = single_instance_violation(&name) {
+            errors.push(format!(
+                "роль «{name}»: «{base}» существует ровно в одном экземпляре на машину \
+                 (§3.5) — реплики индексных ролей не поддерживаются, уберите «{name}» \
+                 (один набор моделей индексации обрабатывает один файл одновременно)"
+            ));
+            continue;
+        }
+        if is_replica(&name) {
+            replicas.push(name);
+        }
+    }
+    // Реплики — по базовой роли и номеру: `chat-2`, `chat-3`, `whisper-2`…
+    replicas.sort_by_key(|n| (role_base(n).to_string(), replica_index(n).unwrap_or(0)));
+    let mut names: Vec<String> = ROLES.iter().map(|s| s.to_string()).collect();
+    names.extend(replicas);
+    names
+}
+
+/// §3.5: порты ролей/реплик уникальны — иначе два фасада рвутся за один порт.
+fn check_unique_ports(roles: &[RoleConfig], errors: &mut Vec<String>) {
+    let mut seen: BTreeMap<u16, String> = BTreeMap::new();
+    for rc in roles {
+        if rc.port == 0 {
+            continue; // роль без HTTP-порта (whisper-подобные)
+        }
+        if let Some(prev) = seen.insert(rc.port, rc.role.clone()) {
+            errors.push(format!(
+                "порт {} занят двумя ролями: «{prev}» и «{}» — репликам задайте явные \
+                 порты (`llm.{}.port`); базовые роли остаются на 8010/8011/8012 (§3.5)",
+                rc.port, rc.role, rc.role
+            ));
+        }
     }
 }
 
 /// Умолчания роли — из `hds/llama_server.py` (`_role_cfg` и `DEFAULTS`).
+///
+/// Для реплик (`chat-2`, `whisper-2`) берём умолчания **базовой** роли; порт
+/// реплики чата — `8010+N` (§3.6: «порты реплик 8010+N — внутренние/
+/// диагностические»), но при совпадении с базовой ролью задаётся явно в конфиге
+/// (иначе `check_unique_ports` вернёт ошибку с числами).
 fn role_defaults(role: &str) -> (u16, i32, &'static str) {
-    match role {
-        "chat" => (
-            8010,
-            32768,
-            "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99",
-        ),
+    match role_base(role) {
+        "chat" => {
+            let port = match replica_index(role) {
+                Some(n) => (8010 + n).min(u16::MAX as u32) as u16,
+                None => 8010,
+            };
+            (
+                port,
+                32768,
+                "--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99",
+            )
+        }
         "embedding" => (8011, 8192, "--batch-size 8192 --ubatch-size 8192 -ngl 99"),
         "rerank" => (8012, 8192, "-ngl 0"),
-        // whisper — не HTTP-роль: ASR-инстанс поднимается в W3
+        // whisper — не HTTP-роль: ASR-инстанс поднимается в W3 (порт 0)
         _ => (0, 0, ""),
     }
 }
@@ -506,27 +673,29 @@ fn build_role(
     warnings: &mut Vec<String>,
 ) -> Option<RoleConfig> {
     let (def_port, def_ctx, def_extra) = role_defaults(role);
+    let base = role_base(role);
     let mut notes: Vec<String> = Vec::new();
 
     // Модель: llm.<role>.model → llm_server.<role>.model → index.whisper_model_path
     let model_spec = dig_str(root, &format!("llm.{role}.model"))
         .or_else(|| dig_str(root, &format!("llm_server.{role}.model")))
         .or_else(|| {
-            if role == "whisper" {
+            if base == "whisper" {
                 dig_str(root, "index.whisper_model_path")
             } else {
                 None
             }
         })
         .unwrap_or_else(|| {
-            if role == "whisper" {
+            if base == "whisper" {
                 String::new()
             } else {
-                // дефолт W2: модель из общего рантайма, а не каталог проекта (§14.7)
-                format!("shared:{role}")
+                // дефолт W2: модель из общего рантайма, а не каталог проекта (§14.7);
+                // у реплик модель та же, что у базовой роли (§3.5)
+                format!("shared:{base}")
             }
         });
-    if role == "whisper" && model_spec.is_empty() {
+    if base == "whisper" && model_spec.is_empty() {
         return None; // ASR-инстанс появится в W3
     }
 
@@ -579,7 +748,7 @@ fn build_role(
     // (`keep`, прогрев при старте, host.rs); desktop экономит VRAM как раньше.
     let server = dig_str(root, "profile").as_deref() == Some("server");
     let default_retention =
-        if role == "chat" || (server && (role == "embedding" || role == "rerank")) {
+        if base == "chat" || (server && (base == "embedding" || base == "rerank")) {
             retention::KEEP_LOADED
         } else {
             retention::LOAD_ON_DEMAND
@@ -604,7 +773,7 @@ fn build_role(
         .unwrap_or(300)
         .max(0) as i32;
 
-    let (kind, embedding, reranking) = match role {
+    let (kind, embedding, reranking) = match base {
         "embedding" => (model_kind::EMBEDDINGS, true, false),
         "rerank" => (model_kind::RERANK, false, true),
         "whisper" => (model_kind::WHISPER, false, false),
@@ -615,7 +784,7 @@ fn build_role(
     let legacy_n_gpu_layers = ea.n_gpu_layers;
     if let Some(n) = legacy_n_gpu_layers {
         if gpu.n_gpu_layers_set {
-            if role != "whisper" {
+            if base != "whisper" {
                 let msg = format!(
                     "{role}: -ngl {n} из extra_args игнорируется — задано \
                      gpu.n_gpu_layers = {}",
@@ -624,7 +793,7 @@ fn build_role(
                 warnings.push(msg.clone());
                 notes.push(msg);
             }
-        } else if role != "whisper" {
+        } else if base != "whisper" {
             notes.push(format!(
                 "{role}: -ngl {n} взят из legacy extra_args; перенесите в gpu.n_gpu_layers"
             ));
@@ -995,6 +1164,83 @@ llm_server:
     #[test]
     fn unknown_role_priority_is_zero() {
         assert_eq!(GpuConfig::default().priority_of("не-роль"), 0);
+    }
+
+    /// M6 T2 (§3.5): чат-реплика `chat-2` — своя роль с портом/контекстом; модель
+    /// наследуется от базовой роли (`shared:chat`), retention `keep` как у чата.
+    #[test]
+    fn chat_replica_is_parsed_like_base_role() {
+        let yaml = r#"
+llm:
+  chat-2:
+    port: 8030
+llm_server:
+  parallel: 5
+  chat: { port: 8010 }
+"#;
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert!(
+            cfg.errors.is_empty(),
+            "реплика чата легальна: {:?}",
+            cfg.errors
+        );
+        let chat2 = cfg.role("chat-2").expect("реплика разобрана");
+        assert_eq!(chat2.port, 8030, "порт реплики — из конфига");
+        assert_eq!(
+            chat2.model_spec, "shared:chat",
+            "модель — как у базовой роли"
+        );
+        assert_eq!(chat2.model_kind, model_kind::TEXT);
+        assert_eq!(
+            chat2.retention_mode,
+            retention::KEEP_LOADED,
+            "чат-реплика держится в VRAM как чат"
+        );
+        assert_eq!(cfg.replicas_of("chat").len(), 2, "chat + chat-2");
+    }
+
+    /// M6 T2 (§3.5): реплика индексной роли — нарушение контракта с числами
+    /// (индексация существует ровно в одном экземпляре на машину).
+    #[test]
+    fn index_role_replica_is_contract_error() {
+        let root: Value =
+            serde_yaml::from_str("llm:\n  rerank-2: { model: \"shared:rerank\" }\n").expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        let note = cfg.contract_note().expect("ошибка контракта");
+        assert!(note.contains("rerank-2"), "{note}");
+        assert!(note.contains("§3.5"), "{note}");
+        assert!(note.contains("одном экземпляре"), "{note}");
+        assert!(cfg.role("rerank-2").is_none(), "роль не создаётся");
+    }
+
+    /// M6 T2 (§3.5): порты ролей уникальны — дубль даёт ошибку с числами.
+    #[test]
+    fn duplicate_ports_are_contract_error() {
+        let root: Value = serde_yaml::from_str(
+            "llm:\n  chat-2: { port: 8012 }\nllm_server:\n  chat: { port: 8010 }\n",
+        )
+        .expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        let note = cfg.contract_note().expect("ошибка контракта");
+        assert!(note.contains("8012"), "число порта в сообщении: {note}");
+        assert!(note.contains("chat-2"), "{note}");
+        assert!(note.contains("rerank"), "обе роли названы: {note}");
+    }
+
+    /// M6 T2 (§3.5): `role_base`/`replica_index` разбирают имена реплик, а
+    /// индексные роли реплик не имеют.
+    #[test]
+    fn replica_name_helpers() {
+        assert_eq!(role_base("chat"), "chat");
+        assert_eq!(role_base("chat-2"), "chat");
+        assert_eq!(role_base("whisper-10"), "whisper");
+        assert_eq!(role_base("embedding"), "embedding");
+        assert_eq!(replica_index("chat-2"), Some(2));
+        assert_eq!(replica_index("chat"), None);
+        assert!(!is_replica("embedding"));
+        assert_eq!(single_instance_violation("embedding-2"), Some("embedding"));
+        assert_eq!(single_instance_violation("chat-2"), None);
     }
 
     /// Новые ключи `llm.<role>.{n_batch,n_ubatch,n_threads}` приоритетнее legacy
