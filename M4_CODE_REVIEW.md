@@ -213,3 +213,20 @@ python -c "import json,os;[print(f,json.load(open(os.path.join('tools','parity',
 > `tools/parity/out/` гитигнорится; отчёты `m4_load_*.json` — локальные артефакты стенда,
 > числа §3 получены из этих файлов.
 
+## 8. Статус находок F1–F9 (закрытие в M5, история §1–§4 сохранена)
+
+| Находка | Статус | Подтверждение |
+|---|---|---|
+| F1 (SLA не воспроизводима) | ✅ закрыто (M5 T0.1) | root-cause: on-demand перезагрузка `embedding` при тесной VRAM, fit-шаг движка ~299 с (замеры `m4_load_f1_r1..r3.json`: до фикса 315,6/315,7/46,5 с); фикс — `retention: keep` (server) + прогрев при старте llm-host; после фикса 3/3 в SLA — 34,1/34,0/33,9 с (`m4_load_f1_fix_r1..r3.json`) |
+| F2 (auth после очереди) | ✅ закрыто (M5 T0.2) | проверка Bearer до `queue.acquire` (`401` мгновенно); сокет-тест `unauthorized_heavy_rejected_before_queue` |
+| F3 (дефолты) | ✅ закрыто (M5 T0.3) | `rate_limit.max_inflight` server 5 (=`parallel`); `hds check` warn о рассинхроне |
+| F4 (FIFO внутри пользователя) | ✅ закрыто (M5 T0.4) | слот берёт минимальный `seq`; тест `fifo_within_user_by_seq` |
+| F5 (нет notify при постановке) | ✅ закрыто (M5 T0.5) | `cv.notify_all()` после постановки |
+| F6 (мёртвый путь лимитера) | ✅ закрыто (M5 T0.6) | `inflight_*`/`InflightGuard` удалены; тесты на `user_inflight_*` |
+| F7 (`Retry-After` 60 с) | ✅ закрыто (M5 T0.7) | от `wait_timeout` (половина, min 5); тест |
+| F8 (allowlist `journal_mode`) | ✅ закрыто (M5 T0.8) | allowlist + фолбэк `wal`; тест |
+| F9 (покрытие) | ✅ закрыто (M5 T0.9) | сокет-тест `Aborted` + сценарий F2 |
+
+Хвосты, перенесённые дальше: рост fit-шага движка от числа загрузок (кандидат
+`engine-patch` P5), F9 (M3 `Host`), T0.9 (вопросы заказчику), чек-лист внешнего HTTPS.
+

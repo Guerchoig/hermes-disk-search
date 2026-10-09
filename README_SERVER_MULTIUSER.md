@@ -187,8 +187,32 @@ http://127.0.0.1:8765/?token=<админ-токен>
 | Превышен лимит частоты | HTTP `429` + `Retry-After` + `X-RateLimit-Limit`/`-Remaining`/`-Reset` (ключ — пользователь, иначе IP) |
 | Очередь тяжёлых RAG полна (`queue.max_depth`) | HTTP `429` + `Retry-After: 5` + `X-Queue-Depth`; hint — про `queue.max_depth` |
 | Превышен пер-пользовательский предел RAG (`rate_limit.max_inflight_per_user`) | HTTP `429` + `Retry-After` + `X-Queue-Depth: 0`; hint — про `rate_limit.max_inflight_per_user` |
-| Не дождался слота за `queue.wait_timeout_sec` | HTTP `503` + `Retry-After`; hint — про `queue.wait_timeout_sec` |
+| Не дождался слота за `queue.wait_timeout_sec` | HTTP `503` + `Retry-After` (половина `wait_timeout_sec`, мин 5); hint — про `queue.wait_timeout_sec` |
 | Десктоп (`access.enabled` нет) | ничего из вышеописанного не применяется |
+
+Дополнительно (M5): неавторизованный тяжёлый запрос при занятых слотах получает
+`401` **мгновенно** — очередь не занимает (закрыт вектор DoS из ревью M4 F2).
+
+## 8a. Внешний chat-provider `remote` (M5)
+
+RAG-ответ можно отдать внешнему OpenAI-совместимому API — тогда `llm-host` не
+держит chat-модель в VRAM (освобождается ~8 ГиБ на RTX 3060 — «рычаг SLA»):
+
+```yaml
+chat:
+  provider: remote          # local (дефолт) | remote
+  base_url: "https://api.example.com/v1"
+  api_key: "sk-..."         # Bearer-ключ; "-" = без ключа; в git не входит
+  model: "gpt-4o-mini"
+```
+
+* Поиск/эмбеддинги/реранкер и фильтрация по проектам остаются локальными —
+  наружу уходит только собранный промпт (вопрос + фрагменты).
+* ⚠ **Анонимизация (W9) ещё не реализована**: текст вопроса и фрагменты
+  локальных файлов уходят провайдеру как есть — включайте `remote` только для
+  доверенных API.
+* Проверка: `hds check` (пункт `chat_provider`), `llm-host status` (chat-роль
+  не поднимается; предупреждение в warnings).
 
 ## 9. Десктоп-режим (по умолчанию)
 
