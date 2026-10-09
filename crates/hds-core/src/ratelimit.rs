@@ -18,8 +18,8 @@
 //! Состояние — в памяти процесса; несколько процессов (`mcp-http` + `ui`)
 //! лимитируются независимо (документированное ограничение; общий лимит —
 //! задача прокси). Дефолт: desktop — выключен, `server` — включён
-//! (120 req/min, burst 30, login 10/min, inflight 4, per-user inflight 2);
-//! всё перекрывается ключами конфига `rate_limit.*`.
+//! (120 req/min, burst 30, login 10/min, inflight: server 5 / desktop 4,
+//! per-user inflight 2); всё перекрывается ключами конфига `rate_limit.*`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -42,8 +42,8 @@ pub struct RateLimit {
     pub burst: u32,
     /// Лимит `/auth/login` в минуту по IP (дефолт 10).
     pub login_per_min: u32,
-    /// Предел одновременных тяжёлых запросов (дефолт 4) — **глобальный**
-    /// (лимит ИСПОЛНЕНИЯ очереди, M4 T3).
+    /// Предел одновременных тяжёлых запросов (дефолт: server 5 / desktop 4) —
+    /// **глобальный** (лимит ИСПОЛНЕНИЯ очереди, M4 T3).
     pub max_inflight: u32,
     /// Предел одновременных тяжёлых запросов **на пользователя** (M4 T4,
     /// дефолт [`DEFAULT_MAX_INFLIGHT_PER_USER`]).
@@ -76,7 +76,18 @@ impl RateLimit {
             requests_per_min: u("rate_limit.requests_per_min", 120),
             burst: u("rate_limit.burst", 30),
             login_per_min: u("rate_limit.login_per_min", 10),
-            max_inflight: u("rate_limit.max_inflight", 4),
+            // F3 (M5 T0.3): лимит ИСПОЛНЕНИЯ очереди не «съедает» слоты чата —
+            // дефолт server = 5 (= дефолт `llm_server.parallel`), desktop —
+            // прежние 4 (лимитер M3). Рассинхрон явных значений помечает
+            // `hds check` (пункт `queue`, `crates/hds-index/src/diag.rs`).
+            max_inflight: u(
+                "rate_limit.max_inflight",
+                if crate::config::profile(cfg).is_server() {
+                    5
+                } else {
+                    4
+                },
+            ),
             max_inflight_per_user: u(
                 "rate_limit.max_inflight_per_user",
                 DEFAULT_MAX_INFLIGHT_PER_USER,
@@ -312,7 +323,9 @@ mod tests {
         assert_eq!(l.cfg().requests_per_min, 120);
         assert_eq!(l.cfg().burst, 30);
         assert_eq!(l.cfg().login_per_min, 10);
-        assert_eq!(l.cfg().max_inflight, 4);
+        // F3 (M5 T0.3): дефолт server = 5 — как дефолт `llm_server.parallel`,
+        // лимит исполнения не меньше слотов чата; desktop — прежние 4.
+        assert_eq!(l.cfg().max_inflight, 5);
         // Явное выключение сильнее профиля; явное включение — сильнее десктопа.
         assert!(
             Limiter::from_config(&cfg("profile: server\nrate_limit:\n  enabled: false")).is_none()
@@ -395,7 +408,10 @@ mod tests {
             c.max_inflight_per_user, 2,
             "дефолт пер-пользовательского предела"
         );
-        assert_eq!(c.max_inflight, 4, "глобальный предел — из max_inflight");
+        assert_eq!(
+            c.max_inflight, 5,
+            "глобальный предел — из max_inflight (дефолт server 5, F3)"
+        );
         assert_eq!(c.requests_per_min_per_user, c.requests_per_min);
         assert!(!c.per_token, "по умолчанию ключ — пользователь, не токен");
 

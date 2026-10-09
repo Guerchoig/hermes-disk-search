@@ -898,6 +898,16 @@ fn queue_check(cfg: &Config, q: &hds_core::queue::QueueConfig, snap: Option<Valu
             hds_core::queue::CLIENT_TIMEOUT_SEC
         ));
     }
+    // F3 (M5 T0.3): рассинхрон слотов чата и лимита исполнения — 5-й
+    // пользователь ждал бы при свободном слоте чата.
+    let par = hds_core::config::llm_parallel(cfg);
+    if par > q.max_inflight as i64 {
+        fixes.push(format!(
+            "rate_limit.max_inflight ({}) >= llm_server.parallel ({}): лимит исполнения \
+             очереди меньше слотов чата — лишние слоты простаивают",
+            q.max_inflight, par
+        ));
+    }
     let configured = format!(
         "очередь включена: политика {}, глубина ожидания ≤ {}, одновременно исполняется ≤ {} \
          (на пользователя ≤ {}), ожидание ≤ {} с",
@@ -1120,6 +1130,35 @@ mod tests {
             "fix={}",
             chk.fix
         );
+    }
+
+    /// F3 (M5 T0.3): рассинхрон `llm_server.parallel` ↔ `rate_limit.max_inflight`
+    /// помечается warn с числами; согласованные дефолты — не помечаются.
+    #[test]
+    fn queue_check_warns_on_inflight_parallel_mismatch() {
+        use super::queue_check;
+        use hds_core::queue::QueueConfig;
+
+        // Явный рассинхрон: слотов чата 5, исполнение 3 → warn с числами.
+        let c = cfg("profile: server\nllm_server:\n  parallel: 5\n\
+             rate_limit:\n  max_inflight: 3\nqueue:\n  enabled: true");
+        let q = QueueConfig::from_config(&c);
+        let chk = queue_check(&c, &q, None);
+        assert_eq!(chk.status, "warn", "msg={}", chk.msg);
+        assert!(
+            chk.fix.contains("llm_server.parallel (5)"),
+            "fix={}",
+            chk.fix
+        );
+        assert!(chk.fix.contains("max_inflight (3)"), "fix={}", chk.fix);
+
+        // Согласованные дефолты server (parallel 5 / inflight 5) — warn только
+        // про отсутствие снапшота, не про рассинхрон.
+        let c = cfg("profile: server");
+        let q = QueueConfig::from_config(&c);
+        assert_eq!(q.max_inflight, 5, "дефолт server — как parallel (F3)");
+        let chk = queue_check(&c, &q, None);
+        assert!(!chk.fix.contains("max_inflight (3)"), "fix={}", chk.fix);
     }
 
     /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.

@@ -211,7 +211,10 @@ trusted_proxy: false        # true = доверять X-Forwarded-For/Proto от
 #   requests_per_min: 120    # частота запросов на пользователя
 #   burst: 30                # всплеск (ёмкость bucket)
 #   login_per_min: 10        # POST /auth/login по IP (антибрутфорс)
-#   max_inflight: 4          # параллельные тяжёлые запросы (ask_my_files) — глобально
+#   max_inflight: 5          # параллельные тяжёлые запросы (ask_my_files) — глобально;
+#                            #   дефолт по профилю: server 5 (= llm_server.parallel),
+#                            #   desktop 4 (M5 T0.3/F3); держите >= llm_server.parallel,
+#                            #   иначе слоты чата простаивают (hds check предупредит)
 #   max_inflight_per_user: 2 # ...и на пользователя (M4 T4): 3-й одновременный RAG
 #                            #   одного пользователя -> 429 + hint; в очереди (T3)
 #                            #   это отдельный предел, проверяется в can_admit
