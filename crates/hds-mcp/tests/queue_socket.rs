@@ -253,3 +253,48 @@ fn queue_disabled_keeps_m3_behaviour() {
     std::env::remove_var("HDS_CONFIG");
     std::env::remove_var("HDS_ROOT");
 }
+
+/// T0.9 (F9 из M4_CODE_REVIEW.md): обрыв клиента во время ожидания слота —
+/// `QueueReject::Aborted`: место в очереди освобождается, счётчик `aborted`
+/// растёт, ответ не отправляется (соединение уже закрыто клиентом).
+#[test]
+fn aborted_client_releases_queue_slot() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmp_dir("q3");
+    let cfg = write_config(&dir, 1, 4);
+    let lock = lock_db(&dir); // держатель слота (писатель БД)
+    let addr = spawn_server(&cfg);
+
+    // 1) Слот занят (запрос висит на блокировке БД).
+    let _held = hold_slot(addr);
+    wait_for(
+        "executing=1 в снапшоте очереди",
+        Duration::from_secs(30),
+        || snapshot(&dir).is_some_and(|v| v["executing"] == 1),
+    );
+
+    // 2) Второй тяжёлый запрос встал в очередь.
+    let waiter = hold_slot(addr);
+    wait_for(
+        "depth=1 в снапшоте (запрос ждёт)",
+        Duration::from_secs(10),
+        || snapshot(&dir).is_some_and(|v| v["depth"] == 1),
+    );
+
+    // 3) Клиент оборвал соединение, не читая ответ.
+    let _ = waiter.shutdown(std::net::Shutdown::Both);
+
+    // 4) Место освободилось, обрыв зафиксирован в метриках (`hds check`).
+    wait_for(
+        "aborted=1, depth=0 в снапшоте",
+        Duration::from_secs(10),
+        || {
+            snapshot(&dir)
+                .is_some_and(|v| v["aborted"].as_u64().unwrap_or(0) >= 1 && v["depth"] == 0)
+        },
+    );
+
+    drop(lock);
+    std::env::remove_var("HDS_CONFIG");
+    std::env::remove_var("HDS_ROOT");
+}

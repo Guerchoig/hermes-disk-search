@@ -240,3 +240,128 @@ fn two_tokens_of_same_user_share_quota() {
     std::env::remove_var("HDS_CONFIG");
     std::env::remove_var("HDS_ROOT");
 }
+
+/// Тяжёлый запрос с Bearer-токеном (тело то же).
+fn heavy_req_token(token: &str) -> Vec<u8> {
+    format!(
+        "POST /mcp HTTP/1.1\r\nHost: t\r\nContent-Type: application/json\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{HEAVY}",
+        HEAVY.len()
+    )
+    .into_bytes()
+}
+
+/// Авторизованный тяжёлый запрос с чтением ответа.
+fn send_heavy_token(addr: SocketAddr, token: &str) -> String {
+    let mut s = TcpStream::connect(addr).expect("connect");
+    s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    s.write_all(&heavy_req_token(token)).expect("write");
+    let mut resp = String::new();
+    let _ = s.read_to_string(&mut resp);
+    resp
+}
+
+/// Авторизованный тяжёлый запрос БЕЗ чтения ответа (занимает слот/очередь).
+fn hold_slot_token(addr: SocketAddr, token: &str) -> TcpStream {
+    let mut s = TcpStream::connect(addr).expect("connect");
+    s.write_all(&heavy_req_token(token)).expect("write");
+    s
+}
+
+/// F2 (M5 T0.2): при `access.enabled` неавторизованный ТЯЖЁЛЫЙ запрос
+/// отвергается `401` ДО постановки в очередь — занятый слот не заставляет его
+/// ждать `wait_timeout_sec`, место в `queue.max_depth` он не занимает
+/// (регресс-защита от вектора DoS, появившегося в M4).
+#[test]
+fn unauthorized_heavy_rejected_before_queue() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmp_dir("authq");
+    // Конфиг очереди (слот исполнения 1), access включён, глубина ожидания 1;
+    // per-user предел ослабляем (2 > глобального 1), чтобы авторизованный
+    // waiter действительно ЖДАЛ слот, а не получал немедленный `429` PerUser.
+    let body = queue_cfg_body()
+        .replace("access:\n  enabled: false", "access:\n  enabled: true")
+        .replace("max_depth: 5", "max_depth: 1")
+        .replace("max_inflight: 3", "max_inflight: 1")
+        .replace("max_inflight_per_user: 1", "max_inflight_per_user: 2");
+    let cfg = dir.join("config.yaml");
+    std::fs::write(&cfg, body).unwrap();
+
+    // access.yaml: пользователи anna и boris с валидными токенами (проекты
+    // непустые — иначе search не трогает БД и «занятый слот» не детерминирован).
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let mut acc = hds_core::access::Access::default();
+    for (login, projects) in [
+        ("anna", vec!["demo".to_string()]),
+        ("boris", vec!["demo".to_string()]),
+    ] {
+        acc.users.push(hds_core::access::User {
+            name: login.to_string(),
+            login: login.to_string(),
+            password_hash: "$argon2id$v=19$m=19456,t=2,p=1$placeholder".to_string(),
+            admin: false,
+            projects,
+            disabled: false,
+        });
+    }
+    let (t_anna, tok_a) = hds_core::access::new_token("anna", 90, now).unwrap();
+    let (t_boris, tok_b) = hds_core::access::new_token("boris", 90, now).unwrap();
+    acc.tokens.extend([tok_a, tok_b]);
+    hds_core::access::save_at(&dir.join("data").join("access.yaml"), &acc).unwrap();
+
+    let lock = lock_db(&dir);
+    let addr = spawn_server(&cfg);
+
+    // 1) Занять единственный слот исполнения авторизованным запросом.
+    let _held = hold_slot_token(addr, &t_anna);
+    wait_for(
+        "executing=1 в снапшоте очереди",
+        Duration::from_secs(30),
+        || snapshot(&dir).is_some_and(|v| v["executing"] == 1),
+    );
+
+    // 2) Неавторизованный тяжёлый запрос → мгновенный 401 (не ждёт слот).
+    let started = Instant::now();
+    let r = send_heavy(addr);
+    assert!(
+        r.starts_with("HTTP/1.1 401"),
+        "ожидался 401, получено: {:.200}",
+        r
+    );
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "401 пришёл после ожидания очереди — F2 не закрыт"
+    );
+
+    // 3) В очередь он не встал: depth остаётся 0 (окно наблюдения дольше
+    //    среза снапшота 2 с).
+    std::thread::sleep(Duration::from_secs(3));
+    let snap = snapshot(&dir).expect("снапшот очереди");
+    assert_eq!(
+        snap["depth"], 0,
+        "неавторизованный занял место в очереди: {snap}"
+    );
+
+    // 4) Валидный токен ДРУГОГО пользователя ведёт себя как раньше: встаёт
+    //    в очередь и после освобождения слота получает ответ.
+    let waiter = std::thread::spawn(move || send_heavy_token(addr, &t_boris));
+    wait_for(
+        "depth=1 (авторизованный ждёт слот)",
+        Duration::from_secs(10),
+        || snapshot(&dir).is_some_and(|v| v["depth"] == 1),
+    );
+    drop(lock); // слот освободится — держатель и waiter завершатся
+    let r2 = waiter.join().unwrap();
+    assert!(
+        r2.starts_with("HTTP/1.1 200"),
+        "авторизованный должен дождаться ответа: {:.200}",
+        r2
+    );
+
+    std::env::remove_var("HDS_CONFIG");
+    std::env::remove_var("HDS_ROOT");
+}

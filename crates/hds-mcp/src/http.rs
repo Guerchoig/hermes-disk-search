@@ -809,6 +809,35 @@ fn serve_request(
     // (иначе текст запроса со словом `ask_my_files` ложно попадал под лимит).
     let heavy = is_heavy_request(b);
     if heavy {
+        // F2 (M5 T0.2): при включённой авторизации проверяем Bearer ДО очереди
+        // и ДО пер-пользовательского лимита. Иначе неавторизованный тяжёлый
+        // запрос сначала ждёт слот до `queue.wait_timeout_sec` (240 с), занимая
+        // место в `queue.max_depth`, и только потом `route` отдаёт `401` —
+        // вектор DoS, появившийся в M4. Отказ снова немедленный, как в M3.
+        if env.enabled && auth::resolve_bearer(env, head.authorization.as_deref()).is_none() {
+            // M3 T2: аудит неавторизованного доступа — событие не теряется
+            // (до `route` запрос теперь не доходит).
+            if let Some(a) = &env.audit {
+                a.record(
+                    &hds_core::audit::AuditEvent {
+                        ts: 0,
+                        event: "unauthorized".into(),
+                        user: None,
+                        ip: ip.clone(),
+                        method: m.into(),
+                        path: p.into(),
+                        tool: None,
+                        projects: None,
+                        token: None,
+                        status: 401,
+                        ms: 0,
+                    }
+                    .now(),
+                );
+            }
+            write_reply(stream, unauthorized());
+            return;
+        }
         // M4 T3: очередь тяжёлых RAG (server-профиль). Запрос ЖДЁТ слот с
         // fair-share по пользователю; `queue.enabled: false` (desktop) —
         // прежнее поведение M3 (мгновенный 429).
