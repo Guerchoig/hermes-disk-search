@@ -23,6 +23,11 @@ rand_core.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 getrandom.workspace = true
+# M5 T2 (PLAN_M5_EXTERNAL_CHAT.md §3.3): TLS-клиент для внешнего chat-API
+# (chat.provider: remote). Только исходящие; входящие серверы без TLS
+# (периметр = reverse-proxy, M3). ring — без aws-lc-rs (сборка проще).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
 
 [dev-dependencies]
 # OpenFlags/Connection для тестов паритета (боевая БД, read-only)

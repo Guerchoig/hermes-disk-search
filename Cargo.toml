@@ -38,6 +38,12 @@ sha2 = "0.10"
 subtle = "2"
 getrandom = "0.3"
 
+# M5 T2 (PLAN_M5_EXTERNAL_CHAT.md §3.3): TLS-клиент для внешнего chat-API
+# (chat.provider: remote). Только исходящие; входящие серверы без TLS
+# (периметр = reverse-proxy, M3). ring — без aws-lc-rs (сборка проще).
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+webpki-roots = "0.26"
+
 # sqlite-vec компилируется из C: без оптимизации скорость вставки/поиска
 # падает в разы (грабля спайка 1, tools/parity/spikes/Cargo.toml).
 [profile.dev.package.sqlite-vec]

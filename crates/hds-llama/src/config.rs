@@ -358,7 +358,21 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
         .unwrap_or(default_parallel)
         .max(1) as i32;
     let mut roles: Vec<RoleConfig> = Vec::new();
+    // M5 §3.2 (PLAN_M5_EXTERNAL_CHAT.md): `chat.provider: remote` — llm-host
+    // НЕ держит chat-роль в VRAM (RAG идёт во внешний API `chat.base_url`);
+    // embedding/rerank поднимаются как раньше. Это и есть «рычаг SLA».
+    let chat_remote = dig_str(root, "chat.provider")
+        .map(|v| v.trim().eq_ignore_ascii_case("remote"))
+        .unwrap_or(false);
     for role in ROLES {
+        if role == "chat" && chat_remote {
+            warnings.push(
+                "chat: provider remote — chat-роль в llm-host не поднимается (RAG ходит \
+                 в chat.base_url); llm_server.chat.* игнорируется"
+                    .to_string(),
+            );
+            continue;
+        }
         if let Some(rc) = build_role(root, role, parallel, &gpu, &mut warnings) {
             roles.push(rc);
         }
@@ -453,11 +467,20 @@ fn build_role(
         notes.push(msg);
     }
 
-    let default_retention = if role == "chat" {
-        retention::KEEP_LOADED
-    } else {
-        retention::LOAD_ON_DEMAND
-    };
+    // F1 (M5 T0.1, корень выброса ~315 с): повторная загрузка роли on_demand
+    // при занятой VRAM идёт через `llama_params_fit_impl` движка, который при
+    // тесной памяти («свободно ~1900 МиБ,Projected 334») завершается за ~299 с
+    // (замер f1_r1: fit chat 0,57 с → embedding 4,2 с → rerank 27,3 с →
+    // embedding-перезагрузка 299 с). Если роль не выгружать, перезагрузок нет —
+    // поэтому в server-профиле embedding/rerank по умолчанию держатся в VRAM
+    // (`keep`, прогрев при старте, host.rs); desktop экономит VRAM как раньше.
+    let server = dig_str(root, "profile").as_deref() == Some("server");
+    let default_retention =
+        if role == "chat" || (server && (role == "embedding" || role == "rerank")) {
+            retention::KEEP_LOADED
+        } else {
+            retention::LOAD_ON_DEMAND
+        };
     let retention_mode = match dig_str(root, &format!("llm.{role}.retention")).as_deref() {
         Some("keep_loaded") | Some("keep-loaded") | Some("keep") => retention::KEEP_LOADED,
         Some("load_on_demand") | Some("load-on-demand") | Some("ondemand") => {
@@ -781,6 +804,52 @@ llm_server:
             build(Path::new("t.yaml"), &explicit).parallel,
             2,
             "явное значение сильнее профильного дефолта"
+        );
+    }
+
+    /// F1 (M5 T0.1): в server-профиле embedding/rerank по умолчанию `keep`
+    /// (без перезагрузок нет и ~299-с fit при тесной VRAM); desktop —
+    /// `load_on_demand` как раньше; явный ключ сильнее дефолта профиля.
+    #[test]
+    fn retention_defaults_by_profile() {
+        let server: Value = serde_yaml::from_str(
+            "profile: server\nllm_server: {host: \"127.0.0.1\"}\nembedding: {base_url: \"http://127.0.0.1:8011/v1\"}",
+        )
+        .unwrap();
+        let cfg = build(Path::new("t.yaml"), &server);
+        assert_eq!(
+            cfg.role("embedding").unwrap().retention_mode,
+            retention::KEEP_LOADED,
+            "server: embedding держим в VRAM"
+        );
+        assert_eq!(
+            cfg.role("rerank").unwrap().retention_mode,
+            retention::KEEP_LOADED,
+            "server: rerank держим в VRAM"
+        );
+
+        let desktop: Value = serde_yaml::from_str("llm_server: {host: \"127.0.0.1\"}").unwrap();
+        let cfg = build(Path::new("t.yaml"), &desktop);
+        assert_eq!(
+            cfg.role("embedding").unwrap().retention_mode,
+            retention::LOAD_ON_DEMAND,
+            "desktop: экономия VRAM как раньше"
+        );
+        assert_eq!(
+            cfg.role("rerank").unwrap().retention_mode,
+            retention::LOAD_ON_DEMAND
+        );
+
+        // Явный ключ сильнее профильного дефолта.
+        let explicit: Value = serde_yaml::from_str(
+            "profile: server\nllm:\n  embedding:\n    retention: load_on_demand",
+        )
+        .unwrap();
+        let cfg = build(Path::new("t.yaml"), &explicit);
+        assert_eq!(
+            cfg.role("embedding").unwrap().retention_mode,
+            retention::LOAD_ON_DEMAND,
+            "явный retention сильнее дефолта профиля"
         );
     }
 

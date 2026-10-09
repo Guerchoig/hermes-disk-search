@@ -2575,6 +2575,41 @@ impl Host {
                     )?;
                     log.line(&format!("  чат: {}", inst.state_name));
                 }
+                // F1 (M5 T0.1): прогрев KEEP-ролей сразу после чата — иначе первый
+                // RAG-запрос, дотянувшийся до on-demand роли, платил за её загрузку
+                // сам (замер f1_r1: fit rerank ~27 с, перезагрузка embedding ~299 с
+                // при тесной VRAM — выброс p95 315 с). Прогрев делает загрузку
+                // детерминированной частью старта, а не сюрпризом под нагрузкой.
+                for role in ["embedding", "rerank"] {
+                    let keep = resolved
+                        .role(role)
+                        .is_some_and(|r| r.retention_mode == crate::ffi::retention::KEEP_LOADED);
+                    if !keep {
+                        continue;
+                    }
+                    if let Some(id) = ids.get(role).copied() {
+                        log.line(&format!("прогрев роли {role} (KEEP_LOADED)…"));
+                        match cls.load(id) {
+                            Ok(()) => {
+                                let inst = cls.wait_loaded(
+                                    id,
+                                    Duration::from_secs(300),
+                                    Duration::from_millis(500),
+                                )?;
+                                log.line(&format!("  {role}: {}", inst.state_name));
+                            }
+                            Err(e) => {
+                                // Не влезла — НЕ молчим: старт продолжается (роль
+                                // поднимется по запросу), но диагностика кричит.
+                                log.note(&format!(
+                                    "прогрев роли {role} не удался: {e} — загрузится по \
+                                     запросу (диспетчер вытеснит простые роли)"
+                                ));
+                            }
+                        }
+                    }
+                }
+
                 let shared = Arc::new(ClusterShared::new(cls));
                 // L1: порог «долгого» вызова движка — строка появится в логе/heartbeat.
                 shared.set_slow_ms(SLOW_CALL_MS);

@@ -95,6 +95,7 @@ def build_corpus(corpus):
 
 
 LLM_CFG = """
+profile: server
 llm_server:
   bin: ""
   host: "127.0.0.1"

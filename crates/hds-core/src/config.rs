@@ -299,6 +299,31 @@ pub fn llm_parallel(cfg: &Config) -> i64 {
         .max(1)
 }
 
+/// `chat.provider`: `local` (дефолт) | `remote` (M5 §3.2, контракт —
+/// `PLAN_M4_CONCURRENCY_SLA.md` §3.5). Неизвестное значение → `local`.
+pub fn chat_provider(cfg: &Config) -> String {
+    let v = dig(cfg, "chat.provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("local")
+        .trim()
+        .to_ascii_lowercase();
+    if v == "remote" {
+        v
+    } else {
+        "local".to_string()
+    }
+}
+
+/// `chat.api_key` — Bearer-токен внешнего API (только `provider: remote`).
+/// `-` — явное «без ключа». В диагностиках не печатать (секрет).
+pub fn chat_api_key(cfg: &Config) -> String {
+    dig(cfg, "chat.api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
 /// `db.journal_mode`: режим журнала, который писатель (`open_rw`) ставит PRAGMA'ой.
 ///
 /// Дефолт `wal` (порт Python). WAL персистентен в файле базы — read-only читатели

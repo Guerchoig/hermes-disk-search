@@ -1000,6 +1000,50 @@ fn queue_check(cfg: &Config, q: &hds_core::queue::QueueConfig, snap: Option<Valu
     }
 }
 
+/// M5 T1 (§3.2): пункт `chat_provider` — источник RAG-ответа: `local` (чат-роль
+/// llm-host) или `remote` (внешний API `chat.base_url`). Для remote без
+/// `base_url`/`api_key` — warn (сервер не заработает / ключ не задан);
+/// напоминание про анонимизацию (W9) — без неё наружу уходят вопрос и фрагменты.
+fn check_chat_provider(cfg: &Config) -> Check {
+    let provider = hds_core::config::chat_provider(cfg);
+    if provider != "remote" {
+        return Check::new(
+            "chat_provider",
+            "ok",
+            "чат-роль локальная (llm-host, фасад :8010); provider=remote включается ключом chat.provider",
+        );
+    }
+    let base = hds_core::config::dig(cfg, "chat.base_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let key = hds_core::config::chat_api_key(cfg);
+    let mut fixes: Vec<String> = Vec::new();
+    if base.is_empty() || !base.starts_with("http://") && !base.starts_with("https://") {
+        fixes.push("задайте chat.base_url (внешний OpenAI-совместимый API)".to_string());
+    }
+    if key.is_empty() || key == "-" {
+        fixes.push("задайте chat.api_key (внешний API без ключа — обычно 401)".to_string());
+    }
+    let msg = format!(
+        "чат ВНЕШНИЙ ({base}): RAG-ответ генерирует внешний API; chat-роль llm-host не \
+         поднимается (VRAM освобождена). Внимание: вопрос и фрагменты локальных файлов \
+         уходят провайдеру как есть — анонимизация ещё не реализована (W9)"
+    );
+    if fixes.is_empty() {
+        Check::new("chat_provider", "ok", "внешний chat-provider (remote)").msg(msg)
+    } else {
+        Check::new(
+            "chat_provider",
+            "warn",
+            "внешний chat-provider (remote): проверьте настройки",
+        )
+        .msg(msg)
+        .fix(fixes.join("; "))
+    }
+}
+
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
@@ -1037,6 +1081,7 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_audit(cfg));
     checks.push(check_perimeter(cfg));
     checks.push(check_queue(cfg));
+    checks.push(check_chat_provider(cfg));
     checks.push(
         Check::new(
             "gpu-manual",
@@ -1159,6 +1204,40 @@ mod tests {
         assert_eq!(q.max_inflight, 5, "дефолт server — как parallel (F3)");
         let chk = queue_check(&c, &q, None);
         assert!(!chk.fix.contains("max_inflight (3)"), "fix={}", chk.fix);
+    }
+
+    /// M5 T1 (§3.2): пункт `chat_provider` — local по умолчанию; remote без
+    /// base_url/api_key — warn с подсказками; полный remote — ok.
+    #[test]
+    fn chat_provider_check_statuses() {
+        use super::check_chat_provider;
+
+        // Дефолт (нет ключа provider) — local, ok.
+        let c = check_chat_provider(&cfg("index:\n  roots: []"));
+        assert_eq!(c.status, "ok");
+        assert!(c.title.contains("локальная"), "title={}", c.title);
+
+        // remote без base_url и api_key — warn с двумя подсказками.
+        let c = check_chat_provider(&cfg("chat:\n  provider: remote"));
+        assert_eq!(c.status, "warn", "msg={}", c.msg);
+        assert!(c.fix.contains("chat.base_url"), "fix={}", c.fix);
+        assert!(c.fix.contains("chat.api_key"), "fix={}", c.fix);
+
+        // Полный remote (https + ключ) — ok, с напоминанием об анонимизации.
+        let c = check_chat_provider(&cfg(
+            "chat:\n  provider: remote\n  base_url: \"https://api.example.com/v1\"\n  api_key: \"sk-test\"",
+        ));
+        assert_eq!(c.status, "ok", "msg={}", c.msg);
+        assert!(
+            c.msg.contains("W9"),
+            "напоминание про анонимизацию: {}",
+            c.msg
+        );
+        assert!(
+            !c.msg.contains("sk-test"),
+            "секрет не печатается: {}",
+            c.msg
+        );
     }
 
     /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.

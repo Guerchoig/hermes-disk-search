@@ -172,20 +172,20 @@ pub fn ask(
             .unwrap_or(240)
             .max(1) as u64,
     );
+    // M5 T2 (§3.2): внешний API (`chat.provider: remote`) — Bearer-ключ
+    // `chat.api_key` на каждый запрос (`-`/пусто — без заголовка). Для local
+    // ключа обычно нет — заголовок не отправляется, поведение прежнее.
+    let api_key = hds_core::config::chat_api_key(cfg);
+    let mut headers: Vec<(&str, String)> = vec![("Content-Type", "application/json".to_string())];
+    if !api_key.is_empty() && api_key != "-" {
+        headers.push(("Authorization", format!("Bearer {api_key}")));
+    }
+    let header_refs: Vec<(&str, &str)> = headers.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let url = format!("{base}/chat/completions");
 
     let post = |body: &serde_json::Value| -> Result<serde_json::Value, String> {
-        let (host, port, prefix) = hds_index::embed::split_base(base).map_err(|e| e.message())?;
-        let path = format!("{prefix}/chat/completions");
-        let resp = http::request(
-            &host,
-            port,
-            "POST",
-            &path,
-            &[("Content-Type", "application/json")],
-            Some(&body.to_string()),
-            timeout,
-        )
-        .map_err(|e| e.message())?;
+        let resp = http::request_url(&url, "POST", &header_refs, Some(&body.to_string()), timeout)
+            .map_err(|e| e.message())?;
         if resp.status != 200 {
             return Err(format!(
                 "HTTP {}: {}",
