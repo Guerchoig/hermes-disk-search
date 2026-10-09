@@ -514,6 +514,20 @@ hds.example.com {
 > fail-closed UI-гейт). Десктоп-профиль не изменён. Пункты Э2 «TLS/reverse-proxy,
 > аудит и rate-limit» закрыты; осталось из Э2 — отправка во внешний API
 > (анонимизация — W9).
+>
+> **Статус M4 — «Конкурентность и SLA ≤5 мин» (Э4/W3) выполнен (08.10.2026,
+> детали и коммиты — `PLAN_M4_CONCURRENCY_SLA.md` §8a):** T0 — хвосты ревью M3;
+> T1 — БД под конкурентность (`db.{busy_timeout_ms,journal_mode,read_only_conns}`,
+> `open_rw`/`open_ro`, стресс без `SQLITE_BUSY`); T2 — слоты чата
+> (`llm_server.parallel`: server 5 / desktop 1) и VRAM fit-гейт; T3 — очередь
+> тяжёлых RAG (`hds-core::queue`, fair-share round-robin по пользователю,
+> `429`/`503` + `Retry-After`, снапшот `data/mcp-queue.json`); **T4 — квоты по
+> пользователю** (ключ лимитов = `user:<login>`/`ip:<addr>`, `max_inflight_per_user`,
+> `per_token`); **T5 — нагрузочная приёмка** 5 × `ask_my_files`
+> (`tools/parity/load5.py`: `parallel 2/3/5` → p95 49–58 с, SLA выполнен;
+> остаточный выброс ~305–315 с при on-demand загрузке `embedding` — отдельный
+> разбор); T6 — доклад. Десктоп-профиль не изменён (очередь/квоты выключены,
+> `parallel: 1`, `db.*` 30000/false).
 
 **Milestone M1 — «Фундамент доступа» = Э2 (только приложение) + Э3 (Проекты).**
 Начинаем с него, потому что:
