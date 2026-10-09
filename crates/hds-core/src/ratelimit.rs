@@ -119,8 +119,9 @@ pub struct Limiter {
     /// Пер-пользовательская частота (`requests_per_min_per_user`; M4 T4 —
     /// применяется при `per_token: true`).
     user_buckets: Mutex<HashMap<String, Bucket>>,
-    inflight: Mutex<HashMap<String, u32>>,
     /// Пер-пользовательский параллелизм (`max_inflight_per_user`; M4 T4).
+    /// F6 (M5 T0.6): мёртвый путь `inflight_*`/`InflightGuard` удалён —
+    /// рантайм тяжёлых идёт через очередь либо `user_inflight_*`.
     user_inflight: Mutex<HashMap<String, u32>>,
 }
 
@@ -141,7 +142,6 @@ impl Limiter {
             buckets: Mutex::new(HashMap::new()),
             login: Mutex::new(HashMap::new()),
             user_buckets: Mutex::new(HashMap::new()),
-            inflight: Mutex::new(HashMap::new()),
             user_inflight: Mutex::new(HashMap::new()),
         }
     }
@@ -201,41 +201,6 @@ impl Limiter {
         }
     }
 
-    /// Занять слот параллелизма (`max_inflight` на ключ); `false` — предел.
-    pub fn inflight_acquire(&self, key: &str) -> bool {
-        let mut m = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        let n = m.entry(key.to_string()).or_insert(0);
-        if *n >= self.cfg.max_inflight {
-            false
-        } else {
-            *n += 1;
-            true
-        }
-    }
-
-    /// Отпустить слот параллелизма (в паре с `inflight_acquire`).
-    pub fn inflight_release(&self, key: &str) {
-        let mut m = self.inflight.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(n) = m.get_mut(key) {
-            *n = n.saturating_sub(1);
-            if *n == 0 {
-                m.remove(key);
-            }
-        }
-    }
-
-    /// Занять слот с авто-освобождением на `Drop`; `None` — предел достигнут.
-    pub fn inflight_guard(self: &Arc<Self>, key: &str) -> Option<InflightGuard> {
-        if self.inflight_acquire(key) {
-            Some(InflightGuard {
-                limiter: Arc::clone(self),
-                key: key.to_string(),
-            })
-        } else {
-            None
-        }
-    }
-
     /// Занять **пер-пользовательский** слот параллелизма (M4 T4 §3.3);
     /// `false` — предел пользователя.
     ///
@@ -273,18 +238,6 @@ impl Limiter {
                 m.remove(key);
             }
         }
-    }
-}
-
-/// RAII-слот параллелизма: на `Drop` освобождает слот.
-pub struct InflightGuard {
-    limiter: Arc<Limiter>,
-    key: String,
-}
-
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        self.limiter.inflight_release(&self.key);
     }
 }
 
@@ -367,35 +320,37 @@ mod tests {
         assert!(l.check_login("5.6.7.8").is_none());
     }
 
-    /// Параллелизм: до max_inflight — да, дальше нет; Drop освобождает.
+    /// Параллелизм: до пер-пользовательского предела — да, дальше нет;
+    /// release возвращает слот. F6 (M5 T0.6): тест переведён на рантайм-путь
+    /// `user_inflight_*` (мёртвый `inflight_*`/`InflightGuard` удалён).
     #[test]
-    fn inflight_capped_and_guard_releases() {
-        let l = Arc::new(lim(600, 50, 50, 2));
-        assert!(l.inflight_acquire("tok"));
-        assert!(l.inflight_acquire("tok"));
-        assert!(!l.inflight_acquire("tok"), "третий параллельный — 429");
-        {
-            let _g = l.inflight_guard("tok2").expect("другой ключ — ок");
-            assert!(l.inflight_acquire("tok2"));
-            assert!(!l.inflight_acquire("tok2"));
-        } // guard.drop → слот tok2 освобождён
-        assert!(l.inflight_acquire("tok2"), "после Drop слот свободен");
-        l.inflight_release("tok");
-        assert!(l.inflight_acquire("tok"), "release возвращает слот");
+    fn user_inflight_capped_and_release_returns_slot() {
+        let l = Arc::new(lim(600, 50, 50, 2)); // предел пользователя min(2, 2) = 2
+        assert!(l.user_inflight_acquire("u"));
+        assert!(l.user_inflight_acquire("u"));
+        assert!(!l.user_inflight_acquire("u"), "третий параллельный — 429");
+        assert!(
+            l.user_inflight_acquire("u2"),
+            "другой пользователь — свой предел"
+        );
+        l.user_inflight_release("u");
+        assert!(l.user_inflight_acquire("u"), "после release слот свободен");
+        l.user_inflight_release("u");
+        l.user_inflight_release("u2");
     }
 
-    /// Частота и параллелизм — независимые измерения.
+    /// Частота и параллелизм — независимые измерения (F6: путь `user_inflight_*`).
     #[test]
     fn frequency_and_inflight_independent() {
-        let l = Arc::new(lim(600, 50, 50, 1));
-        assert!(l.check("tok").is_none());
-        let g = l.inflight_guard("tok").unwrap();
+        let l = Arc::new(lim(600, 50, 50, 1)); // предел пользователя min(2, 1) = 1
+        assert!(l.check("u").is_none());
+        assert!(l.user_inflight_acquire("u"));
         // Частота не заблокирована inflight-слотом...
-        assert!(l.check("tok").is_none());
+        assert!(l.check("u").is_none());
         // ...а слот параллелизма исчерпан.
-        assert!(!l.inflight_acquire("tok"), "второй inflight — 429");
-        drop(g);
-        assert!(l.inflight_acquire("tok"), "после Drop слот свободен");
+        assert!(!l.user_inflight_acquire("u"), "второй inflight — 429");
+        l.user_inflight_release("u");
+        assert!(l.user_inflight_acquire("u"), "после release слот свободен");
     }
 
     /// M4 T4 (§3.3): дефолты пер-пользовательских ключей и `per_token`
