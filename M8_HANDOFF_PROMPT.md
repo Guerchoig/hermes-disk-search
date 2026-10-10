@@ -1,0 +1,103 @@
+# M8_HANDOFF_PROMPT.md — промт для нового чата (этап M8/Э8+Э9: пакеты установки сервер/клиент)
+
+> Скопируйте текст ниже в новый чат. Он самодостаточен: репозиторий, ветка, состояние, точка
+> входа, объём, контракты, где детали, правила и грабли окружения.
+>
+> **Этап M7/Э7 закрыт (T0–T6) и прошёл независимое код-ревью** (`M7_CODE_REVIEW.md`, коммит
+> `345a0df`, принят; главная находка **M7-1** — medium, локализация отказа SCM). По дорожной
+> карте `PLAN_SERVER_MULTIUSER.md` §5 следующий этап — **M8/Э8+Э9**: **Э8** «Серверный пакет
+> установки Win/Apple Silicon» (W6, 5–8 дн) и **Э9** «Клиентский пакет Win/macOS, Cline+Hermes»
+> (W7, 3–5 дн). Детальный план — **`PLAN_M8_INSTALL_PACKAGES.md`** (§3 контракты, §4 треки T0–T6,
+> §5 приёмка, §7 открытые вопросы к владельцу).
+
+---
+
+Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
+Состояние на момент передачи: **HEAD — верх `git log`** после docs-коммитов M8 (план + промт);
+ранее — ревью `345a0df`, промт ревью `77634a7`, этап M7 закрыт на `94d3469`. Дерево чистое.
+Боевой стенд поднят (резидент `llm_host` `target\release`, `hds watch`/`hds mcp-http`/
+`hds transcribe-watch` из `target\debug`, `index.pause` — есть). M1–M7 закрыты; M6/M7 прошли
+код-ревью (`M6_CODE_REVIEW.md`, `M7_CODE_REVIEW.md`).
+
+Станция: Windows, RTX 3060 12 ГБ, AMD Radeon iGraphics (iGPU, UMA), Ryzen 7 5700G, 64 ГБ RAM,
+rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только sidecar.
+
+## Объём M8 (кратко; подробно — `PLAN_M8_INSTALL_PACKAGES.md`)
+
+1. **T0 — хвосты ревью M7:** **M7-1** (`permission_denied`: `to_lowercase()` вместо
+   `to_ascii_lowercase()` + проверки `"ошибка: 5"`; юнит на русский текст), **M7-2** (`restart`
+   ролей кроме `ui`: поллинг `stopped` перед `start`), **M7-4** (macOS `uninstall` не теряет код
+   `bootout`).
+2. **T1 — серверный установщик unattended (Windows):** параметры вместо `Read-Host`,
+   генерация `config.yaml` server-профиля (`parallel`, раскладка ролей, корни, доступ+админ),
+   обёртки над `fetch_*`.
+3. **T2 — серверный пакет macOS/Apple Silicon:** `install_server.command` + LaunchDaemon +
+   Metal-рантайм (живой цикл — хвост «машина с Mac»).
+4. **T3 — клиентский пакет (Win/macOS):** `hds cline-sync --server-url --token`, мастер
+   «адрес+токен → `GET /health` → запись Cline-конфига», опционально Hermes; без локальных
+   моделей/индекса.
+5. **T4 — обновление/откат серверного профиля:** `update.ps1` с остановом SCM-служб (окно
+   обслуживания), откат `app\current`.
+6. **T5 — приёмка:** чистый сервер (одна команда → 4 службы → `/api/services` → MCP за TLS) +
+   тонкий клиент (одна команда → рабочий поиск, локально пусто); обновление с откатом.
+7. **T6 — доклад:** README/`README_SERVER_MULTIUSER.md` §8d/`STATUS.md`/§9 дорожной карты.
+
+**Перед стартом согласовать с владельцем** открытые вопросы §7 плана (формат пакета
+zip vs MSI/`.pkg`; порядок Э8/Э9; авто-прокси; Hermes; первый админ) — они меняют состав треков.
+
+## Контракты (код — источник истины, §3 плана)
+
+* Серверный установщик — параметры (`-StateDir`, `-McpHost/-McpPort`, `-UiHost/-UiPort`,
+  `-Parallel`, `-GpuDevice/-GpuPreset`, `-Roots`, `-Roles`, `-AdminLogin/-AdminPassword`
+  или `-AdminToken`, `-EnableAccess`, `-Proxy caddy|nginx|none`, `-NoFetch`, `-WhatIf`);
+  без параметров — прежнее поведение.
+* Первичный доступ — через `hds-core::access` (пароль хэшируется; plain — не в логи/аудит).
+* Клиент: `setup-client.ps1`/`install_client.command` (`-ServerUrl`, `-Token`) → `GET /health` →
+  `hds cline-sync --server-url --token`; MCP-запись с внешним URL + заголовком `Authorization`.
+* Обновление server-профиля: стоп `hermes-disk-search-<role>` (4 роли) → подмена `app\current`
+  → старт → `hds check`/`GET /api/services`; откат — прежний `app\current`.
+* Десктоп-профиль и desktop-установка **не изменяются**.
+
+## Точка входа (5 минут)
+
+1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -16`
+2. `git --no-pager -C C:\Users\Sasha\hermes-disk-search status --short`     # чисто
+3. `cargo test --workspace` — ⚠ живые сервисы держат `target\debug\hds.exe`: остановить
+   `hds watch`/`hds mcp-http`/`hds transcribe-watch`, после — **вернуть**; либо
+   `cargo test --workspace --exclude hds-cli`. Ожидание: **88 наборов, 0 failed**.
+4. `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all --check`.
+5. Прочитать: **`PLAN_M8_INSTALL_PACKAGES.md`** → `M7_CODE_REVIEW.md` §3 (хвосты T0) →
+   `PLAN_SERVER_MULTIUSER.md` §2 W6/W7, §3, §5 Э8/Э9, §6 рисков, §7 (закрытые вопросы) →
+   `PLAN_M2_SERVER_PROFILE.md` §4 (службы/`install_server.*`) → `STATUS.md`.
+6. Карта кода: `installers/{install_server.ps1,install_server.command,update.ps1,
+   install_app_version.ps1,cline_mcp_merge.py,fetch_*.ps1,build_rust_release.*}`,
+   `crates/hds-cli/src/cmd/{cline_sync,service,auth}.rs`, `crates/hds-core/src/{cline,service,access}.rs`,
+   `crates/hds-ui/src/lib.rs` (`/api/services`, `/api/cline/sync`), `installers/proxy/`.
+
+## Правила и грабли окружения (важно, платил временем)
+
+* **Резидент держит `target\release\*.exe`**, живые службы — `target\debug\hds.exe`: перед
+  пересборкой/полным `cargo test` остановить и **вернуть** (команды: `target\debug\hds.exe
+  watch` / `… transcribe-watch` / `… mcp --http --host 127.0.0.1 --port 8787 --path /mcp`;
+  резидент — `Start-Process target\release\llm_host.exe -ArgumentList run -WindowStyle Hidden`).
+  Это dev-машина (правило `cline-rules/dev-machine.md`) — останавливать/возвращать можно.
+* **`HDS_CONFIG`/`HDS_ROOT` переживают между элементами `run_commands`** — для песочниц задавать
+  и затем **очищать** (`Remove-Item Env:HDS_CONFIG; Remove-Item Env:HDS_ROOT`).
+* **Боевой `index.pause` не снимать** (пользовательская пауза). Плейн-токены/секреты не печатать.
+* **Полный SCM-цикл требует администратора**; сессия Cline — обычно **не** админ; вариант без
+  перезапуска VS Code — UAC-хелпер через `Start-Process -Verb RunAs` (образец
+  `tools/parity/out/m7_t5_scm.ps1`).
+* PowerShell 5.1: `Invoke-WebRequest` без `-UseBasicParsing` зависает; кириллица в консоли
+  искажается (читать файлы инструментом); первый вывод команды иногда «клеит» символ — ставить
+  заглушку-префикс (`$x=0; …`).
+* `read_files` иногда отвечает `[outdated - see the latest file content]` — перечитать диапазон.
+* Артефакты — в `tools/parity/out/` (гитигнор); коммиты — атомарные по трекам (`M8/TN: …`,
+  `docs(m8): …`); решения §5 дорожной карты **не менять**; чужие незакоммиченные правки не трогать.
+
+## Приёмка (кратко; подробно — `PLAN_M8_INSTALL_PACKAGES.md` §5)
+
+Серверный пакет (Win) одной командой: 4 службы (SCM, `/api/services` = running/auto), `hds check`
+ok, доступ включён, админ создан; рантайм/модели скачиваются unattended; MCP за TLS-прокси —
+`200`/`401`; клиентский мастер поднимает Cline проводкой (без локальных моделей), `GET /health`
+ok, поиск работает; обновление без «отказано в доступе» + откат; macOS — юниты (+ хвост «машина с
+Mac»); desktop не изменён; `cargo test --workspace` зелёный, fmt/clippy `-D warnings` чисто.
