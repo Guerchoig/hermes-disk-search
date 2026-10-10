@@ -30,9 +30,10 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
    **M7-1** (`permission_denied`: Unicode `to_lowercase()` + проверки `"failed 5"`/`"ошибка: 5"`;
    юнит на рус. текст), **M7-2** (`restart` ролей кроме `ui`: `wait_stopped()` перед `start`),
    **M7-4** (macOS `uninstall` сохраняет код `bootout`).
-2. **T1 — серверный установщик unattended (Windows):** параметры вместо `Read-Host`,
-   генерация `config.yaml` server-профиля (`parallel`, раскладка ролей, корни, доступ+админ),
-   обёртки над `fetch_*`.
+2. **T1 — серверный установщик unattended (Windows) — ✅ сделано 10.10.2026 (`44e20a8`;
+   следующий шаг — T2):** параметры `install_server.ps1` (`-StateDir/-Parallel/-Gpu*/-Roots/
+   -EnableAccess/-Admin*/-Fetch/-NoFetch/-WhatIf`), генерация server-`config.yaml`, админ
+   (хэш), unattended-вызов `fetch_*` (они уже без `Read-Host`), parity-тест.
 3. **T2 — серверный пакет macOS/Apple Silicon:** `install_server.command` + LaunchDaemon +
    Metal-рантайм (живой цикл — хвост «машина с Mac»).
 4. **T3 — клиентский пакет (Win/macOS):** ⏸ **отложен вместе с Э9** (следующий этап) —
@@ -62,6 +63,23 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
   `restart` через `POST /api/services`.
 * Регресс: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt --check`/clippy `-D warnings`
   чисто. **Хвост:** живой SCM-прогон хелпера — при админ-сессии.
+
+## Сделано в T1 (`44e20a8`, 10.10.2026)
+
+* `installers/install_server.ps1` переписан под unattended (обратная совместимость: без новых
+  параметров — прежнее поведение M2): параметры `-StateDir/-McpHost/-McpPort/-UiHost/-UiPort/
+  -Parallel/-GpuDevice/-GpuPreset/-Roots/-EnableAccess/-AdminLogin/-AdminPassword/-Fetch/
+  -NoFetch/-WhatIf`; `-WhatIf` — план + тело конфига **без изменений и без админа**; `-Roles ""`
+  — config-only. Генерация `config.yaml`: `profile: server`, `access.enabled`,
+  `llm_server.parallel`, `gpu.device_index`/`gpu.preset`, `index.roots`, `mcp_http`/`ui`
+  (существующий конфиг не затирается). Админ — `hds user add --admin` (пароль только хэш,
+  идемпотентно `user passwd`), хинт `token new --user`. **Уточнение:** `fetch_*` уже без
+  `Read-Host` — установщик их оркестрирует (идемпотентно, перехват ошибок).
+* Паритет-тест `crates/hds-cli/tests/install_server_parity.rs` (`install_server_ps1_has_unattended_params`;
+  macOS-паритет — `#[ignore]` до T2).
+* Проверка: `-WhatIf` без админа; песочница config-only (валидный YAML + хэшированный админ,
+  `tools/parity/out/m8_t1_check.py`); `cargo test --workspace` — **89 наборов / 0 failed**,
+  fmt/clippy чисто. **Хвост:** живой прогон с `-Fetch` (сеть) и установка служб — на админ-стенде.
 
 ## Контракты (код — источник истины, §3 плана)
 

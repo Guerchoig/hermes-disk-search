@@ -95,14 +95,25 @@ Win/macOS — `hds` + мастер «адрес сервера + токен» �
   следующей админ-сессии; на этой станции проверены код+юнит+изолированный сниппет.
 - **Следующий шаг — T1** (unattended серверный установщик, Windows).
 
-### T1. Серверный установщик, unattended (Windows) — 2–3 дн
-- [ ] Параметризовать `install_server.ps1` (§3); `-WhatIf` — печать плана без изменений.
-- [ ] Обёртки unattended вокруг `fetch_engine_runtime.ps1`/`fetch_llm_models.ps1`/
-      `fetch_whisper_model.ps1`/`fetch_clip_models.ps1` (проброс параметров; без `Read-Host`).
-- [ ] Генерация `config.yaml` серверного профиля: `parallel`, `gpu.devices`/`gpu.preset`,
-      корни, `mcp_http`/`ui` bind, `access.enabled` + админ.
-- [ ] `install_server.command` — те же параметры/шаги (macOS-ветка — T2).
-- [ ] Юниты паритета текстов/параметров (общий список параметров Win/mac).
+### T1. Серверный установщик, unattended (Windows) — 2–3 дн — ✅ **выполнено 10.10.2026** (`44e20a8`)
+- [x] Параметризовать `install_server.ps1` (§3): `-StateDir/-McpHost/-McpPort/-UiHost/-UiPort/
+      -Parallel/-GpuDevice/-GpuPreset/-Roots/-EnableAccess/-AdminLogin/-AdminPassword/-Fetch/
+      -NoFetch/-WhatIf`; `-WhatIf` — печать плана + тела конфига **без изменений и без админа**;
+      `-Roles ""` — config-only (без SCM/админа). Без новых параметров — прежнее поведение.
+- [x] Unattended-загрузка: установщик вызывает `fetch_engine_runtime.ps1`/`fetch_llm_models.ps1`/
+      `fetch_whisper_model.ps1`/`fetch_clip_models.ps1` (параметрами, идемпотентно). **Уточнение к
+      §1 плана:** `Read-Host` в `fetch_*` нет (проверено grep) — они уже unattended, правок не
+      потребовалось; установщик лишь оркестрирует и перехватывает ошибки.
+- [x] Генерация `config.yaml` серверного профиля: `profile: server`, `access.enabled`,
+      `llm_server.parallel`, `gpu.device_index`/`gpu.preset`, `index.roots`, `mcp_http`/`ui`;
+      существующий конфиг **не затирается** (идемпотентно).
+- [x] Админ: `hds user add --admin` (пароль — **только хэш** в `data/access.yaml`, идемпотентно
+      через `user passwd`); хинт `token new --user`.
+- [x] Юнит паритета `install_server_ps1_has_unattended_params` (набор параметров + секции +
+      fetch-хуки + хинт токена); macOS-паритет — плейсхолдер `#[ignore]` до T2.
+- Проверка: `-WhatIf` без админа; песочница config-only (валидный YAML, хэшированный админ,
+      `tools/parity/out/m8_t1_check.py`); `cargo test --workspace` — **89 наборов / 0 failed**,
+      fmt/clippy чисто. **Следующий шаг — T2** (macOS-аналог `.command`).
 
 ### T2. Серверный пакет macOS/Apple Silicon — 1,5–2 дн
 - [ ] `install_server.command`: параметры, LaunchDaemon (уже есть), Metal-рантайм через
