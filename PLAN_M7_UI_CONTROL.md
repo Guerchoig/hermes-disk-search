@@ -180,12 +180,22 @@ Apple Silicon (Э11); анонимизация внешнего API (W9); нов
       чисто. Артефакты — `tools/parity/out/m7_t2_live_{desktop,server}.txt`.
 - **Следующий шаг — T3** (выдача токенов: CLI `hds token new` + UI `/api/access/token/new`).
 
-### T3. Выдача токенов (CLI + UI) — 1–1,5 дн
-- [ ] CLI `hds token new --user <login> [--ttl-days N]` (§3.3) + аудит `admin_op`; юнит на
-      формат/отказ для несуществующего пользователя (путь — явный, как в тестах auth).
-- [ ] UI `POST /api/access/token/new` → plain-токен один раз; под admin-гейтом/CSRF; аудит.
-- [ ] Проверить: выданный токен проходит `resolve_token` и запрос клиента с Bearer;
-      plain-токен нигде не логируется.
+### T3. Выдача токенов (CLI + UI) — 1–1,5 дн — ✅ **выполнено 10.10.2026 (`8980338`)**
+- [x] CLI `hds token new --user <login> [--ttl-days N]` (§3.3): plain-токен печатается
+      **один раз** + срок; TTL из `--ttl-days` либо `access.token_ttl_days`; отказ для
+      несуществующего/отключённого логина (exit 1); аудит `admin_op`. Ядро — `token_new_issue`
+      (в файл только `token_sha256`).
+- [x] UI `POST /api/access/token/new {user, ttl_days?}` → `{token, expires, user}`; под штатным
+      admin-гейтом/CSRF и аудитом `admin_op` (без токена); отказ для неизвестного логина (`400`).
+- [x] Проверено живым прогоном (песочница `server` + `access.enabled`): CLI выдал токен, `ghost`
+      → отказ (exit 1); admin Bearer `GET /api/services` → `200`, без токена → `401`; выданный
+      через UI токен работает (`200`), отзыв по пользователю → последующий запрос `401`; аудит
+      содержит `admin_op` (CLI `hds token new` и UI `/api/access/token/new`) и **не содержит**
+      plain-токенов. Артефакты — `tools/parity/out/m7_t3_{cli_issue,live}.txt`, `m7_t3_audit.jsonl`.
+- [x] Юниты: CLI `token_new_issue` (хэш сохранён, plain резолвится, чужой логин — отказ);
+      UI `access_token_new` (рабочий токен; `400` на неизвестного). `cargo test --workspace` —
+      **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings` чисто.
+- **Следующий шаг — T4** (UI-карточки «Службы» и «Доступ» в `page.rs`).
 
 ### T4. UI-карточка «Службы» + доработка «Доступа» — 1–1,5 дн
 - [ ] `page.rs`: карточка «Службы» (состояние, кнопки, автообновление), desktop-сообщение.

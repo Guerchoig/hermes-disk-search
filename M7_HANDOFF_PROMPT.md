@@ -6,17 +6,17 @@
 > **Этап начат.** M1–M6 закрыты: **M6/Э5** завершён (`ffc450c`) и прошёл код-ревью
 > (`M6_CODE_REVIEW.md`, `4449fab`, принят). По дорожной карте `PLAN_SERVER_MULTIUSER.md` §5
 > после Э5 (M6) и Э6 (M5) идёт **Э7** — «Управление службами и токенами из UI» (**W10**, §2).
-> **M7: T0 (`14567a8`), T1 (`cd01065`) и T2 (`112d6ee`) закрыты, следующий шаг — T3.**
+> **M7: T0 (`14567a8`), T1 (`cd01065`), T2 (`112d6ee`) и T3 (`8980338`) закрыты, следующий шаг — T4.**
 > Детальный план этапа — **`PLAN_M7_UI_CONTROL.md`** (треки T0–T6, контракты, приёмка;
-> §4 T0/T1/T2 помечены выполненными; §3.3 — контракт выдачи токенов).
+> §4 T0–T3 помечены выполненными; §3.4 — UI-карточки «Службы»/«Доступ»).
 
 ---
 
 Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
-Состояние на момент передачи: **HEAD `112d6ee`** (+ docs-коммит этого промта), дерево чистое;
+Состояние на момент передачи: **HEAD `8980338`** (+ docs-коммит этого промта), дерево чистое;
 боевой стенд поднят (резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` —
-есть). Этап **M7/Э7** начат: **T0 закрыт** (`14567a8`), **T1 закрыт** (`cd01065`),
-**T2 закрыт** (`112d6ee`), **следующий шаг — T3**. Предыдущий этап M6 закрыт: `ffc450c`
+есть). Этап **M7/Э7** начат: **T0** (`14567a8`), **T1** (`cd01065`), **T2** (`112d6ee`),
+**T3** (`8980338`) — закрыты, **следующий шаг — T4**. Предыдущий этап M6 закрыт: `ffc450c`
 (T6-доклад), код-ревью — `4449fab`.
 
 Станция: Windows, RTX 3060 12 ГБ (единственный дискретный GPU), AMD Radeon Graphics
@@ -36,8 +36,9 @@ Python — только sidecar.
    (`watch|mcp-http|ui|llm-host`); `POST {role, action}` — `install|uninstall|start|stop|restart`
    (admin-гейт/CSRF/аудит `admin_op`); роли `ui`-restart — detached helper; честные ошибки прав
    и «не установлена»; desktop → пусто+hint.
-4. **T3 (выдача токенов):** CLI `hds token new --user <login> [--ttl-days N]` и UI
-   `POST /api/access/token/new` → plain-токен **один раз** (в файл — хэш, в аудит — без токена).
+4. **T3 (выдача токенов) — ✅ сделано (`8980338`):** CLI `hds token new --user <login> [--ttl-days N]`
+   и UI `POST /api/access/token/new` → plain-токен **один раз** (в файл — хэш, в аудит `admin_op` —
+   без токена); отказ для неизвестного логина.
 5. **T4 (UI):** карточка «Службы» (состояние + кнопки, desktop-сообщение) и кнопка
    «Выдать токен» в карточке «Доступ» (`page.rs`).
 6. **T5 (приёмка):** SCM-цикл по ролям (из-под администратора), выдача/отзыв токена живым
@@ -104,20 +105,36 @@ Python — только sidecar.
 * `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings`
   чисто. Артефакты — `tools/parity/out/m7_t2_live_{desktop,server}.txt`.
 
-## Следующий шаг — T3 (выдача токенов: CLI + UI)
+## Сделано в T3 (`8980338`, 10.10.2026)
 
-Ядро уже умеет: `hds_core::access::new_token(user, ttl_days, now_unix)` → `(plain, Token)`
-(в файл — `token_sha256`), TTL — `token_ttl_days(cfg)` (контракт — §3.3).
+* **CLI** (`crates/hds-cli/src/cmd/auth.rs`): `hds token new --user <login> [--ttl-days N]` →
+  plain-токен печатается **один раз** + срок; TTL из `--ttl-days` (иначе `access.token_ttl_days`);
+  отказ для несуществующего/отключённого логина (exit 1); аудит `admin_op`. Ядро —
+  `token_new_issue(path, login, ttl, now) -> (plain, expires)` (в файл только `token_sha256`).
+  Usage обновлён (`token list|new|revoke`).
+* **UI** (`crates/hds-ui/src/lib.rs`): `POST /api/access/token/new {user, ttl_days?}` →
+  `{token, expires, user}` (plain **один раз**); отказ для неизвестного/отключённого логина (`400`);
+  под штатным admin-гейтом/CSRF и аудитом `admin_op` (токен в аудит не пишется).
+* Тесты: CLI `token_new_issue` (хэш сохранён, plain резолвится, чужой логин — отказ); UI
+  `access_token_new` (рабочий токен; `400`).
+* Живой прогон (песочница `server` + `access.enabled`): CLI выдал токен, `ghost` → отказ (exit 1);
+  admin Bearer `GET /api/services` → `200`, без токена → `401`; выданный через UI токен работает
+  (`200`); отзыв по пользователю → последующий запрос `401`; аудит содержит `admin_op` (CLI и UI)
+  и **не содержит** plain-токенов. Артефакты — `tools/parity/out/m7_t3_{cli_issue,live}.txt`,
+  `m7_t3_audit.jsonl`.
+* `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings`
+  чисто.
 
-* **CLI:** `hds token new --user <login> [--ttl-days N]` → plain-токен **один раз** + срок;
-  отказ, если пользователя нет; аудит `admin_op` (как `token revoke`). Сейчас `cmd_token`
-  (`crates/hds-cli/src/cmd/auth.rs` ~264) умеет только `list|revoke`.
-* **UI:** `POST /api/access/token/new {"user","ttl_days"?}` → `{token, expires, user}`; под
-  admin-гейтом/CSRF; аудит `admin_op`; plain-токен **не** в лог/аудит (в аудите — факт+пользователь).
-* Отзыв — уже есть (`/api/access/token/revoke`, `hds token revoke`), не трогаем.
-* Юнит на формат/отказ несуществующего пользователя (путь — явный, как в тестах auth);
-  живая проверка: выданный токен проходит `resolve_token`, клиент с Bearer получает 200,
-  отзыв → `401`.
+## Следующий шаг — T4 (UI-карточки «Службы» и «Доступ»)
+
+`crates/hds-ui/src/page.rs` (контракт — §3.4; без внешних ассетов, через существующий `act()`):
+
+* новая карточка «Службы»: таблица 4 ролей (состояние/автозапуск), кнопки
+  `install|uninstall|start|stop|restart`, автообновление статуса через `GET /api/services`;
+  в desktop-профиле — сообщение «службы только в server-профиле» **без** кнопок.
+* карточка «Доступ»: кнопка «Выдать токен» (пользователь + TTL) → `POST /api/access/token/new`,
+  показ plain-токена **один раз** (копировать), как для секретов; отзыв — уже есть.
+* Проверка: `hds_ui` собирается/открывается, карточки не ломают desktop; приёмка — T5.
 
 ## Точка входа (5 минут)
 1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -8`  # HEAD — этот промт
