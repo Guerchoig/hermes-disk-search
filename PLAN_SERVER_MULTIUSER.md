@@ -605,9 +605,12 @@ hds.example.com {
 > фикс потери последнего корня в `--roots`. **T4** — `update.ps1 -Profile server` (окно
 > обслуживания: стоп/старт 4 SCM-служб, ожидание), `-RollbackTo`/`-ListVersions`/`-WhatIf`.
 > **T5** — приёмка: **(a)** без админа (песочницы: `-WhatIf`/`--whatif`, config-only с хэш-админом,
-> реальные обновление/откат junction, `cargo test` 89/0, fmt/clippy); **(b)** с админом (SCM/TLS) —
-> хвост, UAC-хелпер `m8_t5_scm.ps1`. **T6** — доклад. **Э9 (клиентский пакет, Cline без Hermes) и
-> T3 отложены** в следующий этап. Десктоп-профиль не изменён.
+> реальные обновление/откат junction, `cargo test` 89/0, fmt/clippy); **(b)** с админом — живой
+> прогон UAC-хелпером `m8_t5_scm.ps1`: 4 службы SCM (`kind=service`/`autostart=True`; `mcp-http`/`ui`
+> running), `/api/services` ↔ `sc query`, MCP-гейт `401`/`200`, `update.ps1 -Profile server` +
+> `-RollbackTo` без «отказано в доступе» (health 200); TLS-прокси — вручную. **T6** — доклад.
+> **Э9 (клиентский пакет, Cline без Hermes) и T3 отложены** в следующий этап. Десктоп-профиль
+> не изменён.
 
 **Milestone M1 — «Фундамент доступа» = Э2 (только приложение) + Э3 (Проекты).**
 Начинаем с него, потому что:

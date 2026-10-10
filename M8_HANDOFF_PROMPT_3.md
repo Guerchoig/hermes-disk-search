@@ -8,7 +8,7 @@
 > `PLAN_SERVER_MULTIUSER.md` §5 — **Э9 «Клиентский пакет Win/macOS, Cline+Hermes» (W7, 3–5 дн)**;
 > в текущем объёме остался **трек T3** из `PLAN_M8_INSTALL_PACKAGES.md` §4 (клиент — **Cline без
 > Hermes**, решение владельца §7.4). Серверный пакет (Э8) закрыт: **T0/T1/T2/T4 ✅, T5 — приёмка
-> (a) + UAC-хелпер (b), T6 — доклад** (см. `PLAN_M8_INSTALL_PACKAGES.md` §4/§5).
+> (a)+(b) ✅ (живой SCM-прогон), T6 — доклад** (см. `PLAN_M8_INSTALL_PACKAGES.md` §4/§5).
 
 ---
 

@@ -555,12 +555,15 @@
 > набор флагами, `pwsh`-fetch, ad-hoc `codesign`, `xattr`), фикс потери последнего корня в
 > `--roots`. **T4** — `update.ps1 -Profile server` (стоп/старт 4 SCM-служб с ожиданием,
 > окно обслуживания), `-RollbackTo`/`-ListVersions`/`-WhatIf`, фикс `-Force:$Force`.
-> **T5** — приёмка: **(a)** без админа (эта сессия) — `-WhatIf`/`--whatif` (план+конфиг,
+> **T5** — приёмка: **(a)** без админа — `-WhatIf`/`--whatif` (план+конфиг,
 > YAML ok, `bash -n`), config-only песочница (админ-хэш argon2id, plain не утёк), реальные
 > обновление/откат (junction `app\current`, health 200), `cargo test --workspace` **89/0**
 > (в первом прогоне — флейк `quota_socket`, изолированно зелёный), fmt/clippy чисто;
-> **(b)** с админом — хвост, UAC-хелпер `tools/parity/out/m8_t5_scm.ps1` (SCM-цикл, `/api/services`,
-> MCP-гейт `401`/`200`, обновление/откат, TLS-прокси вручную). **T6** — доклад: `README.md`
+> **(b)** с админом — UAC-хелпер `m8_t5_scm.ps1` (живой прогон): **4 службы SCM**
+> (`kind=service`/`autostart=True`; `mcp-http`/`ui` running), `/api/services` (Bearer admin) ↔
+> `sc query`, **MCP-гейт** без токена `401`/с токеном `200`, `update.ps1 -Profile server` +
+> `-RollbackTo` без «отказано в доступе» (health 200), desktop не тронут; TLS-прокси — вручную.
+> **T6** — доклад: `README.md`
 > (раздел «Установка серверного пакета (M8)»), `README_SERVER_MULTIUSER.md` §8d,
 > `PLAN_SERVER_MULTIUSER.md` §9. **Э9/T3 (клиентский пакет, Cline без Hermes) отложены** в
 > следующий этап. Десктоп-профиль не изменён; боевой стенд возвращён (`index.pause` не снимался).

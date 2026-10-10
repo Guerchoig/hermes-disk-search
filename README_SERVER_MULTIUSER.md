@@ -336,6 +336,14 @@ sudo bash installers/install_server.command \
   (задачи Планировщика + резидент).
 * **TLS reverse-proxy** — вручную: образцы `installers/proxy/{Caddyfile,nginx.conf}` (наружу
   только `/mcp` и `/ui`), затем `trusted_proxy: true`. Автоустановка Caddy/nginx не входит.
+* **Проверено на живом стенде (10.10.2026):** `install_server.ps1` ставит 4 службы SCM
+  (`kind=service`, автозапуск); `GET /api/services` (админ-Bearer) совпадает с `sc query`;
+  MCP-гейт — без токена `401`, с токеном `200`; `update.ps1 -Profile server` + `-RollbackTo`
+  без «отказано в доступе» (health `200`). **Среда:** `watch` требует `index.roots` **и**
+  sidecar-рантайм (`.venv\Scripts\python.exe`/`sidecar/python`), `llm-host` — моделей/движка;
+  без них эти роли не удерживаются (на реальной поставке их даёт `-Fetch` + корни). Службы
+  ставятся с **автозапуском** и не стартуют немедленно — старт при загрузке или
+  `hds service start <role>`.
 * Приёмка M8 (песочницы + UAC-хелпер `m8_t5_scm.ps1`) — `PLAN_M8_INSTALL_PACKAGES.md` §4/§5.
 
 ## 9. Десктоп-режим (по умолчанию)
