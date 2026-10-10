@@ -1314,6 +1314,256 @@ pub fn mcp_http_action(action: &str) -> Value {
     json!({ "ok": ok, "msg": msg, "detail": text, "state": state })
 }
 
+// --- T2 (M7, PLAN_M7_UI_CONTROL.md §3.2/§3.5): /api/services -----------------
+
+/// Действия `POST /api/services` (контракт §3.2).
+const SERVICE_ACTIONS: [&str; 5] = ["install", "uninstall", "start", "stop", "restart"];
+
+/// `GET /api/services` для явного профиля (тесты — без чтения боевого `config.yaml`).
+///
+/// desktop: `services` пуст, `hint` объясняет почему (служб нет). server: 4 роли
+/// с живым состоянием (`hds_core::service::status` — SCM `sc query`/`qc`, launchd).
+pub fn services_json_profile(profile: config::Profile) -> Value {
+    if !profile.is_server() {
+        return json!({
+            "profile": profile.as_str(),
+            "services": [],
+            "hint": "службы доступны только в server-профиле: desktop использует автозапуск задачами Планировщика"
+        });
+    }
+    let services: Vec<Value> = hds_core::service::ROLES
+        .iter()
+        .map(|r| service_state_json(r))
+        .collect();
+    json!({ "profile": profile.as_str(), "services": services, "hint": "" })
+}
+
+/// `GET /api/services` — профиль берётся из конфига.
+pub fn services_json() -> Value {
+    let cfg = load().unwrap_or(Config::Null);
+    services_json_profile(config::profile(&cfg))
+}
+
+/// Состояние роли по контракту `/api/services` (`null`, если сериализация не удалась).
+fn service_state_json(role: &str) -> Value {
+    serde_json::to_value(hds_core::service::status(role)).unwrap_or(Value::Null)
+}
+
+/// stdout+stderr управляющего действия одной строкой (для `msg`).
+fn control_out(r: &hds_core::service::ControlResult) -> String {
+    let mut t = r.stdout.trim().to_string();
+    let e = r.stderr.trim();
+    if !e.is_empty() {
+        if !t.is_empty() {
+            t.push(' ');
+        }
+        t.push_str(e);
+    }
+    t
+}
+
+/// Подсказка для неуспешного действия: права администратора / служба не установлена.
+fn control_hint(r: &hds_core::service::ControlResult, action: &str) -> Option<String> {
+    if r.permission_denied() {
+        return Some(
+            "нужны права администратора — запустите UI от администратора или из службы LocalSystem"
+                .to_string(),
+        );
+    }
+    let out = format!("{}{}", r.stdout, r.stderr).to_ascii_lowercase();
+    if out.contains("1060") || out.contains("не существует") || out.contains("does not exist")
+    {
+        return Some(if action == "install" {
+            "служба не создалась — проверьте права администратора и путь hds.exe".to_string()
+        } else {
+            "служба не установлена — сначала выполните install".to_string()
+        });
+    }
+    None
+}
+
+/// Тело ответа по результату одного действия `control` (`{ok, msg, state, hint?}`).
+fn control_reply(action: &str, role: &str, r: &hds_core::service::ControlResult) -> Value {
+    let ok = r.ok();
+    let msg = if ok {
+        match action {
+            "install" => format!(
+                "служба {} установлена (автостарт + авторестарт)",
+                hds_core::service::service_name(role)
+            ),
+            "uninstall" => format!("служба {} удалена", hds_core::service::service_name(role)),
+            "start" => format!("служба {} запущена", hds_core::service::service_name(role)),
+            "stop" => format!(
+                "служба {} остановлена",
+                hds_core::service::service_name(role)
+            ),
+            "restart" => format!(
+                "служба {} перезапущена",
+                hds_core::service::service_name(role)
+            ),
+            other => format!("{other}: готово"),
+        }
+    } else {
+        let t = control_out(r);
+        if t.is_empty() {
+            format!("{action}: не удалось")
+        } else {
+            t
+        }
+    };
+    let mut body = json!({ "ok": ok, "msg": msg, "state": service_state_json(role) });
+    if !ok {
+        if let Some(h) = control_hint(r, action) {
+            body["hint"] = json!(h);
+        }
+    }
+    body
+}
+
+/// `POST /api/services {role, action}` — валидация входа и выполнение (контракт §3.2).
+///
+/// Неизвестная роль/действие → `400 {error, hint}` (до профиля, без SCM). Дальше —
+/// профиль/права (§3.5); сам POST уже под admin-гейтом/CSRF/аудитом `admin_op`.
+pub fn services_action_json(body: &str) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let role_raw = v.get("role").and_then(|x| x.as_str()).unwrap_or("").trim();
+    let action = v
+        .get("action")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim();
+    let Some(role) = hds_core::service::parse_role(role_raw) else {
+        return (
+            400,
+            "application/json",
+            json!({
+                "error": format!("неизвестная роль: '{role_raw}'"),
+                "hint": format!("роли: {}", hds_core::service::ROLES.join("|"))
+            })
+            .to_string(),
+        );
+    };
+    if !SERVICE_ACTIONS.contains(&action) {
+        return (
+            400,
+            "application/json",
+            json!({
+                "error": format!("неизвестное действие: '{action}'"),
+                "hint": "install|uninstall|start|stop|restart"
+            })
+            .to_string(),
+        );
+    }
+    let cfg = load().unwrap_or(Config::Null);
+    services_action_profile(config::profile(&cfg), role, action)
+}
+
+/// `POST /api/services` для явного профиля (тесты desktop без SCM).
+///
+/// desktop → `{ok:false, msg, hint}` (действия отклоняются); server → `control`
+/// по роли с путём к `hds.exe` из [`hds_exe`].
+pub fn services_action_profile(profile: config::Profile, role: &str, action: &str) -> Reply {
+    if !profile.is_server() {
+        return json_ok(json!({
+            "ok": false,
+            "msg": "управление службами доступно только в server-профиле",
+            "hint": "desktop-профиль: автозапуск задачами Планировщика, OS-служб нет",
+            "state": Value::Null
+        }));
+    }
+    let Some(exe) = hds_exe() else {
+        return json_ok(json!({
+            "ok": false,
+            "msg": "не найден бинарь hds (рядом с UI / bin / target/{release,debug})",
+            "state": Value::Null
+        }));
+    };
+    match action {
+        "install" | "uninstall" | "start" | "stop" => {
+            let r = hds_core::service::control(action, role, &exe);
+            json_ok(control_reply(action, role, &r))
+        }
+        "restart" => services_restart(role, &exe),
+        other => json_ok(json!({
+            "ok": false,
+            "msg": format!("действие не поддержано: {other}"),
+            "state": Value::Null
+        })),
+    }
+}
+
+/// `restart` = stop + start; для роли `ui` (UI сам себя) — отложенный detached helper.
+fn services_restart(role: &str, exe: &std::path::Path) -> Reply {
+    if role == "ui" {
+        return services_restart_ui();
+    }
+    let stop = hds_core::service::control("stop", role, exe);
+    if !stop.ok() {
+        return json_ok(control_reply("stop", role, &stop));
+    }
+    let start = hds_core::service::control("start", role, exe);
+    json_ok(control_reply(
+        if start.ok() { "restart" } else { "start" },
+        role,
+        &start,
+    ))
+}
+
+/// Перезапуск обслуживающей роли `ui`: синхронный `stop` убил бы процесс до отдачи
+/// ответа, поэтому запускаем detached helper и отвечаем сразу (страница не виснет).
+#[cfg(windows)]
+fn services_restart_ui() -> Reply {
+    if spawn_deferred_restart("ui") {
+        json_ok(json!({
+            "ok": true,
+            "msg": "перезапуск службы ui запланирован (detached helper, ~2 c)",
+            "state": Value::Null
+        }))
+    } else {
+        json_ok(json!({
+            "ok": false,
+            "msg": "не удалось запланировать перезапуск службы ui",
+            "hint": "перезапустите извне: hds service stop ui && hds service start ui",
+            "state": Value::Null
+        }))
+    }
+}
+
+/// Перезапуск `ui` на прочих платформах — честный отказ (служб/`launchctl` нет смысла
+/// дёргать из самого процесса).
+#[cfg(not(windows))]
+fn services_restart_ui() -> Reply {
+    json_ok(json!({
+        "ok": false,
+        "msg": "перезапуск службы ui из самого UI не поддержан на этой платформе",
+        "hint": "используйте launchctl/службу извне",
+        "state": Value::Null
+    }))
+}
+
+/// Отложенный перезапуск службы: detached `cmd` (переживёт остановку UI) —
+/// пауза → `sc stop` → пауза → `sc start`. `ping` как пауза (в DETACHED нет консоли
+/// для `timeout`), вывод глушится. Возвращает `true`, если процесс запущен.
+#[cfg(windows)]
+fn spawn_deferred_restart(role: &str) -> bool {
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+    let name = hds_core::service::service_name(role);
+    let script = format!(
+        "ping -n 3 127.0.0.1 >nul & sc.exe stop {name} & ping -n 3 127.0.0.1 >nul & sc.exe start {name}"
+    );
+    std::process::Command::new("cmd.exe")
+        .args(["/C", &script])
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+}
+
 /// Гейт UI (M1 T5): при `access.enabled` весь UI — только для админ-токена.
 ///
 /// `access_path` — явный путь (тесты); `None` — `data/access.yaml` по умолчанию.
@@ -1444,6 +1694,7 @@ pub fn route_with_access(
             ("GET", "/api/watch/daemon") => json_ok(watch_status()),
             ("GET", "/api/chat-model") => json_ok(chat_model_json()),
             ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
+            ("GET", "/api/services") => json_ok(services_json()),
             ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
             ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
             ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
@@ -1499,6 +1750,7 @@ pub fn route_with_access(
                     "/api/access/user/passwd" => access_user_passwd(body, access_path),
                     "/api/access/user/grant" => access_user_grant(body, access_path),
                     "/api/access/token/revoke" => access_token_revoke(body, access_path),
+                    "/api/services" => services_action_json(body),
                     "/api/index/start" => {
                         let full = qp(query, "full")
                             .map(|v| v == "1" || v == "true")

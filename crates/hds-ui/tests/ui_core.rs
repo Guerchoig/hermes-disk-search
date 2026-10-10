@@ -559,3 +559,69 @@ fn bind_from_config_defaults_and_section() {
 
     let _ = std::fs::remove_file(&tmp);
 }
+
+// --- T2 (M7, PLAN_M7_UI_CONTROL.md §3.2/§3.5): /api/services ---
+
+/// desktop-профиль: служб нет (пустой список + hint), действия отклоняются без SCM.
+#[test]
+fn services_desktop_reports_none_and_rejects_actions() {
+    use hds_core::config::Profile;
+
+    let v = hds_ui::services_json_profile(Profile::Desktop);
+    assert_eq!(v["profile"], "desktop");
+    assert_eq!(v["services"].as_array().unwrap().len(), 0, "{v}");
+    assert!(
+        !v["hint"].as_str().unwrap_or("").is_empty(),
+        "hint объясняет отсутствие служб: {v}"
+    );
+
+    let (status, _, body) = hds_ui::services_action_profile(Profile::Desktop, "watch", "install");
+    assert_eq!(status, 200);
+    let a: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(a["ok"], false, "{a}");
+    assert!(a.get("hint").is_some(), "{a}");
+    assert_eq!(a["state"], serde_json::Value::Null, "{a}");
+}
+
+/// server-профиль GET: 4 роли с контрактными полями (чтение SCM — read-only).
+#[test]
+fn services_server_lists_four_roles() {
+    use hds_core::config::Profile;
+
+    let v = hds_ui::services_json_profile(Profile::Server);
+    assert_eq!(v["profile"], "server");
+    let arr = v["services"].as_array().unwrap();
+    assert_eq!(arr.len(), 4, "{v}");
+    for s in arr {
+        for key in ["role", "kind", "state", "autostart", "detail"] {
+            assert!(s.get(key).is_some(), "нет {key}: {s}");
+        }
+        assert!(s["autostart"].is_boolean(), "{s}");
+    }
+}
+
+/// POST: неизвестная роль/действие → 400 с hint (до профиля и без SCM).
+#[test]
+fn services_post_validates_role_and_action() {
+    let (status, _, body) = hds_ui::services_action_json(r#"{"role":"nope","action":"start"}"#);
+    assert_eq!(status, 400);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("роль"), "{v}");
+    assert!(v.get("hint").is_some(), "{v}");
+
+    let (status, _, body) = hds_ui::services_action_json(r#"{"role":"watch","action":"nope"}"#);
+    assert_eq!(status, 400);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["error"].as_str().unwrap().contains("действие"), "{v}");
+}
+
+/// Роутер отдаёт `GET /api/services` (профиль из боевого config.yaml — desktop).
+#[test]
+fn services_route_get_is_json() {
+    let (status, ctype, body) = route("GET", "/api/services", "", &ReqHeaders::default(), "");
+    assert_eq!(status, 200);
+    assert!(ctype.starts_with("application/json"));
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(v["profile"].is_string(), "{v}");
+    assert!(v["services"].is_array(), "{v}");
+}
