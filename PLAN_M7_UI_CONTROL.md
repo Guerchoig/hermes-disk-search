@@ -160,13 +160,25 @@ Apple Silicon (Э11); анонимизация внешнего API (W9); нов
       останавливался на тесты и **возвращён**; `index.pause` цел, резидент `llm_host` жив.
 - **Следующий шаг — T2** (`/api/services` в UI).
 
-### T2. `/api/services` в UI — 1,5–2 дн
-- [ ] `GET /api/services` (§3.2): профиль, роли, `state`/`autostart`/`kind`, hint.
-- [ ] `POST /api/services {role, action}`: install/uninstall/start/stop/restart;
-      admin-гейт/CSRF/аудит `admin_op`.
-- [ ] Особые случаи: перезапуск роли `ui` (сам себя); нет прав; служба не установлена;
-      неподдерживаемая ОС; неизвестная роль/действие.
-- [ ] Юнит-тесты на разбор действий/ответов (без SCM — на «неизвестная роль», desktop-профиль).
+### T2. `/api/services` в UI — 1,5–2 дн — ✅ **выполнено 10.10.2026 (`112d6ee`)**
+- [x] `GET /api/services` (§3.2): профиль + 4 роли (`role/kind/state/autostart/detail` из
+      `hds_core::service::status`), `hint`; desktop → пустой список + объяснение.
+- [x] `POST /api/services {role, action}`: `install|uninstall|start|stop|restart` через
+      `hds_core::service::control` (путь `hds.exe` — существующий `hds_ui::hds_exe()`);
+      под admin-гейтом/CSRF и аудитом `admin_op` (штатный блок `is_admin_op`, без правок).
+- [x] Валидация входа: неизвестная роль/действие → `400 {error, hint}`. Ошибки: нет прав
+      (`Access denied`/код 5) → hint «запустите UI от администратора/LocalSystem»;
+      служба не установлена (`sc 1060`) → `{ok:false, msg, hint, state}`.
+- [x] Особый случай `ui` (UI сам себя): `restart` отвечает сразу, затем перезапуск —
+      detached helper (`cmd` → пауза → `sc stop`/`start`, ~2 c), страница не виснет; при
+      сбое запуска helper — честная ошибка с hint.
+- [x] Юнит-тесты (`tests/ui_core.rs`): desktop (пусто + отказ, без SCM), server (4 роли/поля),
+      валидация (`400` с hint), роутер `GET /api/services`.
+- [x] Живой прогон в песочнице (`HDS_CONFIG`): desktop — `GET` пусто+hint, `POST` отклонён;
+      server — `GET` 4 роли (`absent`), `POST start` → `ok:false` «не установлена» + `state`.
+      `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings`
+      чисто. Артефакты — `tools/parity/out/m7_t2_live_{desktop,server}.txt`.
+- **Следующий шаг — T3** (выдача токенов: CLI `hds token new` + UI `/api/access/token/new`).
 
 ### T3. Выдача токенов (CLI + UI) — 1–1,5 дн
 - [ ] CLI `hds token new --user <login> [--ttl-days N]` (§3.3) + аудит `admin_op`; юнит на

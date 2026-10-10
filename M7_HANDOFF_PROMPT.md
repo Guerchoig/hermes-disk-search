@@ -6,17 +6,18 @@
 > **Этап начат.** M1–M6 закрыты: **M6/Э5** завершён (`ffc450c`) и прошёл код-ревью
 > (`M6_CODE_REVIEW.md`, `4449fab`, принят). По дорожной карте `PLAN_SERVER_MULTIUSER.md` §5
 > после Э5 (M6) и Э6 (M5) идёт **Э7** — «Управление службами и токенами из UI» (**W10**, §2).
-> **M7: T0 (`14567a8`) и T1 (`cd01065`) закрыты, следующий шаг — T2.**
+> **M7: T0 (`14567a8`), T1 (`cd01065`) и T2 (`112d6ee`) закрыты, следующий шаг — T3.**
 > Детальный план этапа — **`PLAN_M7_UI_CONTROL.md`** (треки T0–T6, контракты, приёмка;
-> §4 T0/T1 помечены выполненными; §3.2 — контракт `GET/POST /api/services`).
+> §4 T0/T1/T2 помечены выполненными; §3.3 — контракт выдачи токенов).
 
 ---
 
 Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
-Состояние на момент передачи: **HEAD `cd01065`** (+ docs-коммит этого промта), дерево чистое;
+Состояние на момент передачи: **HEAD `112d6ee`** (+ docs-коммит этого промта), дерево чистое;
 боевой стенд поднят (резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` —
 есть). Этап **M7/Э7** начат: **T0 закрыт** (`14567a8`), **T1 закрыт** (`cd01065`),
-**следующий шаг — T2**. Предыдущий этап M6 закрыт: `ffc450c` (T6-доклад), код-ревью — `4449fab`.
+**T2 закрыт** (`112d6ee`), **следующий шаг — T3**. Предыдущий этап M6 закрыт: `ffc450c`
+(T6-доклад), код-ревью — `4449fab`.
 
 Станция: Windows, RTX 3060 12 ГБ (единственный дискретный GPU), AMD Radeon Graphics
 (iGPU, UMA), Ryzen 7 5700G, 64 ГБ RAM, rustc/cargo 1.97.1. Ядро на Rust (`crates/`),
@@ -31,9 +32,10 @@ Python — только sidecar.
    `hds-core::service` (роли/имена, `sc_args(sub, role, hds_exe)`, `daemon_plist`, чтение
    состояния SCM/launchd, управление); `hds-cli::cmd::service` — тонкая обёртка; `service run`
    остался в CLI; `hds service …` — поведение без изменений.
-3. **T2 (`/api/services`):** `GET` — состояние 4 ролей (`watch|mcp-http|ui|llm-host`),
-   `POST {role, action}` — `install|uninstall|start|stop|restart` (admin-гейт/CSRF/аудит
-   `admin_op`); особые случаи: перезапуск роли `ui` (сам себя), нет прав, desktop-профиль.
+3. **T2 (`/api/services`) — ✅ сделано (`112d6ee`):** `GET` — состояние 4 ролей
+   (`watch|mcp-http|ui|llm-host`); `POST {role, action}` — `install|uninstall|start|stop|restart`
+   (admin-гейт/CSRF/аудит `admin_op`); роли `ui`-restart — detached helper; честные ошибки прав
+   и «не установлена»; desktop → пусто+hint.
 4. **T3 (выдача токенов):** CLI `hds token new --user <login> [--ttl-days N]` и UI
    `POST /api/access/token/new` → plain-токен **один раз** (в файл — хэш, в аудит — без токена).
 5. **T4 (UI):** карточка «Службы» (состояние + кнопки, desktop-сообщение) и кнопка
@@ -79,21 +81,44 @@ Python — только sidecar.
   -D warnings` чисто; `hds check` (desktop) — ok. Регрессия `hds service status <role>` на стенде:
   `sc 1060` → exit 1; неизвестная подкоманда/нет роли → exit 2. Стенд останавливался и **возвращён**.
 
-## Следующий шаг — T2 (`/api/services` в UI)
+## Сделано в T2 (`112d6ee`, 10.10.2026)
 
-Добавить `GET`/`POST /api/services` в `crates/hds-ui/src/lib.rs` поверх `hds-core::service`
-(контракт — `PLAN_M7_UI_CONTROL.md` §3.2; профили/права — §3.5):
+* В `crates/hds-ui/src/lib.rs` добавлены `GET`/`POST /api/services` (контракт — §3.2):
+  * `GET` → `{profile, services:[{role,kind,state,autostart,detail}], hint}`; роли из
+    `hds_core::service::ROLES`, состояние — `hds_core::service::status(role)` (SCM/launchd);
+    desktop → `services: []` + `hint`.
+  * `POST {role, action}` → `{ok, msg, state, hint?}`; `install|uninstall|start|stop` через
+    `hds_core::service::control(action, role, hds_exe())`; `restart = stop + start`.
+  * Валидация: неизвестная роль/действие → `400 {error, hint}` (до профиля/SCM).
+  * Ошибки: нет прав (`Access denied`/код 5) → hint «UI от администратора/LocalSystem»;
+    не установлена (`sc 1060`) → `{ok:false, msg, hint, state}`; desktop → отказ с hint.
+  * `ui` (UI сам себя): `restart` отвечает сразу, перезапуск — detached helper
+    (`cmd` → пауза → `sc stop`/`start`); при сбое — честная ошибка с hint.
+  * POST остаётся под штатным admin-гейтом/CSRF и аудитом `admin_op` (общий блок `is_admin_op`);
+    старые `/api/*` не тронуты.
+* Функции `services_json_profile`/`services_action_profile` вынесены `pub` — тесты без боевого
+  `config.yaml`; `services_action_json` — разбор тела.
+* Тесты (`tests/ui_core.rs`, +4): desktop (пусто+отказ), server (4 роли/поля), валидация (`400`),
+  роутер GET. Живой прогон (песочница `HDS_CONFIG`): desktop `GET` пусто+hint/`POST` отказ;
+  server `GET` 4 роли (`absent`)/`POST start` → `ok:false` «не установлена» + `state`.
+* `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings`
+  чисто. Артефакты — `tools/parity/out/m7_t2_live_{desktop,server}.txt`.
 
-* `GET /api/services` → `{profile, services:[{role,kind,state,autostart,detail}], hint}` —
-  по 4 ролям из `hds_core::service::ROLES`, состояние через `service::status(role)`.
-* `POST /api/services {role, action}` → `{ok, msg, state}`: `install|uninstall|start|stop|restart`,
-  путь к `hds.exe` — существующим `hds-ui::hds_exe()`; под admin-гейтом/CSRF/аудитом `admin_op`.
-* Особые случаи (§3.5): нет прав (код 5/Access denied → честная ошибка + hint); служба не
-  установлена; desktop-профиль — «служб нет», действия отклоняются; перезапуск роли `ui`
-  (сам себя) — ответ до перезапуска/делегирование SCM-авторестарту либо отказ с hint.
-* Старые точки (`/api/watch/daemon`, `/api/mcp-http`, `/api/llm-host/restart`,
-  `/api/transcribe/daemon`) — **не ломать**; `/api/services` — добавление.
-* Юниты (без SCM): разбор действия, неизвестная роль, desktop-профиль.
+## Следующий шаг — T3 (выдача токенов: CLI + UI)
+
+Ядро уже умеет: `hds_core::access::new_token(user, ttl_days, now_unix)` → `(plain, Token)`
+(в файл — `token_sha256`), TTL — `token_ttl_days(cfg)` (контракт — §3.3).
+
+* **CLI:** `hds token new --user <login> [--ttl-days N]` → plain-токен **один раз** + срок;
+  отказ, если пользователя нет; аудит `admin_op` (как `token revoke`). Сейчас `cmd_token`
+  (`crates/hds-cli/src/cmd/auth.rs` ~264) умеет только `list|revoke`.
+* **UI:** `POST /api/access/token/new {"user","ttl_days"?}` → `{token, expires, user}`; под
+  admin-гейтом/CSRF; аудит `admin_op`; plain-токен **не** в лог/аудит (в аудите — факт+пользователь).
+* Отзыв — уже есть (`/api/access/token/revoke`, `hds token revoke`), не трогаем.
+* Юнит на формат/отказ несуществующего пользователя (путь — явный, как в тестах auth);
+  живая проверка: выданный токен проходит `resolve_token`, клиент с Bearer получает 200,
+  отзыв → `401`.
+
 ## Точка входа (5 минут)
 1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -8`  # HEAD — этот промт
 2. `git --no-pager -C C:\Users\Sasha\hermes-disk-search status --short`     # чисто
