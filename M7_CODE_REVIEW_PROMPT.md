@@ -16,10 +16,11 @@
 ---
 
 Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
-Состояние на момент передачи: **HEAD `94d3469`**, дерево чистое; боевой стенд поднят
-(резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` — есть).
-M1–M7 закрыты; M6 прошёл код-ревью (`M6_CODE_REVIEW.md`, принят). Предыдущий этап M6 закрыт
-`ffc450c` (T6-доклад); M7 — коммиты ниже.
+Состояние на момент передачи: этап **M7 закрыт на `94d3469`** (T6-доклад); сам промт и его
+правки идут docs-коммитами **сверх** этого (`888f438` + текущий), поэтому **актуальный HEAD —
+верх `git log`**, дерево чистое. Боевой стенд поднят (резидент `llm_host`,
+`watch`/`mcp-http`/`transcribe-watch`, `index.pause` — есть). M1–M7 закрыты; M6 прошёл код-ревью
+(`M6_CODE_REVIEW.md`, принят, `ffc450c` — T6-доклад M6); коммиты M7 — ниже.
 
 Станция: Windows, RTX 3060 12 ГБ (дискретный GPU), AMD Radeon iGraphics (iGPU, UMA),
 Ryzen 7 5700G, 64 ГБ RAM, rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только sidecar.
