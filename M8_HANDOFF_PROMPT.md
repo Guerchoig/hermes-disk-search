@@ -40,8 +40,10 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
 4. **T3 — клиентский пакет (Win/macOS):** ⏸ **отложен вместе с Э9** (следующий этап) —
    `hds cline-sync --server-url --token`, мастер «адрес+токен → `GET /health` → Cline-конфиг»,
    Cline без Hermes; без локальных моделей/индекса.
-5. **T4 — обновление/откат серверного профиля:** `update.ps1` с остановом SCM-служб (окно
-   обслуживания), откат `app\current`.
+5. **T4 — обновление/откат серверного профиля — ✅ сделано 10.10.2026 (`49e80e0`;
+   следующий шаг — T5):** `update.ps1 -Profile server` (стоп SCM-служб с ожиданием STOPPED →
+   установка → старт → health), `-RollbackTo`/`-ListVersions`/`-WhatIf`, фикс `-Force:$Force`,
+   тест.
 6. **T5 — приёмка:** чистый сервер (одна команда → 4 службы → `/api/services` → MCP за TLS) +
    тонкий клиент (одна команда → рабочий поиск, локально пусто); обновление с откатом.
 7. **T6 — доклад:** README/`README_SERVER_MULTIUSER.md` §8d/`STATUS.md`/§9 дорожной карты.
@@ -98,6 +100,23 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
   `bash -n` (Git Bash) — ok; `--whatif` → YAML-валидный конфиг (`tools/parity/out/m8_t2_check.py`);
   `cargo test --workspace` — **89 наборов / 0 failed**, fmt/clippy чисто.
   **Хвост:** живой цикл на реальном Mac (LaunchDaemon/codesign/`spec`).
+
+## Сделано в T4 (`49e80e0`, 10.10.2026)
+
+* `installers/update.ps1` получил `-Profile desktop|server`:
+  * **server** — стоп SCM-служб `hermes-disk-search-<role>` в порядке `ui→mcp-http→watch→llm-host`
+    с ожиданием `STOPPED` (bounded 30 с), `install_app_version.ps1`, старт
+    `llm-host→watch→mcp-http→ui` (ожидание `RUNNING` 60 с) + health `.../health`;
+  * **desktop** — прежнее поведение (задачи Планировщика + резидент).
+* Откат `-RollbackTo <ver>` (переключение junction `app\current`), `-ListVersions` (`*` — текущая),
+  `-WhatIf` (план без изменений).
+* **Попутный фикс:** `-Force:$Force` при вызове внешнего `powershell` передавался строкой и падал
+  (баг был и в прежней desktop-версии) — аргументы теперь собираются явным массивом.
+* **Окно обслуживания:** до подмены бинарей останавливаются все держатели (`*.exe`) — снимает
+  «отказано в доступе»; прошлые версии остаются, откат быстрый.
+* Юнит `update_ps1_is_server_profile_aware`. Проверка: `-ListVersions`/`-WhatIf` + **реальные**
+  откат и обновление на песочнице; `cargo test --workspace` — **89 наборов / 0 failed**,
+  fmt/clippy чисто. **Хвост:** живое обновление на реальных SCM-службах (нужен админ).
 
 ## Контракты (код — источник истины, §3 плана)
 
