@@ -820,6 +820,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
   server-профиль и не открывает браузер; админ ходит через reverse-proxy.
   Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) не менялся.
 
+## Управление службами и токенами из UI (M7)
+
+* **Карточка «Службы (server-профиль)»** в Rust-UI: состояние 4 ролей (`watch | mcp-http |
+  ui | llm-host`) и кнопки `install / uninstall / start / stop / restart`
+  (`GET/POST /api/services`). Требует прав администратора (или UI, запущенного как служба
+  `LocalSystem`); в desktop-профиле — сообщение «служб нет» без кнопок. Перезапуск роли `ui`
+  не подвешивает страницу: ответ отдаётся сразу, перезапуск — отложенным helper'ом.
+* **«Выдать токен»** (карточка «Доступ») и CLI `hds token new --user <login> [--ttl-days N]`:
+  plain-токен показывается **один раз** (`POST /api/access/token/new`); в `data/access.yaml`
+  пишется только `token_sha256`, в аудит — `admin_op` без токена; отзыв — как раньше.
+* Сценарий и API — `README_SERVER_MULTIUSER.md` §8c; план и рантайм-приёмка —
+  `PLAN_M7_UI_CONTROL.md`.
+
 ## Сетевой периметр (M3): TLS-прокси, аудит, rate-limit
 
 Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS

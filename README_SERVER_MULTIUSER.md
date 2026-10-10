@@ -157,6 +157,10 @@ http://127.0.0.1:8765/?token=<админ-токен>
   `GET /api/access/users`, `GET /api/access/projects`,
   `POST /api/access/user/add|del|passwd|grant`, `POST /api/access/token/revoke`.
 
+В карточке «Доступ» кнопка **«Выдать токен»** (логин + TTL) выпускает новый токен —
+plain-значение показывается **один раз**. Карточка **«Службы (server-профиль)»** показывает
+состояние OS-служб и кнопки `install/uninstall/start/stop/restart` (детали — §8c).
+
 Остальные карточки UI (индексация, llm-host, конфиг, транскрибация) — админские операции,
 в server-режиме они защищены тем же гейтом.
 
@@ -253,6 +257,38 @@ llm:
   только когда клиент **не** шлёт поле `gpu`; штатные `hds whisper-check`/
   `auto_transcribe` его шлют (см. `PLAN_M6_GPU_MULTIVENDOR.md` §8a, T5 / F-m6-t5-1).
   На одной карте разницы нет; на N картах — учитывать.
+
+## 8c. Управление службами и токенами из UI (M7)
+
+Карточки Rust-UI в server-профиле (доступ — с админ-токеном, см. §6).
+
+**«Службы (server-профиль)»** — состояние 4 OS-служб (`watch | mcp-http | ui | llm-host`)
+и кнопки `install | uninstall | start | stop | restart`:
+
+* API: `GET /api/services` → `{profile, services:[{role,kind,state,autostart,detail}], hint}`
+  (`kind = service|absent`, `state = running|stopped|absent|unknown`);
+  `POST /api/services {role, action}` → `{ok, msg, state, hint?}`.
+* Требует прав администратора (или UI, запущенного как служба `LocalSystem`). Нет прав →
+  `{ok:false, msg:"…Access denied…", hint:"запустите UI от администратора или из службы LocalSystem"}`.
+* Служба не установлена (`sc` код 1060) → `{ok:false, msg, hint:"…сначала install", state}`.
+* `restart` = stop + start; для роли `ui` (UI перезапускает сам себя) ответ отдаётся сразу,
+  перезапуск выполняется отложенным helper'ом — страница не виснет.
+* **desktop-профиль:** `services: []` + `hint`, кнопок нет, действия отклоняются.
+
+**«Выдать токен»** (карточка «Доступ») — plain-токен показывается **один раз**:
+
+* CLI: `hds token new --user <login> [--ttl-days N]` → печатает plain-токен и срок;
+  для несуществующего/отключённого логина — отказ (exit 1);
+* UI: `POST /api/access/token/new {user, ttl_days?}` → `{token, expires, user}`;
+* в `data/access.yaml` пишется только `token_sha256`; в аудит — событие `admin_op` **без** токена;
+* отзыв — `hds token revoke …` / `POST /api/access/token/revoke` (§7).
+
+**Проверено на живом стенде M7** (`PLAN_M7_UI_CONTROL.md` §4, T5): полный SCM-цикл по всем
+4 ролям **из-под администратора** (install→start→status→stop→uninstall) со сверкой
+`/api/services` ↔ `sc query`; выдача/отзыв токена живым запросом, `401` без токена, аудит без
+plain-токена. Практические находки: `sc.exe create` принимает `binPath` только в «классическом»
+виде (`binPath= "\"<exe>\" service run <role>"` — в коде через `raw_arg`), а `sc qc` локализован
+(метка `Тип_запуска`) — состояние/автозапуск читаются по значениям, а не по меткам.
 
 ## 9. Десктоп-режим (по умолчанию)
 
