@@ -55,7 +55,10 @@ pub fn cmd_cline_sync(
     let server_url = server_url
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // Токен: `--token` или `HDS_CLINE_TOKEN` (env) — чтобы не светить секрет в argv
+    // (как `hds login` без пароля в argv); мастер задаёт env для дочернего процесса.
     let token = token
+        .or_else(|| std::env::var("HDS_CLINE_TOKEN").ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     if server_url.is_none() && token.is_some() {
