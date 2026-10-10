@@ -6,8 +6,9 @@
 
 use hds_llama::config::{GpuConfig, GpuPolicy};
 use hds_llama::dispatch::{
-    eviction_order, eviction_order_for_indexing, idle_evictions, plan_indexing, plan_query,
-    plan_transcribe, Action, Demand, InstanceUse, Verdict, TRANSCRIBE_TRANSPORT_ROLE,
+    cards_in_use, eviction_order, eviction_order_for_indexing, idle_evictions, on_card,
+    plan_indexing, plan_query, plan_transcribe, Action, Demand, InstanceUse, Verdict,
+    TRANSCRIBE_TRANSPORT_ROLE,
 };
 use hds_llama::ffi::state;
 
@@ -597,4 +598,73 @@ fn query_may_evict_active_transcriber() {
         .map(|i| i.name.clone())
         .collect();
     assert_eq!(names, vec!["whisper"], "запрос важнее автотранскрибации");
+}
+
+// --- M6 T3 §3.3: бюджет и вытеснение в пределах карты ---
+
+/// Инстансы карты: вытеснение не выходит за её пределы (роли другой карты не
+/// выгружаются чужой нехваткой VRAM); без карты (`None`) — прежнее поведение.
+#[test]
+fn eviction_and_budget_are_scoped_to_card() {
+    let instances = vec![
+        InstanceUse::new("chat", "chat", 5000)
+            .keep_loaded()
+            .on_card(1),
+        InstanceUse::new("embedding", "embedding", 600).on_card(2),
+        InstanceUse::new("rerank", "rerank", 500).on_card(2),
+    ];
+    // Карта 1: только чат → вытеснять ему некого (сам себя не вытесняет).
+    let on1 = on_card(&instances, Some(1));
+    assert_eq!(on1.len(), 1, "на карте 1 только chat");
+    assert!(
+        eviction_order(&gpu(), &on1, "chat").is_empty(),
+        "чат не вытесняет сам себя"
+    );
+    // Карта 2: запрос rerank вытесняет только роли карты 2 (embedding), а чат с
+    // карты 1 не трогает — в этом и смысл раскладки.
+    let on2 = on_card(&instances, Some(2));
+    let ordered = eviction_order(&gpu(), &on2, "rerank");
+    let names: Vec<&str> = ordered.iter().map(|i| i.role.as_str()).collect();
+    assert_eq!(names, vec!["embedding"], "только роли карты 2: {names:?}");
+    // Карта неизвестна — прежнее поведение: все инстансы в расчёте.
+    assert_eq!(on_card(&instances, None).len(), 3);
+    // Инстанс без карты в режиме «по карте» не участвует: не догадываемся.
+    let unknown = vec![InstanceUse::new("rerank", "rerank", 500)];
+    assert!(on_card(&unknown, Some(2)).is_empty());
+}
+
+/// Карты с инстансами: уникальные, отсортированы; инстансы без карты не дают
+/// «карту» (иначе такт арбитра пошёл бы по несуществующей).
+#[test]
+fn cards_in_use_lists_distinct_sorted_cards() {
+    let instances = vec![
+        InstanceUse::new("chat", "chat", 5000).on_card(2),
+        InstanceUse::new("embedding", "embedding", 600).on_card(1),
+        InstanceUse::new("rerank", "rerank", 500).on_card(1),
+        InstanceUse::new("whisper", "whisper", 400), // карта неизвестна
+    ];
+    assert_eq!(cards_in_use(&instances), vec![1, 2]);
+    assert!(cards_in_use(&[InstanceUse::new("chat", "chat", 1)]).is_empty());
+}
+
+/// Предохранитель простоя, ограниченный картой, выгружает только её роли.
+#[test]
+fn idle_eviction_on_one_card_does_not_touch_other_card() {
+    let instances = vec![
+        InstanceUse::new("embedding", "embedding", 600)
+            .on_card(1)
+            .with_idle(10_000),
+        InstanceUse::new("rerank", "rerank", 500)
+            .on_card(2)
+            .with_idle(10_000),
+    ];
+    let acts = idle_evictions(&gpu(), &on_card(&instances, Some(2)));
+    let names: Vec<String> = acts
+        .iter()
+        .filter_map(|a| match a {
+            Action::Unload { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, vec!["rerank".to_string()], "карта 2: только её роль");
 }

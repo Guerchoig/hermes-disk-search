@@ -412,6 +412,8 @@ pub struct LocalStatus {
     pub instances_line: Option<String>,
     /// Как измеряется **целевое** устройство (проба ↔ устройство движка).
     pub target_line: Option<String>,
+    /// M6 T3 §3.3: VRAM по картам (карта, бэкенд, свободно, роли).
+    pub cards_line: Option<String>,
 }
 
 impl LocalStatus {
@@ -419,6 +421,9 @@ impl LocalStatus {
     pub fn lines(&self) -> Vec<String> {
         let mut out = self.report.lines();
         if let Some(line) = &self.target_line {
+            out.push(line.clone());
+        }
+        if let Some(line) = &self.cards_line {
             out.push(line.clone());
         }
         out.push(self.pause_line.clone());
@@ -577,11 +582,31 @@ pub fn local_status(args: &LocalStatusArgs) -> Result<LocalStatus> {
         ))
     };
 
+    // M6 T3 §3.3: строки по картам — какая карта сколько имеет свободной VRAM и
+    // какие роли на ней (свидетельство раскладки для оператора).
+    let role_cards: BTreeMap<String, i32> = planned
+        .iter()
+        .filter_map(|p| p.ready())
+        .filter_map(|i| i.bridge_device_index.map(|c| (i.role.clone(), c)))
+        .collect();
+    let cards = cards_lines(&devices, &role_cards, &|c| {
+        probes
+            .get(&c)
+            .and_then(|p| p.snapshot())
+            .map(|v| v.free_mib)
+    });
+    let cards_line = if cards.is_empty() {
+        None
+    } else {
+        Some(cards.join("; "))
+    };
+
     Ok(LocalStatus {
         report,
         pause_line,
         instances_line,
         target_line,
+        cards_line,
     })
 }
 
@@ -911,6 +936,13 @@ pub struct ClusterBackend {
     /// `whisper`, `whisper-2`, …): один экземпляр на карту, карту под файл
     /// выбираем по свободной VRAM (числа — в логе).
     whisper_cards: Vec<(String, i32)>,
+    /// M6 T3 §3.3: карта каждой роли (`role → bridge-индекс`) — из поднятого плана.
+    ///
+    /// Диспетчер считает бюджет и вытеснение **по карте роли**, а не по «целевой
+    /// карте» `gpu.device_index`: на машине с несколькими GPU нехватка на одной
+    /// карте не должна выгружать роли с другой. Пусто (нет раскладки/одна карта) —
+    /// поведение до M6 сохраняется.
+    role_cards: BTreeMap<String, i32>,
     /// T3.1 (§6): сейчас идёт задание автотранскрибации — индексация и предохранитель
     /// простоя не вытесняют транскрибатор, пока он работает. Запрос чата/поиска
     /// вытеснить его **может** (приоритет 1 > 2).
@@ -1196,6 +1228,24 @@ impl ClusterBackend {
         }
     }
 
+    /// Свободная VRAM **карты роли** (M6 T3 §3.3): проба ↔ числа движка по её
+    /// bridge-индексу. Роль без раскладки — как раньше: целевое устройство
+    /// (`gpu.device_index`), то есть одна карта на все роли.
+    fn free_for_role(&self, role: &str) -> Option<u64> {
+        match self.role_cards.get(role).copied() {
+            Some(card) => self.card_free_mib(card),
+            None => self.target_free_mib(),
+        }
+    }
+
+    /// Инстансы **карты роли** — бюджет и вытеснение внутри неё (M6 T3 §3.3).
+    ///
+    /// Роль без раскладки карт не ограничивает: отдаём все инстансы (компат).
+    fn uses_for_role(&self, role: &str, uses: Vec<InstanceUse>) -> Vec<InstanceUse> {
+        let card = self.role_cards.get(role).copied();
+        crate::dispatch::on_card(&uses, card)
+    }
+
     /// Карта под файл транскрибации (M6 §3.6): среди настроенных ролей
     /// `whisper*` выбираем карту с максимальной свободной VRAM (числа — в логе),
     /// один файл — одна карта (split отвергнут). Ролей не настроено — остаётся
@@ -1347,6 +1397,13 @@ impl ClusterBackend {
             .and_then(|r| r.ok())
             .unwrap_or_default();
         let mut uses = instance_uses(&instances, &self.needs, &self.idle_map());
+        // M6 T3 §3.3: помечаем карту инстанса (имя инстанса = имя роли) — по ней
+        // диспетчер считает бюджет и ограничивает вытеснение картой.
+        for u in uses.iter_mut() {
+            if let Some(card) = self.role_cards.get(&u.name).copied() {
+                u.card = Some(card);
+            }
+        }
         // §6 (T3.1): пока идёт задание автотранскрибации, помечаем его носитель —
         // индексация и предохранитель простоя его не вытесняют.
         if self.transcribe_active.load(Ordering::Relaxed) {
@@ -1426,13 +1483,18 @@ impl ClusterBackend {
         let plan = {
             // сколько освободит каждый инстанс — по ЕГО собственной роли, а не по
             // запрошенной: иначе арифметика вытеснения врёт (поймано живым прогоном)
-            let uses = self.uses();
+            let uses = self.uses_for_role(role, self.uses());
             let demand = Demand::new(role, need);
             let mut plan = if transcribe {
-                plan_transcribe(&self.gpu, self.target_free_mib(), &demand, &uses)
+                plan_transcribe(&self.gpu, self.free_for_role(role), &demand, &uses)
             } else {
-                plan_query(&self.gpu, self.target_free_mib(), &demand, &uses)
+                plan_query(&self.gpu, self.free_for_role(role), &demand, &uses)
             };
+            if let Some(card) = self.role_cards.get(role).copied() {
+                plan.notes.push(format!(
+                    "карта роли '{role}' — {card}: бюджет и вытеснение в её пределах (M6 §3.3)"
+                ));
+            }
             strip_index_self_pause(&mut plan, role);
             plan
         };
@@ -1488,7 +1550,7 @@ impl ClusterBackend {
             return Err(EngineError::Other(format!(
                 "не хватает VRAM для роли '{role}': нужно {need} МиБ, свободно {}; \
                  вытеснение не помогло — авто-деградации нет (gpu.model_policy: {})",
-                self.target_free_mib()
+                self.free_for_role(role)
                     .map(|f| f.to_string())
                     .unwrap_or_else(|| "?".to_string()),
                 self.cfg.model_policy
@@ -1708,29 +1770,54 @@ impl ClusterBackend {
         self.whisper_idle_evict();
         let heartbeat = read_heartbeat(&self.pause_dir);
         let indexing_live = heartbeat.as_ref().map(|h| h.is_live()).unwrap_or(false);
-        let mut plans: Vec<(&str, Plan)> = Vec::new();
+        let mut plans: Vec<(String, Plan)> = Vec::new();
 
         // ARB-5: простой роли (свой предохранитель + grace роли)
+        //
+        // M6 T3 §3.3: на машине с раскладкой по картам предохранитель работает
+        // **в каждой карте отдельно** — роли другой карты не выгружаем чужой
+        // нехваткой VRAM. Карты неизвестны (нет раскладки) — поведение прежнее.
         let uses = self.uses();
-        let idle_actions = dispatch::idle_evictions(&self.gpu, &uses);
-        if !idle_actions.is_empty() {
-            let mut plan = Plan::new(self.free_mib(), 0, self.gpu.reserve_mb);
-            plan.actions = idle_actions;
-            plans.push(("idle", plan));
+        let cards = dispatch::cards_in_use(&uses);
+        if cards.is_empty() {
+            let idle_actions = dispatch::idle_evictions(&self.gpu, &uses);
+            if !idle_actions.is_empty() {
+                let mut plan = Plan::new(self.free_mib(), 0, self.gpu.reserve_mb);
+                plan.actions = idle_actions;
+                plans.push(("idle".to_string(), plan));
+            }
+        } else {
+            for card in cards {
+                let on_card = dispatch::on_card(&uses, Some(card));
+                let idle_actions = dispatch::idle_evictions(&self.gpu, &on_card);
+                if idle_actions.is_empty() {
+                    continue;
+                }
+                let mut plan = Plan::new(self.card_free_mib(card), 0, self.gpu.reserve_mb);
+                plan.notes.push(format!(
+                    "карта {card}: предохранитель простоя — только её роли (M6 §3.3)"
+                ));
+                plan.actions = idle_actions;
+                plans.push((format!("idle:{card}"), plan));
+            }
         }
 
         // ARB-3: идёт индексация, памяти не хватает — резидент (chat) уступает ей
         if indexing_live {
             let need = self.needs.get("embedding").copied().unwrap_or(0);
             if need > 0 {
+                // Индексация — на карте роли `embedding` (M6 §3.3/§3.5): бюджет и
+                // вытеснение в её пределах; нет раскладки — прежнее поведение.
+                let card = self.role_cards.get("embedding").copied();
+                let uses_on = dispatch::on_card(&uses, card);
                 let plan = dispatch::plan_indexing(
                     &self.gpu,
-                    self.free_mib(),
+                    self.free_for_role("embedding"),
                     &Demand::new("embedding", need),
-                    &uses,
+                    &uses_on,
                 );
                 if !plan.actions.is_empty() {
-                    plans.push(("indexing", plan));
+                    plans.push(("indexing".to_string(), plan));
                 }
             }
         }
@@ -1955,7 +2042,12 @@ impl Backend for ClusterBackend {
         });
         let mut json = report.json();
         if let Value::Object(map) = &mut json {
-            map.insert("lines".to_string(), json!(report.lines()));
+            // M6 T3 §3.3: VRAM по картам — «карта, бэкенд, свободно, роли».
+            let cards = cards_lines(&devices, &self.role_cards, &|c| self.card_free_mib(c));
+            let mut lines = report.lines();
+            lines.extend(cards.iter().cloned());
+            map.insert("lines".to_string(), json!(lines));
+            map.insert("cards".to_string(), json!(cards));
             map.insert("mode".to_string(), json!(self.mode.as_str()));
             map.insert("pid".to_string(), json!(self.pid));
             map.insert(
@@ -2443,6 +2535,55 @@ fn upstream_map(yaml: &serde_yaml::Value, cfg: &LlmHostConfig) -> BTreeMap<Strin
 ///
 /// Роли, не поднятые (`RolePlan::Failed`), в строку не входят — о них пишет
 /// отдельная строка лога с числами.
+/// M6 T3 §3.3: строки VRAM **по картам** — карта, бэкенд, устройство, свободно и
+/// какие роли на ней.
+///
+/// `free` — «сколько свободно на карте» (проба ↔ числа движка): замыкание, чтобы
+/// функция осталась чистой и проверялась тестами без движка и GPU.
+pub fn cards_lines(
+    devices: &[crate::cluster::Device],
+    role_cards: &BTreeMap<String, i32>,
+    free: &dyn Fn(i32) -> Option<u64>,
+) -> Vec<String> {
+    let mut cards: Vec<i32> = devices
+        .iter()
+        .filter(|d| d.is_accelerator())
+        .map(|d| d.bridge_device_index)
+        .chain(role_cards.values().copied())
+        .collect();
+    cards.sort_unstable();
+    cards.dedup();
+    cards
+        .into_iter()
+        .map(|card| {
+            let dev = devices.iter().find(|d| d.bridge_device_index == card);
+            let backend = dev
+                .map(|d| d.backend.clone())
+                .unwrap_or_else(|| "—".to_string());
+            let name = dev
+                .map(|d| d.description_or_name())
+                .unwrap_or_else(|| "—".to_string());
+            let mut roles: Vec<String> = role_cards
+                .iter()
+                .filter(|(_, c)| **c == card)
+                .map(|(r, _)| r.clone())
+                .collect();
+            roles.sort();
+            let free_txt = free(card)
+                .map(|f| format!("{f} МиБ"))
+                .unwrap_or_else(|| "нет замера".to_string());
+            format!(
+                "карта {card} ({backend}, {name}): свободно {free_txt}, роли: {}",
+                if roles.is_empty() {
+                    "—".to_string()
+                } else {
+                    roles.join(", ")
+                }
+            )
+        })
+        .collect()
+}
+
 pub fn layout_line(planned: &[RolePlan]) -> String {
     let items: Vec<String> = planned
         .iter()
@@ -2882,6 +3023,23 @@ impl Host {
                     .join(", ")
             ));
         }
+        // M6 T3 §3.3: карта каждой роли — по ней диспетчер считает бюджет и
+        // вытеснение (роли другой карты не трогаем). Пусто — прежнее поведение.
+        let role_cards: BTreeMap<String, i32> = planned
+            .iter()
+            .filter_map(|p| p.ready())
+            .filter_map(|i| i.bridge_device_index.map(|c| (i.role.clone(), c)))
+            .collect();
+        if !role_cards.is_empty() {
+            log.line(&format!(
+                "бюджет и вытеснение по картам ролей: {}",
+                role_cards
+                    .iter()
+                    .map(|(r, c)| format!("{r} → карта {c}"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         // Пробы VRAM, привязанные к устройствам движка по имени: диспетчер мерит
         // именно то устройство, на которое поедет модель (iGPU vs dGPU!).
         let device_probes = bind_device_probes(&engine_devices, cfg.nvml_index);
@@ -2931,6 +3089,7 @@ impl Host {
             chat_roles,
             chat_rr: std::sync::atomic::AtomicUsize::new(0),
             whisper_cards,
+            role_cards,
             transcribe_active: Arc::new(AtomicBool::new(false)),
             abandoned_request_sec: resolved.gpu.abandoned_request_sec,
         });
@@ -3373,7 +3532,6 @@ mod whisper_device_tests {
     }
 
     // --- сопоставление пробы VRAM с устройством движка (общий случай: iGPU+dGPU) ---
-
     #[test]
     fn names_match_engine_desc_and_probe_names() {
         // Замеры 05.10.2026: описания движка и имена NVML/DXGI совпадают.
@@ -3403,5 +3561,57 @@ mod whisper_device_tests {
         ));
         assert!(!names_match("", "NVIDIA GeForce RTX 3060"));
         assert!(!names_match("NVIDIA GeForce RTX 3060", ""));
+    }
+
+    // --- M6 T3 §3.3: строки VRAM по картам ---
+
+    /// Строки по картам: карта, бэкенд, устройство, свободно и её роли. Картами
+    /// считаются ускорители движка плюс карты из раскладки ролей; CPU в карты не
+    /// попадает. Функция чистая — проверяется без движка и GPU.
+    #[test]
+    fn cards_lines_show_per_card_roles_and_free() {
+        use super::cards_lines;
+        use crate::cluster::Device;
+        use std::collections::BTreeMap;
+        let dev = |idx: i32, backend: &str, name: &str, desc: &str| Device {
+            bridge_device_index: idx,
+            device_type: 1,
+            memory_free: 3 * 1024 * 1024 * 1024,
+            memory_total: 12 * 1024 * 1024 * 1024,
+            backend: backend.to_string(),
+            name: name.to_string(),
+            description: desc.to_string(),
+        };
+        let devices = vec![
+            dev(0, "CUDA", "CUDA0", "NVIDIA GeForce RTX 3060"),
+            dev(1, "CPU", "CPU", "AMD Ryzen 7 5700G"),
+        ];
+        let mut roles = BTreeMap::new();
+        roles.insert("chat".to_string(), 0);
+        roles.insert("chat-2".to_string(), 0);
+        roles.insert("embedding".to_string(), 1);
+        let lines = cards_lines(&devices, &roles, &|c| {
+            if c == 0 {
+                Some(3269)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            lines.len(),
+            2,
+            "CPU-устройство картой не считается: {lines:?}"
+        );
+        assert!(
+            lines[0].contains("карта 0 (CUDA, NVIDIA GeForce RTX 3060)"),
+            "{}",
+            lines[0]
+        );
+        assert!(lines[0].contains("свободно 3269 МиБ"), "{}", lines[0]);
+        assert!(lines[0].contains("chat, chat-2"), "{}", lines[0]);
+        assert!(lines[1].contains("нет замера"), "{}", lines[1]);
+        assert!(lines[1].contains("embedding"), "{}", lines[1]);
+        // Нет ни ускорителей, ни раскладки — нет и строк (не выдумываем карты).
+        assert!(cards_lines(&[], &BTreeMap::new(), &|_| None).is_empty());
     }
 }

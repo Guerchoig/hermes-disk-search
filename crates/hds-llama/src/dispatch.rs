@@ -50,6 +50,13 @@ pub struct InstanceUse {
     /// чата/поиска (приоритет 1 из 3) вытеснить транскрибацию **может** — так
     /// требует ТЗ; иначе порядок «1 → 2 → 3» был бы нарушен.
     pub transcribe_active: bool,
+    /// Карта (bridge-индекс), на которой исполняется инстанс (M6 T3 §3.3).
+    ///
+    /// Нужна, чтобы вытеснение и бюджет считались **в пределах карты**: роли
+    /// другой карты не вытесняются чужой нехваткой VRAM. `None` — карта
+    /// неизвестна (компат-режим: одна карта/нет раскладки) — тогда поведение
+    /// прежнее, вытеснение не ограничиваем.
+    pub card: Option<i32>,
 }
 
 impl InstanceUse {
@@ -67,6 +74,7 @@ impl InstanceUse {
             idle_secs: 0,
             grace_seconds: 0,
             transcribe_active: false,
+            card: None,
         }
     }
 
@@ -101,6 +109,17 @@ impl InstanceUse {
     /// Инстанс создан не нами (чужой владелец) — не трогаем.
     pub fn foreign(mut self) -> Self {
         self.owned = false;
+        self
+    }
+
+    /// M6 T3 §3.3: инстанс исполняется на карте `card` (bridge-индекс).
+    ///
+    /// Без этого поля вытеснение считалось бы по всем инстансам сразу и могло
+    /// «освобождать» VRAM на одной карте, выгружая роль с другой (на машине с
+    /// двумя GPU это нехватка на карте A → выгрузка роли с карты B, а карта A
+    /// так и остаётся полной).
+    pub fn on_card(mut self, card: i32) -> Self {
+        self.card = Some(card);
         self
     }
 
@@ -167,6 +186,35 @@ fn evictable<'a>(instances: &'a [InstanceUse], protect: &[&str]) -> Vec<&'a Inst
             i.owned && i.holds_vram() && !i.is_busy() && !protect.contains(&i.role.as_str())
         })
         .collect()
+}
+
+/// M6 T3 §3.3: инстансы **одной карты** — бюджет и вытеснение считаются в её
+/// пределах, роли другой карты не трогаем.
+///
+/// * `card = Some(c)` — только инстансы этой карты. Инстансы без карты (`card ==
+///   None`, например созданные до раскладки) в этом режиме не участвуют: считать
+///   их «на карте c» было бы догадкой, а выгружать чужую карту — ошибкой
+///   (живой смысл раскладки как раз в изоляции карт).
+/// * `card = None` — карта неизвестна (одна карта/нет раскладки): отдаём все
+///   инстансы, то есть **поведение до M6 не меняется**.
+pub fn on_card(instances: &[InstanceUse], card: Option<i32>) -> Vec<InstanceUse> {
+    match card {
+        None => instances.to_vec(),
+        Some(c) => instances
+            .iter()
+            .filter(|i| i.card == Some(c))
+            .cloned()
+            .collect(),
+    }
+}
+
+/// Карты, на которых есть инстансы (отсортированы) — для такта арбитра «по
+/// картам»: предохранитель простоя работает в каждой карте независимо.
+pub fn cards_in_use(instances: &[InstanceUse]) -> Vec<i32> {
+    let mut cards: Vec<i32> = instances.iter().filter_map(|i| i.card).collect();
+    cards.sort_unstable();
+    cards.dedup();
+    cards
 }
 
 /// Порядок вытеснения **для запроса**: сначала роли с меньшим приоритетом
@@ -916,6 +964,9 @@ pub fn instance_use(inst: &Instance, role: &str, vram_mib: u64, idle_secs: u64) 
         idle_secs,
         grace_seconds: inst.load_on_demand_grace_seconds,
         transcribe_active: false,
+        // M6 T3 §3.3: карту инстансу проставляет хост (по раскладке ролей) —
+        // здесь она неизвестна, и это честное «карта неизвестна».
+        card: None,
     }
 }
 
