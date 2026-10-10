@@ -93,12 +93,20 @@ impl ControlResult {
     }
 
     /// Признак «нет прав администратора» (`sc.exe`: Access denied / код 5).
+    ///
+    /// M8 T0 (M7-1, код-ревью M7): регистр понижается **Unicode**-`to_lowercase()`, а не
+    /// `to_ascii_lowercase()` — тот понижает только ASCII, поэтому локализованный отказ
+    /// (`sc.exe` на рус. Windows: `[SC] OpenService: ошибка: 5:\n\nОтказано в доступе.`)
+    /// не распознавался (заглавная «О» оставалась). Ложных срабатываний нет: строки ниже
+    /// специфичны для отказа в доступе.
     pub fn permission_denied(&self) -> bool {
-        let t = format!("{}{}", self.stdout, self.stderr).to_ascii_lowercase();
+        let t = format!("{}{}", self.stdout, self.stderr).to_lowercase();
         t.contains("access is denied")
             || t.contains("отказано в доступе")
             || t.contains("code 5 ")
             || t.contains("код 5 ")
+            || t.contains("failed 5")
+            || t.contains("ошибка: 5")
     }
 }
 
@@ -308,11 +316,25 @@ pub fn control(action: &str, role: &str, hds_exe: &Path) -> ControlResult {
     match action {
         "install" => install_macos(role, &label, hds_exe),
         "uninstall" => {
-            let mut r = run_cmd("launchctl", &["bootout", &format!("system/{label}")]);
-            let _ = std::fs::remove_file(plist_path(&label));
-            r.stdout
-                .push_str(&format!("LaunchDaemon {label} удалён (если был)\n"));
-            r.code = 0;
+            let bootout = run_cmd("launchctl", &["bootout", &format!("system/{label}")]);
+            let path = plist_path(&label);
+            let had = path.exists();
+            // M8 T0 (M7-4, код-ревью M7): код `launchctl bootout` больше не затирается —
+            // он печатается в сообщении; успех `uninstall` определяем по факту удаления
+            // плейста (идемпотентно: «демон не загружен» без плейста — это не ошибка,
+            // а вот не удалить существующий плейст (нет прав) — честный отказ).
+            let removed = std::fs::remove_file(&path).is_ok() || !had;
+            let bootout_code = bootout.code;
+            let mut r = bootout;
+            r.stdout.push_str(&format!(
+                "LaunchDaemon {label}: plist {} (bootout код {bootout_code})\n",
+                if removed {
+                    "удалён/уже отсутствовал"
+                } else {
+                    "НЕ удалён — нужен sudo"
+                }
+            ));
+            r.code = if removed { 0 } else { 1 };
             r
         }
         "start" => run_cmd(
@@ -459,7 +481,7 @@ pub fn status(role: &str) -> ServiceStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_label, daemon_plist, parse_role, service_name, ROLES};
+    use super::{daemon_label, daemon_plist, parse_role, service_name, ControlResult, ROLES};
 
     /// M2 T4: роли — ровно четыре; имена служб/лейблы однозначно выводятся.
     #[test]
@@ -471,6 +493,46 @@ mod tests {
         assert_eq!(parse_role("nope"), None);
         assert_eq!(service_name("ui"), "hermes-disk-search-ui");
         assert_eq!(daemon_label("llm-host"), "com.hermes-disk-search.llm-host");
+    }
+
+    /// M8 T0 (M7-1, код-ревью M7): локализованный отказ `sc.exe` (ru-Windows) распознаётся
+    /// как «нет прав», хотя сообщение начинается с заглавной кириллицы (раньше
+    /// `to_ascii_lowercase()` оставлял «О» заглавной и проверка не срабатывала).
+    #[test]
+    fn permission_denied_matches_localized_denied() {
+        // Точное сообщение ru-Windows (снято живым `sc.exe stop <служба>` без админа).
+        let ru = ControlResult {
+            code: 5,
+            stdout: "[SC] OpenService: ошибка: 5:\r\n\r\nОтказано в доступе.\r\n".into(),
+            stderr: String::new(),
+        };
+        assert!(
+            ru.permission_denied(),
+            "русский отказ должен ловиться: {ru:?}"
+        );
+
+        // Английский вариант — Unicode-регистр не сломал прежний ASCII-фолбэк.
+        let en = ControlResult {
+            code: 5,
+            stdout: "[SC] OpenService FAILED 5:\n\nAccess is denied.".into(),
+            stderr: String::new(),
+        };
+        assert!(
+            en.permission_denied(),
+            "английский отказ должен ловиться: {en:?}"
+        );
+
+        // Обычная ошибка (1060, служба не установлена) — не ложное срабатывание.
+        let other = ControlResult {
+            code: 1060,
+            stdout: "[SC] OpenService: ошибка: 1060:\r\n\r\nУказанная служба не установлена.\r\n"
+                .into(),
+            stderr: String::new(),
+        };
+        assert!(
+            !other.permission_denied(),
+            "1060 — не отказ в доступе: {other:?}"
+        );
     }
 
     /// Опции `sc.exe create` (классический raw-синтаксис, T5): binPath с вложенными

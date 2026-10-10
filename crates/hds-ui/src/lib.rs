@@ -1492,7 +1492,34 @@ pub fn services_action_profile(profile: config::Profile, role: &str, action: &st
     }
 }
 
+/// Сколько ждать перехода службы в `stopped` после `stop` (M8 T0, M7-2).
+const RESTART_STOP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Шаг опроса `status()` при ожидании останова (M8 T0, M7-2).
+const RESTART_POLL_STEP: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Ждать, пока служба роли не перестанет быть `running` (bounded). `true`, если она
+/// остановилась (`stopped`/`absent`), `false` — таймаут.
+fn wait_stopped(role: &str, timeout: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        if matches!(
+            hds_core::service::status(role).state.as_str(),
+            "stopped" | "absent"
+        ) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(RESTART_POLL_STEP);
+    }
+}
+
 /// `restart` = stop + start; для роли `ui` (UI сам себя) — отложенный detached helper.
+///
+/// M8 T0 (M7-2, код-ревью M7): `sc.exe stop`/`launchctl kill` асинхронны — перед `start`
+/// ждём фактического останова (bounded), иначе `start` мог вернуть 1053/1062 («служба не в
+/// том состоянии») при удачном стопе. Диагностика таймаута — в `hint`.
 fn services_restart(role: &str, exe: &std::path::Path) -> Reply {
     if role == "ui" {
         return services_restart_ui();
@@ -1501,12 +1528,15 @@ fn services_restart(role: &str, exe: &std::path::Path) -> Reply {
     if !stop.ok() {
         return json_ok(control_reply("stop", role, &stop));
     }
+    let stopped = wait_stopped(role, RESTART_STOP_TIMEOUT);
     let start = hds_core::service::control("start", role, exe);
-    json_ok(control_reply(
-        if start.ok() { "restart" } else { "start" },
-        role,
-        &start,
-    ))
+    let mut body = control_reply(if start.ok() { "restart" } else { "start" }, role, &start);
+    if !stopped {
+        body["hint"] = json!(
+            "служба не перешла в stopped за отведённое время — проверьте состояние и повторите restart"
+        );
+    }
+    json_ok(body)
 }
 
 /// Перезапуск обслуживающей роли `ui`: синхронный `stop` убил бы процесс до отдачи
