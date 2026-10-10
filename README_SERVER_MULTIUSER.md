@@ -159,7 +159,8 @@ http://127.0.0.1:8765/?token=<админ-токен>
 
 В карточке «Доступ» кнопка **«Выдать токен»** (логин + TTL) выпускает новый токен —
 plain-значение показывается **один раз**. Карточка **«Службы (server-профиль)»** показывает
-состояние OS-служб и кнопки `install/uninstall/start/stop/restart` (детали — §8c).
+состояние OS-служб и кнопки `install/uninstall/start/stop/restart` (детали — §8c). Установка
+серверного пакета одной командой — §8d.
 
 Остальные карточки UI (индексация, llm-host, конфиг, транскрибация) — админские операции,
 в server-режиме они защищены тем же гейтом.
@@ -289,6 +290,53 @@ llm:
 plain-токена. Практические находки: `sc.exe create` принимает `binPath` только в «классическом»
 виде (`binPath= "\"<exe>\" service run <role>"` — в коде через `raw_arg`), а `sc qc` локализован
 (метка `Тип_запуска`) — состояние/автозапуск читаются по значениям, а не по меткам.
+
+## 8d. Установка серверного пакета (M8)
+
+Серверный пакет ставится **одной командой** (формат поставки — zip + скрипты, MSI/`.pkg` нет).
+Установщики **unattended** (параметры вместо приглашений); без новых параметров — прежнее
+поведение M2. Требуется администратор (Windows/SCM) или `sudo` (macOS/LaunchDaemon).
+
+**Windows** (из-под администратора):
+
+```powershell
+# План + тело конфига — без изменений и без админа:
+installers\install_server.ps1 -WhatIf -StateDir C:\ProgramData\hermes-disk-search `
+  -McpPort 8787 -UiPort 8765 -Parallel 5 -GpuDevice 1 -Roots "D:\;E:\Archive" `
+  -EnableAccess -AdminLogin admin -AdminPassword <secret>
+
+# Реальная установка (службы SCM, автозагрузка; фолбэк — AtStartup-задача SYSTEM):
+installers\install_server.ps1 -StateDir C:\ProgramData\hermes-disk-search -Parallel 5 `
+  -Roots "D:\;E:\Archive" -EnableAccess -AdminLogin admin -AdminPassword <secret> -Fetch
+```
+
+**macOS** (под `sudo`; LaunchDaemon `com.hermes-disk-search.<role>`):
+
+```bash
+sudo bash installers/install_server.command \
+  --statedir "/Library/Application Support/hermes-disk-search" \
+  --parallel 5 --roots "D:\;E:\Archive" --enable-access --admin-login admin --admin-password <secret> --fetch
+```
+
+* **Паритет параметров** (Win ↔ macOS): `-StateDir`↔`--statedir`, `-McpHost/-McpPort`↔`--mcp-host/--mcp-port`,
+  `-UiHost/-UiPort`, `-Parallel`, `-GpuDevice/-GpuPreset`, `-Roots`, `-EnableAccess`,
+  `-AdminLogin/-AdminPassword`, `-Fetch/-NoFetch`, `-WhatIf`↔`--whatif`.
+* **`-WhatIf`/`--whatif`** — печатает план и тело `config.yaml` **без изменений и без админа**;
+  **`-Roles ""`/`--roles ""`** — config-only (без служб и без админа).
+* Генерируется server-`config.yaml` (`profile: server`, `access.enabled`, `llm_server.parallel`,
+  `gpu.device_index`/`gpu.preset`, `index.roots`, `mcp_http`/`ui`); существующий конфиг
+  **не затирается** (идемпотентно). Первый админ — `hds user add --admin` (пароль только
+  хэшем argon2id, plain не в логах/аудите); токен — `hds token new --user admin`.
+* `-Fetch` вызывает `fetch_engine_runtime.ps1`/`fetch_llm_models.ps1`/`fetch_whisper_model.ps1`/
+  `fetch_clip_models.ps1` (они unattended, без `Read-Host`; на macOS — через `pwsh`).
+* **Обновление/откат** (`installers\update.ps1`): `-Profile server -From <stage> -Version <ver>`
+  останавливает 4 службы (`ui→mcp-http→watch→llm-host`, ожидание `STOPPED`), подменяет
+  `app\current`, стартует (`llm-host→watch→mcp-http→ui`) и проверяет `/health`; `-RollbackTo <ver>`
+  возвращает прошлую версию; `-ListVersions` — список. **desktop**-профиль — прежний путь
+  (задачи Планировщика + резидент).
+* **TLS reverse-proxy** — вручную: образцы `installers/proxy/{Caddyfile,nginx.conf}` (наружу
+  только `/mcp` и `/ui`), затем `trusted_proxy: true`. Автоустановка Caddy/nginx не входит.
+* Приёмка M8 (песочницы + UAC-хелпер `m8_t5_scm.ps1`) — `PLAN_M8_INSTALL_PACKAGES.md` §4/§5.
 
 ## 9. Десктоп-режим (по умолчанию)
 

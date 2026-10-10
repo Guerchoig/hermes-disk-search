@@ -543,6 +543,27 @@
 > `README_SERVER_MULTIUSER.md` §8c, `PLAN_SERVER_MULTIUSER.md` §9. Тесты: **88 наборов / 0 failed**;
 > fmt/clippy `-D warnings` чисто. **Хвост:** перезапуск роли `ui` из самого UI на живом SCM-стенде
 > не прогоняли. Десктоп-профиль не изменён; боевой стенд возвращён (`index.pause` не снимался).
+>
+> **Этап M8 — «Серверный пакет установки» (Э8/W6) выполнен (10.10.2026, ветка
+> `server-multiuser`; детали и коммиты — `PLAN_M8_INSTALL_PACKAGES.md` §4).** **T0** — хвосты
+> ревью M7 (M7-1: `permission_denied` — Unicode `to_lowercase()` + `"failed 5"`/`"ошибка: 5"`;
+> M7-2: `restart` ждёт `STOPPED`; M7-4: macOS `uninstall` сохраняет код `bootout`). **T1** —
+> unattended `install_server.ps1` (`-StateDir/-McpHost/-McpPort/-UiHost/-UiPort/-Parallel/
+> -GpuDevice/-GpuPreset/-Roots/-EnableAccess/-AdminLogin/-AdminPassword/-Fetch/-NoFetch/-WhatIf`),
+> генерация server-`config.yaml` (не затирает существующий), админ только хэшем, оркестрация
+> `fetch_*` (в них нет `Read-Host`). **T2** — macOS-аналог `install_server.command` (тот же
+> набор флагами, `pwsh`-fetch, ad-hoc `codesign`, `xattr`), фикс потери последнего корня в
+> `--roots`. **T4** — `update.ps1 -Profile server` (стоп/старт 4 SCM-служб с ожиданием,
+> окно обслуживания), `-RollbackTo`/`-ListVersions`/`-WhatIf`, фикс `-Force:$Force`.
+> **T5** — приёмка: **(a)** без админа (эта сессия) — `-WhatIf`/`--whatif` (план+конфиг,
+> YAML ok, `bash -n`), config-only песочница (админ-хэш argon2id, plain не утёк), реальные
+> обновление/откат (junction `app\current`, health 200), `cargo test --workspace` **89/0**
+> (в первом прогоне — флейк `quota_socket`, изолированно зелёный), fmt/clippy чисто;
+> **(b)** с админом — хвост, UAC-хелпер `tools/parity/out/m8_t5_scm.ps1` (SCM-цикл, `/api/services`,
+> MCP-гейт `401`/`200`, обновление/откат, TLS-прокси вручную). **T6** — доклад: `README.md`
+> (раздел «Установка серверного пакета (M8)»), `README_SERVER_MULTIUSER.md` §8d,
+> `PLAN_SERVER_MULTIUSER.md` §9. **Э9/T3 (клиентский пакет, Cline без Hermes) отложены** в
+> следующий этап. Десктоп-профиль не изменён; боевой стенд возвращён (`index.pause` не снимался).
 
 ---
 

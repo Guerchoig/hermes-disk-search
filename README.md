@@ -833,6 +833,34 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 * Сценарий и API — `README_SERVER_MULTIUSER.md` §8c; план и рантайм-приёмка —
   `PLAN_M7_UI_CONTROL.md`.
 
+## Установка серверного пакета (M8)
+
+Серверный пакет ставится **одной командой** (формат поставки — zip + скрипты;
+MSI/`.pkg` нет). Установщики **unattended**: параметры вместо приглашений, без
+новых параметров — прежнее поведение M2.
+
+* **Windows** (администратор): `installers\install_server.ps1` — параметры
+  `-StateDir -McpHost/-McpPort -UiHost/-UiPort -Parallel -GpuDevice/-GpuPreset
+  -Roots -EnableAccess -AdminLogin/-AdminPassword -Fetch/-NoFetch -WhatIf`;
+  службы SCM (фолбэк — AtStartup-задача SYSTEM), снимает десктопные AtLogOn-задачи.
+  **`-WhatIf`** печатает план и тело `config.yaml` **без изменений и без админа**;
+  **`-Roles ""`** — config-only.
+* **macOS** (`sudo`): `installers/install_server.command` — паритетный набор
+  флагов (`--statedir/--mcp-*/--ui-*/--parallel/--gpu-*/--roots/--enable-access/
+  --admin-*/--fetch/--no-fetch/--whatif`), LaunchDaemon, ad-hoc `codesign`,
+  снятие карантина.
+* **Генерация `config.yaml`** серверного профиля (`profile: server`,
+  `access.enabled`, `llm_server.parallel`, `gpu.device_index`/`gpu.preset`,
+  `index.roots`, `mcp_http`/`ui`); существующий конфиг **не затирается**. Первый
+  админ — `hds user add --admin` (пароль только хэшем argon2id). `-Fetch` качает
+  рантайм/модели unattended (`fetch_*` без `Read-Host`).
+* **Обновление/откат:** `installers\update.ps1 -Profile server` останавливает
+  4 службы (ожидание `STOPPED`), подменяет `app\current`, стартует и проверяет
+  `/health`; `-RollbackTo <ver>` — возврат; `-ListVersions` — список. Desktop —
+  прежний путь (Планировщик).
+* Сценарий и приёмка — `README_SERVER_MULTIUSER.md` §8d,
+  `PLAN_M8_INSTALL_PACKAGES.md`.
+
 ## Сетевой периметр (M3): TLS-прокси, аудит, rate-limit
 
 Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
