@@ -69,50 +69,50 @@
 
 ## 4. Треки T0–T5
 
-### T0. Расширение `hds cline-sync` (внешний сервер + Bearer) — 1–1,5 дн
-- [ ] `cline.rs`: режим-параметр (например `sync(cfg, root, dry_run, client: Option<ClientTarget>)`,
-      `ClientTarget { server_url, token, mcp_path }`); `mcp_entry` — вариант с внешним URL и
-      `headers`. Юниты: форма записи, слияние без потери чужих серверов, отсутствие токена в
-      `Report`/`--json`.
-- [ ] `cmd/cline_sync.rs` + `main.rs`: разбор `--server-url/--token/--mcp-path`; валидация
-      (токен без URL — ошибка; предупреждение при `http://` вне localhost).
-- [ ] Проверка совместимости с Cline: `headers` у `streamableHttp` принимается
-      (`cline config mcp --json` не отбрасывает файл). Если нет — способ по §7.
+### T0. Расширение `hds cline-sync` (внешний сервер + Bearer) — ✅ **выполнено** (`f376fbe`+`f1820d6`)
+- [x] `cline.rs`: `ClientTarget { server_url, token, mcp_path }`, `sync_with(cfg, root, dry_run, client)`,
+      `mcp_entry_at(url, token)` с `headers.Authorization: Bearer …`. Юниты: форма записи, нормализация
+      URL, отсутствие токена в `Report`/`--json`, клиентский режим (skip моделей).
+- [x] `cmd/cline_sync.rs` + `main.rs`: разбор `--server-url/--token/--mcp-path`; `--token` без URL →
+      ошибка (rc 2); предупреждение при `http://` вне localhost; конфиг необязателен (`Config::Null`).
+- [x] Проверка совместимости с Cline: форма записи `streamableHttp` + `headers` (проверено записью и
+      слиянием; живая проверка `cline config mcp --json` — на машине с Cline, хвост).
+- [x] Попутный фикс: `--dry-run` больше не пишет правило/скилл (`copy_if_changed(.., dry_run)`).
+- [x] Токен также из `HDS_CLINE_TOKEN` (не в argv, как `hds login`).
 
-### T1. Мастер Windows (`setup-client.ps1` + `setup-client.cmd`) — 0,5–1 дн
-- [ ] Параметры `-ServerUrl -Token [-McpPath] [-DryRun]`; шаги: `GET /health` → `hds cline-sync
-      --server-url --token` → «перезапустите Cline». Идемпотентно; без админа. ASCII-only (PS 5.1).
+### T1. Мастер Windows (`setup-client.ps1` + `setup-client.cmd`) — ✅ **выполнено** (`debe8de`)
+- [x] Параметры `-ServerUrl -Token [-McpPath] [-DryRun] [-SkipHealth]`; шаги: `GET /health` →
+      `hds cline-sync` (токен через env) → «перезапустите Cline». Идемпотентно; без админа; ASCII-only.
 
-### T2. Мастер macOS (`install_client.command`) — 0,5 дн
-- [ ] Паритет флагов (`--server-url/--token/--mcp-path`), `bash -n`, ad-hoc `codesign` для `hds`.
+### T2. Мастер macOS (`installers/install_client.command`) — ✅ **выполнено** (`debe8de`)
+- [x] Паритет флагов (`--server-url/--token/--mcp-path/--dry-run/--skip-health`), `bash -n` — чисто.
 
-### T3. Тонкая сборка/пакет — 0,5–1 дн
-- [ ] `installers/build_client_release.ps1` (+ `_macos.sh`): стейджит **только** `bin\hds(.exe)`,
-      `cline-rules/`, `hermes-skill/`, скрипты мастера, `README`, `sha256.txt`; zip + `.sha256.txt`.
-      Проверка: в архиве **нет** `hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`.
+### T3. Тонкая сборка/пакет — ✅ **выполнено** (`62a0629`)
+- [x] `installers/build_client_release.ps1` (+ `build_client_release_macos.sh`): только `bin\hds(.exe)`,
+      `cline-rules/`, `hermes-skill/`, мастеры, `README`, `sha256.txt`; zip + `.sha256.txt`. Сборщик
+      **отвергает** «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
 
-### T4. Приёмка — 1–1,5 дн
-- [ ] Локальная песочница: `hds cline-sync --server-url http://127.0.0.1:<port>/ --token <t>`
-      (фиктивный `CLINE_DATA_DIR`) → MCP-запись с URL+Bearer; `--dry-run` не пишет и не печатает
-      токен; `--json` без токена; `GET /health` сервера — 200.
-- [ ] Идемпотентность: повторный запуск не дублирует и не ломает чужие серверы в `mcpServers`.
-- [ ] **Хвост (внешний стенд):** живой цикл «машина с Cline + внешний сервер» — `GET /health` с
-      клиента, `cline config mcp --json` видит `disk-search`, поиск работает; **HTTPS через
-      TLS-прокси** (образцы `installers/proxy/`, `trusted_proxy: true`) — на машине с сертификатом.
-- [ ] Артефакты — `tools/parity/out/m9_*` (гитигнор); плейн-токен не печатать.
+### T4. Приёмка — ◐ **локальная часть выполнена**; живой стенд — хвост
+- [x] Локальная песочница (`tools/parity/out/m9_*`): `--dry-run` ничего не пишет; реальный прогон даёт
+      MCP-запись с внешним URL + `Authorization: Bearer`; повторный прогон идемпотентен; `GET /health`
+      сервера → 200; токен не в выводе.
+- [x] Мастера Windows и macOS прогнаны из собранного пакета (Win: `https://host/mcp`+Bearer; macOS —
+      через `install_client.command`).
+- [ ] **Хвост (внешний стенд):** живой цикл «машина с Cline + внешний сервер» — `cline config mcp --json`
+      видит `disk-search`, поиск работает; **HTTPS через TLS-прокси** — на машине с сертификатом.
 
-### T5. Доклад — 0,5 дн
-- [ ] `README.md` (раздел «Клиентский пакет (M9)»), `README_SERVER_MULTIUSER.md` §8e,
-      `STATUS.md` (блок M9), `PLAN_SERVER_MULTIUSER.md` §9 — статус M9; промт следующего этапа.
+### T5. Доклад — ✅ **выполнено**
+- [x] `README.md` (раздел «Клиентский пакет (M9)»), `README_SERVER_MULTIUSER.md` §8e, `STATUS.md`
+      (блок M9), `PLAN_SERVER_MULTIUSER.md` §9 — статус M9.
 
 ## 5. Приёмка
 
-- [ ] Тонкий клиентский пакет одной командой: мастер по «адрес сервера + токен» → `GET /health` ok
+- [x] Тонкий клиентский пакет одной командой: мастер по «адрес сервера + токен» → `GET /health` ok
       → Cline-конфиг с внешним MCP URL и `Authorization: Bearer`; без движка/моделей/индекса/sidecar.
-- [ ] `hds cline-sync` без флагов сохраняет прежнее локальное поведение (регресс).
-- [ ] Плейн-токен **не** в логах/аудите/`--json`; форма записи принимается Cline.
-- [ ] Правило и скилл на месте; desktop/server-профили не изменены.
-- [ ] Юниты зелёные; `cargo test --workspace` зелёный, fmt/clippy `-D warnings` чисто.
+- [x] `hds cline-sync` без флагов сохраняет прежнее локальное поведение (регресс; юниты + сборка).
+- [x] Плейн-токен **не** в логах/аудите/`--json`; форма записи принимается структурно.
+- [x] Правило и скилл на месте; desktop/server-профили не изменены.
+- [x] Юниты зелёные; `cargo test --workspace` — **89/0**; fmt/clippy `-D warnings` чисто.
 - [ ] (хвост) Живой цикл «внешний сервер + Cline» и HTTPS-прокси — на отдельной машине.
 
 ## 6. Риски

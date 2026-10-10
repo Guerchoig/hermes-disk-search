@@ -346,6 +346,48 @@ sudo bash installers/install_server.command \
   `hds service start <role>`.
 * Приёмка M8 (песочницы + UAC-хелпер `m8_t5_scm.ps1`) — `PLAN_M8_INSTALL_PACKAGES.md` §4/§5.
 
+## 8e. Установка клиентского пакета (M9)
+
+**Тонкий клиент** подключает Cline (Desktop/CLI) к **удалённому** серверу disk-search и
+ничего тяжёлого не ставит (ни движка, ни моделей, ни индекса, ни sidecar) — вся работа
+на сервере. Формат поставки — zip + скрипты; права администратора **не** нужны.
+
+**Шаг 1 (на сервере): выписать токен** для клиента:
+
+```powershell
+bin\hds.exe token new --user <логин>        # plain-токен показывается ОДИН раз
+```
+
+**Шаг 2 (на клиентской машине): подключить Cline.**
+
+Windows:
+```powershell
+.\setup-client.ps1 -ServerUrl https://host/ -Token <bearer>
+# или: .\setup-client.cmd -ServerUrl https://host/ -Token <bearer>
+```
+macOS:
+```bash
+bash installers/install_client.command --server-url https://host/ --token <bearer>
+```
+
+Мастер: проверяет `GET <ServerUrl>/health` (200) → `hds cline-sync --server-url --token` →
+просит перезапустить Cline. Флаг `-DryRun`/`--dry-run` показывает план без записи;
+`-SkipHealth`/`--skip-health` пропускает проверку соединения.
+
+* **Что пишется:** MCP-сервер `disk-search` в `~/.cline/data/settings/cline_mcp_settings.json`
+  и `~/.cline/mcp.json` — с **внешним** URL (`<ServerUrl><mcp-path>`) и заголовком
+  `Authorization: Bearer <токен>`; правило `~/.cline/rules/disk-search.md` и скилл
+  `~/.cline/skills/disk-search/SKILL.md` (из клиентского пакета). Окна моделей `models.json`
+  в клиентском режиме **не** меняются (локального `llm_server` нет). Идемпотентно.
+* **Безопасность:** токен передаётся в Cline как заголовок `Authorization`; в логи/аудит он не
+  пишется; мастер передаёт его в `hds` через переменную `HDS_CLINE_TOKEN` (не в командной
+  строке). Без TLS (`http://`) токен идёт открытым текстом — используйте `https://`.
+* **Тонкая сборка:** `installers/build_client_release.ps1` (Windows) / `build_client_release_macos.sh`
+  (macOS) — в пакет входят только `bin\hds(.exe)`, правило/скилл, мастеры, `README`, `sha256.txt`;
+  сборщик **отвергает** «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
+* **Проверка:** `GET https://host/health` → 200; в Cline виден сервер `disk-search`; после
+  перезапуска — вопрос по файлам работает через внешний сервер.
+
 ## 9. Десктоп-режим (по умолчанию)
 
 Если в `config.yaml` нет `access.enabled: true` (или он `false`):

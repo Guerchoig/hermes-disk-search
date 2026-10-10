@@ -861,6 +861,27 @@ MSI/`.pkg` нет). Установщики **unattended**: параметры в
 * Сценарий и приёмка — `README_SERVER_MULTIUSER.md` §8d,
   `PLAN_M8_INSTALL_PACKAGES.md`.
 
+## Клиентский пакет (M9)
+
+**Тонкий клиент** Win/macOS: подключает Cline к **удалённому** серверу disk-search и
+ничего тяжёлого не ставит (ни движка, ни моделей, ни индекса, ни sidecar).
+
+* **`hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`** — записывает
+  MCP-сервер `disk-search` в настройки Cline (`~/.cline/...`) с **внешним** URL и заголовком
+  `Authorization: Bearer`, копирует правило и скилл. Без `--server-url` — прежнее локальное
+  поведение (из `config.yaml`); окна моделей в клиентском режиме не трогаются (локального
+  `llm_server` нет). Токен можно передать через `HDS_CLINE_TOKEN` (не в командной строке).
+* **Мастер:** `setup-client.ps1`/`setup-client.cmd` (Windows) и
+  `installers/install_client.command` (macOS) — параметры `-ServerUrl`/`--server-url`,
+  `-Token`/`--token`, `-McpPath`/`--mcp-path`, `-DryRun`/`--dry-run`; шаги: `GET <url>/health`
+  → `hds cline-sync` → «перезапустите Cline». Без прав администратора; идемпотентно.
+* **Тонкая сборка:** `installers/build_client_release.ps1` (+ `_macos.sh`) — в пакет входят
+  только `bin\hds(.exe)`, правило/скилл, мастеры, `README`, `sha256.txt`; сборщик **отвергает**
+  «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
+* Токен выписывает админ сервера: `hds token new --user <логин>` (plain — один раз). Без TLS
+  (`http://`) токен идёт открытым текстом — используйте `https://` (reverse-proxy на сервере).
+* Сценарий — `README_SERVER_MULTIUSER.md` §8e; план — `PLAN_M9_CLIENT_PACKAGE.md`.
+
 ## Сетевой периметр (M3): TLS-прокси, аудит, rate-limit
 
 Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
