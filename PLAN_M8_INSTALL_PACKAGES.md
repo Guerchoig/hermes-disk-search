@@ -79,13 +79,21 @@ Win/macOS — `hds` + мастер «адрес сервера + токен» �
 
 ## 4. Треки T0–T6
 
-### T0. Хвосты ревью M7 + регресс-проверка — 0,5–1 дн
-- [ ] **M7-1** (medium): `ControlResult::permission_denied` — `to_lowercase()` вместо
-      `to_ascii_lowercase()` + проверки `"ошибка: 5"`/`"failed 5"`; юнит на русский текст.
-- [ ] **M7-2** (medium/low): `restart` ролей кроме `ui` — поллинг `status()` до `stopped`
-      (bounded timeout) перед `start`; `restart` в приёмочный SCM-хелпер.
-- [ ] **M7-4** (low): macOS `uninstall` — не терять код `launchctl bootout`.
-- [ ] Регресс: `cargo test --workspace` (88/0), fmt/clippy `-D warnings`.
+### T0. Хвосты ревью M7 + регресс-проверка — 0,5–1 дн — ✅ **выполнено 10.10.2026** (`fd5af46`)
+- [x] **M7-1** (medium): `ControlResult::permission_denied` — `to_lowercase()` (Unicode) вместо
+      `to_ascii_lowercase()` + проверки `"failed 5"`/`"ошибка: 5"`; юнит
+      `permission_denied_matches_localized_denied` (рус. + англ. + 1060-негатив) — зелёный.
+- [x] **M7-2** (medium/low): `restart` ролей кроме `ui` — `wait_stopped()` (bounded 10 с, шаг
+      400 мс) перед `start`, диагностика таймаута в `hint`; приёмочный SCM-хелпер с фазой
+      `restart` через `POST /api/services` — `tools/parity/out/m8_t0_scm.ps1` (артефакт, UAC).
+- [x] **M7-4** (low): macOS `uninstall` — код `launchctl bootout` сохранён (в сообщении),
+      успех определяется по удалению плейста (идемпотентно; логика проверена изолированным
+      сниппетом — macOS-таргет на станции недоступен).
+- [x] Регресс: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt --check`, clippy
+      `-D warnings` — чисто (живые debug-службы остановлены и возвращены).
+- **Хвост T0:** живой SCM-прогон хелпера `m8_t0_scm.ps1` (нужен администратор/UAC) — при
+  следующей админ-сессии; на этой станции проверены код+юнит+изолированный сниппет.
+- **Следующий шаг — T1** (unattended серверный установщик, Windows).
 
 ### T1. Серверный установщик, unattended (Windows) — 2–3 дн
 - [ ] Параметризовать `install_server.ps1` (§3); `-WhatIf` — печать плана без изменений.

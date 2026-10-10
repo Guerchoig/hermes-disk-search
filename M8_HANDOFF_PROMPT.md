@@ -26,10 +26,10 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
 
 ## Объём M8 (кратко; подробно — `PLAN_M8_INSTALL_PACKAGES.md`)
 
-1. **T0 — хвосты ревью M7:** **M7-1** (`permission_denied`: `to_lowercase()` вместо
-   `to_ascii_lowercase()` + проверки `"ошибка: 5"`; юнит на русский текст), **M7-2** (`restart`
-   ролей кроме `ui`: поллинг `stopped` перед `start`), **M7-4** (macOS `uninstall` не теряет код
-   `bootout`).
+1. **T0 — хвосты ревью M7 — ✅ сделано 10.10.2026 (`fd5af46`; следующий шаг — T1):**
+   **M7-1** (`permission_denied`: Unicode `to_lowercase()` + проверки `"failed 5"`/`"ошибка: 5"`;
+   юнит на рус. текст), **M7-2** (`restart` ролей кроме `ui`: `wait_stopped()` перед `start`),
+   **M7-4** (macOS `uninstall` сохраняет код `bootout`).
 2. **T1 — серверный установщик unattended (Windows):** параметры вместо `Read-Host`,
    генерация `config.yaml` server-профиля (`parallel`, раскладка ролей, корни, доступ+админ),
    обёртки над `fetch_*`.
@@ -47,6 +47,21 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
 **Решения владельца зафиксированы (10.10.2026, §7 плана):** формат — zip+скрипты; порядок —
 Э8 первым; прокси — только образцом; клиент (Э9) отложен, Cline без Hermes; первый админ —
 параметры `-AdminLogin/-AdminPassword` в T1.
+
+## Сделано в T0 (`fd5af46`, 10.10.2026)
+
+* `crates/hds-core/src/service.rs`:
+  * `ControlResult::permission_denied` — `to_lowercase()` (Unicode) вместо `to_ascii_lowercase()`
+    + `"failed 5"`/`"ошибка: 5"`; юнит `permission_denied_matches_localized_denied`
+    (рус. «Отказано в доступе.» / англ. / 1060-негатив) — **зелёный**;
+  * macOS `control("uninstall")` — код `launchctl bootout` сохранён (в сообщении), успех — по
+    удалению плейста (идемпотентно).
+* `crates/hds-ui/src/lib.rs`: `services_restart` — `wait_stopped()` (bounded 10 с, шаг 400 мс)
+  перед `start`; таймаут → `hint` (роль `ui` — прежний detached helper).
+* Приёмочный SCM-хелпер `tools/parity/out/m8_t0_scm.ps1` (гитигнор; нужен админ/UAC) — фаза
+  `restart` через `POST /api/services`.
+* Регресс: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt --check`/clippy `-D warnings`
+  чисто. **Хвост:** живой SCM-прогон хелпера — при админ-сессии.
 
 ## Контракты (код — источник истины, §3 плана)
 
