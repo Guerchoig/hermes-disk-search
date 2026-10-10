@@ -3,19 +3,20 @@
 > Скопируйте текст ниже в новый чат. Он самодостаточен: репозиторий, ветка, состояние,
 > точка входа, где детали, контракты, правила и грабли окружения.
 >
-> **Новый этап.** M1–M6 закрыты: **M6/Э5** (GPU-раскладка) завершён (`ffc450c`) и прошёл
-> код-ревью (`M6_CODE_REVIEW.md`, `4449fab`, принят, находки некритичные). По дорожной
-> карте `PLAN_SERVER_MULTIUSER.md` §5 после Э5 (M6) и Э6 (M5) идёт **Э7** — «Управление
-> службами и токенами из UI» (**W10**, §2).
-> Детальный план этапа — **`PLAN_M7_UI_CONTROL.md`** (треки T0–T6, контракты, приёмка).
+> **Этап начат.** M1–M6 закрыты: **M6/Э5** завершён (`ffc450c`) и прошёл код-ревью
+> (`M6_CODE_REVIEW.md`, `4449fab`, принят). По дорожной карте `PLAN_SERVER_MULTIUSER.md` §5
+> после Э5 (M6) и Э6 (M5) идёт **Э7** — «Управление службами и токенами из UI» (**W10**, §2).
+> **M7: T0 закрыт (`14567a8`), следующий шаг — T1.**
+> Детальный план этапа — **`PLAN_M7_UI_CONTROL.md`** (треки T0–T6, контракты, приёмка;
+> §4 T0 помечен выполненным, §3.1 — тонкость T1 про `sc_args`/`hds.exe`).
 
 ---
 
 Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
-Состояние на момент передачи: **HEAD `4449fab`**, дерево чистое; боевой стенд поднят
-(резидент `llm_host`, `watch`/`mcp-http`, `index.pause` — есть).
-Этап **M7/Э7** — код не начат. Предыдущий этап M6 закрыт: `ffc450c` (T6-доклад),
-`M6_CODE_REVIEW.md` — принят (`4449fab`).
+Состояние на момент передачи: **HEAD `6f40547`**, дерево чистое; боевой стенд поднят
+(резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` — есть).
+Этап **M7/Э7** начат: **T0 закрыт** (`14567a8`), **следующий шаг — T1** (код служб пока
+не тронут). Предыдущий этап M6 закрыт: `ffc450c` (T6-доклад), код-ревью — `4449fab` (принят).
 
 Станция: Windows, RTX 3060 12 ГБ (единственный дискретный GPU), AMD Radeon Graphics
 (iGPU, UMA), Ryzen 7 5700G, 64 ГБ RAM, rustc/cargo 1.97.1. Ядро на Rust (`crates/`),
@@ -23,8 +24,9 @@ Python — только sidecar.
 
 ## Объём M7 (что сделать) — кратко
 
-1. **T0 (хвосты ревью M6):** M6-1 (`hds check` `gpu_roles` не читает `llm.<role>.device`),
-   M6-4 (косметика `CUDA ,`), зафиксировать решение по F-m6-t5-1 (клиенты всегда шлют `gpu`).
+1. **T0 (хвосты ревью M6) — ✅ сделано (`14567a8`):** M6-1 (`hds check` `gpu_roles` теперь
+   читает `llm.<role>.device`), M6-4 (косметика `CUDA ,`), F-m6-t5-1 — решение «поведение
+   не меняем» (ждёт владельца).
 2. **T1 (общий модуль служб):** вынести общую часть служб из `hds-cli` в `hds-core::service`
    (роли/имена, `sc_args`, `daemon_plist`, чтение состояния SCM/launchd, управление) — UI не
    может импортировать `hds-cli` (там цикл: `hds-cli` зависит от `hds-ui`). `hds service …` —
@@ -40,6 +42,42 @@ Python — только sidecar.
    запросом, desktop не изменён; артефакты — `tools/parity/out/m7_*`.
 7. **T6 (доклад):** README/STATUS + статус-блок в `PLAN_SERVER_MULTIUSER.md` §9.
 
+## Сделано в T0 (`14567a8`, 10.10.2026)
+
+* `crates/hds-index/src/diag.rs::role_device_from_cfg` теперь читает карту роли так же, как
+  рантайм `hds-llama::config::build_role`: `llm.<role>.device` **первым** → фолбэк
+  `llm_server.<role>.device` → отрицательный индекс игнорируется (`filter(>=0)`) → плюс
+  `gpu.devices[].roles`. До фикса роль, заданная ключом `llm.<role>.device`, «исчезала» из
+  пункта `gpu_roles`, а двойное назначение с `gpu.devices` не ловилось (находка M6-1).
+* `check_gpu_roles_live` больше не печатает `CUDA ,` при пустом `description` (M6-4).
+* Новый юнит `diag::tests::role_device_prefers_llm_key` (4 сценария).
+* **F-m6-t5-1 (M6-2):** поведение не менялось; ограничение «клиенты всегда шлют `gpu` →
+  host-выбор карты под файл не срабатывает» уже задокументировано в
+  `README_SERVER_MULTIUSER.md` §8b (M6 T6). Решение — за владельцем.
+* Проверено: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy -D warnings`
+  чисто. Изменён только `crates/hds-index/src/diag.rs` (+55/−8).
+
+## Следующий шаг — T1 (общий модуль служб)
+
+Цель: чтобы UI мог управлять OS-службами, вынести **общую часть** `hds-cli/src/cmd/service.rs`
+в нижний крейт (`hds-core::service` — рекомендуется; альтернатива — новый `hds-service`).
+Почему нельзя оставить в CLI: `hds-ui` **не** зависит от `hds-cli`, а `hds-cli` зависит от
+`hds-ui` — прямой импорт дал бы цикл.
+
+* Переносим: `ROLES`, `service_name`, `daemon_label`, `parse_role`, `sc_args`, `daemon_plist`,
+  чтение состояния службы (SCM `sc query` / `launchctl print`) и управление
+  (`install|uninstall|start|stop` через `sc.exe`/`launchctl`).
+* **НЕ переносим:** `service run` (SCM-диспетчер через `windows-service`, `run_llm_host`) —
+  остаётся в CLI; поэтому `windows-service` в общий крейт **не тянется** (управление идёт
+  через `sc.exe`).
+* **Ключевая тонкость:** `sc_args("install")` берёт `std::env::current_exe()` для `binPath`
+  → в общем коде это стало бы exe **вызывающего** (UI), а не `hds.exe`. Общий `sc_args`
+  обязан принимать путь к `hds.exe` параметром (`sc_args(sub, role, hds_exe: &Path)`); в UI
+  искать `hds.exe` существующим `hds-ui::hds_exe()` (рядом/`bin`/`target/…`).
+* Регрессия: текст/exit-коды `hds service …` не меняются; юнит-тесты `service.rs`
+  (`roles_and_names`, `sc_install_args_quote_binpath`, `plist_has_required_keys`,
+  `role_from_args_reads_service_role`) остаются зелёными там, где оказался код.
+* Готовый контракт статуса роли — `PLAN_M7_UI_CONTROL.md` §3.1.
 ## Точка входа (5 минут)
 1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -8`  # HEAD — этот промт
 2. `git --no-pager -C C:\Users\Sasha\hermes-disk-search status --short`     # чисто
