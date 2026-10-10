@@ -101,3 +101,34 @@ fn install_server_command_has_unattended_params() {
         "роли по умолчанию потеряны"
     );
 }
+
+/// `update.ps1` (M8 T4): серверный профиль (стоп/старт SCM-служб), окно обслуживания,
+/// откат и листинг версий — плюс сохранённая desktop-ветка (Планировщик).
+#[test]
+fn update_ps1_is_server_profile_aware() {
+    let s = read("installers/update.ps1");
+    for needle in [
+        "[ValidateSet(\"desktop\", \"server\")]",
+        "$Profile",
+        "hermes-disk-search-",
+        "sc.exe stop",
+        "sc.exe start",
+        "Wait-ScState",
+        "install_app_version.ps1",
+        "app\\current",
+        "-RollbackTo",
+        "-ListVersions",
+        "$WhatIf",
+    ] {
+        assert!(s.contains(needle), "в update.ps1 нет '{needle}'");
+    }
+    // Прежняя desktop-ветка (Планировщик) и останов резидента сохранены.
+    for needle in [
+        "Stop-ScheduledTask",
+        "Start-ScheduledTask",
+        "HermesDiskSearchLlmHost",
+        "llm_host.exe",
+    ] {
+        assert!(s.contains(needle), "в update.ps1 нет '{needle}'");
+    }
+}
