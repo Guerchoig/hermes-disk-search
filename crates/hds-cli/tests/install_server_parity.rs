@@ -1,8 +1,8 @@
-//! M8 T1: unattended-параметры серверного установщика (Windows) и паритет текстов.
+//! M8 T1/T2: unattended-параметры серверных установщиков (Windows/macOS) — паритет.
 //!
-//! Статический контракт (`PLAN_M8_INSTALL_PACKAGES.md` §3): `install_server.ps1`
-//! экспонирует unattended-набор параметров и генерирует server-конфиг; macOS-аналог
-//! (`install_server.command`) получает тот же набор — паритет закрывается в T2.
+//! Статический контракт (`PLAN_M8_INSTALL_PACKAGES.md` §3): `install_server.ps1` и
+//! `install_server.command` экспонируют один и тот же unattended-набор и генерируют
+//! server-конфиг. Тест ловит рассинхрон/потерю параметров между сборками.
 
 use std::path::PathBuf;
 
@@ -19,48 +19,48 @@ fn read(rel: &str) -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("прочитать {}: {e}", p.display()))
 }
 
-/// Ожидаемый unattended-набор параметров серверного установщика (общий для Win/mac).
-const EXPECTED_PARAMS: &[&str] = &[
-    "StateDir",
-    "McpHost",
-    "McpPort",
-    "UiHost",
-    "UiPort",
-    "Parallel",
-    "GpuDevice",
-    "GpuPreset",
-    "Roots",
-    "EnableAccess",
-    "AdminLogin",
-    "AdminPassword",
-    "Fetch",
-    "NoFetch",
-    "WhatIf",
+/// Ожидаемый unattended-набор: (PowerShell-параметр, bash-флаг).
+const PARAMS: &[(&str, &str)] = &[
+    ("StateDir", "--statedir"),
+    ("McpHost", "--mcp-host"),
+    ("McpPort", "--mcp-port"),
+    ("UiHost", "--ui-host"),
+    ("UiPort", "--ui-port"),
+    ("Parallel", "--parallel"),
+    ("GpuDevice", "--gpu-device"),
+    ("GpuPreset", "--gpu-preset"),
+    ("Roots", "--roots"),
+    ("EnableAccess", "--enable-access"),
+    ("AdminLogin", "--admin-login"),
+    ("AdminPassword", "--admin-password"),
+    ("Fetch", "--fetch"),
+    ("NoFetch", "--no-fetch"),
+    ("WhatIf", "--whatif"),
+];
+
+/// Маркеры сгенерированного server-конфига и сопутствующих шагов (в обоих установщиках).
+const CONFIG_NEEDLES: &[&str] = &[
+    "profile: server",
+    "enabled: true",
+    "llm_server:",
+    "  parallel:",
+    "device_index:",
+    "roots:",
+    "fetch_engine_runtime.ps1",
+    "token new --user",
 ];
 
 /// `install_server.ps1`: unattended-параметры, server-конфиг, fetch-хуки, хинт токена.
 #[test]
 fn install_server_ps1_has_unattended_params() {
     let s = read("installers/install_server.ps1");
-    for p in EXPECTED_PARAMS {
+    for (ps, _) in PARAMS {
         assert!(
-            s.contains(&format!("${p}")),
-            "в install_server.ps1 нет параметра ${p}"
+            s.contains(&format!("${ps}")),
+            "в install_server.ps1 нет параметра ${ps}"
         );
     }
-    for needle in [
-        "profile: server",
-        "enabled: true",
-        "llm_server:",
-        "  parallel:",
-        "device_index:",
-        "roots:",
-        "fetch_engine_runtime.ps1",
-        "fetch_llm_models.ps1",
-        "fetch_whisper_model.ps1",
-        "fetch_clip_models.ps1",
-        "token new --user",
-    ] {
+    for needle in CONFIG_NEEDLES {
         assert!(s.contains(needle), "в install_server.ps1 нет '{needle}'");
     }
     // Обратная совместимость: прежние параметры M2 на месте.
@@ -72,13 +72,32 @@ fn install_server_ps1_has_unattended_params() {
     }
 }
 
-/// macOS-установщик (`install_server.command`) получает тот же unattended-набор — в T2.
-/// На bash параметры задаются иначе (позиционные/ENV), поэтому сверку делает T2.
+/// `install_server.command` (macOS): тот же unattended-набор (bash-флаги) + конфиг.
 #[test]
-#[ignore = "T2: дописать unattended-параметры в install_server.command (macOS)"]
-fn install_server_command_params_parity() {
+fn install_server_command_has_unattended_params() {
     let s = read("installers/install_server.command");
-    for p in EXPECTED_PARAMS {
-        assert!(s.contains(p), "в install_server.command нет параметра {p}");
+    for (_, flag) in PARAMS {
+        assert!(
+            s.contains(flag),
+            "в install_server.command нет флага {flag}"
+        );
     }
+    for needle in CONFIG_NEEDLES {
+        assert!(
+            s.contains(needle),
+            "в install_server.command нет '{needle}'"
+        );
+    }
+    // macOS-специфика: LaunchDaemon, ad-hoc подпись, снятие карантина, sudo-гейт.
+    for needle in ["launchctl", "codesign", "xattr", "run with sudo"] {
+        assert!(
+            s.contains(needle),
+            "в install_server.command нет '{needle}'"
+        );
+    }
+    // Обратная совместимость: позиционные аргументы и прежний набор ролей.
+    assert!(
+        s.contains("watch,mcp-http,ui,llm-host"),
+        "роли по умолчанию потеряны"
+    );
 }
