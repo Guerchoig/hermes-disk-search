@@ -28,7 +28,8 @@ fn usage() -> String {
      \x20 transcribe-stop              (мягкая остановка демона автотранскрибации)\n\
      \x20 mcp          [--http --host H --port N --path /mcp] (stdio или streamable-http)\n\
      \x20 mcp-http     check|start|stop|status|restart|run [--host --port --path]\n\
-     \x20 cline-sync   [--json] [--dry-run] (настройки Cline под config.yaml: модели/MCP/правило)\n\
+     \x20 cline-sync   [--json] [--dry-run] [--server-url URL --token T [--mcp-path /mcp]]\n\
+     \x20              (настройки Cline: локально из config.yaml или на внешний сервер с Bearer)\n\
      \x20 ui           [--host H] [--port N] (веб-интерфейс; по умолчанию 127.0.0.1:8765)
      \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
      \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
@@ -134,9 +135,13 @@ fn run(args: &[String]) -> i32 {
             flag_u64(rest, "--port").map(|v| v as u16),
             flag_val(rest, "--path"),
         ),
-        "cline-sync" => {
-            cmd::cline_sync::cmd_cline_sync(has(rest, "--json"), has(rest, "--dry-run"))
-        }
+        "cline-sync" => cmd::cline_sync::cmd_cline_sync(
+            has(rest, "--json"),
+            has(rest, "--dry-run"),
+            flag_val(rest, "--server-url"),
+            flag_val(rest, "--token"),
+            flag_val(rest, "--mcp-path"),
+        ),
         "user" => match rest.first() {
             Some(s) if !s.starts_with("--") => cmd::auth::cmd_user(s, &rest[1..], None),
             _ => {

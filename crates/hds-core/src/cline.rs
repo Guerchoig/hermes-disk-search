@@ -138,15 +138,57 @@ pub fn mcp_url(cfg: &Config) -> String {
     format!("http://{host}:{port}{path}")
 }
 
+/// Цель клиентского режима (Э9/M9): внешний сервер + Bearer-токен.
+///
+/// Когда задана — MCP-запись указывает на внешний URL с заголовком
+/// `Authorization: Bearer …`, а шаг окон моделей пропускается (локального
+/// `llm_server` у клиента нет). Без неё — прежнее локальное поведение.
+#[derive(Debug, Clone, Default)]
+pub struct ClientTarget {
+    /// Базовый URL сервера (например `https://host/`), без пути MCP.
+    pub server_url: String,
+    /// Bearer-токен (plain). В отчёт/логи/`--json` НЕ попадает.
+    pub token: String,
+    /// Путь MCP-эндпоинта (по умолчанию `/mcp`).
+    pub mcp_path: String,
+}
+
+impl ClientTarget {
+    /// URL MCP-эндпоинта: `<server_url><mcp_path>` (нормализует слэши).
+    pub fn mcp_url(&self) -> String {
+        let base = self.server_url.trim().trim_end_matches('/');
+        let raw = self.mcp_path.trim();
+        let path = if raw.is_empty() { "/mcp" } else { raw };
+        let path = if path.starts_with('/') {
+            path.to_string()
+        } else {
+            format!("/{path}")
+        };
+        format!("{base}{path}")
+    }
+}
+
 /// Запись `disk-search` для секции `mcpServers` (плоская форма Cline).
-pub fn mcp_entry(cfg: &Config) -> Value {
-    json!({
+///
+/// `token` — Bearer для внешнего сервера (Э9/M9); `None`/пусто — без заголовка
+/// (локальный режим). Форма: `type/url/disabled/autoApprove/timeout` (+ `headers`).
+pub fn mcp_entry_at(url: &str, token: Option<&str>) -> Value {
+    let mut v = json!({
         "type": "streamableHttp",
-        "url": mcp_url(cfg),
+        "url": url,
         "disabled": false,
         "autoApprove": TOOLS,
         "timeout": MCP_TIMEOUT_SECS,
-    })
+    });
+    if let Some(t) = token.map(str::trim).filter(|t| !t.is_empty()) {
+        v["headers"] = json!({ "Authorization": format!("Bearer {t}") });
+    }
+    v
+}
+
+/// Запись `disk-search` из локального конфига (`mcp_http.*`).
+pub fn mcp_entry(cfg: &Config) -> Value {
+    mcp_entry_at(&mcp_url(cfg), None)
 }
 
 /// Вставить/обновить запись `disk-search` в объект настроек Cline.
@@ -317,15 +359,20 @@ fn write_json(path: &Path, v: &Value) -> Result<(), String> {
     replace_file(&tmp, path).map_err(|e| format!("{}: {}", path.display(), e.message()))
 }
 
-/// Скопировать файл, только если содержимое отличается (`true` — обновили).
+/// Скопировать файл, только если содержимое отличается (`true` — обновили/обновили бы).
 /// Отсутствие источника — `Ok(None)` (не ошибка: в поставке может не быть правил).
-fn copy_if_changed(src: &Path, dst: &Path) -> Result<Option<bool>, String> {
+/// `dry_run` — только вычислить, писать ли (`Some(true)` без записи; M9-фикс:
+/// раньше правило/скилл копировались даже при `--dry-run`).
+fn copy_if_changed(src: &Path, dst: &Path, dry_run: bool) -> Result<Option<bool>, String> {
     let bytes = match std::fs::read(src) {
         Ok(b) => b,
         Err(_) => return Ok(None),
     };
     if std::fs::read(dst).map(|cur| cur == bytes).unwrap_or(false) {
         return Ok(Some(false));
+    }
+    if dry_run {
+        return Ok(Some(true));
     }
     if let Some(parent) = dst.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
@@ -334,12 +381,24 @@ fn copy_if_changed(src: &Path, dst: &Path) -> Result<Option<bool>, String> {
     Ok(Some(true))
 }
 
-/// Синхронизировать все настройки Cline с конфигом проекта.
+/// Синхронизировать все настройки Cline с конфигом проекта (локальный режим).
+pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
+    sync_with(cfg, root, dry_run, None)
+}
+
+/// Синхронизация с выбором режима: `client: None` — локальный (как [`sync`]),
+/// `Some(target)` — клиентский (Э9/M9): MCP-запись на внешний сервер с Bearer,
+/// шаг окон моделей пропускается.
 ///
 /// `root` — корень проекта (оттуда берутся источники правила/скилла), `dry_run` —
 /// только отчёт без записи. Ошибки ввода-вывода не роняют синхронизацию: шаг
 /// помечается `warn`, остальные выполняются.
-pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
+pub fn sync_with(
+    cfg: &Config,
+    root: &Path,
+    dry_run: bool,
+    client: Option<&ClientTarget>,
+) -> Report {
     let mut rep = Report::default();
     let dir = match cline_dir() {
         Some(d) if d.is_dir() => d,
@@ -355,48 +414,57 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
     rep.cline_dir = Some(dir.clone());
 
     // 1. Окна контекста моделей: иначе Cline сжимает историю раньше реального слота.
-    let chat_base = dig(cfg, "chat.base_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or("http://127.0.0.1:8010/v1");
-    let chat_ctx = role_ctx_tokens(cfg, "chat", DEFAULT_CHAT_CTX);
-    let embed_ctx = role_ctx_tokens(cfg, "embedding", crate::config::EMB_CONTEXT);
-    let rerank_ctx = role_ctx_tokens(cfg, "rerank", crate::config::EMB_CONTEXT);
-    let models_path = dir.join("data").join("settings").join("models.json");
-    if !models_path.exists() {
+    //    Клиентский режим: локального llm_server нет — шаг пропускается.
+    if client.is_some() {
         rep.push(
             "models.json",
             "skip",
-            format!(
-                "не найден ({}) — откройте Cline и выберите модель",
-                models_path.display()
-            ),
+            "клиентский режим: локального llm_server нет — окна моделей не меняем",
         );
     } else {
-        match load_json(&models_path) {
-            Err(e) => rep.push(
+        let chat_base = dig(cfg, "chat.base_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("http://127.0.0.1:8010/v1");
+        let chat_ctx = role_ctx_tokens(cfg, "chat", DEFAULT_CHAT_CTX);
+        let embed_ctx = role_ctx_tokens(cfg, "embedding", crate::config::EMB_CONTEXT);
+        let rerank_ctx = role_ctx_tokens(cfg, "rerank", crate::config::EMB_CONTEXT);
+        let models_path = dir.join("data").join("settings").join("models.json");
+        if !models_path.exists() {
+            rep.push(
                 "models.json",
-                "warn",
-                format!("не читается ({e}) — файл не тронут"),
-            ),
-            Ok(mut data) => {
-                let changed = sync_models(&mut data, chat_base, chat_ctx, embed_ctx, rerank_ctx);
-                if changed.is_empty() {
-                    rep.push(
-                        "models.json",
-                        "ok",
-                        format!("окна контекста уже совпадают (слот чата {chat_ctx})"),
-                    );
-                } else if dry_run {
-                    rep.push(
-                        "models.json",
-                        "ok",
-                        format!("(dry-run) будет: {}", changed.join(", ")),
-                    );
-                } else {
-                    match write_json(&models_path, &data) {
-                        Ok(()) => {
-                            rep.restart_required = true;
-                            rep.push(
+                "skip",
+                format!(
+                    "не найден ({}) — откройте Cline и выберите модель",
+                    models_path.display()
+                ),
+            );
+        } else {
+            match load_json(&models_path) {
+                Err(e) => rep.push(
+                    "models.json",
+                    "warn",
+                    format!("не читается ({e}) — файл не тронут"),
+                ),
+                Ok(mut data) => {
+                    let changed =
+                        sync_models(&mut data, chat_base, chat_ctx, embed_ctx, rerank_ctx);
+                    if changed.is_empty() {
+                        rep.push(
+                            "models.json",
+                            "ok",
+                            format!("окна контекста уже совпадают (слот чата {chat_ctx})"),
+                        );
+                    } else if dry_run {
+                        rep.push(
+                            "models.json",
+                            "ok",
+                            format!("(dry-run) будет: {}", changed.join(", ")),
+                        );
+                    } else {
+                        match write_json(&models_path, &data) {
+                            Ok(()) => {
+                                rep.restart_required = true;
+                                rep.push(
                                 "models.json",
                                 "ok",
                                 format!(
@@ -404,8 +472,9 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
                                     changed.join(", ")
                                 ),
                             );
+                            }
+                            Err(e) => rep.push("models.json", "warn", format!("не записан: {e}")),
                         }
-                        Err(e) => rep.push("models.json", "warn", format!("не записан: {e}")),
                     }
                 }
             }
@@ -413,7 +482,10 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
     }
 
     // 2. MCP-сервер: оба файла настроек Cline (Desktop/CLI и IDE-вариант CLI).
-    let entry = mcp_entry(cfg);
+    let (entry, url) = match client {
+        Some(ct) => (mcp_entry_at(&ct.mcp_url(), Some(&ct.token)), ct.mcp_url()),
+        None => (mcp_entry(cfg), mcp_url(cfg)),
+    };
     let mcp_files = [
         dir.join("data")
             .join("settings")
@@ -434,17 +506,13 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
             rep.push(
                 title,
                 "ok",
-                format!("(dry-run) будет записан disk-search → {}", mcp_url(cfg)),
+                format!("(dry-run) будет записан disk-search → {}", url),
             );
         } else if let Err(e) = write_json(&path, &data) {
             rep.push(title, "warn", format!("не записан: {e}"));
         } else {
             rep.restart_required = true;
-            rep.push(
-                title,
-                "ok",
-                format!("сервер disk-search → {}", mcp_url(cfg)),
-            );
+            rep.push(title, "ok", format!("сервер disk-search → {}", url));
         }
     }
 
@@ -492,7 +560,7 @@ pub fn sync(cfg: &Config, root: &Path, dry_run: bool) -> Report {
         }
     }
     for (title, src, dst) in pairs {
-        match copy_if_changed(&src, &dst) {
+        match copy_if_changed(&src, &dst, dry_run) {
             Ok(None) => rep.push(
                 title,
                 "skip",
@@ -660,5 +728,101 @@ mod tests {
         assert_eq!(e["autoApprove"].as_array().unwrap().len(), TOOLS.len());
         // дефолты, если секции нет
         assert_eq!(mcp_url(&yaml("chat: {}\n")), "http://127.0.0.1:8787/mcp");
+    }
+
+    /// Э9/M9: URL внешнего сервера нормализуется (слэши, путь по умолчанию).
+    #[test]
+    fn client_target_url_normalization() {
+        let base = |u: &str, p: &str| ClientTarget {
+            server_url: u.to_string(),
+            token: String::new(),
+            mcp_path: p.to_string(),
+        };
+        assert_eq!(base("https://host/", "/mcp").mcp_url(), "https://host/mcp");
+        assert_eq!(base("https://host", "/mcp").mcp_url(), "https://host/mcp");
+        assert_eq!(base("https://host/", "mcp").mcp_url(), "https://host/mcp");
+        assert_eq!(base("https://host/", "").mcp_url(), "https://host/mcp");
+        assert_eq!(
+            base("https://host/base/", "/custom").mcp_url(),
+            "https://host/base/custom"
+        );
+    }
+
+    /// Э9/M9: запись MCP с Bearer-заголовком (и без него в локальном режиме).
+    #[test]
+    fn mcp_entry_at_adds_bearer_header() {
+        let e = mcp_entry_at("https://host/mcp", Some("SECRET"));
+        assert_eq!(e["type"], "streamableHttp");
+        assert_eq!(e["url"], "https://host/mcp");
+        assert_eq!(e["headers"]["Authorization"], "Bearer SECRET");
+        assert_eq!(e["timeout"], MCP_TIMEOUT_SECS);
+        // пустой/отсутствующий токен — без заголовка (локальный режим)
+        assert!(mcp_entry_at("http://127.0.0.1:8787/mcp", None)
+            .get("headers")
+            .is_none());
+        assert!(mcp_entry_at("http://127.0.0.1:8787/mcp", Some("  "))
+            .get("headers")
+            .is_none());
+        // локальная запись тоже без заголовка
+        let cfg = yaml("mcp_http:\n  port: 8799\n");
+        assert!(mcp_entry(&cfg).get("headers").is_none());
+    }
+
+    /// Э9/M9: клиентский режим пишет внешний MCP с Bearer, пропускает окна
+    /// моделей и НЕ утекает токеном в отчёт/`--json`.
+    #[test]
+    fn client_mode_sync_writes_external_mcp_and_skips_models() {
+        let tmp = std::env::temp_dir().join(format!("hds-cline-m9-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::var_os("CLINE_DATA_DIR");
+        std::env::set_var("CLINE_DATA_DIR", &tmp);
+
+        let cfg = yaml("chat: {}\n");
+        let root = std::env::temp_dir(); // источников правила/скилла нет -> skip
+        let ct = ClientTarget {
+            server_url: "https://host/".to_string(),
+            token: "SECRET123".to_string(),
+            mcp_path: "/mcp".to_string(),
+        };
+
+        // dry-run: НИЧЕГО не пишем (M9-фикс: правило/скилл тоже)
+        let dry = sync_with(&cfg, &root, true, Some(&ct));
+        let mcp_path = tmp
+            .join("data")
+            .join("settings")
+            .join("cline_mcp_settings.json");
+        assert!(!mcp_path.exists(), "dry-run не должен создавать MCP-файл");
+        assert!(
+            !tmp.join("rules").exists(),
+            "dry-run не должен копировать правило"
+        );
+        assert!(dry.to_json().to_string().contains("(dry-run)"));
+
+        // реальный прогон
+        let rep = sync_with(&cfg, &root, false, Some(&ct));
+
+        // env вернуть сразу после прогона
+        match prev {
+            Some(v) => std::env::set_var("CLINE_DATA_DIR", v),
+            None => std::env::remove_var("CLINE_DATA_DIR"),
+        }
+
+        let data: Value =
+            serde_json::from_str(&std::fs::read_to_string(&mcp_path).expect("MCP-файл записан"))
+                .unwrap();
+        assert_eq!(data["mcpServers"]["disk-search"]["url"], "https://host/mcp");
+        assert_eq!(
+            data["mcpServers"]["disk-search"]["headers"]["Authorization"],
+            "Bearer SECRET123"
+        );
+        // окна моделей пропущены (локального llm_server нет)
+        assert!(rep
+            .steps
+            .iter()
+            .any(|s| s.title == "models.json" && s.status == "skip"));
+        // токен не утёк в отчёт/JSON
+        assert!(!rep.to_json().to_string().contains("SECRET123"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
