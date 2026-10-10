@@ -6,17 +6,17 @@
 > **Этап начат.** M1–M6 закрыты: **M6/Э5** завершён (`ffc450c`) и прошёл код-ревью
 > (`M6_CODE_REVIEW.md`, `4449fab`, принят). По дорожной карте `PLAN_SERVER_MULTIUSER.md` §5
 > после Э5 (M6) и Э6 (M5) идёт **Э7** — «Управление службами и токенами из UI» (**W10**, §2).
-> **M7: T0 закрыт (`14567a8`), следующий шаг — T1.**
+> **M7: T0 (`14567a8`) и T1 (`cd01065`) закрыты, следующий шаг — T2.**
 > Детальный план этапа — **`PLAN_M7_UI_CONTROL.md`** (треки T0–T6, контракты, приёмка;
-> §4 T0 помечен выполненным, §3.1 — тонкость T1 про `sc_args`/`hds.exe`).
+> §4 T0/T1 помечены выполненными; §3.2 — контракт `GET/POST /api/services`).
 
 ---
 
 Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка **`server-multiuser`**.
-Состояние на момент передачи: **HEAD `6f40547`**, дерево чистое; боевой стенд поднят
-(резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` — есть).
-Этап **M7/Э7** начат: **T0 закрыт** (`14567a8`), **следующий шаг — T1** (код служб пока
-не тронут). Предыдущий этап M6 закрыт: `ffc450c` (T6-доклад), код-ревью — `4449fab` (принят).
+Состояние на момент передачи: **HEAD `cd01065`** (+ docs-коммит этого промта), дерево чистое;
+боевой стенд поднят (резидент `llm_host`, `watch`/`mcp-http`/`transcribe-watch`, `index.pause` —
+есть). Этап **M7/Э7** начат: **T0 закрыт** (`14567a8`), **T1 закрыт** (`cd01065`),
+**следующий шаг — T2**. Предыдущий этап M6 закрыт: `ffc450c` (T6-доклад), код-ревью — `4449fab`.
 
 Станция: Windows, RTX 3060 12 ГБ (единственный дискретный GPU), AMD Radeon Graphics
 (iGPU, UMA), Ryzen 7 5700G, 64 ГБ RAM, rustc/cargo 1.97.1. Ядро на Rust (`crates/`),
@@ -27,10 +27,10 @@ Python — только sidecar.
 1. **T0 (хвосты ревью M6) — ✅ сделано (`14567a8`):** M6-1 (`hds check` `gpu_roles` теперь
    читает `llm.<role>.device`), M6-4 (косметика `CUDA ,`), F-m6-t5-1 — решение «поведение
    не меняем» (ждёт владельца).
-2. **T1 (общий модуль служб):** вынести общую часть служб из `hds-cli` в `hds-core::service`
-   (роли/имена, `sc_args`, `daemon_plist`, чтение состояния SCM/launchd, управление) — UI не
-   может импортировать `hds-cli` (там цикл: `hds-cli` зависит от `hds-ui`). `hds service …` —
-   поведение без изменений.
+2. **T1 (общий модуль служб) — ✅ сделано (`cd01065`):** общая часть служб вынесена в
+   `hds-core::service` (роли/имена, `sc_args(sub, role, hds_exe)`, `daemon_plist`, чтение
+   состояния SCM/launchd, управление); `hds-cli::cmd::service` — тонкая обёртка; `service run`
+   остался в CLI; `hds service …` — поведение без изменений.
 3. **T2 (`/api/services`):** `GET` — состояние 4 ролей (`watch|mcp-http|ui|llm-host`),
    `POST {role, action}` — `install|uninstall|start|stop|restart` (admin-гейт/CSRF/аудит
    `admin_op`); особые случаи: перезапуск роли `ui` (сам себя), нет прав, desktop-профиль.
@@ -57,27 +57,43 @@ Python — только sidecar.
 * Проверено: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy -D warnings`
   чисто. Изменён только `crates/hds-index/src/diag.rs` (+55/−8).
 
-## Следующий шаг — T1 (общий модуль служб)
+## Сделано в T1 (`cd01065`, 10.10.2026)
 
-Цель: чтобы UI мог управлять OS-службами, вынести **общую часть** `hds-cli/src/cmd/service.rs`
-в нижний крейт (`hds-core::service` — рекомендуется; альтернатива — новый `hds-service`).
-Почему нельзя оставить в CLI: `hds-ui` **не** зависит от `hds-cli`, а `hds-cli` зависит от
-`hds-ui` — прямой импорт дал бы цикл.
+* Создан **`crates/hds-core/src/service.rs`** — общий код служб (M7 T1, `PLAN_M7_UI_CONTROL.md`
+  §3.1): `ROLES`, `service_name`, `daemon_label`, `parse_role`; `sc_args(sub, role, hds_exe: &Path)`
+  (путь к `hds.exe` передаёт вызывающий — `current_exe()` в общем коде указал бы на UI),
+  `daemon_plist`; чтение состояния `status(role) -> ServiceStatus` (SCM `sc query`/`sc qc`,
+  launchd `launchctl print`); управление `control(action, role, hds_exe) -> ControlResult`
+  (`install|uninstall|start|stop` через `sc.exe`/`launchctl`; `permission_denied()` — для T2).
+  Контракт `ServiceStatus {role, kind, state, autostart, detail}` — под `GET /api/services`.
+* `hds-cli/src/cmd/service.rs` стал тонкой обёрткой: `service run` (SCM-диспетчер
+  `windows-service`, `run_llm_host`, `on_service_stop`) остался в CLI; `install…status`
+  делегирует в `hds_core::service::control` (печать/exit-код без изменений); имена
+  реэкспортированы (`pub use hds_core::service::{…}`) — внешний API `hds-cli::cmd::service`
+  сохранён. `windows-service` в `hds-core` **не** тянется.
+* Юнит-тесты: `roles_and_names`, `sc_install_args_quote_binpath`, `plist_has_required_keys`
+  переехали в `hds-core::service::tests` (вызов `sc_args` — с путём); в CLI остался
+  `role_from_args_reads_service_role`; добавлены чистые `parse_sc_query_state`/`parse_sc_qc_autostart`
+  (работают и на linux-CI).
+* Проверено: `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets
+  -D warnings` чисто; `hds check` (desktop) — ok. Регрессия `hds service status <role>` на стенде:
+  `sc 1060` → exit 1; неизвестная подкоманда/нет роли → exit 2. Стенд останавливался и **возвращён**.
 
-* Переносим: `ROLES`, `service_name`, `daemon_label`, `parse_role`, `sc_args`, `daemon_plist`,
-  чтение состояния службы (SCM `sc query` / `launchctl print`) и управление
-  (`install|uninstall|start|stop` через `sc.exe`/`launchctl`).
-* **НЕ переносим:** `service run` (SCM-диспетчер через `windows-service`, `run_llm_host`) —
-  остаётся в CLI; поэтому `windows-service` в общий крейт **не тянется** (управление идёт
-  через `sc.exe`).
-* **Ключевая тонкость:** `sc_args("install")` берёт `std::env::current_exe()` для `binPath`
-  → в общем коде это стало бы exe **вызывающего** (UI), а не `hds.exe`. Общий `sc_args`
-  обязан принимать путь к `hds.exe` параметром (`sc_args(sub, role, hds_exe: &Path)`); в UI
-  искать `hds.exe` существующим `hds-ui::hds_exe()` (рядом/`bin`/`target/…`).
-* Регрессия: текст/exit-коды `hds service …` не меняются; юнит-тесты `service.rs`
-  (`roles_and_names`, `sc_install_args_quote_binpath`, `plist_has_required_keys`,
-  `role_from_args_reads_service_role`) остаются зелёными там, где оказался код.
-* Готовый контракт статуса роли — `PLAN_M7_UI_CONTROL.md` §3.1.
+## Следующий шаг — T2 (`/api/services` в UI)
+
+Добавить `GET`/`POST /api/services` в `crates/hds-ui/src/lib.rs` поверх `hds-core::service`
+(контракт — `PLAN_M7_UI_CONTROL.md` §3.2; профили/права — §3.5):
+
+* `GET /api/services` → `{profile, services:[{role,kind,state,autostart,detail}], hint}` —
+  по 4 ролям из `hds_core::service::ROLES`, состояние через `service::status(role)`.
+* `POST /api/services {role, action}` → `{ok, msg, state}`: `install|uninstall|start|stop|restart`,
+  путь к `hds.exe` — существующим `hds-ui::hds_exe()`; под admin-гейтом/CSRF/аудитом `admin_op`.
+* Особые случаи (§3.5): нет прав (код 5/Access denied → честная ошибка + hint); служба не
+  установлена; desktop-профиль — «служб нет», действия отклоняются; перезапуск роли `ui`
+  (сам себя) — ответ до перезапуска/делегирование SCM-авторестарту либо отказ с hint.
+* Старые точки (`/api/watch/daemon`, `/api/mcp-http`, `/api/llm-host/restart`,
+  `/api/transcribe/daemon`) — **не ломать**; `/api/services` — добавление.
+* Юниты (без SCM): разбор действия, неизвестная роль, desktop-профиль.
 ## Точка входа (5 минут)
 1. `git --no-pager -C C:\Users\Sasha\hermes-disk-search log --oneline -8`  # HEAD — этот промт
 2. `git --no-pager -C C:\Users\Sasha\hermes-disk-search status --short`     # чисто
@@ -87,7 +103,8 @@ Python — только sidecar.
 4. `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all --check`.
 5. Прочитать: **`PLAN_M7_UI_CONTROL.md`** целиком (§3 — контракты, §4 — треки, §5 — приёмка)
    → `M6_CODE_REVIEW.md` §3 (хвосты T0) → `PLAN_SERVER_MULTIUSER.md` §2 W10 / §5 Э7 → `STATUS.md`.
-6. Карта кода: `crates/hds-cli/src/cmd/service.rs` (службы), `crates/hds-ui/src/lib.rs`
+6. Карта кода: `crates/hds-core/src/service.rs` (общий код служб, T1) →
+   `crates/hds-cli/src/cmd/service.rs` (тонкая обёртка + `service run`), `crates/hds-ui/src/lib.rs`
    (`/api/*`, admin-гейт ~1424, `mcp_http_action` ~1237, `llm_host_restart` ~826),
    `crates/hds-ui/src/page.rs` (карточки), `crates/hds-core/src/access.rs` (`new_token` ~201),
    `crates/hds-mcp/src/auth.rs` (`login` ~96).
@@ -95,8 +112,8 @@ Python — только sidecar.
 ## Контракты (код — источник истины, `PLAN_M7_UI_CONTROL.md` §3)
 
 * **Роль службы** = `watch | mcp-http | ui | llm-host`; имена `hermes-disk-search-<role>`
-  (Windows SCM) / `com.hermes-disk-search.<role>` (macOS launchd). Источник —
-  `hds-cli::cmd::service` (переносится в общий модуль, T1).
+  (Windows SCM) / `com.hermes-disk-search.<role>` (macOS launchd). Источник — `hds_core::service`
+  (общий модуль, T1); `hds-cli::cmd::service` реэкспортирует имена для совместимости.
 * **`GET /api/services`** → `{profile, services:[{role,kind,state,autostart,detail}], hint}`;
   `kind = "service"|"absent"`, `state = "running"|"stopped"|"absent"|"unknown"`.
 * **`POST /api/services {role, action}`** → `{ok, msg, state}`; действия

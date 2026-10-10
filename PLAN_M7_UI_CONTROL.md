@@ -139,14 +139,26 @@ Apple Silicon (Э11); анонимизация внешнего API (W9); нов
 - **Следующий шаг — T1.** Боевой стенд (`watch`/`mcp-http`/`transcribe-watch`) останавливался
   на время тестов и **возвращён**; `index.pause` цел, резидент `llm_host` жив.
 
-### T1. Общий модуль служб (рефакторинг без смены поведения) — 1–1,5 дн
-- [ ] Перенести общую часть служб в `hds-core::service` (§3.1): роли/имена, `sc_args`,
-      `daemon_plist`, чтение состояния, управление; `hds-cli::cmd::service` — тонкая обёртка.
-- [ ] `service run` (SCM-диспетчер, `run_llm_host`) остаётся в CLI.
-- [ ] Перенести/сохранить юнит-тесты; поведение `hds service …` — без изменений
-      (регрессия: тот же текст/exit-коды).
-- [ ] `hds service status <role>` печатает живое состояние (SCM/launchd) — с числами/
-      деталями; в desktop профиле — как раньше.
+### T1. Общий модуль служб (рефакторинг без смены поведения) — 1–1,5 дн — ✅ **выполнено 10.10.2026**
+- [x] Общая часть служб вынесена в **`hds-core::service`** (§3.1): роли/имена (`ROLES`,
+      `service_name`, `daemon_label`, `parse_role`), `sc_args`, `daemon_plist`, чтение состояния
+      (`status` — SCM `sc query`/`sc qc`, launchd `launchctl print`) и управление
+      (`control` — `sc.exe`/`launchctl`); `hds-cli::cmd::service` — тонкая обёртка (реэкспорт
+      имён для совместимости). Ключевое: `sc_args(sub, role, hds_exe: &Path)` принимает путь к
+      `hds.exe` параметром (в general-коде `current_exe()` указал бы на exe вызывающего — UI).
+- [x] `service run` (SCM-диспетчер `windows-service`, `run_llm_host`) остался в CLI;
+      `windows-service` в `hds-core` не тянется (управление идёт через `sc.exe`).
+- [x] Юнит-тесты сохранены/перенесены: `roles_and_names`, `sc_install_args_quote_binpath`,
+      `plist_has_required_keys` — в core; `role_from_args_reads_service_role` — в CLI. Добавлены
+      чистые кросс-платформенные `parse_sc_query_state`/`parse_sc_qc_autostart`.
+- [x] Контракты для T2/T3: `ServiceStatus` (`role/kind/state/autostart/detail`) и
+      `ControlResult` (код + раздельные потоки + `permission_denied`).
+- [x] Поведение `hds service …` без изменений (регрессия): `status <role>` — живое состояние
+      (`sc 1060` → exit 1), неизвестная подкоманда/нет роли — exit 2 (проверено на стенде).
+- [x] `cargo test --workspace` — **88 наборов / 0 failed**; `fmt`/`clippy --all-targets -D warnings`
+      чисто; `hds check` (desktop) — ok. Стенд (`watch`/`mcp-http`/`transcribe-watch`)
+      останавливался на тесты и **возвращён**; `index.pause` цел, резидент `llm_host` жив.
+- **Следующий шаг — T2** (`/api/services` в UI).
 
 ### T2. `/api/services` в UI — 1,5–2 дн
 - [ ] `GET /api/services` (§3.2): профиль, роли, `state`/`autostart`/`kind`, hint.
