@@ -93,6 +93,27 @@ fn page_has_transcribe_tab() {
     }
 }
 
+/// T4 (M7): в странице есть карточка «Службы» и выдача токена в «Доступе»
+/// (плюс восстановлены обработчики пользователей, на которые ссылается разметка).
+#[test]
+fn page_has_services_and_token_controls() {
+    let (_, _, body) = route("GET", "/", "", &ReqHeaders::default(), "");
+    for needle in [
+        "Службы",
+        "loadServices(",
+        "svcAct(",
+        "/api/services",
+        "Выдать токен",
+        "accessTokenNew(",
+        "/api/access/token/new",
+        "accessList(",
+        "accessAdd(",
+        "accessDel(",
+    ] {
+        assert!(body.contains(needle), "в странице нет {needle}");
+    }
+}
+
 /// Статус демона доступен UI (`running`/`enabled`/папки) — без запуска процесса.
 #[test]
 fn transcribe_daemon_status_shape() {

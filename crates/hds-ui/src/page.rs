@@ -81,6 +81,13 @@ pub const PAGE: &str = r#"<!doctype html>
    по умолчанию <code>127.0.0.1:8787/mcp</code>): к нему подключаются Cline/Hermes.
    «Чужой» сервис на порту не переиспользуется — освободите порт и запустите заново.</div></section>
 
+ <section><h2>Службы (server-профиль)</h2>
+  <div id="svc-list" class="muted">…</div>
+  <div class="row" style="margin-top:8px"><button onclick="loadServices()">Обновить состояние</button>
+   <span id="svcmsg" class="muted"></span></div>
+  <div class="muted">Установка/запуск OS-служб (<code>hermes-disk-search-&lt;роль&gt;</code>):
+   доступно только в server-профиле и требует прав администратора (или службы LocalSystem).</div></section>
+
  <section><h2>Доступ (пользователи и проекты)</h2>
   <div id="access-users" class="muted">…</div>
   <div class="row" style="margin-top:8px">
@@ -93,6 +100,13 @@ pub const PAGE: &str = r#"<!doctype html>
    <button onclick="accessList()">Обновить</button>
   </div>
   <div id="accmsg" class="muted"></div>
+  <div class="row" style="margin-top:8px">
+   <input id="tok-user" placeholder="логин" style="min-width:110px">
+   <input id="tok-ttl" placeholder="TTL дней" style="min-width:90px">
+   <button onclick="accessTokenNew()">Выдать токен</button>
+   <span id="tokmsg" class="muted"></span>
+  </div>
+  <pre id="tokout" class="muted" style="display:none"></pre>
   <div class="muted">Проекты назначаются по корням (<code>index.roots</code>: «корень → проект»).
    В server-режиме страница открывается только с админ-токеном (<code>?token=...</code> —
    запоминается в браузере; токены выдаёт <code>POST /auth/login</code> или <code>hds login</code>).</div>
@@ -286,6 +300,78 @@ async function mcpAct(action){
   }catch(e){ m.textContent='ошибка: '+e; }
   loadMcp(); refresh();
 }
+async function loadServices(){
+  const el=document.getElementById('svc-list');
+  try{ const j=await jget('/api/services');
+    if(j.profile!=='server'){ el.innerHTML='<span class="muted">'+esc(j.hint||'службы только в server-профиле')+'</span>'; return; }
+    const st=function(s){ return s==='running'?'<span class="ok">работает</span>'
+      :(s==='stopped'?'<span class="muted">остановлена</span>'
+      :(s==='absent'?'<span class="muted">не установлена</span>':'<span class="err">неизвестно</span>')); };
+    const rows=(j.services||[]).map(function(s){
+      const acts=['install','uninstall','start','stop','restart'].map(function(a){
+        return '<button onclick="svcAct(\''+esc(s.role)+'\',\''+a+'\')">'+a+'</button>'; }).join(' ');
+      return '<tr><td><code>'+esc(s.role)+'</code></td><td>'+st(s.state)+'</td><td class="muted">'+
+        (s.autostart?'да':'нет')+'</td><td>'+acts+'</td></tr>'; }).join('');
+    el.innerHTML='<table class="tr"><thead><tr><th>Роль</th><th>Состояние</th><th>Автозапуск</th><th>Действия</th></tr></thead><tbody>'
+      +(rows||'<tr><td colspan=4 class="muted">нет ролей</td></tr>')+'</tbody></table>';
+  }catch(e){ el.textContent='ошибка: '+e; }
+}
+async function svcAct(role, action){
+  const m=document.getElementById('svcmsg'); m.textContent='… '+action+' '+role;
+  try{ const r=await jpost('/api/services', {role:role, action:action});
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.hint||r.error||'ok');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  loadServices();
+}
+async function accessList(){
+  const el=document.getElementById('access-users');
+  try{ const j=await jget('/api/access/users');
+    if(j.error){ el.innerHTML='<span class="err">'+esc(j.error)+'</span>'; return; }
+    const us=j.users||[];
+    if(!us.length){ el.innerHTML='<span class="muted">пользователей нет</span>'; return; }
+    el.innerHTML='<table class="tr"><thead><tr><th>Логин</th><th>Имя</th><th>Админ</th><th>Проекты</th></tr></thead><tbody>'
+      +us.map(function(u){ return '<tr><td><code>'+esc(u.login)+'</code></td><td>'+esc(u.name||'')+'</td><td>'+
+        (u.admin?'да':'')+(u.disabled?' <span class="err">отключён</span>':'')+'</td><td class="muted">'+
+        esc((u.projects||[]).join(', ')||'—')+'</td></tr>'; }).join('')+'</tbody></table>';
+  }catch(e){ el.innerHTML='<span class="err">ошибка: '+esc(''+e)+'</span>'; }
+}
+async function accessAdd(){
+  const m=document.getElementById('accmsg');
+  const login=(document.getElementById('acc-login').value||'').trim();
+  const password=document.getElementById('acc-pass').value||'';
+  const projects=(document.getElementById('acc-projects').value||'').split(',').map(function(s){return s.trim();}).filter(Boolean);
+  const admin=document.getElementById('acc-admin').checked;
+  if(!login||!password){ m.textContent='нужны логин и пароль'; return; }
+  m.textContent='…';
+  try{ const r=await jpost('/api/access/user/add', {login:login, password:password, admin:admin, projects:projects});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  accessList();
+}
+async function accessDel(){
+  const m=document.getElementById('accmsg');
+  const login=(document.getElementById('acc-login').value||'').trim();
+  if(!login){ m.textContent='укажите логин в поле «логин»'; return; }
+  m.textContent='…';
+  try{ const r=await jpost('/api/access/user/del', {login:login});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  accessList();
+}
+async function accessTokenNew(){
+  const m=document.getElementById('tokmsg'), o=document.getElementById('tokout');
+  const user=(document.getElementById('tok-user').value||'').trim();
+  if(!user){ m.textContent='укажите логин'; return; }
+  const ttl=parseInt(document.getElementById('tok-ttl').value,10);
+  const body={user:user}; if(ttl>0) body.ttl_days=ttl;
+  m.textContent='…'; o.style.display='none'; o.textContent='';
+  try{ const r=await jpost('/api/access/token/new', body);
+    if(r.token){ m.textContent='токен выдан — показывается один раз';
+      o.textContent='Токен для '+user+':\n'+r.token+'\nИстекает: '+fmtTime(r.expires); o.style.display='block'; }
+    else m.textContent='ошибка: '+(r.error||r.msg||'не удалось');
+  }catch(e){ m.textContent='ошибка: '+e; }
+  accessList();
+}
 async function act(u){
   const m=document.getElementById('imsg'); m.textContent='…';
   try{ const r=await jpost(u); m.textContent=r.msg||'ok'; }catch(e){ m.textContent='ошибка: '+e; }
@@ -475,6 +561,6 @@ function initTab(){
 }
 initTab();
 refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
-loadChatModels(); loadMcp();
+loadChatModels(); loadMcp(); loadServices();
 </script></body></html>
 "#;
