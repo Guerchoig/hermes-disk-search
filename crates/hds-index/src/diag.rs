@@ -1089,16 +1089,22 @@ fn gpu_layout_from_yaml(cfg: &Config) -> (Vec<(i32, Vec<String>)>, Vec<String>) 
     (out, warns)
 }
 
-/// Карта роли из конфига с приоритетами M6 §3.1: `llm_server.<role>.device` →
-/// `gpu.devices[].roles`. Возвращает `(индекс, число источников)`.
+/// Карта роли из конфига с приоритетами M6 §3.1 (как в `hds-llama::config`):
+/// `llm.<role>.device` → `llm_server.<role>.device` → `gpu.devices[].roles`.
+/// Возвращает `(индекс, число источников)`.
 fn role_device_from_cfg(cfg: &Config, role: &str) -> (Option<i32>, usize) {
     let mut sources = 0usize;
     let mut index: Option<i32> = None;
-    if let Some(ix) = dig(cfg, &format!("llm_server.{role}.device")).and_then(|v| v.as_i64()) {
-        if ix >= 0 {
-            sources += 1;
-            index = Some(ix as i32);
-        }
+    // M6-1 (код-ревью M6, 10.10.2026): новый ключ `llm.<role>.device` приоритетнее
+    // `llm_server.<role>.device` — зеркально `hds-llama::config::build_role`.
+    // Раньше читался только старый ключ: роль по `llm.<role>.device` «исчезала» из
+    // пункта `gpu_roles`, а двойное назначение с `gpu.devices` не ловилось.
+    let explicit = dig(cfg, &format!("llm.{role}.device"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| dig(cfg, &format!("llm_server.{role}.device")).and_then(|v| v.as_i64()));
+    if let Some(ix) = explicit.filter(|v| *v >= 0) {
+        sources += 1;
+        index = Some(ix as i32);
     }
     let (layout, _) = gpu_layout_from_yaml(cfg);
     for (n, ix) in layout
@@ -1374,8 +1380,15 @@ fn check_gpu_roles_live(
                     .get("memory_free_mib")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(0.0);
+                // M6-4 (код-ревью M6): при пустом описании устройства не печатаем
+                // «CUDA ,» — склеиваем backend/desc без лишнего пробела.
+                let dev_txt = if desc.trim().is_empty() {
+                    backend.to_string()
+                } else {
+                    format!("{backend} {desc}")
+                };
                 lines.push(format!(
-                    "{line} ({backend} {desc}, свободно {free:.0} МиБ — замер движка, R29 \
+                    "{line} ({dev_txt}, свободно {free:.0} МиБ — замер движка, R29 \
                      недостоверен для бюджета)"
                 ));
                 if looks_like_igpu(desc) {
@@ -1653,6 +1666,40 @@ mod tests {
         let c = check_gpu_roles(&cfg("gpu:\n  devices:\n    - {}"));
         assert_eq!(c.status, "warn", "msg={}", c.msg);
         assert!(c.fix.contains("gpu.devices[0]"), "fix={}", c.fix);
+    }
+
+    /// M6-1 (код-ревью M6, 10.10.2026): карта роли читается и из нового ключа
+    /// `llm.<role>.device` (приоритетнее `llm_server.<role>.device`) — зеркально
+    /// рантайму `hds-llama::config::build_role`. До фикса роль «исчезала» из
+    /// `gpu_roles`, а двойное назначение с `gpu.devices` не ловилось.
+    #[test]
+    fn role_device_prefers_llm_key() {
+        use super::role_device_from_cfg;
+
+        // Новый ключ `llm.<role>.device`.
+        let (ix, n) = role_device_from_cfg(&cfg("llm:\n  chat:\n    device: 2"), "chat");
+        assert_eq!(ix, Some(2), "карта из llm.chat.device");
+        assert_eq!(n, 1);
+
+        // Старый ключ `llm_server.<role>.device` — фолбэк сохранён.
+        let (ix, n) = role_device_from_cfg(&cfg("llm_server:\n  chat:\n    device: 3"), "chat");
+        assert_eq!(ix, Some(3), "фолбэк на llm_server.chat.device");
+        assert_eq!(n, 1);
+
+        // Новый ключ + запись gpu.devices → два источника (двойное назначение).
+        let (ix, n) = role_device_from_cfg(
+            &cfg(
+                "llm:\n  chat:\n    device: 2\ngpu:\n  devices:\n    - { index: 1, roles: [chat] }",
+            ),
+            "chat",
+        );
+        assert_eq!(ix, Some(2), "role-ключ сильнее раскладки");
+        assert_eq!(n, 2, "двойное назначение видно: {n} источников");
+
+        // Отрицательный индекс игнорируется (как в рантайме: filter(>=0)).
+        let (ix, n) = role_device_from_cfg(&cfg("llm:\n  chat:\n    device: -1"), "chat");
+        assert_eq!(ix, None);
+        assert_eq!(n, 0);
     }
 
     /// M6 T4 §3.4: подсказка о пресете — подбор по вендорам/числу карт,
