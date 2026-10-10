@@ -214,6 +214,46 @@ chat:
 * Проверка: `hds check` (пункт `chat_provider`), `llm-host status` (chat-роль
   не поднимается; предупреждение в warnings).
 
+## 8b. Несколько карт одного семейства (M6)
+
+Прод-сервер может иметь **несколько дискретных GPU одного семейства** (NVIDIA под
+Windows или AMD под Windows/Vulkan; на macOS — один Metal). Смешанные вендоры и
+iGPU/UMA **не поддерживаются**. Раскладка — пресетом или явно:
+
+```yaml
+profile: server
+gpu:
+  preset: nvidia-n              # nvidia-one | nvidia-n | amd-n | apple (| none)
+  # devices:                    # явная раскладка сильнее пресета
+  #   - { index: 1, roles: [chat, whisper] }
+  #   - { index: 2, roles: [chat-2, whisper-2] }
+llm_server:
+  parallel: 5
+  chat:   { port: 8010, model: "shared:chat" }
+  chat-2: { port: 8030, model: "shared:chat" }   # реплика — та же модель/контекст
+  embedding: { port: 8011, model: "shared:embedding" }   # один экземпляр на машину
+  rerank:    { port: 8012, model: "shared:rerank" }      # один экземпляр (на CPU — ок)
+llm:
+  whisper:   { model: "…whisper-large-v3-turbo-GGML.bin" }   # экземпляр на карту
+  whisper-2: { model: "…whisper-large-v3-turbo-GGML.bin" }
+```
+
+Что это даёт и как проверять:
+
+* **Пользователи** ходят в один фасад `chat` → `:8010`; хост раскидывает запросы по
+  репликам (least-busy → round-robin). Порты реплик (`8010+N`) наружу не публикуются.
+* **Индексация** — ровно один экземпляр (`embedding`+`rerank`); реплика `embedding-2`
+  → **ошибка конфига** (fail-fast с числами).
+* **Транскрибация** — экземпляр на карту, один файл за раз; число карт и роли видны в
+  логе старта (`транскрибация по картам: …`) и в `cards`.
+* Проверки: `llm_host status` (строки `cards`: карта / backend / свободно / роли),
+  `hds check` (пункт `gpu_roles` — карты, роли, уместный пресет, warn на смешанные
+  вендоры/UMA), `llm_host_plan` (сухой прогон раскладки с числами).
+* ⚠ **Ограничение:** host-выбор карты под файл (`pick_whisper_card`) срабатывает
+  только когда клиент **не** шлёт поле `gpu`; штатные `hds whisper-check`/
+  `auto_transcribe` его шлют (см. `PLAN_M6_GPU_MULTIVENDOR.md` §8a, T5 / F-m6-t5-1).
+  На одной карте разницы нет; на N картах — учитывать.
+
 ## 9. Десктоп-режим (по умолчанию)
 
 Если в `config.yaml` нет `access.enabled: true` (или он `false`):

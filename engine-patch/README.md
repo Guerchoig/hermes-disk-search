@@ -49,6 +49,25 @@ cmd /c '"C:\Program Files\Microsoft Visual Studio\18\Community\VC\Auxiliary\Buil
 13.4 (`nvcc`), `whisper.cpp` рядом (для аудио-моста). Полная поставка (как ассет) —
 через `build_full_stack_cuda.ps1` с `-EnableCpuAllVariants`/`-StageCudaRuntime`, как в CI.
 
+## Как собрать Vulkan-бэкенд (AMD, M6 T0)
+
+Сборка под **AMD/Vulkan** (инсталляции без NVIDIA) — тот же приём, отдельная цель
+`ggml-vulkan`:
+
+* требуется **Vulkan SDK** (на стенде — облегчённый 1.4.335.0 без админа) и
+  `Ninja Multi-Config` из VS 18; configure падал без
+  `-DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=OFF -DLLAMA_BUILD_COMMON=OFF`
+  (см. `tools/parity/out/build_ggml_vulkan.cmd`);
+* **чужие `ggml-vulkan.dll` не подмешивать** — несовместимы с нашей базой:
+  b11528 даёт `api_version=3` (наш — 2), b11200 формально грузится и перечисляет
+  устройства, но **крашит процесс** (апстрим сменил layout `ggml_backend_buffer_i`
+  **без** бампа версии бэкенд-API). Собираем из **нашего** дерева;
+* проверено (спайк M6 T0, `tools/parity/SPIKES.md` §15): движок перечисляет
+  `CUDA0 / Vulkan0=AMD iGPU / Vulkan1=RTX 3060 / CPU` — с Vulkan-бэкендом **порядок
+  ускорителей меняется**, поэтому пин по `gpu.device_index` на AMD-сборке обязателен;
+* результат — фолбэк-ветка: если Vulkan-сборка недоступна, `hds check` даёт warn
+  («Vulkan-бэкенд недоступен»); NVIDIA/Metal не затронуты.
+
 ## Результаты живой проверки (02.10.2026, RTX 3060 12 ГБ)
 
 Собран нашим патчем и проверен на **копии** рантайма (`C:\Users\Sasha\engine-patched`),
