@@ -10,7 +10,10 @@
 //!   CRUD `files`/`chunks`/`chunks_fts`/`chunks_vec`;
 //! * [`access`] — идентичность и доступ (M1, `PLAN_M1_ACCESS_PROJECTS.md`
 //!   §3.2/§3.3): `data/access.yaml`, пароли Argon2id, opaque-токены;
-//! * [`roots`] — корни индексации → проекты (M1, §3.1).
+//! * [`roots`] — корни индексации → проекты (M1, §3.1);
+//! * [`service`] — управление OS-службами (M7 T1, `PLAN_M7_UI_CONTROL.md` §3.1):
+//!   роли/имена, `sc_args`, LaunchDaemon-плейст, чтение состояния SCM/launchd,
+//!   управление через `sc.exe`/`launchctl` (общий код CLI ↔ UI).
 //!
 //! Правило волны W2: Python-версия (`hds/db.py`, `hds/config.py`) — источник
 //! истины по поведению (`PLAN_W2_LLM_HOST.md` §5); расхождения допустимы только
@@ -30,6 +33,7 @@ pub mod net;
 pub mod queue;
 pub mod ratelimit;
 pub mod roots;
+pub mod service;
 
 pub use access::{
     access_path, authenticate, hash_password, load as load_access, new_token, resolve_token,

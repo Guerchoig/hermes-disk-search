@@ -10,9 +10,9 @@
 //!   напрямую (тот же путь, что и на macOS);
 //! * роли: `watch` | `mcp-http` | `ui` | `llm-host` (последний — спавн и
 //!   ожидание `llm_host.exe run`, чтобы SCM контролировал наш процесс);
-//! * `install|uninstall|start|stop|status [role]` — управление: Windows —
-//!   `sc.exe` (автостарт + авторестарт при падении), macOS — плейст
-//!   LaunchDaemon + `launchctl`.
+//! * `install|uninstall|start|stop|status [role]` — управление: общий код
+//!   `hds-core::service` (M7 T1; Windows — `sc.exe` с автостартом/авторестартом,
+//!   macOS — плейст LaunchDaemon + `launchctl`); печать и exit-код без изменений.
 //!
 //! Десктопный автозапуск (Планировщик `AtLogOn`, `install_autostart.ps1`) не
 //! трогается: службы — только server-профиль (ставит `installers/install_server.ps1`).
@@ -21,23 +21,11 @@ use std::path::PathBuf;
 
 use hds_core::config::{ensure_state_dir, load};
 
-/// Поддерживаемые роли службы.
-pub const ROLES: [&str; 4] = ["watch", "mcp-http", "ui", "llm-host"];
-
-/// Имя службы Windows для роли (`hermes-disk-search-<role>`).
-pub fn service_name(role: &str) -> String {
-    format!("hermes-disk-search-{role}")
-}
-
-/// Метка LaunchDaemon macOS для роли.
-pub fn daemon_label(role: &str) -> String {
-    format!("com.hermes-disk-search.{role}")
-}
-
-/// Разбор роли (валидация для CLI).
-pub fn parse_role(s: &str) -> Option<&'static str> {
-    ROLES.iter().find(|r| **r == s).copied()
-}
+/// Роли/имена служб и общий код управления — в `hds-core::service` (M7 T1,
+/// `PLAN_M7_UI_CONTROL.md` §3.1): тот же код использует UI (у которого нет
+/// зависимости на `hds-cli` — иначе цикл). Реэкспорт сохранён, чтобы
+/// `hds-cli::cmd::service::{ROLES, service_name, …}` работали как раньше.
+pub use hds_core::service::{daemon_label, daemon_plist, parse_role, service_name, ROLES};
 
 /// `hds service <sub> [role]`; `sub` — run|install|uninstall|start|stop|status.
 pub fn cmd_service(sub: &str, args: &[String]) -> i32 {
@@ -158,8 +146,8 @@ fn run_llm_host() -> i32 {
 
 #[cfg(windows)]
 mod scm {
-    //! SCM-обвязка: главная функция службы (`windows-service`) и управление
-    //! через `sc.exe` (install/uninstall/start/stop/status).
+    //! SCM-обвязка: главная функция службы (`windows-service`). Управление
+    //! (`sc.exe` install/uninstall/start/stop/status) — в `hds-core::service`.
     //!
     //! Остановка: роли — блокирующие циклы без канала остановки, поэтому
     //! обработчик Stop завершает процесс (SCM фиксирует остановку по смерти
@@ -221,37 +209,6 @@ mod scm {
 
         set(ServiceState::Stopped, ServiceControlAccept::empty());
     }
-
-    /// Аргументы `sc.exe` для подкоманды управления службой.
-    pub fn sc_args(sub: &str, role: &str) -> Vec<String> {
-        let name = super::service_name(role);
-        match sub {
-            "install" => vec![
-                "create".into(),
-                name,
-                format!(
-                    "binPath= \"\\\"{}\\\" service run {role}\"",
-                    std::env::current_exe()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default()
-                ),
-                "start= auto".into(),
-                format!("DisplayName= \"Hermes Disk Search: {role}\""),
-                "obj= LocalSystem".into(),
-            ],
-            "uninstall" => vec!["delete".into(), name],
-            "start" => vec!["start".into(), name],
-            "stop" => vec!["stop".into(), name],
-            "status" => vec!["query".into(), name],
-            _ => vec![],
-        }
-    }
-
-    /// Авторестарт службы при падении (5 с, 5 с, 30 с; сброс счётчика за сутки).
-    pub const FAILURE_ARGS: [&str; 2] = [
-        "reset= 86400",
-        "actions= restart/5000/restart/5000/restart/30000",
-    ];
 }
 
 #[cfg(windows)]
@@ -294,165 +251,20 @@ fn service_run_platform(role: &str) -> i32 {
     }
 }
 
-#[cfg(windows)]
+/// Управление службой (`install|uninstall|start|stop|status`) — общий код
+/// `hds-core::service` (M7 T1). Печатаем stdout/stderr и возвращаем exit-код
+/// ровно как раньше (без смены поведения). `hds.exe` для `binPath` — свой
+/// `current_exe()` (CLI вызывается как `hds …`).
 fn service_control(sub: &str, role: &str) -> i32 {
-    let args = scm::sc_args(sub, role);
-    let out = std::process::Command::new("sc.exe").args(&args).output();
-    match out {
-        Ok(o) => {
-            print!("{}", String::from_utf8_lossy(&o.stdout));
-            eprint!("{}", String::from_utf8_lossy(&o.stderr));
-            let code = o.status.code().unwrap_or(1);
-            if sub == "install" && code == 0 {
-                // Авторестарт при падении (риск плана: служба держит exe).
-                let _ = std::process::Command::new("sc.exe")
-                    .arg("failure")
-                    .arg(service_name(role))
-                    .args(scm::FAILURE_ARGS.iter().flat_map(|a| a.split_whitespace()))
-                    .output();
-                println!(
-                    "служба {} установлена (автостарт, авторестарт 5с/5с/30с)",
-                    service_name(role)
-                );
-            }
-            if sub == "status" {
-                // sc query: 0 — установлена; 1060 — нет.
-                return if code == 0 { 0 } else { 1 };
-            }
-            code
-        }
-        Err(e) => {
-            eprintln!("service: не запустить sc.exe: {e}");
-            1
-        }
-    }
-}
-
-// --- macOS: LaunchDaemon ---
-
-#[cfg(target_os = "macos")]
-fn service_control(sub: &str, role: &str) -> i32 {
-    // Плейст /Library/LaunchDaemons/<label>.plist (root), RunAtLoad + KeepAlive;
-    // управление — launchctl bootstrap/bootout/kickstart/kill/print.
-    let label = daemon_label(role);
-    match sub {
-        "install" => service_install_macos(role, &label),
-        "uninstall" => {
-            let _ = std::process::Command::new("launchctl")
-                .args(["bootout", &format!("system/{label}")])
-                .status();
-            let _ = std::fs::remove_file(plist_path(&label));
-            println!("LaunchDaemon {label} удалён (если был)");
-            0
-        }
-        "start" => launchctl(["kickstart", "-k", &format!("system/{label}")]),
-        "stop" => launchctl(["kill", "SIGTERM", &format!("system/{label}")]),
-        "status" => launchctl(["print", &format!("system/{label}")]),
-        _ => 2,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn launchctl(args: [&str; 3]) -> i32 {
-    match std::process::Command::new("launchctl").args(args).status() {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => {
-            eprintln!("service: launchctl: {e}");
-            1
-        }
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn plist_path(label: &str) -> std::path::PathBuf {
-    std::path::PathBuf::from("/Library/LaunchDaemons").join(format!("{label}.plist"))
-}
-
-#[cfg(target_os = "macos")]
-fn service_install_macos(role: &str, label: &str) -> i32 {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("service: не определить свой exe: {e}");
-            return 1;
-        }
-    };
-    let log_dir = hds_core::config::system_state_dir()
-        .map(|d| d.join("data").join("logs"))
-        .unwrap_or_else(|| std::path::PathBuf::from("/var/log/hermes-disk-search"));
-    // F10.2 (M2-ревью): каталог логов должен существовать до старта демона.
-    let _ = std::fs::create_dir_all(&log_dir);
-    let body = daemon_plist(
-        &exe.display().to_string(),
-        role,
-        &label,
-        &log_dir.display().to_string(),
-    );
-    let path = plist_path(label);
-    if std::fs::write(&path, body).is_err() {
-        eprintln!(
-            "service: нет прав на {} — запустите с sudo:\n--- 8< ---\n{body}\n--- >8 ---",
-            path.display()
-        );
-        return 1;
-    }
-    launchctl(["bootstrap", "system", &format!("system/{label}")])
-}
-
-/// Содержимое LaunchDaemon-плейста (RunAtLoad + KeepAlive — старт при загрузке
-/// без интерактивного входа и перезапуск при падении). `log_dir` — каталог для
-/// `StandardOutPath`/`StandardErrorPath` (F10.2, M2-ревью: иначе логи демона
-/// теряются).
-pub fn daemon_plist(exe: &str, role: &str, label: &str, log_dir: &str) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>{label}</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>{exe}</string>
-        <string>service</string>
-        <string>run</string>
-        <string>{role}</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-    <key>KeepAlive</key><true/>
-    <key>StandardOutPath</key><string>{log_dir}/{role}.out.log</string>
-    <key>StandardErrorPath</key><string>{log_dir}/{role}.err.log</string>
-</dict>
-</plist>
-"#
-    )
-}
-
-// --- Прочие платформы (linux-CI) ---
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn service_control(sub: &str, _role: &str) -> i32 {
-    eprintln!(
-        "service {sub}: на этой платформе службы не поддерживаются (Windows — SCM, macOS — LaunchDaemon)"
-    );
-    2
+    let exe = std::env::current_exe().unwrap_or_default();
+    let r = hds_core::service::control(sub, role, &exe);
+    print!("{}", r.stdout);
+    eprint!("{}", r.stderr);
+    r.code
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{daemon_label, daemon_plist, parse_role, service_name, ROLES};
-
-    /// M2 T4: роли — ровно четыре; имена служб/лейблы однозначно выводятся.
-    #[test]
-    fn roles_and_names() {
-        assert_eq!(parse_role("ui"), Some("ui"));
-        assert_eq!(parse_role("mcp-http"), Some("mcp-http"));
-        assert_eq!(parse_role("watch"), Some("watch"));
-        assert_eq!(parse_role("llm-host"), Some("llm-host"));
-        assert_eq!(parse_role("nope"), None);
-        assert_eq!(service_name("ui"), "hermes-disk-search-ui");
-        assert_eq!(daemon_label("llm-host"), "com.hermes-disk-search.llm-host");
-    }
-
     /// F10.3 (M2-ревью): роль из argv распознаётся (эвристика `service run <role>`).
     #[cfg(windows)]
     #[test]
@@ -471,57 +283,5 @@ mod tests {
             super::role_from_args(&a(&["hds.exe", "service", "status"])),
             "ui"
         );
-    }
-
-    /// Аргументы sc.exe: install строит binPath с вложенными кавыками вокруг exe.
-    #[cfg(windows)]
-    #[test]
-    fn sc_install_args_quote_binpath() {
-        let args = super::scm::sc_args("install", "mcp-http");
-        assert_eq!(args[0], "create");
-        assert_eq!(args[1], "hermes-disk-search-mcp-http");
-        let bin = &args[2];
-        assert!(bin.starts_with("binPath= \"\\\""), "{bin}");
-        assert!(bin.contains("\" service run mcp-http\""), "{bin}");
-        assert!(args.contains(&"start= auto".to_string()));
-        // M3 T0 (F1): DisplayName должен содержать реальную роль, а не литерал
-        // `<role>` (дефект M2: все службы получали имя «Hermes Disk Search: <role>»).
-        assert!(
-            args.contains(&"DisplayName= \"Hermes Disk Search: mcp-http\"".to_string()),
-            "DisplayName без подстановки роли: {args:?}"
-        );
-        assert!(!args.iter().any(|a| a.contains("<role>")), "{args:?}");
-        for sub in ["uninstall", "start", "stop", "status"] {
-            let a = super::scm::sc_args(sub, "ui");
-            assert_eq!(a.last().unwrap(), "hermes-disk-search-ui");
-        }
-    }
-
-    /// LaunchDaemon-плейст: Label/ProgramArguments/RunAtLoad/KeepAlive + логи.
-    #[test]
-    fn plist_has_required_keys() {
-        let p = daemon_plist(
-            "/opt/hds/bin/hds",
-            "ui",
-            "com.hermes-disk-search.ui",
-            "/Library/Application Support/hermes-disk-search/data/logs",
-        );
-        for key in [
-            "<key>Label</key>",
-            "<key>RunAtLoad</key><true/>",
-            "<key>KeepAlive</key><true/>",
-            // F10.2 (M2-ревью): логи демона не теряются.
-            "<key>StandardOutPath</key>",
-            "<key>StandardErrorPath</key>",
-        ] {
-            assert!(p.contains(key), "нет {key}");
-        }
-        assert!(!p.contains("{ui}.out.log"), "шаблон не подставлен");
-        assert!(p.contains("/ui.out.log"), "лог stdout роли: {p}");
-        assert!(p.contains("/ui.err.log"), "лог stderr роли: {p}");
-        assert!(p.contains("<string>/opt/hds/bin/hds</string>"));
-        assert!(p.contains("<string>service</string>"));
-        assert!(p.contains("<string>ui</string>"));
-        assert!(ROLES.len() == 4);
     }
 }
