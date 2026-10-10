@@ -212,6 +212,34 @@
 > `llm_server.<role>.device` → ok, индекс вне диапазона → warn с числами, компат
 > `gpu.device_index` → ok. Замечания (низкие): косметика «CUDA ,»; при недоступном резиденте
 > диапазон карт не проверяется. Дальше — **T4** (пресеты и автодетект).
+> **T4 — пресеты раскладки и автодетект (10.10.2026).** Новые ключи `gpu.preset`
+> (`none|nvidia-one|nvidia-n|amd-n|apple`, вендор-гомогенные) и `gpu.autodetect`
+> (по умолчанию **false** — раскладка только по явному ключу). `crates/hds-llama`:
+> `config::GpuPreset` (+`parse`/`autodetect`/`layout`/`required_vendor`) и `AccelFacts`
+> (число карт + вендоры из устройств движка); `GpuConfig::{preset,autodetect}`,
+> `effective_layout` (приоритет: явная `gpu.devices` → `gpu.preset` → `gpu.autodetect`
+> → компат `gpu.device_index`) и `preset_note`; `device::vendor_of`; реестр строит
+> раскладку через `effective_layout` (ключ роли `llm_server.<role>.device` перекрывает
+> пресет; для явной `gpu.devices` двойное назначение — по-прежнему fail-fast);
+> fail-fast с числами: пресет без карт или на «чужих» картах (напр. `nvidia-n` на AMD).
+> Пресет раскладывает **существующие** роли (реплики `chat-N`/`whisper-N` — явно, как в T2):
+> `nvidia-one`/`apple` — всё на первую карту; `nvidia-n`/`amd-n` — чат-реплики и whisper
+> round-robin по картам, индексация (`embedding`/`rerank`) — на выделенной карте.
+> Печать с числами: лог старта `llm-host` («пресет: …»), `llm_host_plan` (+`preset`/
+> `autodetect`/`devices` в JSON), `hds check` — пункт `gpu_roles` даёт подсказку
+> (число ускорителей/бэкендов, уместный пресет, что смешанные вендоры/UMA вне
+> поддержки), **статус не меняет** (боевой `hds check` остаётся ok). Тесты: `config.rs` +2
+> (резолв пресета + override `gpu.devices`; `autodetect` off/on), `diag.rs` +1
+> (`preset_hint_text` по вендорам/числам), `gpu_roles_check_statuses` +подсказка;
+> `cargo test --workspace` — **88 наборов / 0 failed**, clippy `-D warnings`/fmt чисто.
+> Рантайм: `llm_host_plan` на песочном конфиге (`gpu.preset: nvidia-n`) → «пресет:
+> gpu.preset=nvidia-n (ускорителей: 1, вендоры: nvidia)» + раскладка с числами
+> (`chat→0, embedding→0, rerank→1(CPU), chat-2→0`; одно карта — распределение по картам
+> проверено юнитами); `hds check --json` (боевой) → `gpu_roles` **ok** + «уместен
+> gpu.preset=nvidia-one»; на песочном конфиге → ok + «задан gpu.preset=nvidia-n»;
+> стенд возвращён (`:8010`/`:8787` → 200, `index.pause` цел). Артефакты —
+> `tools/parity/out/m6_t4_*`. **Хвост:** распределение по 2+ картам живьём не проверено
+> (нет железа) — юниты + хвост ревизии 2.
 >
 > **Требования Э5 пересмотрены владельцем (10.10.2026, в ходе работы над T0).** На проде
 > одновременно используются **несколько дискретных GPU только одного семейства**: либо

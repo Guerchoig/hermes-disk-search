@@ -18,6 +18,8 @@ use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
+use crate::cluster::Device;
+use crate::device::{accelerators, vendor_of};
 use crate::error::{EngineError, Result};
 use crate::ffi::{model_kind, retention};
 use crate::vram::VramSource;
@@ -169,6 +171,185 @@ pub struct GpuDeviceAssignment {
     pub roles: Vec<String>,
 }
 
+/// Пресет раскладки ролей по картам (M6 T4 §3.4) — вендор-гомогенные конфиги
+/// из «коробки». Назначает **существующие** роли конфига на карты (реплики
+/// `chat-N`/`whisper-N` по-прежнему объявляются явно, как в T2); явная
+/// `gpu.devices` сильнее пресета, `llm_server.<role>.device` — сильнее всего.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GpuPreset {
+    /// Пресет не задан (компат: все роли на `gpu.device_index`).
+    None,
+    /// `NVIDIA: одна карта` — все роли на первую карту; масштаб — `parallel`
+    /// и/или явная реплика `chat-2` (делят ту же карту).
+    NvidiaOne,
+    /// `NVIDIA: N карт` — чат-реплики и `whisper` раскладываются по картам
+    /// (round-robin), индексация (`embedding`/`rerank`) — на выделенной.
+    NvidiaN,
+    /// `AMD: N карт` (Vulkan) — раскладка как у `nvidia-n`.
+    AmdN,
+    /// `Apple Silicon` (Metal) — всё на первую карту.
+    Apple,
+}
+
+impl GpuPreset {
+    /// Разбор `gpu.preset`; `None` — неизвестное значение (в `build` → warning).
+    pub fn parse(s: &str) -> Option<GpuPreset> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "none" | "off" => Some(GpuPreset::None),
+            "nvidia-one" | "nvidia-1" | "nvidia-one-card" => Some(GpuPreset::NvidiaOne),
+            "nvidia-n" | "nvidia" | "nvidia-multi" => Some(GpuPreset::NvidiaN),
+            "amd-n" | "amd" | "amd-multi" => Some(GpuPreset::AmdN),
+            "apple" | "apple-silicon" | "metal" | "apple-metal" => Some(GpuPreset::Apple),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GpuPreset::None => "none",
+            GpuPreset::NvidiaOne => "nvidia-one",
+            GpuPreset::NvidiaN => "nvidia-n",
+            GpuPreset::AmdN => "amd-n",
+            GpuPreset::Apple => "apple",
+        }
+    }
+
+    /// Вендор, которого требует пресет (`None` — не требует, `apple` — Metal).
+    pub fn required_vendor(&self) -> Option<&'static str> {
+        match self {
+            GpuPreset::NvidiaOne | GpuPreset::NvidiaN => Some("nvidia"),
+            GpuPreset::AmdN => Some("amd"),
+            GpuPreset::Apple => Some("apple"),
+            GpuPreset::None => None,
+        }
+    }
+
+    /// Пресет по фактам об ускорителях (`gpu.autodetect: true`): только
+    /// вендор-гомогенные наборы, иначе `None` (смешанные вендоры/UMA — §2).
+    pub fn autodetect(facts: &AccelFacts) -> GpuPreset {
+        let vendors = facts.unique_vendors();
+        if facts.count == 0 || vendors.len() != 1 {
+            return GpuPreset::None;
+        }
+        match vendors[0] {
+            "nvidia" => {
+                if facts.count >= 2 {
+                    GpuPreset::NvidiaN
+                } else {
+                    GpuPreset::NvidiaOne
+                }
+            }
+            "amd" => GpuPreset::AmdN,
+            "apple" => GpuPreset::Apple,
+            _ => GpuPreset::None,
+        }
+    }
+
+    /// Раскладка пресета для **существующих** ролей конфига. Fail-fast с числами,
+    /// если карт нет или вендор не совпал (§2/§3.5).
+    pub fn layout(
+        &self,
+        facts: &AccelFacts,
+        roles: &[String],
+    ) -> std::result::Result<Vec<GpuDeviceAssignment>, String> {
+        if *self == GpuPreset::None {
+            return Ok(Vec::new());
+        }
+        if facts.count == 0 {
+            return Err(format!(
+                "пресет gpu.preset={}: ускорителей не найдено (только CPU) — раскладка \
+                 невозможна; проверьте `llm-host devices`",
+                self.as_str()
+            ));
+        }
+        if let Some(want) = self.required_vendor() {
+            let vendors = facts.unique_vendors();
+            if !vendors.is_empty() && !vendors.contains(&want) {
+                return Err(format!(
+                    "пресет gpu.preset={} ожидает карты {want} — найдено: {}; смешанные \
+                     вендоры/чужие карты не поддерживаются (§2)",
+                    self.as_str(),
+                    vendors.join(" + ")
+                ));
+            }
+        }
+        let n = facts.count as i32;
+        let mut map: BTreeMap<i32, Vec<String>> = BTreeMap::new();
+        if matches!(self, GpuPreset::NvidiaOne | GpuPreset::Apple) {
+            // Одна карта: все роли на неё (масштаб — `parallel`/явная реплика).
+            for r in roles {
+                map.entry(1).or_default().push(r.clone());
+            }
+        } else {
+            // N карт: chat-реплики и whisper — round-robin по картам; индексация
+            // (embedding/rerank) — одним экземпляром на выделенной (последней)
+            // карте («лёгкая добавка», §3.4); прочие — на первую.
+            let mut chats: Vec<&String> = roles.iter().filter(|r| role_base(r) == "chat").collect();
+            chats.sort_by_key(|r| replica_index(r).unwrap_or(0));
+            for (i, r) in chats.iter().enumerate() {
+                map.entry(1 + (i as i32 % n))
+                    .or_default()
+                    .push((*r).clone());
+            }
+            let mut whisps: Vec<&String> =
+                roles.iter().filter(|r| role_base(r) == "whisper").collect();
+            whisps.sort_by_key(|r| replica_index(r).unwrap_or(0));
+            for (i, r) in whisps.iter().enumerate() {
+                map.entry(1 + (i as i32 % n))
+                    .or_default()
+                    .push((*r).clone());
+            }
+            for r in roles {
+                let base = role_base(r);
+                if base == "chat" || base == "whisper" {
+                    continue;
+                }
+                let card = if base == "embedding" || base == "rerank" {
+                    n
+                } else {
+                    1
+                };
+                map.entry(card).or_default().push(r.clone());
+            }
+        }
+        Ok(map
+            .into_iter()
+            .map(|(index, roles)| GpuDeviceAssignment { index, roles })
+            .collect())
+    }
+}
+
+/// Факты об ускорителях, нужные пресету/автодетекту (M6 T4 §3.4): число карт и
+/// вендоры по ним. Собирается из устройств движка в реестре/хосте/`diag`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AccelFacts {
+    pub count: usize,
+    /// Вендоры по картам (`nvidia`/`amd`/`intel`/`apple`/`unknown`).
+    pub vendors: Vec<String>,
+}
+
+impl AccelFacts {
+    /// Собрать факты из устройств движка (ускорители в порядке перечисления).
+    pub fn from_devices(devices: &[Device]) -> AccelFacts {
+        let acc = accelerators(devices);
+        AccelFacts {
+            count: acc.len(),
+            vendors: acc
+                .iter()
+                .map(|d| vendor_of(&d.description_or_name()).to_string())
+                .collect(),
+        }
+    }
+
+    /// Уникальные вендоры (отсортированы) — для гомогенности (§2) и подсказок.
+    pub fn unique_vendors(&self) -> Vec<&str> {
+        let mut v: Vec<&str> = self.vendors.iter().map(|s| s.as_str()).collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+}
+
 /// `gpu.*`: бюджет VRAM, устройство и приоритеты вытеснения (§A4).
 #[derive(Debug, Clone)]
 pub struct GpuConfig {
@@ -177,6 +358,13 @@ pub struct GpuConfig {
     /// Раскладка ролей по картам (M6 §3.1, `gpu.devices`). Пустой список —
     /// раскладки нет, все роли идут на карту `device_index` (компат).
     pub devices: Vec<GpuDeviceAssignment>,
+    /// Пресет раскладки (M6 T4 §3.4): `gpu.preset`. `None` — не задан. Пресет
+    /// применяется, только если `devices` пуст (явная раскладка сильнее).
+    pub preset: GpuPreset,
+    /// Автодетект раскладки (M6 T4 §3.4): `gpu.autodetect`. По умолчанию выключен
+    /// — раскладка только по явному ключу (`gpu.preset`/`gpu.devices`). При `true`
+    /// и пустых `devices`/`preset` пресет подбирается по вендорам карт.
+    pub autodetect: bool,
     /// Явно ли задан `gpu.n_gpu_layers` в конфиге (иначе уважаем legacy `-ngl`).
     pub n_gpu_layers_set: bool,
     pub n_gpu_layers: i32,
@@ -213,6 +401,8 @@ impl Default for GpuConfig {
         GpuConfig {
             device_index: 1, // первый GPU: без явного выбора движок может уйти на CPU (R32)
             devices: Vec::new(),
+            preset: GpuPreset::None,
+            autodetect: false,
             n_gpu_layers_set: false,
             n_gpu_layers: -1,
             reserve_mb: 1024,
@@ -265,6 +455,75 @@ impl GpuConfig {
             .filter(|a| a.roles.iter().any(|r| r == role))
             .map(|a| a.index)
             .collect()
+    }
+
+    /// Эффективная раскладка ролей по картам (M6 T4 §3.4). Приоритет источников:
+    /// явная `gpu.devices` → `gpu.preset` → автодетект (`gpu.autodetect: true`) →
+    /// компат (пусто, все роли на `gpu.device_index`). `role_names` — роли,
+    /// объявленные в конфиге (пресет раскладывает именно их). Ошибка — fail-fast
+    /// с числами (нет карт / вендор пресета не найден).
+    pub fn effective_layout(
+        &self,
+        facts: &AccelFacts,
+        role_names: &[String],
+    ) -> std::result::Result<Vec<GpuDeviceAssignment>, String> {
+        // Явная раскладка сильнее пресета (§3.4).
+        if !self.devices.is_empty() {
+            return Ok(self.devices.clone());
+        }
+        let preset = if self.preset != GpuPreset::None {
+            self.preset
+        } else if self.autodetect {
+            GpuPreset::autodetect(facts)
+        } else {
+            GpuPreset::None
+        };
+        if preset == GpuPreset::None {
+            return Ok(Vec::new());
+        }
+        preset.layout(facts, role_names)
+    }
+
+    /// Строка о пресете/автодетекте для логов/`llm_host_plan` (M6 T4 §3.4).
+    /// `None` — раскладка не задана пресетом (компат или явная `gpu.devices`).
+    pub fn preset_note(&self, facts: &AccelFacts) -> Option<String> {
+        let vendors = facts.unique_vendors();
+        let vendor_txt = if vendors.is_empty() {
+            "неизвестно".to_string()
+        } else {
+            vendors.join(" + ")
+        };
+        if !self.devices.is_empty() {
+            return Some(format!(
+                "раскладка gpu.devices: {} записей (пресет не применяется — явная раскладка \
+                 сильнее пресета)",
+                self.devices.len()
+            ));
+        }
+        if self.preset != GpuPreset::None {
+            return Some(format!(
+                "пресет раскладки gpu.preset={} (ускорителей: {}, вендоры: {})",
+                self.preset.as_str(),
+                facts.count,
+                vendor_txt
+            ));
+        }
+        if self.autodetect {
+            return Some(match GpuPreset::autodetect(facts) {
+                GpuPreset::None => format!(
+                    "gpu.autodetect=true, но пресет не подобран (ускорителей: {}, вендоры: {}; \
+                     смешанные вендоры/UMA не поддерживаются — §2)",
+                    facts.count, vendor_txt
+                ),
+                p => format!(
+                    "gpu.autodetect=true → пресет {} (ускорителей: {}, вендоры: {})",
+                    p.as_str(),
+                    facts.count,
+                    vendor_txt
+                ),
+            });
+        }
+        None
     }
 
     /// Строка о бюджете для `hdsw llm-host status` / логов (точные цифры).
@@ -457,6 +716,21 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
                 gpu.device_index
             ));
         }
+    }
+    // M6 T4 §3.4: пресеты раскладки и автодетект. Пресет применяется, только если
+    // явная `gpu.devices` пуста (она сильнее); автодетект — только если пусты и
+    // `devices`, и `preset`.
+    if let Some(v) = dig_str(root, "gpu.preset") {
+        match GpuPreset::parse(&v) {
+            Some(p) => gpu.preset = p,
+            None => warnings.push(format!(
+                "gpu.preset: неизвестное значение «{v}» — ожидается одно из: none, \
+                 nvidia-one, nvidia-n, amd-n, apple (пресет не применён)"
+            )),
+        }
+    }
+    if let Some(v) = dig_bool(root, "gpu.autodetect") {
+        gpu.autodetect = v;
     }
     if let Some(v) = dig_i64(root, "gpu.n_gpu_layers") {
         gpu.n_gpu_layers = v as i32;
@@ -1373,5 +1647,133 @@ llm:
             "отрицательный device — предупреждение: {:?}",
             cfg.warnings
         );
+    }
+
+    /// M6 T4 §3.4: пресет раскладывает существующие роли по картам; явная
+    /// `gpu.devices` сильнее; без пресета/автодетекта ничего не меняется.
+    #[test]
+    fn gpu_preset_layout_and_override() {
+        let yaml = r#"
+index:
+  whisper_model_path: ""
+gpu:
+  preset: nvidia-n
+llm_server:
+  parallel: 1
+  chat:    { port: 8010, model: "shared:chat" }
+  chat-2:  { port: 8030, model: "shared:chat" }
+  embedding: { port: 8011, model: "shared:embedding" }
+  rerank:  { port: 8012, model: "shared:rerank" }
+llm:
+  whisper:   { model: "shared:whisper" }
+  whisper-2: { model: "shared:whisper" }
+"#;
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert_eq!(cfg.gpu.preset, GpuPreset::NvidiaN);
+        let names: Vec<String> = cfg.roles.iter().map(|r| r.role.clone()).collect();
+        let facts = AccelFacts {
+            count: 2,
+            vendors: vec!["nvidia".into(), "nvidia".into()],
+        };
+        let layout = cfg.gpu.effective_layout(&facts, &names).expect("layout");
+        let card_of = |role: &str| {
+            layout
+                .iter()
+                .find(|a| a.roles.iter().any(|r| r == role))
+                .map(|a| a.index)
+        };
+        assert_eq!(card_of("chat"), Some(1), "чат-реплики — round-robin");
+        assert_eq!(card_of("chat-2"), Some(2));
+        assert_eq!(card_of("whisper"), Some(1), "whisper — по картам");
+        assert_eq!(card_of("whisper-2"), Some(2));
+        assert_eq!(
+            card_of("embedding"),
+            Some(2),
+            "индексация — выделенная карта"
+        );
+        assert_eq!(card_of("rerank"), Some(2));
+
+        // Пресет nvidia-n на AMD-картах — fail-fast с числами (§2).
+        let amd = AccelFacts {
+            count: 1,
+            vendors: vec!["amd".into()],
+        };
+        let err = cfg.gpu.effective_layout(&amd, &names).expect_err("AMD");
+        assert!(err.contains("nvidia"), "err={err}");
+        assert!(err.contains("amd"), "err={err}");
+
+        // Явная `gpu.devices` сильнее пресета (§3.4).
+        let yaml2 = r#"
+index:
+  whisper_model_path: ""
+gpu:
+  preset: nvidia-n
+  devices:
+    - { index: 1, roles: [chat] }
+llm_server:
+  chat:   { port: 8010, model: "shared:chat" }
+  chat-2: { port: 8030, model: "shared:chat" }
+"#;
+        let root2: Value = serde_yaml::from_str(yaml2).expect("yaml2");
+        let cfg2 = build(Path::new("t.yaml"), &root2);
+        let names2: Vec<String> = cfg2.roles.iter().map(|r| r.role.clone()).collect();
+        let layout2 = cfg2.gpu.effective_layout(&facts, &names2).expect("layout2");
+        assert_eq!(layout2.len(), 1, "взята явная раскладка: {layout2:?}");
+        assert_eq!(layout2[0].index, 1);
+        assert_eq!(layout2[0].roles, vec!["chat".to_string()]);
+    }
+
+    /// M6 T4 §3.4: `gpu.autodetect` по умолчанию выключен (ничего не меняется);
+    /// при `true` пресет подбирается по вендорам/числу карт.
+    #[test]
+    fn gpu_autodetect_off_by_default() {
+        assert_eq!(GpuPreset::parse("nvidia-n"), Some(GpuPreset::NvidiaN));
+        assert_eq!(GpuPreset::parse("amd"), Some(GpuPreset::AmdN));
+        assert_eq!(GpuPreset::parse("metal"), Some(GpuPreset::Apple));
+        assert_eq!(GpuPreset::parse("бяка"), None);
+
+        let yaml = "index:\n  whisper_model_path: \"\"\nllm_server:\n  chat: { port: 8010, model: \"shared:chat\" }\n";
+        let root: Value = serde_yaml::from_str(yaml).expect("yaml");
+        let cfg = build(Path::new("t.yaml"), &root);
+        let names: Vec<String> = cfg.roles.iter().map(|r| r.role.clone()).collect();
+        let facts = AccelFacts {
+            count: 2,
+            vendors: vec!["nvidia".into(), "nvidia".into()],
+        };
+        assert!(!cfg.gpu.autodetect, "автодетект по умолчанию выключен");
+        assert!(
+            cfg.gpu.effective_layout(&facts, &names).unwrap().is_empty(),
+            "без пресета/автодетекта раскладка пуста (компат)"
+        );
+
+        let yaml2 = "gpu:\n  autodetect: true\nindex:\n  whisper_model_path: \"\"\nllm_server:\n  chat: { port: 8010, model: \"shared:chat\" }\n";
+        let root2: Value = serde_yaml::from_str(yaml2).expect("yaml2");
+        let cfg2 = build(Path::new("t.yaml"), &root2);
+        let names2: Vec<String> = cfg2.roles.iter().map(|r| r.role.clone()).collect();
+        let layout = cfg2
+            .gpu
+            .effective_layout(&facts, &names2)
+            .expect("autodetect layout");
+        let card_of = |role: &str| {
+            layout
+                .iter()
+                .find(|a| a.roles.iter().any(|r| r == role))
+                .map(|a| a.index)
+        };
+        assert_eq!(
+            card_of("chat"),
+            Some(1),
+            "две NVIDIA → nvidia-n: {layout:?}"
+        );
+        assert_eq!(card_of("embedding"), Some(2), "индексация — карта 2");
+
+        // Одна NVIDIA → nvidia-one (одна запись на карту 1).
+        let one = AccelFacts {
+            count: 1,
+            vendors: vec!["nvidia".into()],
+        };
+        assert_eq!(GpuPreset::autodetect(&one), GpuPreset::NvidiaOne);
+        assert_eq!(GpuPreset::autodetect(&facts), GpuPreset::NvidiaN);
     }
 }

@@ -145,6 +145,11 @@ fn run() -> Result<()> {
     let cluster = engine.create_cluster()?;
     let devices = cluster.devices()?;
     println!("устройства: {}", describe_devices(&devices));
+    // M6 T4 §3.4: пресет раскладки/автодетект — печатаем с числами (§5).
+    let facts = config::AccelFacts::from_devices(&devices);
+    if let Some(note) = cfg.gpu.preset_note(&facts) {
+        println!("пресет: {note}");
+    }
     if devices.is_empty() {
         return Err(EngineError::Other(
             "движок не вернул ни одного устройства — план без маппинга устройства бессмыслен"
@@ -211,6 +216,11 @@ fn save_json(
         "engine_dir": engine.dir().display().to_string(),
         "gpu": {
             "device_index": cfg.gpu.device_index,
+            "preset": cfg.gpu.preset.as_str(),
+            "autodetect": cfg.gpu.autodetect,
+            "devices": cfg.gpu.devices.iter().map(|a| serde_json::json!({
+                "index": a.index, "roles": a.roles,
+            })).collect::<Vec<_>>(),
             "n_gpu_layers": cfg.gpu.n_gpu_layers,
             "reserve_mb": cfg.gpu.reserve_mb,
             "evict_idle_sec": cfg.gpu.evict_idle_sec,

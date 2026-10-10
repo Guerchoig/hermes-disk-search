@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::cluster::{Device, InstanceSpec};
-use crate::config::{role_base, single_instance_violation, LlmHostConfig, RoleConfig};
+use crate::config::{role_base, single_instance_violation, AccelFacts, LlmHostConfig, RoleConfig};
 use crate::device::{cpu_device, selection_for_role, DeviceSelection};
 use crate::error::{EngineError, Result};
 use crate::runtime;
@@ -192,7 +192,26 @@ fn plan_role(
     // `gpu.devices[].roles` → компат `gpu.device_index`. «Одна роль — ровно одна
     // карта» (§3.5): двойное назначение — fail-fast с числами (роль в двух
     // записях `devices` и/или одновременно в `devices` и role-ключе).
-    let via_devices = config.gpu.role_assignments(&rc.role);
+    // M6 §3.1 + T4 §3.4: эффективная раскладка — явная `gpu.devices` сильнее
+    // пресета `gpu.preset`, а `llm_server.<role>.device` сильнее их обеих.
+    let facts = AccelFacts::from_devices(devices);
+    let role_names: Vec<String> = config.roles.iter().map(|r| r.role.clone()).collect();
+    let layout = config
+        .gpu
+        .effective_layout(&facts, &role_names)
+        .map_err(EngineError::Other)?;
+    let layout_is_preset = config.gpu.devices.is_empty();
+    // Для пресета ключ роли просто перекрывает раскладку; для явного `gpu.devices`
+    // двойное назначение (ключ + запись) остаётся ошибкой (§3.5).
+    let via_devices: Vec<i32> = if layout_is_preset && rc.device.is_some() {
+        Vec::new()
+    } else {
+        layout
+            .iter()
+            .filter(|a| a.roles.iter().any(|r| r == &rc.role))
+            .map(|a| a.index)
+            .collect()
+    };
     let mut explicit_sources: Vec<String> = Vec::new();
     if let Some(ix) = rc.device {
         explicit_sources.push(format!("llm_server.{}.device={ix}", rc.role));

@@ -46,6 +46,25 @@ pub fn cpu_device(devices: &[Device]) -> Option<&Device> {
     devices.iter().find(|d| !d.is_accelerator())
 }
 
+/// Вендор ускорителя по описанию движка (имя GPU): `nvidia | amd | intel | apple | unknown`
+/// (M6 T4 §3.4: пресеты раскладки вендор-гомогенные, поэтому вендор нужен и для
+/// автодетекта, и для проверки «пресет ↔ карты»). Дублирует эвристику `diag.rs`
+/// (`hds-index` не зависит от `hds-llama`).
+pub fn vendor_of(desc: &str) -> &'static str {
+    let d = desc.to_lowercase();
+    if d.contains("nvidia") || d.contains("geforce") {
+        "nvidia"
+    } else if d.contains("amd") || d.contains("radeon") {
+        "amd"
+    } else if d.contains("intel") {
+        "intel"
+    } else if d.contains("apple") {
+        "apple"
+    } else {
+        "unknown"
+    }
+}
+
 /// Текстовое описание списка устройств (для `llm-host devices`/логов).
 ///
 /// `desc` — описание устройства от движка (обычно имя GPU: `AMD Radeon(TM)

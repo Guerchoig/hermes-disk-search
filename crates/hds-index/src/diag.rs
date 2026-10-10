@@ -1138,6 +1138,100 @@ fn looks_like_igpu(desc: &str) -> bool {
     d.contains("(tm) graphics") || d.contains("uhd graphics") || d.contains("iris")
 }
 
+/// Живые устройства фасада (`GET :8010/internal/devices`) — `None`, если резидент
+/// не ответил (пункт `gpu_roles` честно сообщает об этом).
+fn fetch_devices_json(cfg: &Config) -> Option<Value> {
+    let (host, port) = role_addr(cfg, "chat");
+    http::request(
+        &host,
+        port,
+        "GET",
+        "/internal/devices",
+        &[],
+        None,
+        PROBE_TIMEOUT,
+    )
+    .ok()
+    .filter(|r| (200..300).contains(&r.status))
+    .and_then(|r| r.json().ok())
+}
+
+/// Ускорители из JSON устройств (`backend != CPU`).
+fn accelerators_of(dev_json: &Value) -> Vec<&Value> {
+    dev_json
+        .get("devices")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|d| {
+                    d.get("backend")
+                        .and_then(|v| v.as_str())
+                        .map(|b| !b.eq_ignore_ascii_case("CPU"))
+                        .unwrap_or(false)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// M6 T4 §3.4: подсказка о пресете раскладки — сколько ускорителей/бэкендов
+/// нашлось и какой пресет уместен. Информация для оператора (в `msg` пункта
+/// `gpu_roles`), **статус пункта не меняет**. `accelerators` — живые ускорители
+/// (пусто, если резидент недоступен).
+fn preset_hint_text(preset: Option<&str>, autodetect: bool, accelerators: &[&Value]) -> String {
+    let n = accelerators.len();
+    let mut vendors: Vec<&str> = accelerators
+        .iter()
+        .filter_map(|d| d.get("description").and_then(|v| v.as_str()))
+        .map(device_vendor)
+        .filter(|v| *v != "unknown")
+        .collect();
+    vendors.sort_unstable();
+    vendors.dedup();
+    let family = if n == 0 {
+        "неизвестно".to_string()
+    } else if vendors.is_empty() {
+        "unknown".to_string()
+    } else {
+        vendors.join(" + ")
+    };
+    let suggest = if vendors.len() > 1 {
+        "нет (смешанные вендоры, §2 — не поддерживаются)".to_string()
+    } else {
+        match vendors.first().copied() {
+            Some("nvidia") => {
+                if n >= 2 {
+                    "nvidia-n".to_string()
+                } else {
+                    "nvidia-one".to_string()
+                }
+            }
+            Some("amd") => "amd-n".to_string(),
+            Some("apple") => "apple".to_string(),
+            _ => "не определён".to_string(),
+        }
+    };
+    let set = match preset {
+        Some(p) if !p.is_empty() => format!("задан gpu.preset={p}"),
+        _ => "не задан".to_string(),
+    };
+    let auto = if autodetect {
+        "gpu.autodetect=true"
+    } else {
+        "gpu.autodetect=false (по умолчанию)"
+    };
+    let counted = if n == 0 {
+        "ускорителей в движке не видно (резидент не ответил — смотрите `llm-host devices`)"
+            .to_string()
+    } else {
+        format!("ускорителей в движке {n} ({family})")
+    };
+    format!(
+        "пресет раскладки: {set}; {counted}; уместен gpu.preset={suggest}; {auto} — раскладка \
+         только по явному ключу, `gpu.devices` сильнее пресета (§3.4)"
+    )
+}
+
 /// M6 T1 (`PLAN_M6_GPU_MULTIVENDOR.md` §3.1/§3.5/§5): пункт `gpu_roles` —
 /// раскладка ролей по картам и границы поддержки.
 ///
@@ -1162,15 +1256,30 @@ fn check_gpu_roles(cfg: &Config) -> Check {
         }
     }
 
+    // M6 T4 §3.4: пресет/автодетект раскладки — подсказка в пункте (статус не меняет).
+    let preset = dig(cfg, "gpu.preset")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_lowercase());
+    let autodetect = dig(cfg, "gpu.autodetect")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let preset_active = preset
+        .as_deref()
+        .map(|p| !p.is_empty() && p != "none" && p != "off")
+        .unwrap_or(false);
+
     let empty_layout = role_lines.is_empty()
         && !warns
             .iter()
             .any(|w| w.contains("роль назначена") || w.contains("gpu.devices"));
-    if empty_layout && warns.is_empty() {
-        // Компат: раскладки нет — все роли на карте device_index.
+    if empty_layout && warns.is_empty() && !preset_active && !autodetect {
+        // Компат: раскладки/пресета нет — все роли на карте device_index.
         let di = dig(cfg, "gpu.device_index")
             .and_then(|v| v.as_i64())
             .unwrap_or(1);
+        let live = fetch_devices_json(cfg);
+        let acc: Vec<&Value> = live.as_ref().map(accelerators_of).unwrap_or_default();
+        let hint = preset_hint_text(preset.as_deref(), autodetect, &acc);
         return Check::new(
             "gpu_roles",
             "ok",
@@ -1178,43 +1287,47 @@ fn check_gpu_roles(cfg: &Config) -> Check {
         )
         .msg(format!(
             "gpu.device_index={di} (0 = CPU, 1..N = ускорители движка); \
-             раскладка задаётся списком gpu.devices: [{{ index: 1, roles: [chat] }}, …]"
+             раскладка задаётся списком gpu.devices: [{{ index: 1, roles: [chat] }}, …]; {hint}"
         ));
     }
 
-    self::check_gpu_roles_live(cfg, role_lines, warns)
+    // Контекст раскладки из конфига (для случая, когда роли не расписаны
+    // по картам, но задан пресет — его раскладку разрешает llm-host по числу карт).
+    let ctx = if !role_lines.is_empty() {
+        role_lines.join("; ")
+    } else if preset_active {
+        format!(
+            "пресет gpu.preset={} — раскладку разрешает llm-host по числу карт",
+            preset.as_deref().unwrap_or("")
+        )
+    } else {
+        "раскладка из конфига прочитана".to_string()
+    };
+
+    self::check_gpu_roles_live(cfg, role_lines, warns, ctx, preset, autodetect)
 }
 
 /// Часть пункта `gpu_roles` с живыми устройствами (отделена для читаемости).
-fn check_gpu_roles_live(cfg: &Config, role_lines: Vec<String>, warns: Vec<String>) -> Check {
+fn check_gpu_roles_live(
+    cfg: &Config,
+    role_lines: Vec<String>,
+    warns: Vec<String>,
+    ctx: String,
+    preset: Option<String>,
+    autodetect: bool,
+) -> Check {
     // Живые устройства фасада (`/internal/devices`).
-    let (host, port) = role_addr(cfg, "chat");
-    let live = http::request(
-        &host,
-        port,
-        "GET",
-        "/internal/devices",
-        &[],
-        None,
-        PROBE_TIMEOUT,
-    )
-    .ok()
-    .filter(|r| (200..300).contains(&r.status))
-    .and_then(|r| r.json().ok());
-    let Some(dev_json) = live else {
+    let Some(dev_json) = fetch_devices_json(cfg) else {
+        let (host, port) = role_addr(cfg, "chat");
+        let hint = preset_hint_text(preset.as_deref(), autodetect, &[]);
         let mut check = Check::new(
             "gpu_roles",
             "warn",
             "раскладка ролей по картам задана, но устройства резидента недоступны",
         )
         .msg(format!(
-            "{}; резидент не отвечает на GET {host}:{port}/internal/devices — \
-             проверить карты/бэкенды можно `llm-host devices`",
-            if role_lines.is_empty() {
-                "раскладка из конфига прочитана".to_string()
-            } else {
-                role_lines.join("; ")
-            }
+            "{ctx}; {hint}; резидент не отвечает на GET {host}:{port}/internal/devices — \
+             проверить карты/бэкенды можно `llm-host devices`"
         ));
         for w in &warns {
             check = check.fix(w.clone());
@@ -1227,15 +1340,7 @@ fn check_gpu_roles_live(cfg: &Config, role_lines: Vec<String>, warns: Vec<String
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    let accelerators: Vec<&Value> = devices
-        .iter()
-        .filter(|d| {
-            d.get("backend")
-                .and_then(|v| v.as_str())
-                .map(|b| !b.eq_ignore_ascii_case("CPU"))
-                .unwrap_or(false)
-        })
-        .collect();
+    let accelerators: Vec<&Value> = accelerators_of(&dev_json);
 
     let mut lines: Vec<String> = Vec::new();
     let mut fixes: Vec<String> = warns;
@@ -1306,12 +1411,19 @@ fn check_gpu_roles_live(cfg: &Config, role_lines: Vec<String>, warns: Vec<String
     }
 
     let status = if fixes.is_empty() { "ok" } else { "warn" };
+    // M6 T4 §3.4: подсказка о пресете — с числами (§5), статус не меняет.
+    let hint = preset_hint_text(preset.as_deref(), autodetect, &accelerators);
+    let msg = if lines.is_empty() {
+        hint
+    } else {
+        format!("{}; {hint}", lines.join("; "))
+    };
     Check::new(
         "gpu_roles",
         status,
         "раскладка ролей по картам (gpu.devices)",
     )
-    .msg(lines.join("; "))
+    .msg(msg)
     .fix(fixes.join("; "))
 }
 
@@ -1525,6 +1637,8 @@ mod tests {
         assert_eq!(c.status, "ok", "msg={}", c.msg);
         assert!(c.title.contains("не задана"), "title={}", c.title);
         assert!(c.msg.contains("gpu.device_index=1"), "msg={}", c.msg);
+        // M6 T4 §3.4: подсказка о пресете — в msg, статус не меняет.
+        assert!(c.msg.contains("пресет раскладки"), "msg={}", c.msg);
 
         // Двойное назначение embedding (devices + role-ключ) — warn с числами.
         let c = check_gpu_roles(&cfg(
@@ -1539,6 +1653,61 @@ mod tests {
         let c = check_gpu_roles(&cfg("gpu:\n  devices:\n    - {}"));
         assert_eq!(c.status, "warn", "msg={}", c.msg);
         assert!(c.fix.contains("gpu.devices[0]"), "fix={}", c.fix);
+    }
+
+    /// M6 T4 §3.4: подсказка о пресете — подбор по вендорам/числу карт,
+    /// смешанные вендоры → «пресеты недоступны»; статус пункта не меняется.
+    #[test]
+    fn preset_hint_suggests_by_vendor() {
+        use super::preset_hint_text;
+        use serde_json::json;
+
+        let dev = |desc: &str| json!({ "backend": "CUDA", "description": desc });
+        let one = [dev("NVIDIA GeForce RTX 3060")];
+        let two = [
+            dev("NVIDIA GeForce RTX 3060"),
+            dev("NVIDIA GeForce RTX 4090"),
+        ];
+        let amd = [dev("AMD Radeon RX 7900 XTX")];
+        let mixed = [
+            dev("NVIDIA GeForce RTX 3060"),
+            dev("AMD Radeon RX 7900 XTX"),
+        ];
+        fn refs_fn(v: &[serde_json::Value]) -> Vec<&serde_json::Value> {
+            v.iter().collect()
+        }
+
+        assert!(
+            preset_hint_text(None, false, &refs_fn(&one)).contains("gpu.preset=nvidia-one"),
+            "одна NVIDIA → nvidia-one"
+        );
+        assert!(
+            preset_hint_text(None, false, &refs_fn(&two)).contains("gpu.preset=nvidia-n"),
+            "две NVIDIA → nvidia-n"
+        );
+        assert!(
+            preset_hint_text(None, false, &refs_fn(&amd)).contains("gpu.preset=amd-n"),
+            "AMD → amd-n"
+        );
+        assert!(
+            preset_hint_text(None, false, &refs_fn(&mixed)).contains("смешанные вендоры"),
+            "микс → пресеты недоступны"
+        );
+        assert!(
+            preset_hint_text(Some("amd-n"), false, &refs_fn(&one))
+                .contains("задан gpu.preset=amd-n"),
+            "явно заданный пресет виден в подсказке"
+        );
+        assert!(
+            preset_hint_text(None, false, &[]).contains("не видно"),
+            "без живых устройств — честное «не видно»"
+        );
+        let auto = preset_hint_text(None, true, &refs_fn(&one));
+        assert!(auto.contains("autodetect=true"), "autodetect виден: {auto}");
+        assert!(
+            auto.contains("уместен gpu.preset=nvidia-one"),
+            "автодетект подсказывает пресет: {auto}"
+        );
     }
 
     /// M2 T1: desktop — ok; server без access.enabled/ui — warn; полный server — ok.

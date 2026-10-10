@@ -2802,6 +2802,12 @@ impl Host {
                 // старте — это ключевое свидетельство приёмки (роли реально идут
                 // на назначенные карты).
                 log.line(&format!("раскладка ролей: {}", layout_line(&planned)));
+                // M6 T4 §3.4: пресет раскладки/автодетект — с числами (§5,
+                // свидетельство приёмки; секретов не печатаем).
+                let accel_facts = crate::config::AccelFacts::from_devices(&engine_devices);
+                if let Some(note) = resolved.gpu.preset_note(&accel_facts) {
+                    log.line(&format!("пресет: {note}"));
+                }
                 for p in &planned {
                     let inst = match p {
                         RolePlan::Ready(i) => i,
