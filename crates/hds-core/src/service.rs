@@ -104,31 +104,35 @@ impl ControlResult {
 
 // --- Управление: сборка аргументов / запуск ----------------------------------
 
-/// Аргументы `sc.exe` для подкоманды управления службой.
-///
-/// `hds_exe` — путь к `hds.exe` для `binPath` (M7 §3.1: `current_exe()` внутри
-/// общего кода указал бы на exe вызывающего — UI, а не `hds`).
+/// Простые подкоманды `sc.exe` (`delete|start|stop|query`) — по имени службы.
 #[cfg(windows)]
-pub fn sc_args(sub: &str, role: &str, hds_exe: &Path) -> Vec<String> {
+pub fn sc_args(sub: &str, role: &str) -> Vec<String> {
     let name = service_name(role);
     match sub {
-        "install" => vec![
-            "create".into(),
-            name,
-            format!(
-                "binPath= \"\\\"{}\\\" service run {role}\"",
-                hds_exe.display()
-            ),
-            "start= auto".into(),
-            format!("DisplayName= \"Hermes Disk Search: {role}\""),
-            "obj= LocalSystem".into(),
-        ],
         "uninstall" => vec!["delete".into(), name],
         "start" => vec!["start".into(), name],
         "stop" => vec!["stop".into(), name],
         "status" => vec!["query".into(), name],
         _ => vec![],
     }
+}
+
+/// Опции `sc.exe create` в «классическом» синтаксисе — передаются через
+/// `raw_arg`, а **не** argv.
+///
+/// `hds_exe` — путь к `hds.exe` для `binPath` (M7 §3.1: `current_exe()` внутри
+/// общего кода указал бы на exe вызывающего — UI, а не `hds`).
+///
+/// Почему не argv: значение `binPath= "\"<exe>\" service run <role>"` содержит
+/// вложенные кавыки и пробелы; при передаче через `Command::args` Rust
+/// перекавычивает аргумент, и `sc.exe` под администратором отвергает параметры
+/// (печатает usage) — живая находка T5 (до этого `install` падал на валидации).
+#[cfg(windows)]
+pub fn sc_install_raw(role: &str, hds_exe: &Path) -> String {
+    format!(
+        " binPath= \"\\\"{}\\\" service run {role}\" start= auto DisplayName= \"Hermes Disk Search: {role}\" obj= LocalSystem",
+        hds_exe.display()
+    )
 }
 
 /// Авторестарт службы при падении (5 с, 5 с, 30 с; сброс счётчика за сутки).
@@ -142,15 +146,25 @@ pub const FAILURE_ARGS: [&str; 2] = [
 /// macOS — `launchctl`). `hds_exe` — путь к `hds.exe` для `binPath`/плейста.
 #[cfg(windows)]
 pub fn control(action: &str, role: &str, hds_exe: &Path) -> ControlResult {
-    let args = sc_args(action, role, hds_exe);
-    if args.is_empty() {
-        return ControlResult {
-            code: 2,
-            stdout: String::new(),
-            stderr: format!("service: неизвестная подкоманда '{action}'\n"),
-        };
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new("sc.exe");
+    if action == "install" {
+        // Опции `create` с вложенными кавыками — только через `raw_arg` (см. `sc_install_raw`).
+        cmd.arg("create")
+            .arg(service_name(role))
+            .raw_arg(sc_install_raw(role, hds_exe));
+    } else {
+        let args = sc_args(action, role);
+        if args.is_empty() {
+            return ControlResult {
+                code: 2,
+                stdout: String::new(),
+                stderr: format!("service: неизвестная подкоманда '{action}'\n"),
+            };
+        }
+        cmd.args(&args);
     }
-    match std::process::Command::new("sc.exe").args(&args).output() {
+    match cmd.output() {
         Ok(o) => {
             let mut stdout = String::from_utf8_lossy(&o.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&o.stderr).into_owned();
@@ -187,33 +201,27 @@ pub fn control(action: &str, role: &str, hds_exe: &Path) -> ControlResult {
 
 // --- Windows: чтение состояния SCM ------------------------------------------
 
-/// Разбор строки `STATE` вывода `sc query`: `running|stopped|unknown`.
+/// Разбор вывода `sc query`: `running|stopped|unknown`.
 ///
-/// Чистая функция — тестируется без SCM (в т.ч. на linux-CI).
+/// По **значениям** (`RUNNING`/`STOPPED`), а не по метке строки: вывод `sc`
+/// локализован (`sc qc` на рус. Windows печатает `Тип_запуска`, см. ниже), поэтому
+/// привязка к англ. метке ненадёжна. Чистая функция — тестируется без SCM.
 pub fn parse_sc_state(text: &str) -> String {
-    for line in text.lines() {
-        let l = line.trim_start();
-        if l.starts_with("STATE") {
-            if l.contains("RUNNING") {
-                return "running".into();
-            }
-            if l.contains("STOPPED") {
-                return "stopped".into();
-            }
-            return "unknown".into();
-        }
+    if text.contains("RUNNING") {
+        return "running".into();
+    }
+    if text.contains("STOPPED") {
+        return "stopped".into();
     }
     "unknown".into()
 }
 
-/// Разбор строки `START_TYPE` вывода `sc qc`: `AUTO_START` (в т.ч. delayed) → true.
+/// Разбор `sc qc`: автостарт — по значению `AUTO_START` (в т.ч. `AUTO_START (DELAYED)`).
 ///
-/// Чистая функция — тестируется без SCM.
+/// Метка строки локализована (`START_TYPE` / `Тип_запуска`), значение — нет; поэтому
+/// ищем значение. Чистая функция — тестируется без SCM.
 pub fn parse_sc_autostart(text: &str) -> bool {
-    text.lines().any(|line| {
-        let l = line.trim_start();
-        l.starts_with("START_TYPE") && l.contains("AUTO_START")
-    })
+    text.contains("AUTO_START")
 }
 
 /// Состояние роли в SCM (`sc query` + `sc qc`).
@@ -465,31 +473,36 @@ mod tests {
         assert_eq!(daemon_label("llm-host"), "com.hermes-disk-search.llm-host");
     }
 
-    /// Аргументы sc.exe: install строит binPath с вложенными кавыками вокруг exe
-    /// `hds.exe` (передан вызывающим — M7 §3.1, не `current_exe()`).
+    /// Опции `sc.exe create` (классический raw-синтаксис, T5): binPath с вложенными
+    /// кавыками вокруг exe `hds.exe` (передан вызывающим — M7 §3.1, не `current_exe()`).
     #[cfg(windows)]
     #[test]
-    fn sc_install_args_quote_binpath() {
+    fn sc_install_raw_quotes_binpath() {
         let exe = std::path::Path::new("C:\\hds\\hds.exe");
-        let args = super::sc_args("install", "mcp-http", exe);
-        assert_eq!(args[0], "create");
-        assert_eq!(args[1], "hermes-disk-search-mcp-http");
-        let bin = &args[2];
-        assert!(bin.starts_with("binPath= \"\\\""), "{bin}");
-        assert!(bin.contains("\" service run mcp-http\""), "{bin}");
-        assert!(bin.contains("hds.exe"), "{bin}");
-        assert!(args.contains(&"start= auto".to_string()));
-        // M3 T0 (F1): DisplayName должен содержать реальную роль, а не литерал
-        // `<role>` (дефект M2: все службы получали имя «Hermes Disk Search: <role>»).
+        let raw = super::sc_install_raw("mcp-http", exe);
         assert!(
-            args.contains(&"DisplayName= \"Hermes Disk Search: mcp-http\"".to_string()),
-            "DisplayName без подстановки роли: {args:?}"
+            raw.contains("binPath= \"\\\"C:\\hds\\hds.exe\\\" service run mcp-http\""),
+            "{raw}"
         );
-        assert!(!args.iter().any(|a| a.contains("<role>")), "{args:?}");
+        assert!(raw.contains("start= auto"), "{raw}");
+        // M3 T0 (F1): DisplayName должен содержать реальную роль, а не литерал `<role>`.
+        assert!(
+            raw.contains("DisplayName= \"Hermes Disk Search: mcp-http\""),
+            "{raw}"
+        );
+        assert!(raw.contains("obj= LocalSystem"), "{raw}");
+        assert!(!raw.contains("<role>"), "{raw}");
+    }
+
+    /// Простые подкоманды `sc.exe` — по имени службы (T5: `create` тут больше нет).
+    #[cfg(windows)]
+    #[test]
+    fn sc_simple_args_name() {
         for sub in ["uninstall", "start", "stop", "status"] {
-            let a = super::sc_args(sub, "ui", exe);
-            assert_eq!(a.last().unwrap(), "hermes-disk-search-ui");
+            let a = super::sc_args(sub, "ui");
+            assert_eq!(a.last().unwrap(), "hermes-disk-search-ui", "{sub}: {a:?}");
         }
+        assert!(super::sc_args("install", "ui").is_empty());
     }
 
     /// LaunchDaemon-плейст: Label/ProgramArguments/RunAtLoad/KeepAlive + логи.
@@ -536,17 +549,24 @@ mod tests {
     }
 
     /// Разбор `sc qc`: автостарт (в т.ч. delayed) распознаётся, demand — нет.
+    ///
+    /// Метки `sc qc` локализованы (`START_TYPE` англ. / `Тип_запуска` рус.),
+    /// значения — нет; тест покрывает оба варианта (T5-находка).
     #[test]
     fn parse_sc_qc_autostart() {
-        assert!(super::parse_sc_autostart(
-            "START_TYPE         : 2   AUTO_START\r\n"
-        ));
-        assert!(super::parse_sc_autostart(
-            "START_TYPE         : 2   AUTO_START (DELAYED)\r\n"
-        ));
-        assert!(!super::parse_sc_autostart(
-            "START_TYPE         : 3   DEMAND_START\r\n"
-        ));
-        assert!(!super::parse_sc_autostart(""));
+        for auto in [
+            "START_TYPE         : 2   AUTO_START\r\n",
+            "START_TYPE         : 2   AUTO_START (DELAYED)\r\n",
+            "        Тип_запуска          : 2   AUTO_START\r\n",
+        ] {
+            assert!(super::parse_sc_autostart(auto), "{auto:?}");
+        }
+        for demand in [
+            "START_TYPE         : 3   DEMAND_START\r\n",
+            "        Тип_запуска          : 3   DEMAND_START\r\n",
+            "",
+        ] {
+            assert!(!super::parse_sc_autostart(demand), "{demand:?}");
+        }
     }
 }
