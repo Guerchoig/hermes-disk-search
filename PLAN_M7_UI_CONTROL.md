@@ -67,7 +67,11 @@ Apple Silicon (Э11); анонимизация внешнего API (W9); нов
 * юнит-тесты `service.rs` (`roles_and_names`, `sc_install_args_quote_binpath`,
   `plist_has_required_keys`, `role_from_args_reads_service_role`) переносятся к общему коду;
 * контракт роли: `{ role, installed: bool, state: "running|stopped|absent|unknown",
-  autostart: bool, detail: String }`.
+  autostart: bool, detail: String }`;
+* **тонкость:** `sc_args("install")` сейчас берёт `std::env::current_exe()` для `binPath` —
+  при выносе это стало бы exe **вызывающего** (UI), а не `hds.exe`. Общий код обязан
+  принимать путь к `hds.exe` параметром (`sc_args(sub, role, hds_exe: &Path)`); как искать
+  `hds.exe` из UI — переиспользовать существующий `hds-ui::hds_exe()` (рядом/`bin`/`target/…`).
 
 > Альтернатива (если перенос `windows-service` в `hds-core` нежелателен) — отдельный
 > крейт `hds-service` в workspace. Выбор фиксируется в T1.
