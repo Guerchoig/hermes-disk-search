@@ -31,7 +31,7 @@ fn usage() -> String {
      \x20 cline-sync   [--json] [--dry-run] (настройки Cline под config.yaml: модели/MCP/правило)\n\
      \x20 ui           [--host H] [--port N] (веб-интерфейс; по умолчанию 127.0.0.1:8765)
      \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
-     \x20 token        list|revoke [--user U | --sha <префикс хэша>]
+     \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
      \x20 login        --login L --password P [--url http://host:port] (токен на stdout)\n\
       \x20 service      run|install|uninstall|start|stop|status [role] (M2 T4; роли\n\
       \x20              watch|mcp-http|ui|llm-host; Windows — SCM, macOS — LaunchDaemon)"
@@ -147,7 +147,7 @@ fn run(args: &[String]) -> i32 {
         "token" => match rest.first() {
             Some(s) if !s.starts_with("--") => cmd::auth::cmd_token(s, &rest[1..], None),
             _ => {
-                eprintln!("token: нужна подкоманда (list|revoke)");
+                eprintln!("token: нужна подкоманда (list|new|revoke)");
                 2
             }
         },

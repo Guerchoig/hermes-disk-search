@@ -1,5 +1,5 @@
 //! Команды управления доступом (M1 T5, `PLAN_M1_ACCESS_PROJECTS.md` §4):
-//! `hds user add|list|del|passwd|grant|revoke`, `hds token list|revoke`,
+//! `hds user add|list|del|passwd|grant|revoke`, `hds token list|new|revoke`,
 //! `hds login [--url ...]` (клиентский помощник: login/password → токен).
 //!
 //! Хранилище — `data/access.yaml` (через `hds-core::access`). В тестах
@@ -8,8 +8,8 @@
 use std::path::PathBuf;
 
 use hds_core::access::{
-    hash_password, load_at, revoke_token, revoke_tokens_of_user, save_at, user_by_login, Access,
-    User,
+    hash_password, load_at, new_token, revoke_token, revoke_tokens_of_user, save_at, user_by_login,
+    Access, User,
 };
 
 /// Путь к хранилищу по умолчанию (или явный — из тестов).
@@ -271,6 +271,51 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
         }
     };
     match sub {
+        "new" => {
+            let login = match flag(args, "--user") {
+                Some(l) if !l.trim().is_empty() => l,
+                _ => return usage("token new --user <логин> [--ttl-days N]"),
+            };
+            let cfg = hds_core::config::load().unwrap_or(hds_core::config::Config::Null);
+            let ttl = flag(args, "--ttl-days")
+                .and_then(|v| v.trim().parse::<u64>().ok())
+                .filter(|d| *d > 0)
+                .unwrap_or_else(|| hds_core::access::token_ttl_days(&cfg));
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            match token_new_issue(&path, &login, ttl, now) {
+                Ok((plain, expires)) => {
+                    // Plain-токен печатается ОДИН раз; в файл/аудит идёт только хэш.
+                    println!("токен для {login}: {plain}");
+                    println!("истекает: {expires} (через {ttl} дн.)");
+                    if let Some(a) = hds_core::audit::Audit::from_config(&cfg) {
+                        a.record(
+                            &hds_core::audit::AuditEvent {
+                                ts: 0,
+                                event: "admin_op".into(),
+                                user: Some(login.clone()),
+                                ip: "-".into(),
+                                method: "-".into(),
+                                path: "hds token new".into(),
+                                tool: None,
+                                projects: None,
+                                token: None,
+                                status: 0,
+                                ms: 0,
+                            }
+                            .now(),
+                        );
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("token new: {e}");
+                    1
+                }
+            }
+        }
         "list" => {
             let user = flag(args, "--user");
             let now = std::time::SystemTime::now()
@@ -362,9 +407,32 @@ pub fn cmd_token(sub: &str, args: &[String], access_path: Option<PathBuf>) -> i3
             0
         }
         other => usage(&format!(
-            "token: неизвестная подкоманда '{other}' (list|revoke)"
+            "token: неизвестная подкоманда '{other}' (list|new|revoke)"
         )),
     }
+}
+
+/// Выдать токен пользователю и сохранить его хэш: `(plain, expires)` (M7 §3.3).
+///
+/// Plain-значение возвращается вызывающему для показа **один раз**; в `access.yaml`
+/// попадает только `token_sha256`. Отказ, если логина нет или учётка отключена.
+fn token_new_issue(
+    path: &std::path::Path,
+    login: &str,
+    ttl_days: u64,
+    now: i64,
+) -> Result<(String, i64), String> {
+    let mut acc = load(path)?;
+    match user_by_login(&acc, login) {
+        Some(u) if !u.disabled => {}
+        Some(_) => return Err(format!("пользователь '{login}' отключён")),
+        None => return Err(format!("логин не найден: {login}")),
+    }
+    let (plain, token) = new_token(login, ttl_days.max(1), now).map_err(|e| e.message())?;
+    let expires = token.expires;
+    acc.tokens.push(token);
+    save(path, &acc)?;
+    Ok((plain, expires))
 }
 
 /// `hds login [--url http://127.0.0.1:8787] --login L --password P` —
@@ -425,7 +493,7 @@ pub fn cmd_login(args: &[String]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::login_body;
+    use super::{login_body, token_new_issue};
 
     /// M2 T0: логин/пароль с `"`, `\` и переводами строк не ломают JSON-тело
     /// (раньше тело собиралось `format!` без экранирования).
@@ -436,5 +504,45 @@ mod tests {
             serde_json::from_str(&body).expect("тело должно быть валидным JSON");
         assert_eq!(v["login"], "ad\"min");
         assert_eq!(v["password"], "p\\a\"ss\nword");
+    }
+
+    /// M7 T3: `token new` пишет только хэш, plain резолвится; чужой логин — отказ.
+    #[test]
+    fn token_new_issue_saves_hash_and_refuses_unknown_user() {
+        use hds_core::access::{
+            hash_password, load_at, resolve_token, save_at, token_sha256_hex, Access, User,
+        };
+
+        let path = std::env::temp_dir().join(format!("hds-toknew-{}.yaml", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut acc = Access::default();
+        acc.users.push(User {
+            name: "Alice".into(),
+            login: "alice".into(),
+            password_hash: hash_password("pw").unwrap(),
+            admin: true,
+            projects: vec![],
+            disabled: false,
+        });
+        save_at(&path, &acc).unwrap();
+
+        let now = 1_700_000_000i64;
+        let (plain, expires) = token_new_issue(&path, "alice", 30, now).unwrap();
+        assert_eq!(expires, now + 30 * 86_400);
+
+        let saved = load_at(&path).unwrap();
+        assert_eq!(saved.tokens.len(), 1);
+        assert_eq!(saved.tokens[0].token_sha256, token_sha256_hex(&plain));
+        assert!(
+            resolve_token(&saved, &plain, now).is_some(),
+            "выданный токен должен резолвиться"
+        );
+
+        // Несуществующий логин — отказ, файл не меняется.
+        let err = token_new_issue(&path, "bob", 30, now).unwrap_err();
+        assert!(err.contains("bob"), "{err}");
+        assert_eq!(load_at(&path).unwrap().tokens.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
     }
 }

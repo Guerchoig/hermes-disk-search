@@ -625,3 +625,49 @@ fn services_route_get_is_json() {
     assert!(v["profile"].is_string(), "{v}");
     assert!(v["services"].is_array(), "{v}");
 }
+
+// --- T3 (M7, PLAN_M7_UI_CONTROL.md §3.3): выдача токена из UI ---
+
+/// `POST /api/access/token/new`: выдаёт рабочий токен (plain один раз, в файл — хэш);
+/// неизвестный пользователь → `400`.
+#[test]
+fn access_token_new_issues_working_token() {
+    use hds_core::access::{hash_password, load_at, resolve_token, save_at, Access, User};
+
+    let path = std::env::temp_dir().join(format!("hds-ui-toknew-{}.yaml", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut acc = Access::default();
+    acc.users.push(User {
+        name: "Bob".into(),
+        login: "bob".into(),
+        password_hash: hash_password("pw").unwrap(),
+        admin: false,
+        projects: vec![],
+        disabled: false,
+    });
+    save_at(&path, &acc).unwrap();
+
+    let (status, _, body) = hds_ui::access_token_new(r#"{"user":"bob","ttl_days":7}"#, Some(&path));
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["user"], "bob");
+    let token = v["token"].as_str().unwrap().to_string();
+    assert!(!token.is_empty(), "{v}");
+    let expires = v["expires"].as_i64().unwrap();
+    assert!(expires > 0, "{v}");
+
+    // В файле — только хэш, и он резолвится.
+    let saved = load_at(&path).unwrap();
+    assert_eq!(saved.tokens.len(), 1);
+    assert!(
+        resolve_token(&saved, &token, expires - 1).is_some(),
+        "выданный токен должен резолвиться"
+    );
+
+    // Неизвестный пользователь — отказ, токен не пишется.
+    let (status, _, _) = hds_ui::access_token_new(r#"{"user":"nobody"}"#, Some(&path));
+    assert_eq!(status, 400);
+    assert_eq!(load_at(&path).unwrap().tokens.len(), 1);
+
+    let _ = std::fs::remove_file(&path);
+}

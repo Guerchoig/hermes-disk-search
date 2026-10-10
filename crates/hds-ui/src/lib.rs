@@ -1750,6 +1750,7 @@ pub fn route_with_access(
                     "/api/access/user/passwd" => access_user_passwd(body, access_path),
                     "/api/access/user/grant" => access_user_grant(body, access_path),
                     "/api/access/token/revoke" => access_token_revoke(body, access_path),
+                    "/api/access/token/new" => access_token_new(body, access_path),
                     "/api/services" => services_action_json(body),
                     "/api/index/start" => {
                         let full = qp(query, "full")
@@ -2441,5 +2442,51 @@ fn access_token_revoke(body: &str, access_path: Option<&std::path::Path>) -> Rep
         }
     } else {
         body_err("нужно поле sha_prefix или user")
+    }
+}
+
+/// POST /api/access/token/new `{user, ttl_days?}` → `{token, expires, user}` (M7 §3.3).
+///
+/// Plain-токен отдаётся **один раз** в теле ответа; в `access.yaml` пишется только
+/// `token_sha256`, в аудит — факт операции (`admin_op`, общий блок POST) без токена.
+/// TTL: `ttl_days` из тела либо `access.token_ttl_days` конфига.
+pub fn access_token_new(body: &str, access_path: Option<&std::path::Path>) -> Reply {
+    let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+    let login = match body_str(&v, "user") {
+        Some(l) => l,
+        None => return body_err("нужно поле user"),
+    };
+    let ttl = v
+        .get("ttl_days")
+        .and_then(|x| x.as_u64())
+        .filter(|d| *d > 0)
+        .unwrap_or_else(|| {
+            load()
+                .ok()
+                .map(|c| hds_core::access::token_ttl_days(&c))
+                .unwrap_or(hds_core::access::DEFAULT_TOKEN_TTL_DAYS)
+        });
+    let mut acc = match access_load(access_path) {
+        Ok(a) => a,
+        Err(e) => return (500, "application/json", json!({ "error": e }).to_string()),
+    };
+    if !acc.users.iter().any(|u| u.login == login && !u.disabled) {
+        return body_err("логин не найден или отключён");
+    }
+    let (plain, token) = match hds_core::access::new_token(&login, ttl, access_now_unix()) {
+        Ok(t) => t,
+        Err(e) => {
+            return (
+                500,
+                "application/json",
+                json!({ "error": e.message() }).to_string(),
+            )
+        }
+    };
+    let expires = token.expires;
+    acc.tokens.push(token);
+    match access_save(access_path, &acc) {
+        Ok(()) => json_ok(json!({ "token": plain, "expires": expires, "user": login })),
+        Err(e) => (500, "application/json", json!({ "error": e }).to_string()),
     }
 }
