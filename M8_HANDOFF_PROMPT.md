@@ -34,8 +34,9 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
    следующий шаг — T2):** параметры `install_server.ps1` (`-StateDir/-Parallel/-Gpu*/-Roots/
    -EnableAccess/-Admin*/-Fetch/-NoFetch/-WhatIf`), генерация server-`config.yaml`, админ
    (хэш), unattended-вызов `fetch_*` (они уже без `Read-Host`), parity-тест.
-3. **T2 — серверный пакет macOS/Apple Silicon:** `install_server.command` + LaunchDaemon +
-   Metal-рантайм (живой цикл — хвост «машина с Mac»).
+3. **T2 — серверный пакет macOS/Apple Silicon — ✅ сделано 10.10.2026 (`6db2f69`;
+   следующий шаг — T4):** `install_server.command` с тем же unattended-набором (bash-флаги),
+   генерация конфига, `pwsh`-fetch, `codesign`/`xattr`, parity-тест (macOS больше не `#[ignore]`).
 4. **T3 — клиентский пакет (Win/macOS):** ⏸ **отложен вместе с Э9** (следующий этап) —
    `hds cline-sync --server-url --token`, мастер «адрес+токен → `GET /health` → Cline-конфиг»,
    Cline без Hermes; без локальных моделей/индекса.
@@ -80,6 +81,23 @@ rustc/cargo 1.97.1. Ядро на Rust (`crates/`), Python — только side
 * Проверка: `-WhatIf` без админа; песочница config-only (валидный YAML + хэшированный админ,
   `tools/parity/out/m8_t1_check.py`); `cargo test --workspace` — **89 наборов / 0 failed**,
   fmt/clippy чисто. **Хвост:** живой прогон с `-Fetch` (сеть) и установка служб — на админ-стенде.
+
+## Сделано в T2 (`6db2f69`, 10.10.2026)
+
+* `installers/install_server.command` (macOS) переписан под тот же unattended-набор: bash-флаги
+  `--statedir/--mcp-host/--mcp-port/--ui-host/--ui-port/--parallel/--gpu-device/--gpu-preset/
+  --roots/--enable-access/--admin-login/--admin-password/--fetch/--no-fetch/--whatif` +
+  обратная совместимость с позиционными `[root_dir] [roles]`. `gen_config` зеркалит
+  `New-ServerConfig` из `.ps1`; `--whatif` без root/изменений; `--roles ""` — config-only.
+* **Найден и исправлен баг:** `printf '%s'` без перевода строки — `while read` терял последний
+  корень из `--roots` (только macOS-ветка; в PowerShell `-split` корректен).
+* Fetch: вызывает `fetch_*.ps1` через `pwsh` (без `pwsh` — понятный пропуск). Ad-hoc подпись
+  (`codesign --force -s -`) + снятие карантина (`xattr -dr com.apple.quarantine`). LF-инвариант
+  обеспечивает `.gitattributes` (`*.command text eol=lf`).
+* Parity-тест: `install_server_command_has_unattended_params` (`#[ignore]` снят). Проверка:
+  `bash -n` (Git Bash) — ok; `--whatif` → YAML-валидный конфиг (`tools/parity/out/m8_t2_check.py`);
+  `cargo test --workspace` — **89 наборов / 0 failed**, fmt/clippy чисто.
+  **Хвост:** живой цикл на реальном Mac (LaunchDaemon/codesign/`spec`).
 
 ## Контракты (код — источник истины, §3 плана)
 

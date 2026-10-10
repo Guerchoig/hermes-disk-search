@@ -115,11 +115,25 @@ Win/macOS — `hds` + мастер «адрес сервера + токен» �
       `tools/parity/out/m8_t1_check.py`); `cargo test --workspace` — **89 наборов / 0 failed**,
       fmt/clippy чисто. **Следующий шаг — T2** (macOS-аналог `.command`).
 
-### T2. Серверный пакет macOS/Apple Silicon — 1,5–2 дн
-- [ ] `install_server.command`: параметры, LaunchDaemon (уже есть), Metal-рантайм через
-      macos-ветки `fetch_*`, ad-hoc подпись бинарей.
-- [ ] Образец прокси (Caddyfile/nginx.conf) + TLS (self-signed/Let's Encrypt), `trusted_proxy`.
-- [ ] Юниты на plist/`launchctl`-аргументы; **живой цикл — хвост «машина с Mac»** (как M6/M7).
+### T2. Серверный пакет macOS/Apple Silicon — 1,5–2 дн — ✅ **выполнено 10.10.2026** (`6db2f69`)
+- [x] `install_server.command`: тот же unattended-набор (`--statedir/--mcp-*/--ui-*/--parallel/
+      --gpu-*/--roots/--enable-access/--admin-*/--fetch/--no-fetch/--whatif`), обратная
+      совместимость с позиционными `[root_dir] [roles]`; LaunchDaemon — через `hds service install`
+      (как было); `--whatif` без root/изменений; `--roles ""` — config-only.
+- [x] Генерация конфига зеркалит `install_server.ps1` (`New-ServerConfig` ↔ `gen_config`);
+      **найден и исправлен баг** `printf '%s'` без перевода строки — `while read` терял
+      последний корень из `--roots` (macOS-only).
+- [x] Metal-рантайм/модели: `install_server.command` вызывает `fetch_*.ps1` через `pwsh`
+      (macos-ветки внутри скриптов); без `pwsh` — понятный пропуск с подсказкой.
+- [x] Ad-hoc подпись (`codesign --force -s -`) по каждому бинарю в `bin/`; снятие
+      Gatekeeper-карантина (`xattr -dr com.apple.quarantine`); `chmod +x` — best effort.
+- [x] Образцы прокси Caddyfile/nginx.conf копируются как и раньше (`trusted_proxy: true` — в
+      подсказке/доке, не автоправка конфига).
+- [x] Тесты: `install_server_command_has_unattended_params` — `#[ignore]` снят, проверяет флаги +
+      секции конфига + `launchctl`/`codesign`/`xattr`/sudo-гейт. Синтаксис — `bash -n` (Git Bash),
+      `--whatif` выведен и YAML-проверен (`tools/parity/out/m8_t2_check.py`).
+- **Хвост T2:** живой цикл на реальном Mac (LaunchDaemon/`spec`/codesign) — как в M6/M7.
+- **Следующий шаг — T4** (обновление/откат серверного профиля).
 
 ### T3. Клиентский пакет (Win/macOS, Cline+Hermes) — 2–3 дн — ⏸ **отложен (Э9, следующий этап)**
 - [ ] Расширить `hds cline-sync` флагами `--server-url/--token/--mcp-path` (§3); `--dry-run`.
