@@ -1,11 +1,18 @@
-# README_SERVER_MULTIUSER.md — сценарии использования подсистемы доступа (M1)
+# README_SERVER_MULTIUSER.md — серверная многопользовательская подсистема (M1–M9)
 
-> Практическое руководство по «Проектам» и авторизации, реализованным в milestone M1
-> (`PLAN_M1_ACCESS_PROJECTS.md` — план и исполнение; `PLAN_SERVER_MULTIUSER.md` §9 — место
-> в общей серверной дорожной карте). Ветка **`server-multiuser`**.
+> Практическое руководство по **всей серверной подсистеме** `hermes-disk-search`:
+> проекты и авторизация (**M1**), серверный профиль и службы (**M2**), сетевой периметр —
+> TLS/аудит/rate-limit (**M3**), конкурентность под SLA (**M4**), внешняя чат-модель (**M5**),
+> несколько GPU (**M6**), управление службами/токенами из UI (**M7**), серверный пакет
+> установки (**M8**), клиентский пакет (**M9**). Ветка **`server-multiuser`**.
+> **Все этапы выполнены и покрыты тестами** (код-ревью M2–M7; карта — §0.1).
 >
-> Всё ниже — реализовано и покрыто тестами. TLS/reverse-proxy, аудит и rate-limit —
-> следующий этап (Э2), здесь сервис считается закрытым в доверенной сети.
+> Планы и журналы этапов — `PLAN_M1_ACCESS_PROJECTS.md` … `PLAN_M9_CLIENT_PACKAGE.md`;
+> дорожная карта — `PLAN_SERVER_MULTIUSER.md` (§2 workstreams, §5 этапы, §9 статусы).
+>
+> **Осталось (вне M1–M9):** эксплуатация — healthz/бэкап/диагностика (Э10/W8); нагрузочная
+> приёмка на 1/2 картах и Apple Silicon (Э11); анонимизация внешнего API (W9); живая проверка
+> HTTPS через TLS-прокси на машине с сертификатом. Подробнее — §12.
 
 ## 0. Что появилось (кратко)
 
@@ -23,6 +30,20 @@
   занимается только админ; пользователи — никогда.
 * ⚠️ **Переиндексация обязательна**: схема БД изменилась (`files.project`); старая база
   дропается при первом подключении (сообщение в stderr) — запустите `hds index` заново.
+
+## 0.1. Карта этапов (что где)
+
+| Этап | Что сделано | Раздел | План |
+|---|---|---|---|
+| **M1** | Проекты (roots→`files.project`), Argon2id-пароли, авто-токены, Bearer, фильтрация выдачи, admin-гейтинг индексации | §0–§8, §10 | `PLAN_M1_ACCESS_PROJECTS.md` |
+| **M2** | Профиль `desktop\|server`, каталог состояния (ProgramData / Application Support), службы Windows/macOS (`hds service`), headless-UI, установщики | §2a | `PLAN_M2_SERVER_PROFILE.md` |
+| **M3** | TLS reverse-proxy (образцы), аудит JSONL, rate-limit, hardening (`413`/`503`, fail-closed UI) | §11 | `PLAN_M3_NETWORK_PERIMETER.md` |
+| **M4** | БД под конкурентность (WAL + read-only), слоты чата + fit-гейт VRAM, очередь тяжёлых RAG, квоты по пользователю | §11 | `PLAN_M4_CONCURRENCY_SLA.md` |
+| **M5** | Внешняя чат-модель `chat.provider: remote` (RAG без локальной chat-роли в VRAM) | §8a | `PLAN_M5_EXTERNAL_CHAT.md` |
+| **M6** | Несколько GPU одного семейства: `gpu.preset`/`gpu.devices`, чат-реплики, whisper по картам | §8b | `PLAN_M6_GPU_MULTIVENDOR.md` |
+| **M7** | Управление службами и выдача токенов из UI (`GET/POST /api/services`, `hds token new`) | §8c | `PLAN_M7_UI_CONTROL.md` |
+| **M8** | Серверный пакет установки (unattended `install_server.*`, `update.ps1` + откат) | §8d | `PLAN_M8_INSTALL_PACKAGES.md` |
+| **M9** | Клиентский пакет (тонкий Cline-клиент: `cline-sync --server-url/--token`, мастеры, тонкая сборка) | §8e | `PLAN_M9_CLIENT_PACKAGE.md` |
 
 ## 1. Роли
 
@@ -72,6 +93,32 @@ hds login --login admin --password "<пароль>" --url http://127.0.0.1:8787
 
 После шага 1–2 любой запрос к MCP/UI без валидного токена получает `401`, а UI открывается
 только с админ-токеном.
+
+## 2a. Серверный профиль, каталог состояния и службы (M2)
+
+* **Профиль** — ключ `profile: desktop | server` в `config.yaml` (по умолчанию `desktop`).
+  Профиль **сам авторизацию не включает** (её включает только `access.enabled`); `server`
+  задаёт серверные дефолты (`llm_server.parallel: 5`, `db.*`, очередь/квоты/аудит — включены) и
+  предупреждения `hds check` (server без `access.enabled`/`ui.*` → `warn` с подсказками).
+* **Каталог состояния (server):** `%ProgramData%\hermes-disk-search` (Windows) /
+  `/Library/Application Support/hermes-disk-search` (macOS). Там `config.yaml` (фолбэк, если
+  конфига нет в корне установки), `index.db`, `data/` (`access.yaml`, PID `mcp-http`/`llm-host`,
+  логи, heartbeat, `mcp-queue.json`). Переопределение — `HDS_ROOT` (сильнее всего). Desktop —
+  прежнее поведение (всё рядом с программой).
+* **Bind веб-интерфейса:** секция `ui: { host, port }` (по умолчанию `127.0.0.1:8765`); флаги
+  `hds ui --host/--port` переопределяют. В server-профиле держите `127.0.0.1`, наружу — только
+  через reverse-proxy с TLS (§11).
+* **Службы** (старт при загрузке, без интерактивного входа):
+  `hds service run|install|uninstall|start|stop|status <role>`, роли
+  `watch | mcp-http | ui | llm-host`. Windows — SCM (`hermes-disk-search-<role>`, автостарт +
+  авторестарт при падении; `run` под SCM обслуживает крейт `windows-service`), фолбэк —
+  AtStartup-задача SYSTEM; macOS — LaunchDaemon (`com.hermes-disk-search.<role>`, `RunAtLoad` +
+  `KeepAlive`). Управляющие подкоманды требуют прав администратора. **Десктопный** автозапуск
+  (Планировщик `AtLogOn`) не меняется.
+* **Headless-UI (server):** `run_ui.ps1` в server-профиле не открывает браузер и не создаёт ярлыки;
+  вход — строго по админ-токену (§6).
+* **Установка** — одной командой: `installers/install_server.ps1` (Windows) /
+  `installers/install_server.command` (macOS) — см. §8d. Управление службами из UI — §8c.
 
 ## 3. Сценарий B — подключение нового пользователя (админ → пользователь)
 
@@ -160,7 +207,7 @@ http://127.0.0.1:8765/?token=<админ-токен>
 В карточке «Доступ» кнопка **«Выдать токен»** (логин + TTL) выпускает новый токен —
 plain-значение показывается **один раз**. Карточка **«Службы (server-профиль)»** показывает
 состояние OS-служб и кнопки `install/uninstall/start/stop/restart` (детали — §8c). Установка
-серверного пакета одной командой — §8d.
+серверного пакета одной командой — §8d; клиентского (тонкий Cline) — §8e.
 
 Остальные карточки UI (индексация, llm-host, конфиг, транскрибация) — админские операции,
 в server-режиме они защищены тем же гейтом.
@@ -174,7 +221,7 @@ plain-значение показывается **один раз**. Карто�
 | Отозвать все токены юзера | `hds token revoke --user alice` | alice перелогинивается |
 | Сменить пароль | `hds user passwd --login alice --password <новый>` | пароль + **все токены alice** отзываются |
 | Убрать проект | `hds user revoke --login alice --projects Docs` | файлы Docs исчезают из выдачи немедленно |
-| Отключить учётку (план §3.2 `disabled`) — TODO следующего шага | — | пока используйте `user del` |
+| Отключить учётку | — | отдельной команды нет (флаг `disabled` есть в схеме `access.yaml`); используйте `hds user del --login alice` |
 | Удалить пользователя | `hds user del --login alice` | учётка + токены удаляются |
 
 Истёкший по TTL токен перестаёт действовать сам (проверка `expires` при каждом вызове);
@@ -411,8 +458,14 @@ hds user del --login alice                                             # уда�
 hds token list --user alice                                            # токены
 hds token revoke --sha <префикс> | --user alice                        # отзыв
 
+# ── службы (server-профиль, админ) ─────────────────────
+hds service install|start|stop|status|uninstall <role>                 # role: watch|mcp-http|ui|llm-host
+
 # ── пользователь ───────────────────────────────────────
 hds login --login alice --password "..." --url http://127.0.0.1:8787   # → токен (JSON)
+
+# ── клиент (Cline, тонкий) ─────────────────────────────
+hds cline-sync --server-url https://host/ --token <bearer>             # записать настройки Cline
 
 # ── HTTP ───────────────────────────────────────────────
 # POST /auth/login  {"login":"...","password":"..."}  → 200 {token,expires,user,projects} | 401
@@ -421,7 +474,7 @@ hds login --login alice --password "..." --url http://127.0.0.1:8787   # → т�
 # UI                — ?token=<админ-токен>
 ```
 
-## 11. Сетевой периметр (M3): TLS reverse-proxy
+## 11. Сетевой периметр и конкурентность (M3–M4): TLS, аудит, rate-limit, SLA
 
 Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
 (Caddy или nginx, образцы — `installers/proxy/{Caddyfile,nginx.conf}`).
@@ -508,6 +561,34 @@ rate_limit:
 * `ui_auth_gate` при нечитаемом `config.yaml` в server-поставке **fail-closed**
   (401), а не молча открытый UI (дефект F2 из ревью M2).
 
+### БД под конкурентность (M4 T1)
+
+Один писатель (конвейер индексации/watcher) и много читателей (MCP/UI/CLI-поиск) на общей
+SQLite-базе — без «database is locked»:
+
+```yaml
+db:
+  busy_timeout_ms: 5000    # server-дефолт; desktop — 30000 (прежнее поведение)
+  journal_mode: wal        # WAL
+  read_only_conns: true    # server: читатели — read-only соединения (desktop: false)
+```
+
+* `open_rw` — единственный писатель (DDL + WAL + `synchronous` + FK + `busy_timeout`);
+  `open_ro` — читатели (read-only, без DDL; отсутствующая база → явная ошибка).
+* ⚠ WAL + read-only: читателям нужен доступ к файлу `-shm` (иначе `immutable=1`).
+* **Бэкап:** копирование файла при WAL небезопасно — только SQLite `.backup` / `VACUUM INTO`
+  (штатный бэкап — этап Э10). `hds check` показывает фактические PRAGMA.
+* Стресс «5 читателей + писатель» без `SQLITE_BUSY` — `crates/hds-core/tests/db_concurrency.rs`.
+
+### Слоты чата и контекст (M4 T2)
+
+* `llm_server.parallel` — сколько запросов чата исполняются **одновременно** (server-дефолт **5**,
+  desktop — 1); контекст слота — `llm_server.chat.ctx_per_slot` (для RAG подобран под SLA).
+* **Fit-гейт VRAM** на старте чата: не влезает — **явная ошибка** с числами «нужно/свободно/резерв»
+  и подсказкой снизить `parallel`/`ctx_per_slot`; у индексных ролей — громкое предупреждение.
+* `hds check` (пункт `chat`) показывает фактические слоты из `/props` рядом с настроенным
+  `parallel` (расхождение → `warn`).
+
 ### Очередь тяжёлых RAG и SLA (M4 T3)
 
 `ask_my_files` — тяжёлый инструмент (поиск + 27k-токенный промпт + генерация). До M4
@@ -570,20 +651,47 @@ queue:
   `embedding` на 12 ГБ (см. `README.md`, §«Слоты и SLA»). Отчёты —
   `tools/parity/out/m4_load_*.json`.
 
-## 12. Ограничения M1 и что дальше
+## 12. Текущее состояние и что осталось
 
-* Токен ходит по сети открытым текстом — **TLS обязателен** (reverse-proxy, Э2);
-  до этого публикать порт наружу нельзя.
-* `disabled`-флаг учётки есть в схеме, UI/CLI-переключателя пока нет (используйте `del`).
-* Фасад `:8010–8012` (chat/embedding/rerank) пока без авторизации — не публиковать
-  наружу (Э2).
-* Очередь тяжёлых RAG реализована (§11, M4 T3), квоты по пользователю — M4 T4;
-  коды `429`/`503` проверены сокет-тестами
-  (`crates/hds-mcp/tests/queue_socket.rs`, `quota_socket.rs`) и живыми прогонами
-  (`tools/parity/out/m4_t3_live.ps1`, `tools/parity/load5.py`); нагрузочная
-  приёмка «5 × `ask_my_files`» (p95 ≤ 5 мин) — **M4 T5**: `parallel 2/3/5` →
-  p95 49–58 с (см. §11; остаточный выброс до ~315 с при on-demand загрузке
-  `embedding` — отдельный разбор).
-* Ссылки: `PLAN_M1_ACCESS_PROJECTS.md` (контракты, треки, исполнение),
-  `PLAN_SERVER_MULTIUSER.md` (§2 W2/W5, §9 — следующий этап Э1/Э2),
-  `data/access.example.yaml` (формат хранилища).
+**Реализовано и покрыто тестами (M1–M9)** — карта §0.1: профили `desktop`/`server`; проекты,
+пароли (Argon2id) и токены (Bearer); фильтрация выдачи по проектам во всех ветках поиска;
+admin-гейтинг; TLS reverse-proxy (образцы) + аудит + rate-limit + hardening; БД под
+конкурентность + слоты/fit-гейт + очередь тяжёлых RAG + квоты под SLA; внешняя чат-модель;
+несколько GPU одного семейства; управление службами/токенами из UI; серверный и клиентский
+пакеты установки. Код-ревью пройдены для M2–M7 (`M*_CODE_REVIEW.md`).
+
+**Известные ограничения (осознанные):**
+
+* **`disabled`-флаг учётки** есть в схеме `access.yaml`, но отдельной команды/переключателя нет —
+  для отключения используйте `hds user del` (отзывает токены).
+* **Фасад `:8010–8012`** (chat/embedding/rerank) без авторизации — **не публиковать наружу**;
+  наружу — только `/mcp` и `/ui` через TLS-прокси (§11).
+* **Анонимизация (W9) не реализована:** при `chat.provider: remote` вопрос и фрагменты уходят
+  провайдеру как есть (§8a).
+* **Остаточный выброс латентности** ~305–315 с при 5 занятых слотах и on-demand загрузке
+  `embedding` на 12 ГБ (детали — `README.md` §«Слоты и SLA», §11).
+* **Не проверено на живом железе:** несколько дискретных карт и Apple Silicon; host-выбор карты
+  под файл при явном `gpu` от клиента (F-m6-t5-1, §8b).
+
+**Осталось (следующие этапы, вне M1–M9):**
+
+* **Э10/W8 «Эксплуатация»:** агрегированный `/healthz` (llm-host + БД + watcher + диски),
+  бэкап `index.db` (`.backup`/`VACUUM INTO`) и восстановление, расширенная админ-диагностика
+  `hds check`, обновление с малым простоем (план — `PLAN_M10_OPS.md`).
+* **Э11:** нагрузочная приёмка на 1/2 картах и Apple Silicon.
+* **W9:** анонимизация внешнего API (снимает ограничение `remote`).
+* Живая проверка **HTTPS через TLS-прокси** на машине с сертификатом (сейчас подтверждён
+  HTTP-гейт `401`/`200` и живой клиент с Bearer по LAN).
+
+**Ссылки:**
+
+* Дорожная карта: `PLAN_SERVER_MULTIUSER.md` (§2 workstreams W1–W10, §5 этапы Э1–Э11, §9 статусы).
+* Планы этапов: `PLAN_M1_ACCESS_PROJECTS.md`, `PLAN_M2_SERVER_PROFILE.md`,
+  `PLAN_M3_NETWORK_PERIMETER.md`, `PLAN_M4_CONCURRENCY_SLA.md`, `PLAN_M5_EXTERNAL_CHAT.md`,
+  `PLAN_M6_GPU_MULTIVENDOR.md`, `PLAN_M7_UI_CONTROL.md`, `PLAN_M8_INSTALL_PACKAGES.md`,
+  `PLAN_M9_CLIENT_PACKAGE.md`.
+* Код-ревью: `M2_CODE_REVIEW.md` … `M7_CODE_REVIEW.md`; статус — `STATUS.md`;
+  промты передачи контекста — `M1_HANDOFF_PROMPT.md` … `M9_HANDOFF_PROMPT.md`.
+* Смежные подсистемы: `PLAN_AUTO_TRANSCRIBE.md` (автотранскрибация + диаризация),
+  `PLAN_INDEX_QUALITY.md` (качество индекса), `PLAN_SHARED_LLAMA_RUNTIME.md`, `PLAN_W2_LLM_HOST.md`.
+* Формат хранилища доступа: `data/access.example.yaml`.
