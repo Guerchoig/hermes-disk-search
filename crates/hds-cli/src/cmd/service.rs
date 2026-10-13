@@ -251,6 +251,19 @@ fn service_run_platform(role: &str) -> i32 {
     }
 }
 
+/// Не-Windows (macOS LaunchDaemon, linux): SCM-диспетчера нет — процессом
+/// владеет launchd/systemd, а роль выполняется напрямую.
+///
+/// РЕГРЕССИЯ (13.10.2026, релизная приёмка): функция была только под
+/// `#[cfg(windows)]`, а кросс-платформенный `service_run` вызывал её безусловно —
+/// сборка для Linux/macOS падала с `E0425: cannot find function`. Ветка
+/// `server-multiuser` до этого не прогонялась в CI (`rust.yml` следил только за
+/// `main`/`w2-llm-host`).
+#[cfg(not(windows))]
+fn service_run_platform(role: &str) -> i32 {
+    run_role(role)
+}
+
 /// Управление службой (`install|uninstall|start|stop|status`) — общий код
 /// `hds-core::service` (M7 T1). Печатаем stdout/stderr и возвращаем exit-код
 /// ровно как раньше (без смены поведения). `hds.exe` для `binPath` — свой
