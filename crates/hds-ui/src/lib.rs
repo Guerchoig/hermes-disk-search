@@ -1605,6 +1605,7 @@ fn ui_auth_gate(
     access_path: Option<&std::path::Path>,
     method: &str,
     path: &str,
+    query: &str,
 ) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
     let cfg = match load() {
         Ok(c) => c,
@@ -1638,18 +1639,25 @@ fn ui_auth_gate(
     if !enabled {
         return Ok(None);
     }
-    let plain = h.authorization.as_deref().and_then(|x| {
+    // Токен берём из заголовка `Authorization: Bearer`; если его нет — из
+    // `?token=...` в URL. Браузер не может прислать заголовок при навигации,
+    // поэтому первый GET `/` приходит без Authorization: фронтенд (`page.rs`)
+    // читает `?token=`, кладёт его в localStorage и подставляет заголовок для
+    // последующих API-запросов. Без этого `?token=` не срабатывал бы вовсе
+    // (гейт отклонял саму страницу) — расхождение кода с докой.
+    let header_tok = h.authorization.as_deref().and_then(|x| {
         x.split_once(' ')
             .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
-            .map(|(_, t)| t.trim())
+            .map(|(_, t)| t.trim().to_string())
     });
+    let plain: Option<String> = header_tok.or_else(|| qp(query, "token").filter(|v| !v.is_empty()));
     let acc = match access_path {
         Some(p) => hds_core::access::load_at(p),
         // F10.4 (M2-ревью): конфиг уже загружен (`cfg`) — путь строим из него,
         // не парсим config.yaml повторно на каждый запрос.
         None => hds_core::access::load_at(&hds_core::access::access_path_from(&cfg)),
     };
-    let ctx = plain.and_then(|t| {
+    let ctx = plain.as_deref().and_then(|t| {
         acc.ok()
             .and_then(|a| hds_core::access::resolve_token(&a, t, access_now_unix()))
     });
@@ -1701,7 +1709,7 @@ pub fn route_with_access(
     body: &str,
     access_path: Option<&std::path::Path>,
 ) -> Reply {
-    let (server_mode, admin_user) = match ui_auth_gate(h, access_path, method, path) {
+    let (server_mode, admin_user) = match ui_auth_gate(h, access_path, method, path, query) {
         Ok(v) => (v.is_some(), v.map(|c| c.user)),
         Err(reply) => return reply,
     };

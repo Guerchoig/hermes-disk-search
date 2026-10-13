@@ -72,6 +72,47 @@ fn issue_token(acc_path: &std::path::Path, login: &str) -> String {
     plain
 }
 
+/// `?token=` в URL открывает UI: гейт принимает админ-токен из query, если
+/// заголовка `Authorization` нет (браузер не может прислать заголовок при
+/// навигации). Раньше `?token=` не срабатывал вовсе — гейт отклонял страницу.
+#[test]
+fn ui_token_in_query_opens_page() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let dir = tmpdir("qtoken");
+    let cfg = dir.join("config.yaml");
+    let acc_path = dir.join("access.yaml");
+    write_cfg(&cfg, true);
+    std::env::set_var("HDS_CONFIG", &cfg);
+    add_user(&acc_path, "boss", true);
+    let tok = issue_token(&acc_path, "boss");
+
+    // Без заголовка, но с ?token= — страница открывается.
+    let (status, ctype, _) = route_with_access(
+        "GET",
+        "/",
+        &format!("token={tok}"),
+        &headers(None),
+        "",
+        Some(&acc_path),
+    );
+    assert_eq!(status, 200, "server: страница открывается по ?token=");
+    assert!(ctype.starts_with("text/html"));
+
+    // Неверный токен в query — по-прежнему 401.
+    let (status, _, _) = route_with_access(
+        "GET",
+        "/",
+        "token=deadbeef",
+        &headers(None),
+        "",
+        Some(&acc_path),
+    );
+    assert_eq!(status, 401, "неверный ?token= — 401");
+
+    std::env::remove_var("HDS_CONFIG");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn ui_auth_gate_and_access_api() {
     let _env = ENV_LOCK.lock().unwrap();
