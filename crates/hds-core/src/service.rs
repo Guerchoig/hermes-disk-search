@@ -369,7 +369,7 @@ fn install_macos(role: &str, label: &str, hds_exe: &Path) -> ControlResult {
         &log_dir.display().to_string(),
     );
     let path = plist_path(label);
-    if std::fs::write(&path, body).is_err() {
+    if std::fs::write(&path, &body).is_err() {
         return ControlResult {
             code: 1,
             stdout: String::new(),

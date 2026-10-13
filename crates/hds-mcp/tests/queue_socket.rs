@@ -5,8 +5,11 @@
 //!
 //! Детерминизм: единственный слот исполнения «держит» реальный `ask_my_files`,
 //! который висит на блокировке БД — песочница открыта в `journal_mode: delete`,
-//! а тест удерживает `BEGIN EXCLUSIVE` (в rollback-journal писатель блокирует и
-//! читателя). Ни GPU, ни сети, ни Python-воркера тест не требует.
+//! а `BEGIN EXCLUSIVE` удерживает **отдельный процесс**-держатель
+//! (`db_lock_subprocess_helper`, см. `lock_db_in_subprocess`): внутри одного
+//! процесса SQLite отдаёт `SQLITE_BUSY` без вызова busy-handler, из-за чего
+//! держатель отпускал слот раньше потолка ожидания и тест падал на CI
+//! (РЕГРЕССИЯ 13.10.2026). Ни GPU, ни сети, ни Python-воркера тест не требует.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -53,7 +56,14 @@ fn write_config(dir: &Path, max_depth: u32, wait_sec: u64) -> PathBuf {
     p
 }
 
-/// Создать БД песочницы и удерживать блокировку писателя (`BEGIN EXCLUSIVE`).
+/// Открыть БД песочницы и удержать блокировку писателя (`BEGIN EXCLUSIVE`).
+///
+/// Вызывается **процессом-держателем** (`db_lock_subprocess_helper`), а не самим
+/// тестом: межпроцессная блокировка ведёт себя одинаково на всех ОС, а внутри
+/// одного процесса SQLite отдаёт `SQLITE_BUSY` **без** вызова busy-handler
+/// (защита от deadlock) — «держатель» отпускал слот раньше потолка ожидания, и
+/// сокет-тесты падали на CI (РЕГРЕССИЯ 13.10.2026; на Windows тот же тест
+/// проходил, потому что конфликт блокировок внутри процесса там ждёт таймаут).
 fn lock_db(dir: &Path) -> rusqlite::Connection {
     let opts = hds_core::db::DbOptions {
         busy_timeout_ms: 100,
@@ -62,6 +72,55 @@ fn lock_db(dir: &Path) -> rusqlite::Connection {
     let conn = hds_core::db::open_rw(&dir.join("index.db"), 1024, &opts).expect("БД песочницы");
     conn.execute_batch("BEGIN EXCLUSIVE").expect("блокировка");
     conn
+}
+
+/// Процесс-держатель блокировки БД: снимается на `Drop` (в том числе при панике
+/// теста — иначе процесс-держатель остался бы висеть).
+struct DbLockProc {
+    child: std::process::Child,
+    marker: PathBuf,
+}
+
+impl Drop for DbLockProc {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        let _ = std::fs::remove_file(&self.marker);
+    }
+}
+
+/// Поднять ОТДЕЛЬНЫЙ процесс, который держит блокировку БД (`BEGIN EXCLUSIVE`).
+///
+/// Процесс — этот же тестовый бинарник в режиме
+/// `queue_socket --exact db_lock_subprocess_helper --ignored`: внешних
+/// зависимостей (`sqlite3`, `python`) не требуется, а блокировка получается
+/// честная межпроцессная. Маркер-файл подтверждает, что блокировка уже взята —
+/// тест не начинает сценарий раньше времени.
+fn lock_db_in_subprocess(dir: &Path) -> DbLockProc {
+    let marker = dir.join("index.lock-ready");
+    let _ = std::fs::remove_file(&marker);
+    let exe = std::env::current_exe().expect("путь тестового бинарника");
+    let child = std::process::Command::new(exe)
+        .args(["--exact", "db_lock_subprocess_helper", "--ignored"])
+        .env("HDS_TEST_LOCK_DB", dir.join("index.db"))
+        .env("HDS_TEST_LOCK_READY", &marker)
+        .env("HDS_TEST_LOCK_SEC", "60")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("процесс-держатель блокировки БД");
+    let proc = DbLockProc {
+        child,
+        marker: marker.clone(),
+    };
+    let start = Instant::now();
+    while !marker.is_file() {
+        if start.elapsed() > Duration::from_secs(15) {
+            panic!("процесс-держатель блокировки не поднялся за 15 с");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    proc
 }
 
 /// Поднять MCP-сервер на порту `0` и вернуть адрес.
@@ -130,7 +189,7 @@ fn queue_full_and_timeout_codes_reach_client() {
     let dir = tmp_dir("q1");
     // Ожидание 4 с (снапшот пишется раз в 2 с) — «запрос ждёт» видно в метриках.
     let cfg = write_config(&dir, 1, 4);
-    let lock = lock_db(&dir); // слот будет занят, пока держим писателя БД
+    let _lock = lock_db_in_subprocess(&dir); // слот занят, пока живёт держатель блокировки БД
     let addr = spawn_server(&cfg);
 
     // 1) Тяжёлый запрос занял единственный слот (висит на блокировке БД).
@@ -205,7 +264,6 @@ fn queue_full_and_timeout_codes_reach_client() {
         "ожидание учтено: {snap}"
     );
 
-    drop(lock);
     std::env::remove_var("HDS_CONFIG");
     std::env::remove_var("HDS_ROOT");
 }
@@ -222,7 +280,7 @@ fn queue_disabled_keeps_m3_behaviour() {
         .replace("queue:\n  enabled: true", "queue:\n  enabled: false");
     let cfg = dir.join("config.yaml");
     std::fs::write(&cfg, body).unwrap();
-    let lock = lock_db(&dir);
+    let lock = lock_db_in_subprocess(&dir);
     let addr = spawn_server(&cfg);
 
     let _held = hold_slot(addr);
@@ -262,7 +320,7 @@ fn aborted_client_releases_queue_slot() {
     let _env = ENV_LOCK.lock().unwrap();
     let dir = tmp_dir("q3");
     let cfg = write_config(&dir, 1, 4);
-    let lock = lock_db(&dir); // держатель слота (писатель БД)
+    let _lock = lock_db_in_subprocess(&dir); // держатель слота (писатель БД)
     let addr = spawn_server(&cfg);
 
     // 1) Слот занят (запрос висит на блокировке БД).
@@ -294,7 +352,35 @@ fn aborted_client_releases_queue_slot() {
         },
     );
 
-    drop(lock);
     std::env::remove_var("HDS_CONFIG");
     std::env::remove_var("HDS_ROOT");
+}
+
+/// Служебный тест: держит блокировку БД для сокет-тестов в **отдельном**
+/// процессе (`lock_db_in_subprocess`).
+///
+/// Обычным прогоном (`cargo test`) не запускается — помечен `#[ignore]`; сам тест
+/// вызывает этот бинарник как
+/// `queue_socket --exact db_lock_subprocess_helper --ignored` с переменными
+/// `HDS_TEST_LOCK_DB` (путь к `index.db`), `HDS_TEST_LOCK_READY` (маркер «взял
+/// блокировку») и `HDS_TEST_LOCK_SEC` (сколько держать).
+#[test]
+#[ignore = "служебный: запускается сокет-тестами как процесс-держатель блокировки БД"]
+fn db_lock_subprocess_helper() {
+    let db = match std::env::var("HDS_TEST_LOCK_DB") {
+        Ok(p) => PathBuf::from(p),
+        // Прогон `--ignored` вручную без переменных — ничего не делаем.
+        Err(_) => return,
+    };
+    let hold: u64 = std::env::var("HDS_TEST_LOCK_SEC")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let dir = db.parent().unwrap_or(Path::new(".")).to_path_buf();
+    let conn = lock_db(&dir);
+    if let Ok(ready) = std::env::var("HDS_TEST_LOCK_READY") {
+        let _ = std::fs::write(ready, b"1");
+    }
+    std::thread::sleep(Duration::from_secs(hold));
+    let _ = conn;
 }

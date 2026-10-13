@@ -65,16 +65,35 @@ pub fn discover_python(root: &Path) -> Option<PathBuf> {
     // в репозитории лежал `.venv` без `pyvenv.cfg`.
     let venv = root.join(".venv");
     if venv.join("pyvenv.cfg").exists() {
-        let py = venv.join("Scripts").join("python.exe");
-        if py.exists() {
-            return Some(py);
+        // Windows — `Scripts/python.exe`, macOS/Linux — `bin/python3`.
+        for rel in [
+            ["Scripts", "python.exe"],
+            ["bin", "python3"],
+            ["bin", "python"],
+        ] {
+            let py = venv.join(rel[0]).join(rel[1]);
+            if py.exists() {
+                return Some(py);
+            }
         }
     }
     None
 }
 
-/// Поиск `python.exe` в дереве (берём с кратчайшим путём — корень сборки, а не шаблон venv).
+/// Поиск интерпретатора в дереве (берём с кратчайшим путём — корень сборки, а не
+/// шаблон venv).
+///
+/// Имена: `python.exe` (Windows-поставка) и `python3`/`python`
+/// (macOS/Linux: `uv python install --install-dir` кладёт `python/bin/python3`, а
+/// не `python.exe` — без этого поставленный sidecar не находился на macOS).
 fn find_python_exe(dir: &Path) -> Option<PathBuf> {
+    fn is_python_name(name: &str) -> bool {
+        matches!(
+            name.to_ascii_lowercase().as_str(),
+            "python.exe" | "python3" | "python"
+        )
+    }
+
     fn walk(dir: &Path, best: &mut Option<PathBuf>) {
         let rd = match std::fs::read_dir(dir) {
             Ok(r) => r,
@@ -86,7 +105,8 @@ fn find_python_exe(dir: &Path) -> Option<PathBuf> {
                 walk(&p, best);
             } else if p
                 .file_name()
-                .map(|n| n.eq_ignore_ascii_case("python.exe"))
+                .and_then(|n| n.to_str())
+                .map(is_python_name)
                 .unwrap_or(false)
             {
                 let better = match best {
@@ -428,6 +448,24 @@ mod tests {
         std::fs::write(root.join(".venv").join("pyvenv.cfg"), b"home = x").unwrap();
 
         assert_eq!(discover_python(&root), Some(shipped.join("python.exe")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// macOS-раскладка поставки (`sidecar/python/bin/python3` — без `.exe`):
+    /// интерпретатор тоже находится (раньше искали только `python.exe`, и на
+    /// macOS поставленный sidecar не подхватывался).
+    #[test]
+    fn shipped_python3_is_found_without_exe_suffix() {
+        if skip_if_env_python() {
+            println!("пропуск: задан HDS_EXTRACT_PYTHON");
+            return;
+        }
+        let root = tmp_root("sidecar-python3");
+        let shipped = root.join("sidecar").join("python").join("bin");
+        std::fs::create_dir_all(&shipped).unwrap();
+        std::fs::write(shipped.join("python3"), b"").unwrap();
+
+        assert_eq!(discover_python(&root), Some(shipped.join("python3")));
         let _ = std::fs::remove_dir_all(&root);
     }
 }
