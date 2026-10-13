@@ -49,3 +49,7 @@ config.yaml
 # ��������� ��������� ������ ����������
 out/
 transcribe.lock
+
+# Секреты и токены доступа (plain-токены; см. data/access.yaml) — не коммитим
+tokens.txt
+token.txt
