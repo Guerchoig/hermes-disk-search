@@ -5,22 +5,22 @@
 веб-интерфейс. Python остаётся **только там, где он нужен по делу** — извлечение текста
 из офисных форматов/PDF/OCR и русская лемматизация (автономный воркер `sidecar`).
 
-> Приватный проект (`Guerchoig/hermes-disk-search`). **Установка:** скачайте архив со
+> Публичный проект (`Guerchoig/hermes-disk-search`). **Установка:** скачайте архив со
 > [страницы релизов](https://github.com/Guerchoig/hermes-disk-search/releases/latest) и следуйте
 > разделу «Установка на Windows: по шагам» (или «Установка — macOS»). Состояние и журналы волн
 > миграции: `STATUS.md`, `tools/parity/W4_REPORT.md`, `MIGRATION_PLAN_RUST.md`.
 
 ## Карта документов
 
-| Документ | Что внутри | Когда читать |
-|---|---|---|
-| **`README.md`** (этот файл) | продукт и старт: требования, установка (Windows/macOS), архивы релиза, CLI и «Справочник команд», веб-UI, автотранскрибация, MCP, интеграции Hermes/Cline, llm-host, sidecar, БД и файлы-сигналы, `config.yaml`, разработка, диагностика | первое знакомство и повседневная работа |
-| **`README_SERVER_MULTIUSER.md`** | серверная многопользовательская подсистема (M1–M9): роли, сценарии A–F, портрет отказов, эксплуатация по этапам (§8a–§8e), десктоп-режим, шпаргалка команд и HTTP-API, сетевой периметр и конкурентность — **единый источник по серверу** | админ/эксплуатация сервера, подключение пользователей |
-| **`installers/client_readme.md`** | тонкий клиент (лежит как `README.md` в клиентском архиве) | подключение ноутбука к серверу |
-| **`STATUS.md`** | журнал волн миграции и текущие статусы | «что уже сделано» |
-| **`PLAN_*.md`**, `PLAN_SERVER_MULTIUSER.md`, `MIGRATION_PLAN_RUST.md` | планы, дорожные карты и промты передачи контекста (не переписываются) | контекст для разработки |
-| **`RELEASE_NOTES_*.md`** | что нового в конкретной версии | обновление/релиз |
-| **`tools/parity/*_REPORT.md`**, `tools/parity/out/*` | отчёты волн/этапов и артефакты (`out/` в git не идёт) | разбор замеров и приёмки |
+| Документ                                                                  | Что внутри                                                                                                                                                                                                                                                                                                                                                                                                         | Когда читать                                                                               |
+| --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| **`README.md`** (этот файл)                                       | продукт и старт: требования, установка (Windows/macOS), архивы релиза, CLI и «Справочник команд», веб-UI, автотранскрибация, MCP, интеграции Hermes/Cline, llm-host, sidecar, БД и файлы-сигналы,`config.yaml`, разработка, диагностика                                                  | первое знакомство и повседневная работа                            |
+| **`README_SERVER_MULTIUSER.md`**                                          | серверная многопользовательская подсистема (M1–M9): роли, сценарии A–F, портрет отказов, эксплуатация по этапам (§8a–§8e), десктоп-режим, шпаргалка команд и HTTP-API, сетевой периметр и конкурентность —**единый источник по серверу** | админ/эксплуатация сервера, подключение пользователей |
+| **`installers/client_readme.md`**                                         | тонкий клиент (лежит как`README.md` в клиентском архиве)                                                                                                                                                                                                                                                                                                                             | подключение ноутбука к серверу                                             |
+| **`STATUS.md`**                                                           | журнал волн миграции и текущие статусы                                                                                                                                                                                                                                                                                                                                                     | «что уже сделано»                                                                      |
+| **`PLAN_*.md`**, `PLAN_SERVER_MULTIUSER.md`, `MIGRATION_PLAN_RUST.md` | планы, дорожные карты и промты передачи контекста (не переписываются)                                                                                                                                                                                                                                                                                             | контекст для разработки                                                          |
+| **`RELEASE_NOTES_*.md`**                                                  | что нового в конкретной версии                                                                                                                                                                                                                                                                                                                                                                    | обновление/релиз                                                                       |
+| **`tools/parity/*_REPORT.md`**, `tools/parity/out/*`                    | отчёты волн/этапов и артефакты (`out/` в git не идёт)                                                                                                                                                                                                                                                                                                                                    | разбор замеров и приёмки                                                         |
 
 ## Как это работает
 
@@ -80,13 +80,13 @@
 
 Откройте `https://github.com/Guerchoig/hermes-disk-search/releases/latest` и скачайте:
 
-| Файл | Нужен? | Что это |
-|---|---|---|
-| `hds-<версия>-windows-x64.zip` (~210 МБ) | **да** | само приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
-| `hds-<версия>-windows-x64.zip.sha256.txt` | по желанию | контрольная сумма архива (шаг 2) |
-| `hds-engine-runtime-windows-x64-cuda.zip` (~90 МБ) | нет\* | рантайм движка (LLM + ASR). \*Установщик скачивает его сам по манифесту из upstream; ассет нужен только для установки **без интернета** (шаг 5′) |
-| `hds-<версия>-macos-arm64.zip` | только для Mac | версия для Apple Silicon (см. «Установка — macOS») |
-| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет | архивы исходников (для сборки из кода) |
+| Файл                                                           | Нужен?             | Что это                                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `hds-<версия>-windows-x64.zip` (~210 МБ)                 | **да**          | само приложение:`bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
+| `hds-<версия>-windows-x64.zip.sha256.txt`                  | по желанию     | контрольная сумма архива (шаг 2)                                                                                                                                                                                              |
+| `hds-engine-runtime-windows-x64-cuda.zip` (~90 МБ)             | нет\*                | рантайм движка (LLM + ASR).\*Установщик скачивает его сам по манифесту из upstream; ассет нужен только для установки **без интернета** (шаг 5′)   |
+| `hds-<версия>-macos-arm64.zip`                             | только для Mac | версия для Apple Silicon (см. «Установка — macOS»)                                                                                                                                                                              |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                  | архивы исходников (для сборки из кода)                                                                                                                                                                                  |
 
 > **Модели в релиз не входят.** Установщик докачает их с HuggingFace: чат Qwen3.5-9B,
 > эмбеддинги bge-m3, реранкер bge-reranker — вместе ≈9 ГБ (плюс, по желанию, whisper ≈1.5 ГБ
@@ -116,14 +116,14 @@ Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемы
 запустит `setup.ps1`. Он задаст несколько вопросов — можно просто нажимать Enter (значения по
 умолчанию указаны в скобках):
 
-| Вопрос установщика | Что это даёт |
-|---|---|
-| `Install Tesseract OCR … [y/N]` | текст на картинках и сканах |
-| `Download the whisper model now (about 1.5 GB)? [y/N]` | расшифровка речи в видео/аудио |
-| `Download the CLIP models now (about 850 MB)? [y/N]` | поиск картинок по содержанию |
-| `Download the Sortformer diarization model now (about 449 MB)? [y/N]` | автотранскрибация: разметка реплик по спикерам |
-| `Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]` | содержимое индекса, MCP-сервер и llm-host поднимаются сами при входе |
-| `Start the web UI automatically at logon (port 8765)? [y/N]` | веб-интерфейс всегда под рукой (иначе — по ярлыку) |
+| Вопрос установщика                                     | Что это даёт                                                                                              |
+| ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| `Install Tesseract OCR … [y/N]`                                      | текст на картинках и сканах                                                                  |
+| `Download the whisper model now (about 1.5 GB)? [y/N]`                | расшифровка речи в видео/аудио                                                            |
+| `Download the CLIP models now (about 850 MB)? [y/N]`                  | поиск картинок по содержанию                                                               |
+| `Download the Sortformer diarization model now (about 449 MB)? [y/N]` | автотранскрибация: разметка реплик по спикерам                             |
+| `Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]`         | содержимое индекса, MCP-сервер и llm-host поднимаются сами при входе |
+| `Start the web UI automatically at logon (port 8765)? [y/N]`          | веб-интерфейс всегда под рукой (иначе — по ярлыку)                          |
 
 Что установщик делает за вас: runtime Visual C++, `ffmpeg`, рантайм движка (≈90–200 МБ,
 проверка sha256), GGUF-модели чат/эмбеддинги/реранк (≈9 ГБ), `config.yaml` из образца, задачи
@@ -173,7 +173,6 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -SkipEngine -Ski
 
 Или поставить автозапуск: `powershell -File installers\install_llm_host_task.ps1 -Start`.
 Модели загружаются лениво — первый ответ после старта будет с задержкой.
-
 
 ### Шаг 7. Задайте, что индексировать, и запустите индексацию
 
@@ -230,17 +229,17 @@ cd D:\hds
 
 ### Если что-то не получилось
 
-| Симптом | Причина и решение |
-|---|---|
-| SmartScreen: «Windows protected your PC» при запуске `hds.exe` | сборка не подписана: «More info» → «Run anyway» |
-| PowerShell: «выполнение сценариев отключено / требуется подпись» | запускайте через `setup.cmd`, либо `powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1` |
-| `hds check`: чат/эмбеддинги недоступны | не запущен резидент: `.\bin\llm_host.exe run` (шаг 6) |
-| Индексация стоит на месте | стоит `index.pause` (кнопка «Продолжить» в UI) или `index.stop`; проверьте «Состояние» |
-| В UI «Tesseract OCR не найден» | включите OCR и запустите `installers\configure_ocr.py` (нужен Python воркера), либо переустановите установщиком |
-| `.mpp` не индексируются | нужна Java 11+ (см. «Требования») |
-| MCP-сервер не отвечает, порт 8787 занят | `.\bin\hds.exe mcp-http status`; «чужой» сервис на порту нужно освободить, затем `mcp-http restart` |
-| ffmpeg не найден после установки | откройте **новое** окно PowerShell (PATH обновится) |
-| Нет NVIDIA-карты | движок уйдёт на Vulkan/CPU: работает, но медленнее; чат-модель можно положить меньше |
+| Симптом                                                                                                 | Причина и решение                                                                                                                                             |
+| -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| SmartScreen: «Windows protected your PC» при запуске`hds.exe`                                    | сборка не подписана: «More info» → «Run anyway»                                                                                                        |
+| PowerShell: «выполнение сценариев отключено / требуется подпись» | запускайте через`setup.cmd`, либо `powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1`                                                     |
+| `hds check`: чат/эмбеддинги недоступны                                                | не запущен резидент:`.\bin\llm_host.exe run` (шаг 6)                                                                                                   |
+| Индексация стоит на месте                                                                | стоит`index.pause` (кнопка «Продолжить» в UI) или `index.stop`; проверьте «Состояние»                                     |
+| В UI «Tesseract OCR не найден»                                                                      | включите OCR и запустите`installers\configure_ocr.py` (нужен Python воркера), либо переустановите установщиком |
+| `.mpp` не индексируются                                                                       | нужна Java 11+ (см. «Требования»)                                                                                                                         |
+| MCP-сервер не отвечает, порт 8787 занят                                               | `.\bin\hds.exe mcp-http status`; «чужой» сервис на порту нужно освободить, затем `mcp-http restart`                              |
+| ffmpeg не найден после установки                                                         | откройте**новое** окно PowerShell (PATH обновится)                                                                                           |
+| Нет NVIDIA-карты                                                                                       | движок уйдёт на Vulkan/CPU: работает, но медленнее; чат-модель можно положить меньше                             |
 
 ### Подробный журнал: что именно делает `setup.ps1`
 
@@ -334,14 +333,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 > «Установка на Windows: по шагам» и «Установка — macOS». Ниже — технический состав ассетов:
 > какой файл обязателен, а какой лишь запасной вариант.
 
-| Ассет | Нужен? | Содержимое |
-|---|---|---|
-| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`) | **да (Windows)** | основной архив: `bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
-| `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`) | **да (macOS)** | то же для Apple Silicon — **best-effort** |
-| `hds-engine-runtime-windows-x64-cuda.zip` | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима по `runtime-manifests\engine-manifest.json`; установщик скачивает его сам |
-| `hds-engine-runtime-macos-arm64-metal.zip` | офлайн-установка | то же для macOS (Metal) — **best-effort** |
-| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет | архивы исходников (`git archive`), только для сборки из кода |
-
+| Ассет                                                         | Нужен?                     | Содержимое                                                                                                                                                                                                                                                                              |
+| ------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`)         | **да (Windows)**        | основной архив:`bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`)         | **да (macOS)**          | то же для Apple Silicon —**best-effort**                                                                                                                                                                                                                                            |
+| `hds-engine-runtime-windows-x64-cuda.zip`                        | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима по`runtime-manifests\engine-manifest.json`; установщик скачивает его сам                                                                                                   |
+| `hds-engine-runtime-macos-arm64-metal.zip`                       | офлайн-установка | то же для macOS (Metal) —**best-effort**                                                                                                                                                                                                                                            |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                          | архивы исходников (`git archive`), только для сборки из кода                                                                                                                                                                                               |
 
 Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
 `runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
@@ -401,11 +399,11 @@ hds mcp-http check|start|stop|status|restart|run
 
 ### 0. Где бинарник, конфиг и состояние
 
-| Профиль | `hds.exe` | `config.yaml` | состояние: `index.db`, `data/` (access.yaml, логи), PID, heartbeat |
-|---|---|---|---|
-| **Сервер** (`profile: server`) | `<install>\app\current\bin\hds.exe` | `%ProgramData%\hermes-disk-search\config.yaml` | `%ProgramData%\hermes-disk-search\` |
-| **Desktop** (репо или распакованный релиз) | `target\{debug,release}\hds.exe` или `<install>\bin\hds.exe` | корень проекта/установки | корень проекта (`data\`, `index.db`) |
-| **Тонкий клиент** (ноутбук) | `<client>\bin\hds.exe` | не нужен — всё считает сервер | — |
+| Профиль                                                            | `hds.exe`                                                         | `config.yaml`                                       | состояние:`index.db`, `data/` (access.yaml, логи), PID, heartbeat |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Сервер** (`profile: server`)                              | `<install>\app\current\bin\hds.exe`                               | `%ProgramData%\hermes-disk-search\config.yaml`      | `%ProgramData%\hermes-disk-search\`                                              |
+| **Desktop** (репо или распакованный релиз) | `target\{debug,release}\hds.exe` или `<install>\bin\hds.exe` | корень проекта/установки        | корень проекта (`data\`, `index.db`)                              |
+| **Тонкий клиент** (ноутбук)                      | `<client>\bin\hds.exe`                                            | не нужен — всё считает сервер | —                                                                                 |
 
 Резолвинг конфига (порядок): `HDS_CONFIG` (файл) → `HDS_ROOT` (каталог состояния) →
 `<корень проекта>\config.yaml` → системный каталог состояния (если есть `profile: server`).
@@ -517,7 +515,9 @@ hds cline-sync --server-url http://192.168.0.101:8787 --token <T>
 * Эндпоинты: `/health` — публичный (MCP: `200 {"app":"disk-search",…}`; UI в server-профиле: `401`);
   `/mcp` — JSON-RPC + `Authorization: Bearer`; UI — `/`, `/auth/login`, `/api/*`
   (`status`, `diagnostics`, `services`, `access/users|projects|token/…`, `config/save`,
-  `index/reindex`, `db/move`, …; часть — под admin-токеном).
+  `index/reindex`, `db/move`, …). В **server-режиме** (`access.enabled: true`) вся UI — и страница,
+  и `/api/*` — доступна только с **админ-токеном**: `http://<host>:8765/?token=<токен>` (без него —
+  `401`); в десктопе токен не нужен.
 * Файлы Cline: `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`, `%USERPROFILE%\.cline\mcp.json`
   (+ `models.json`, `rules\disk-search.md`, `skills\disk-search\SKILL.md`); после правок — перезапуск Cline.
 * Ключи конфига: `mcp_http.{host,port,path,autostart,start_timeout}`, `ui.{host,port}`,
@@ -553,15 +553,15 @@ hds transcribe-stop                    # мягкая остановка дем�
 
 ### 7. Скрипты-утилиты (релиз/репозиторий)
 
-| Скрипт | Что делает | Повторный запуск |
-|---|---|---|
-| `hds_bin.ps1` | резолвер бинарника (`bin\` → `target\release` → `target\debug`); подключается как `. .\hds_bin.ps1` | безвреден |
-| `run_index.ps1` | один инкрементный обход (`hds index`) | безвреден (пропустит неизменившееся) |
-| `run_ui.ps1` | поднять UI и открыть браузер; если порт уже отвечает — просто открывает; в server-профиле — headless | безвреден |
-| `hidden_launch.vbs` | запуск без окна консоли (задачи/Startup) | безвреден |
-| `installers\cline_mcp_merge.py` | слияние MCP-записей в настройках Cline (используется `cline-sync`) | идемпотентно |
-| `installers\configure_ocr.py` | Tesseract/tessdata: путь, языковые пакеты, `TESSDATA_PREFIX` | идемпотентно |
-| `installers\publish_engine_patch.ps1`, `publish_clip_models.ps1` | публикация патча движка / CLIP-моделей как релизных ассетов | идемпотентно |
+| Скрипт                                                         | Что делает                                                                                                                                                    | Повторный запуск                                      |
+| -------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `hds_bin.ps1`                                                      | резолвер бинарника (`bin\` → `target\release` → `target\debug`); подключается как `. .\hds_bin.ps1`                          | безвреден                                                   |
+| `run_index.ps1`                                                    | один инкрементный обход (`hds index`)                                                                                                           | безвреден (пропустит неизменившееся) |
+| `run_ui.ps1`                                                       | поднять UI и открыть браузер; если порт уже отвечает — просто открывает; в server-профиле — headless | безвреден                                                   |
+| `hidden_launch.vbs`                                                | запуск без окна консоли (задачи/Startup)                                                                                                     | безвреден                                                   |
+| `installers\cline_mcp_merge.py`                                    | слияние MCP-записей в настройках Cline (используется`cline-sync`)                                                               | идемпотентно                                             |
+| `installers\configure_ocr.py`                                      | Tesseract/tessdata: путь, языковые пакеты,`TESSDATA_PREFIX`                                                                                        | идемпотентно                                             |
+| `installers\publish_engine_patch.ps1`, `publish_clip_models.ps1` | публикация патча движка / CLIP-моделей как релизных ассетов                                                              | идемпотентно                                             |
 
 ### 8. Установка и обслуживание сервера (все шаги идемпотентны)
 
@@ -620,9 +620,7 @@ cmd /c mklink /J "%windir%\System32\config\systemprofile\AppData\Roaming\OpenRes
 ```
 
 Прочие установщики: `setup.cmd` → `setup.ps1 [-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SmokeTest]`
-(desktop); `install_autostart.ps1 [-StartupFolder]`; `installers\install_llm_host_task.ps1
-[-Exe -Config -Start -Status -Remove -Force -StartupFolder]`; `installers\install_ui_task.ps1
-[-Port -Status -Remove]`; `install_hermes.ps1 [-HermesDir]`; `install_cline.ps1`;
+(desktop); `install_autostart.ps1 [-StartupFolder]`; `installers\install_llm_host_task.ps1 [-Exe -Config -Start -Status -Remove -Force -StartupFolder]`; `installers\install_ui_task.ps1 [-Port -Status -Remove]`; `install_hermes.ps1 [-HermesDir]`; `install_cline.ps1`;
 macOS: `installers\install_macos.command`, `installers\install_server.command`, `installers\install_client.command`.
 
 ### 9. Клиент (ноутбук): подключение к серверу
@@ -655,22 +653,30 @@ Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # �
 
 ### 10. Диагностика и частые грабли
 
-| Симптом | Что проверить |
-|---|---|
-| MCP-инструменты не отвечают | `GET http://<host>:8787/health`; `hds service status mcp-http`; `sc query hermes-disk-search-mcp-http`; токен в настройках Cline (401 = нет/просрочен) |
-| UI отдаёт 401 | это норма в server-профиле (доступ по токену/логину): `POST /auth/login`, админ — `?token=…` |
-| Индексация «стоит» | `index.heartbeat.json` → `"paused": true` = в корне установки лежит `index.pause` (его ставит резидент под задания и может не снять); удалить файл. Признак: heartbeat обновляется, а CPU службы = 0 |
-| `hds token new` → `os error 5` | ACL каталога состояния (§8, `icacls`) |
-| Служба поднимается после `sc stop` | failure-actions (`sc failure … reset= 0 actions= ""`, §1) |
-| Служба не находит модели/движок | junctions `systemprofile` + machine-env `LLAMA_RUNTIME_DIR`/`HDS_ENGINE_DIR`/`HDS_EXTRACT_PYTHON` (§8) |
-| Извлечение падает («воркер: поток вывода закрыт») | в корне установки нужны `config.yaml` и пакет `hds` (junction/symlink или сборка `-WithSidecar`, §8) |
-| Куда смотреть логи | `<state>\data\logs\{audit.jsonl,llm-host.log}`, `GET /api/diagnostics`; брандмауэр — `Get-NetFirewallRule -DisplayName 'hermes-disk-search*'` |
+| Симптом                                                                             | Что проверить                                                                                                                                                                                                                                                                                   |
+| ------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| MCP-инструменты не отвечают                                           | `GET http://<host>:8787/health`; `hds service status mcp-http`; `sc query hermes-disk-search-mcp-http`; токен в настройках Cline (401 = нет/просрочен)                                                                                                                    |
+| UI отдаёт 401                                                                        | это норма в server-профиле (доступ по токену/логину):`POST /auth/login`, админ — `?token=…`                                                                                                                                                                  |
+| Индексация «стоит»                                                        | `index.heartbeat.json` → `"paused": true` = в корне установки лежит `index.pause` (его ставит резидент под задания и может не снять); удалить файл. Признак: heartbeat обновляется, а CPU службы = 0 |
+| `hds token new` → `os error 5`                                                        | ACL каталога состояния (§8,`icacls`)                                                                                                                                                                                                                                                    |
+| Служба поднимается после`sc stop`                                  | failure-actions (`sc failure … reset= 0 actions= ""`, §1)                                                                                                                                                                                                                                               |
+| Служба не находит модели/движок                                 | junctions`systemprofile` + machine-env `LLAMA_RUNTIME_DIR`/`HDS_ENGINE_DIR`/`HDS_EXTRACT_PYTHON` (§8)                                                                                                                                                                                              |
+| Извлечение падает («воркер: поток вывода закрыт») | в корне установки нужны`config.yaml` и пакет `hds` (junction/symlink или сборка `-WithSidecar`, §8)                                                                                                                                                               |
+| Куда смотреть логи                                                         | `<state>\data\logs\{audit.jsonl,llm-host.log}`, `GET /api/diagnostics`; брандмауэр — `Get-NetFirewallRule -DisplayName 'hermes-disk-search*'`                                                                                                                                              |
 
 Полезные ссылки: `README_SERVER_MULTIUSER.md` (мультиюзер-сервер, §8d–§8e — установка и клиент),
 `installers\client_readme.md` (клиентский пакет), `tools\parity\out\SERVER_MIGRATION_20261013.md`
 (живой пример развёртывания + найденные дефекты), `installers\proxy\` (образцы TLS-прокси).
 
 ## Веб-интерфейс (`hds ui`)
+
+> ⚠️ **Доступ к UI (server-режим).** В десктопе (`access.enabled` не задан) UI открывается без
+> токена. При **`access.enabled: true`** страница **и все `/api/*`** требуют **админ-токен**: открывайте
+> `http://<host>:<port>/?token=<админ-токен>` — токен запоминается в браузере и подставляется во все
+> запросы; без него страница и API отдают `401` (в server-профиле и `/health` отвечает `401`).
+> Токен админа выписывают `hds login --login admin --password …` / `hds token new --user admin`
+> (plain — один раз) или кнопка «Выдать токен» в карточке «Доступ»; пароль/токены — в
+> `data/access.yaml` каталога состояния. Подробности — `README_SERVER_MULTIUSER.md` §6.
 
 Ярлык «Hermes Disk Search» (рабочий стол) запускает `run_ui.ps1` → `bin\hds.exe ui` и открывает
 `http://127.0.0.1:8765`. Это интерфейс **администрирования** (не запросов): статус индекса и ролей
@@ -756,12 +762,14 @@ auto_transcribe:
 ## Интеграция с Hermes / Cline
 
 **Windows:**
+
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File install_hermes.ps1   # Hermes Desktop
 powershell -NoProfile -ExecutionPolicy Bypass -File install_cline.ps1    # Cline Desktop/CLI
 ```
 
 **macOS:**
+
 ```bash
 bash installers/install_hermes_macos.sh    # Hermes Desktop
 bash installers/install_cline_macos.sh     # Cline Desktop/CLI
@@ -780,10 +788,10 @@ bash installers/install_cline_macos.sh     # Cline Desktop/CLI
 клиенты вправе его игнорировать: **Cline 0.0.43 его не подмешивает**. Поэтому для Cline та же суть
 продублирована двумя артефактами, и оба ставит одна команда:
 
-| Что | Куда ставится | Когда попадает в промпт |
-|---|---|---|
-| Правило `cline-rules/disk-search.md` | `~/.cline/rules/disk-search.md` | **всегда**: правила инжектятся в системный промпт каждой сессии |
-| Скилл `hermes-skill/disk-search.md` | `~/.cline/skills/disk-search/SKILL.md` | лениво: только если модель вызовет `use_skill` |
+| Что                                       | Куда ставится                | Когда попадает в промпт                                                                              |
+| -------------------------------------------- | ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Правило`cline-rules/disk-search.md` | `~/.cline/rules/disk-search.md`        | **всегда**: правила инжектятся в системный промпт каждой сессии |
+| Скилл`hermes-skill/disk-search.md`    | `~/.cline/skills/disk-search/SKILL.md` | лениво: только если модель вызовет`use_skill`                                             |
 
 Локальная 9B-модель скилл сама не активирует и отвечает по одному запросу — «найди ТЗ» отвечает
 первой выдачей из 8 фрагментов. Правило доносит до модели главное: одна выдача — это фрагменты, а
@@ -810,8 +818,6 @@ bash installers/install_cline_macos.sh     # Cline Desktop/CLI
 Потолок вывода роли `chat` задаётся `chat.max_tokens` (см. «Конфиг»): у агентов он был 600 токенов
 вместе с размышлениями, и ответы обрывались на полуслове. Ответ `ask_my_files` — отдельный,
 короткий бюджет `chat.rag_max_tokens`.
-
-
 
 Агенты подключаются **по URL** — своих процессов не запускают (иначе плодятся сироты). Инструменты
 MCP — 6 (см. «MCP-сервер»). На macOS лаунчеры веб-UI и индексации ставит `install_macos.command`
@@ -847,13 +853,13 @@ bin\llm_host.exe stop      # graceful: выгрузить инстансы, сн
 Замеры на RTX 3060 12 ГБ (08.10.2026, `tools/parity/out/m4_slots_*.json`; 5 клиентов шлют
 `/v1/chat/completions` одновременно, ответ 300 токенов, чат-модель Q6_K + KV `q8_0`):
 
-| `parallel` | `ctx_per_slot` | VRAM (наш процесс) | 5 запросов: wall | p95 |
-|---|---|---|---|---|
-| 2 | 32768 | 8129 МиБ | 33,7 с | ≈33 с |
-| 3 | 32768 | 8723 МиБ | 27,1 с | ≈26,5 с |
-| 5 | 16384 | 8553 МиБ | **21,3 с** (все параллельно) | ≈20,8 с |
-| 5 | 32768 | — | **отказ** гейта: нужно 10668 + резерв 1024, свободно 11385 (не хватает 307 МиБ) | — |
-| 5 | 65536 (боевые 65536 симв. контекста) | — | **отказ** гейта: нужно 13388 + 1024 > 11385 | — |
+| `parallel` | `ctx_per_slot`                                        | VRAM (наш процесс) | 5 запросов: wall                                                                                                       | p95       |
+| ------------ | ------------------------------------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | --------- |
+| 2            | 32768                                                   | 8129 МиБ                  | 33,7 с                                                                                                                        | ≈33 с   |
+| 3            | 32768                                                   | 8723 МиБ                  | 27,1 с                                                                                                                        | ≈26,5 с |
+| 5            | 16384                                                   | 8553 МиБ                  | **21,3 с** (все параллельно)                                                                              | ≈20,8 с |
+| 5            | 32768                                                   | —                           | **отказ** гейта: нужно 10668 + резерв 1024, свободно 11385 (не хватает 307 МиБ) | —        |
+| 5            | 65536 (боевые 65536 симв. контекста) | —                           | **отказ** гейта: нужно 13388 + 1024 > 11385                                                               | —        |
 
 Вывод: при живом рабочем столе на карту влезают `parallel: 5` с `ctx_per_slot: 16384`
 (тогда держите `chat.max_context_chars` ≲ 32000) либо `parallel: 2–3` с `ctx_per_slot: 32768`.
@@ -924,12 +930,12 @@ hint'ом; счётчик виден в снапшоте (`rejected_user`) и в
 `tools/parity/out/m4_load_<tag>.json`. Замеры на RTX 3060 (KV q8_0, корпус
 120 документов):
 
-| `parallel` | ctx/слот | коды | p50 | **p95** | VRAM |
-|---|---|---|---|---|---|
-| 5 | 16384 | 200×5 | 25,7 с | **49,6 с** | 9669 МиБ |
-| 3 | 16384 | 200×5 | 30,8 с | 48,9 с | — |
-| 2 | 16384 | 200×5 | 42,3 с | 58,1 с | — |
-| 5 (+`hds index --full` параллельно) | 16384 | 200×5 | 41,4 с | 315,1 с | — |
+| `parallel`                                     | ctx/слот | коды | p50     | **p95**     | VRAM        |
+| ------------------------------------------------ | ------------ | -------- | ------- | ----------------- | ----------- |
+| 5                                                | 16384        | 200×5   | 25,7 с | **49,6 с** | 9669 МиБ |
+| 3                                                | 16384        | 200×5   | 30,8 с | 48,9 с           | —          |
+| 2                                                | 16384        | 200×5   | 42,3 с | 58,1 с           | —          |
+| 5 (+`hds index --full` параллельно) | 16384        | 200×5   | 41,4 с | 315,1 с          | —          |
 
 При `parallel 2/3` очередь реально работает: одновременно исполняется ≤2/3,
 остальные ждут, отказов (`rejected_*`) и таймаутов нет.
@@ -1069,14 +1075,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 > (единый источник: роли §1, сценарии A–F §2–§7, портрет отказов §8, этапы M7/M8/M9
 > §8c–§8e, периметр и конкурентность §11). Ниже — только «что умеет» и ключи конфига.
 
-| Этап | Что умеет | Ключи конфига / команды | Где подробно |
-|---|---|---|---|
-| **M1** | доступ и проекты: проект — единица разграничения; логин/пароль (Argon2id) и токены (sha256, TTL 90 дн.); Bearer-гейт → `401`; фильтрация поиска/RAG по проектам; индексация — только админ | `access.enabled`, `access.token_ttl_days`; `index.roots` (имя проекта — строка `- "E:\Archive"` или `{ path, project }`); `hds user …`, `hds token …` | §2–§3, §7 |
-| **M2** | серверный профиль, каталог состояния, OS-службы, headless-UI | `profile: desktop\|server`; `ui: { host, port }`; `hds service <role>` (`watch, mcp-http, ui, llm-host`) | §2a |
-| **M3** | сетевой периметр: наружу только `/mcp` и `/ui` через TLS-прокси; аудит, rate-limit, hardening | `trusted_proxy`; `audit.{enabled, max_mb}`; `rate_limit.{enabled, requests_per_min, burst, login_per_min, max_inflight, max_inflight_per_user, per_token}`; `http.{max_body_kb, max_conns}` | §11 |
-| **M7** | управление службами и выдача токенов из веб-UI (права админа) | `GET/POST /api/services`; `hds token new --user <login> [--ttl-days N]` | §8c |
-| **M8** | серверный пакет: установка одной (unattended) командой, обновление и откат | `installers\install_server.ps1` (`-WhatIf`, `-Roles`, `-EnableAccess`, …) / `install_server.command`; `installers\update.ps1 -Profile server [-RollbackTo <ver>]` | §8d |
-| **M9** | тонкий клиент: Cline к удалённому серверу, без движка/моделей/индекса | `hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`; `setup-client.ps1`; `installers/build_client_release.ps1` | §8e |
+| Этап     | Что умеет                                                                                                                                                                                                                                                                                             | Ключи конфига / команды                                                                                                                                                          | Где подробно |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
+| **M1** | доступ и проекты: проект — единица разграничения; логин/пароль (Argon2id) и токены (sha256, TTL 90 дн.); Bearer-гейт →`401`; фильтрация поиска/RAG по проектам; индексация — только админ | `access.enabled`, `access.token_ttl_days`; `index.roots` (имя проекта — строка `- "E:\Archive"` или `{ path, project }`); `hds user …`, `hds token …`           | §2–§3, §7           |
+| **M2** | серверный профиль, каталог состояния, OS-службы, headless-UI                                                                                                                                                                                                            | `profile: desktop\|server`; `ui: { host, port }`; `hds service <role>` (`watch, mcp-http, ui, llm-host`)                                                                                     | §2a                    |
+| **M3** | сетевой периметр: наружу только`/mcp` и `/ui` через TLS-прокси; аудит, rate-limit, hardening                                                                                                                                                                  | `trusted_proxy`; `audit.{enabled, max_mb}`; `rate_limit.{enabled, requests_per_min, burst, login_per_min, max_inflight, max_inflight_per_user, per_token}`; `http.{max_body_kb, max_conns}` | §11                    |
+| **M7** | управление службами и выдача токенов из веб-UI (права админа)                                                                                                                                                                                                 | `GET/POST /api/services`; `hds token new --user <login> [--ttl-days N]`                                                                                                                         | §8c                    |
+| **M8** | серверный пакет: установка одной (unattended) командой, обновление и откат                                                                                                                                                                                | `installers\install_server.ps1` (`-WhatIf`, `-Roles`, `-EnableAccess`, …) / `install_server.command`; `installers\update.ps1 -Profile server [-RollbackTo <ver>]`                      | §8d                    |
+| **M9** | тонкий клиент: Cline к удалённому серверу, без движка/моделей/индекса                                                                                                                                                                                    | `hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`; `setup-client.ps1`; `installers/build_client_release.ps1`                                                             | §8e                    |
 
 ⚠️ После M1 **переиндексация обязательна** (схема БД изменилась — см. «Индексная БД и
 файлы-сигналы» выше). Без `access.enabled` (десктоп) всё работает как раньше: без токенов
