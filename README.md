@@ -10,6 +10,18 @@
 > разделу «Установка на Windows: по шагам» (или «Установка — macOS»). Состояние и журналы волн
 > миграции: `STATUS.md`, `tools/parity/W4_REPORT.md`, `MIGRATION_PLAN_RUST.md`.
 
+## Карта документов
+
+| Документ | Что внутри | Когда читать |
+|---|---|---|
+| **`README.md`** (этот файл) | продукт и старт: требования, установка (Windows/macOS), архивы релиза, CLI и «Справочник команд», веб-UI, автотранскрибация, MCP, интеграции Hermes/Cline, llm-host, sidecar, БД и файлы-сигналы, `config.yaml`, разработка, диагностика | первое знакомство и повседневная работа |
+| **`README_SERVER_MULTIUSER.md`** | серверная многопользовательская подсистема (M1–M9): роли, сценарии A–F, портрет отказов, эксплуатация по этапам (§8a–§8e), десктоп-режим, шпаргалка команд и HTTP-API, сетевой периметр и конкурентность — **единый источник по серверу** | админ/эксплуатация сервера, подключение пользователей |
+| **`installers/client_readme.md`** | тонкий клиент (лежит как `README.md` в клиентском архиве) | подключение ноутбука к серверу |
+| **`STATUS.md`** | журнал волн миграции и текущие статусы | «что уже сделано» |
+| **`PLAN_*.md`**, `PLAN_SERVER_MULTIUSER.md`, `MIGRATION_PLAN_RUST.md` | планы, дорожные карты и промты передачи контекста (не переписываются) | контекст для разработки |
+| **`RELEASE_NOTES_*.md`** | что нового в конкретной версии | обновление/релиз |
+| **`tools/parity/*_REPORT.md`**, `tools/parity/out/*` | отчёты волн/этапов и артефакты (`out/` в git не идёт) | разбор замеров и приёмки |
+
 ## Как это работает
 
 ```
@@ -378,6 +390,285 @@ hds mcp-http check|start|stop|status|restart|run
 5000, desktop — 30000). При `db.read_only_conns: true` (server-дефолт) читатели
 (MCP/UI/CLI-поиск/`ask`) открывают базу read-only, писатель — только конвейер
 индексации/watcher; `hds check` показывает фактические `journal_mode`/`busy_timeout`.
+
+## Справочник команд: сервер, клиент, утилиты, установщики
+
+> Плотная шпаргалка: всё, чем пользуются на **сервере** и на **клиенте** (ноутбук).
+> Запускать `hds`/`hds.exe` — из-под того бинарника, который соответствует профилю машины
+> (см. таблицу ниже). Развёрнутые пояснения — в разделах ниже, а серверная эксплуатация —
+> `README_SERVER_MULTIUSER.md` §8d–§8e. Живой пример развёрнутого сервера с точными
+> путями/значениями — `tools/parity/out/SERVER_MIGRATION_20261013.md` (артефакт, в git не идёт).
+
+### 0. Где бинарник, конфиг и состояние
+
+| Профиль | `hds.exe` | `config.yaml` | состояние: `index.db`, `data/` (access.yaml, логи), PID, heartbeat |
+|---|---|---|---|
+| **Сервер** (`profile: server`) | `<install>\app\current\bin\hds.exe` | `%ProgramData%\hermes-disk-search\config.yaml` | `%ProgramData%\hermes-disk-search\` |
+| **Desktop** (репо или распакованный релиз) | `target\{debug,release}\hds.exe` или `<install>\bin\hds.exe` | корень проекта/установки | корень проекта (`data\`, `index.db`) |
+| **Тонкий клиент** (ноутбук) | `<client>\bin\hds.exe` | не нужен — всё считает сервер | — |
+
+Резолвинг конфига (порядок): `HDS_CONFIG` (файл) → `HDS_ROOT` (каталог состояния) →
+`<корень проекта>\config.yaml` → системный каталог состояния (если есть `profile: server`).
+Скрипты репозитория находят бинарник сами через `hds_bin.ps1` (`bin\` → `target\release` → `target\debug`).
+
+### 1. Службы (Windows SCM; только профиль `server`)
+
+```powershell
+# состояние и управление (роль: watch | mcp-http | ui | llm-host)
+hds service status                  # все 4 роли (kind/state/autostart/detail)
+hds service status <role>
+hds service start   <role>          # sc.exe start hermes-disk-search-<role>
+hds service stop    <role>
+hds service install <role>          # auto start + авторестарт при падении (нужен админ)
+hds service uninstall <role>        # sc.exe delete
+hds service run     <role>          # то, что запускает SCM; вручную — блокирующий режим
+```
+
+* Имена служб: `hermes-disk-search-watch`, `-mcp-http`, `-ui`, `-llm-host` (LocalSystem, `START_TYPE auto`).
+* Прямые команды SCM, когда `hds` недоступен: `sc.exe query|start|stop|delete hermes-disk-search-<role>`.
+* Из веб-UI (admin Bearer): `GET /api/services`, `POST /api/services {role, action}`,
+  `action = install|uninstall|start|stop|restart`.
+* Порядок старта — `llm-host` → `watch` → `mcp-http` → `ui`; остановки — в обратном (`update.ps1 -Profile server` делает это сам).
+* **Осторожно:** у службы настроены failure-actions (`restart/5000`), поэтому `sc stop`
+  может не «удержаться» — служба поднимется через ~7 с. Чтобы остановить насовсем:
+  `sc failure hermes-disk-search-watch reset= 0 actions= ""` или `sc config … start= demand`.
+
+### 2. Индексация и обслуживание индекса
+
+```powershell
+hds index                            # инкрементный обход index.roots (это же делает watch)
+hds index --full                     # перечитать всё (по mtime/размеру не пропускать)
+hds index --roots "D:\;E:\Archive"   # разовые корни (через ';')
+hds index --kinds text,pdf           # ограничить виды
+hds index --limit 20 --no-prune      # пробный прогон: не больше 20 файлов, без prune
+hds index --rechunk                  # перечанковать (после смены chunk.size)
+hds index --progress-sec 10 --quiet  # частота прогресса / тишина
+hds watch [--roots "D:\"]            # резидентный обход + FS-события (роль службы watch)
+hds reindex <path> [--no-force]      # один файл/папка
+hds reindex-fts [--progress-sec N]   # перестроить лемматизированный FTS-индекс
+hds forget <path>                    # удалить файл/папку из индекса
+hds clip-index                       # догнать CLIP-векторы картинок
+hds status [--json]                  # файлы по видам/статусам, чанки, ошибки
+hds db-move --to <path> [--force]    # перенести БД (останавливает индексацию, переписывает db_path)
+hds stop                             # сигнал остановки индексации: файл index.stop
+```
+
+Файлы-сигналы в **корне проекта** (для службы это `<install>\app\current\`):
+`index.pause` — пауза обхода (`hds index` её ждёт; ставит в т.ч. резидент при заданиях
+`gpu.pause_index_on_query`), `index.stop` — остановка, `index.heartbeat.json` — прогресс,
+`watch.lock` — единственный watcher на машину. `hds watch` файлы `index.pause`/`index.stop`
+**не читает** — обход watcher'а останавливается только остановкой службы.
+
+### 3. Поиск и RAG-ответ
+
+```powershell
+hds search "договор аренды"                 # гибрид (FTS + векторы + CLIP) — мгновенно
+hds search "SAP" --kinds docx,pdf --limit 20
+hds search "отчёт" --json                   # машинный вывод (из пути/страницы)
+hds ask "о чём договор с подрядчиком" --limit 15
+hds ask "какие есть ТЗ" --limit 30 --json   # обзорный RAG-ответ с цитатами [N]
+```
+
+`ask` идёт через локальную chat-роль: 15–20 ток/с, минуты на ответ — это норма.
+Те же операции по MCP: `search_local_files`, `ask_my_files`, `index_status`,
+`start_indexing`, `stop_indexing`, `reindex_path`.
+
+### 4. Доступ: пользователи и токены (`data/access.yaml`)
+
+```powershell
+# пользователи (проекты = «корень → проект» из index.roots)
+hds user add    --login laptop --password "<пароль>" [--name "Ноутбук"] [--projects "D:\;E:\Archive"] [--admin]
+hds user list
+hds user passwd --login laptop --password "<новый пароль>"   # отзывает все токены этого логина
+hds user del    --login laptop
+hds user grant  --login laptop --projects "D:\"
+hds user revoke --login laptop --projects "D:\"
+
+# токены (plain-токен показывается ОДИН раз; в БД/логи идёт только sha256)
+hds token new    --user laptop [--ttl-days 90]     # → строка токена на stdout
+hds token list
+hds token revoke --user laptop
+hds token revoke --sha <префикс хэша>              # префикс из token list
+
+# токен без помощи админа (логин/пароль → токен), эндпоинт /auth/login на UI-порту
+hds login --login laptop --password "<пароль>" --url http://192.168.0.101:8765
+```
+
+* Пароли — Argon2id (хэш); токен — opaque 256 бит, в файле только sha256, TTL из `access.token_ttl_days`.
+* `--admin` видит все проекты и может управлять индексацией/службами; обычный пользователь
+  видит только выданные проекты (фильтрация выдачи MCP/UI).
+* Гейт включается **только** `access.enabled: true` — сам `profile: server` доступа не даёт.
+* Аудит (server-профиль — включён по умолчанию): `%ProgramData%\hermes-disk-search\data\logs\audit.jsonl`
+  (`login_ok`/`login_fail`/`unauthorized`/`tool_call`/`admin_op`/`token_revoke`).
+
+### 5. MCP-сервер, веб-UI, синхронизация Cline
+
+```powershell
+hds mcp                                   # stdio: клиент поднимает процесс сам (локальный режим)
+hds mcp --http --host 0.0.0.0 --port 8787 --path /mcp
+hds mcp-http check | start | stop | status | restart | run [--host H --port N --path /mcp]
+hds ui [--host H] [--port N]              # дефолт 127.0.0.1:8765; в server-профиле — headless
+hds cline-sync [--json] [--dry-run]       # локальный Cline из config.yaml (порт/путь берутся из конфига)
+hds cline-sync --server-url http://192.168.0.101:8787 --token <T>
+```
+
+* `--server-url` указывайте **без** `/mcp` — путь добавляется сам (с `…/mcp` получится `/mcp/mcp`).
+  Токен можно передать переменной `HDS_CLINE_TOKEN` вместо `--token`.
+* Эндпоинты: `/health` — публичный (MCP: `200 {"app":"disk-search",…}`; UI в server-профиле: `401`);
+  `/mcp` — JSON-RPC + `Authorization: Bearer`; UI — `/`, `/auth/login`, `/api/*`
+  (`status`, `diagnostics`, `services`, `access/users|projects|token/…`, `config/save`,
+  `index/reindex`, `db/move`, …; часть — под admin-токеном).
+* Файлы Cline: `%USERPROFILE%\.cline\data\settings\cline_mcp_settings.json`, `%USERPROFILE%\.cline\mcp.json`
+  (+ `models.json`, `rules\disk-search.md`, `skills\disk-search\SKILL.md`); после правок — перезапуск Cline.
+* Ключи конфига: `mcp_http.{host,port,path,autostart,start_timeout}`, `ui.{host,port}`,
+  `access.{enabled,token_ttl_days}`, `rate_limit.*`, `audit.*`, `trusted_proxy`, `http.max_body_kb`.
+* Публикация в LAN: `mcp_http.host`/`ui.host = 0.0.0.0` + правило брандмауэра (§8).
+  Наружу — только через TLS-reverse-proxy (`installers\proxy\{Caddyfile,nginx.conf}`) и `trusted_proxy: true`.
+
+### 6. Резидент `llm-host` (владелец GPU, порты 8010–8012) и диагностика
+
+```powershell
+llm_host.exe status                    # инстансы/порты/VRAM
+llm_host.exe devices                   # устройства движка (нумерация для gpu.device_index)
+llm_host.exe load   <role>             # role: chat | embedding | rerank | whisper | transcribe
+llm_host.exe unload <role>
+llm_host.exe run                       # резидентный режим (то, что запускает служба llm-host)
+llm_host.exe stop [--force]            # мягкая остановка; --force — по pid-файлу, если HTTP завис
+# общие флаги: --config FILE --runtime DIR --engine-dir DIR --host HOST --port N
+```
+
+```powershell
+hds check [--json]                     # профиль, БД, корни, chat/embedding/rerank, OCR, ffmpeg,
+                                       # лемматизатор (pymorphy3), .mpp, GPU/VRAM, аудит, очередь, периметр
+hds whisper-check [--file <медиа>] [--json]
+hds transcribe-watch                   # демон автотранскрибации (inbox_dir → out_dir)
+hds transcribe-once <медиафайл>        # один файл «здесь и сейчас», без очереди
+hds transcribe-stop                    # мягкая остановка демона (сигнал transcribe.stop)
+```
+
+* Фасад совместим с llama-server: `:8010` chat, `:8011` embedding, `:8012` rerank — слушают только `127.0.0.1`.
+* Логи/состояние: `<state>\data\logs\llm-host.log`, `<state>\data\llm-host.heartbeat.json`, `<state>\data\llm-host.pid`.
+* Быстрая приёмка сервера: `sc query hermes-disk-search-<role>` ↔ `GET /api/services` (admin Bearer),
+  `GET /health` на 8787 и 8765, `hds check`.
+
+### 7. Скрипты-утилиты (релиз/репозиторий)
+
+| Скрипт | Что делает | Повторный запуск |
+|---|---|---|
+| `hds_bin.ps1` | резолвер бинарника (`bin\` → `target\release` → `target\debug`); подключается как `. .\hds_bin.ps1` | безвреден |
+| `run_index.ps1` | один инкрементный обход (`hds index`) | безвреден (пропустит неизменившееся) |
+| `run_ui.ps1` | поднять UI и открыть браузер; если порт уже отвечает — просто открывает; в server-профиле — headless | безвреден |
+| `hidden_launch.vbs` | запуск без окна консоли (задачи/Startup) | безвреден |
+| `installers\cline_mcp_merge.py` | слияние MCP-записей в настройках Cline (используется `cline-sync`) | идемпотентно |
+| `installers\configure_ocr.py` | Tesseract/tessdata: путь, языковые пакеты, `TESSDATA_PREFIX` | идемпотентно |
+| `installers\publish_engine_patch.ps1`, `publish_clip_models.ps1` | публикация патча движка / CLIP-моделей как релизных ассетов | идемпотентно |
+
+### 8. Установка и обслуживание сервера (все шаги идемпотентны)
+
+```powershell
+# 1) релиз: dist\hds-<ver>-windows-x64\ + .zip + .zip.sha256.txt
+powershell -File installers\build_rust_release.ps1 -Version 1.0.1 [-SkipBuild] [-SkipZip] [-WithSidecar -SidecarDir <dir>]
+# 1a) самодостаточный sidecar (портативный CPython + копия пакета hds; нужен uv, ~250 МБ загрузки)
+powershell -File installers\build_sidecar.ps1 -OutDir sidecar [-SelfTest] [-Force]
+
+# 2) раскладка: app\<ver>\ + junction app\current
+powershell -File installers\install_app_version.ps1 -From dist\hds-1.0.1-windows-x64 -Version 1.0.1 -Root C:\Users\Sasha\hds-server -SetCurrent [-Force]
+
+# 3) конфиг положить в каталог состояния ДО установщика (он существующий не перезапишет):
+#    %ProgramData%\hermes-disk-search\config.yaml  (profile: server, access.enabled: true, mcp_http/ui.host)
+
+# 4) установка служб (админ; -WhatIf — план без изменений и без прав администратора)
+powershell -File <install>\app\current\installers\install_server.ps1 -WhatIf -StateDir "%ProgramData%\hermes-disk-search" -McpHost 0.0.0.0 -McpPort 8787 -UiHost 0.0.0.0 -UiPort 8765 -Parallel 1 -GpuDevice 1 -Roots "D:\" -EnableAccess -AdminLogin admin -AdminPassword "<secret>" -NoFetch [-KeepAtLogOn] [-Roles "watch,mcp-http,ui,llm-host"]
+
+# 5) старт (порядок: резидент → обход → MCP → UI)
+hds service start llm-host; hds service start watch; hds service start mcp-http; hds service start ui
+
+# 6) приёмка
+hds check
+hds token new --user admin                              # выдать токен (показывается один раз)
+hds cline-sync --server-url http://127.0.0.1:8787 --token <T>   # локальному Cline
+```
+
+Повторный запуск установщиков:
+
+* `install_server.ps1` — существующий `config.yaml` **не** перезаписывает; службы создаёт/обновляет
+  заново; `-Roles ""` = только конфиг (права админа не нужны); `-WhatIf` ничего не меняет;
+  `-KeepAtLogOn` не трогает десктопные задачи `HermesDiskSearch*` (без него релизная версия
+  пытается их удалить и падает, если задач нет).
+* `install_app_version.ps1` — `data\`/`models\` общие (junctions), `-Force` переустанавливает версию.
+* `update.ps1` — останов → подмена версии → старт (`-Profile server` для служб, `desktop` — задачи
+  Планировщика); `-ListVersions`, `-RollbackTo <ver>`, `-WhatIf`.
+* `fetch_*.ps1` — идемпотентны: проверяют sha256/размер и без `-Force` ничего не качают.
+  `fetch_engine_runtime.ps1 [-Backend auto|cuda|vulkan|metal|cpu] [-PatchEngine|-RollbackEnginePatch]`;
+  `fetch_llm_models.ps1 [-Models chat,embedding,rerank] [-RuntimeDir DIR] [-Force]`;
+  `fetch_whisper_model.ps1` / `fetch_diarization_model.ps1` / `fetch_clip_models.ps1 [-Force]`.
+
+```powershell
+# обновление сервера и откат
+powershell -File <install>\app\current\installers\update.ps1 -Root <install> -Profile server -From dist\hds-1.1.0-windows-x64.zip -Version 1.1.0
+powershell -File <install>\app\current\installers\update.ps1 -Root <install> -ListVersions
+powershell -File <install>\app\current\installers\update.ps1 -Root <install> -Profile server -RollbackTo 1.0.1
+```
+
+```powershell
+# то, что установщик/миграция делает руками
+New-NetFirewallRule -DisplayName 'hermes-disk-search TCP 8787' -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8787 -RemoteAddress LocalSubnet
+Remove-NetFirewallRule -DisplayName 'hermes-disk-search TCP 8787'
+icacls "%ProgramData%\hermes-disk-search" /grant "<ДОМЕН\Пользователь>:(OI)(CI)(M)" /T   # иначе `hds token new` → os error 5
+cmd /c mklink /J "%windir%\System32\config\systemprofile\AppData\Local\llama-runtime" "%LOCALAPPDATA%\llama-runtime"
+cmd /c mklink /J "%windir%\System32\config\systemprofile\AppData\Roaming\OpenResearchTools" "%APPDATA%\OpenResearchTools"
+```
+
+Прочие установщики: `setup.cmd` → `setup.ps1 [-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SmokeTest]`
+(desktop); `install_autostart.ps1 [-StartupFolder]`; `installers\install_llm_host_task.ps1
+[-Exe -Config -Start -Status -Remove -Force -StartupFolder]`; `installers\install_ui_task.ps1
+[-Port -Status -Remove]`; `install_hermes.ps1 [-HermesDir]`; `install_cline.ps1`;
+macOS: `installers\install_macos.command`, `installers\install_server.command`, `installers\install_client.command`.
+
+### 9. Клиент (ноутбук): подключение к серверу
+
+```powershell
+# 1) НА СЕРВЕРЕ — учётка и токен для ноутбука
+hds user add --login laptop --password "<пароль>" [--projects "D:\"]
+hds token new --user laptop --ttl-days 90          # plain-токен показывается один раз → отдать на ноутбук
+
+# 2) НА НОУТБУКЕ (права админа не нужны)
+powershell -File installers\build_client_release.ps1 -Version 0.18.0   # dist\hds-client-<ver>-windows-x64(+.zip)
+.\setup-client.ps1 -ServerUrl http://192.168.0.101:8787 -Token <ТОКЕН> [-McpPath /mcp] [-DryRun] [-SkipHealth]
+#   проще двойным щелчком:  setup-client.cmd -ServerUrl http://192.168.0.101:8787 -Token <ТОКЕН>
+# macOS:
+bash installers/install_client.command --server-url http://192.168.0.101:8787 --token <ТОКЕН> [--dry-run] [--skip-health]
+
+# 3) вручную (без мастера)
+hds cline-sync --server-url http://192.168.0.101:8787 --token <ТОКЕН>
+hds login --login laptop --password "<пароль>" --url http://192.168.0.101:8765   # токен самому (эндпоинт /auth/login)
+
+# 4) проверка соединения с ноутбука
+Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # ожидаем 200 {"app":"disk-search",…}
+```
+
+* Мастер: проверяет `GET <ServerUrl>/health`, пишет MCP-запись (`type: streamableHttp`,
+  заголовок `Authorization: Bearer …`) в оба файла Cline, кладёт правило и скилл, затем просит
+  перезапустить Cline. Повторный запуск ничего не дублирует (`-DryRun` — только план).
+* `-ServerUrl` указывайте **без** `/mcp` (для LAN: `http://<IP-сервера>:8787`; при TLS-прокси — `https://host/`).
+* В клиентском пакете нет движка/моделей/индекса/sidecar — всё считает сервер.
+
+### 10. Диагностика и частые грабли
+
+| Симптом | Что проверить |
+|---|---|
+| MCP-инструменты не отвечают | `GET http://<host>:8787/health`; `hds service status mcp-http`; `sc query hermes-disk-search-mcp-http`; токен в настройках Cline (401 = нет/просрочен) |
+| UI отдаёт 401 | это норма в server-профиле (доступ по токену/логину): `POST /auth/login`, админ — `?token=…` |
+| Индексация «стоит» | `index.heartbeat.json` → `"paused": true` = в корне установки лежит `index.pause` (его ставит резидент под задания и может не снять); удалить файл. Признак: heartbeat обновляется, а CPU службы = 0 |
+| `hds token new` → `os error 5` | ACL каталога состояния (§8, `icacls`) |
+| Служба поднимается после `sc stop` | failure-actions (`sc failure … reset= 0 actions= ""`, §1) |
+| Служба не находит модели/движок | junctions `systemprofile` + machine-env `LLAMA_RUNTIME_DIR`/`HDS_ENGINE_DIR`/`HDS_EXTRACT_PYTHON` (§8) |
+| Извлечение падает («воркер: поток вывода закрыт») | в корне установки нужны `config.yaml` и пакет `hds` (junction/symlink или сборка `-WithSidecar`, §8) |
+| Куда смотреть логи | `<state>\data\logs\{audit.jsonl,llm-host.log}`, `GET /api/diagnostics`; брандмауэр — `Get-NetFirewallRule -DisplayName 'hermes-disk-search*'` |
+
+Полезные ссылки: `README_SERVER_MULTIUSER.md` (мультиюзер-сервер, §8d–§8e — установка и клиент),
+`installers\client_readme.md` (клиентский пакет), `tools\parity\out\SERVER_MIGRATION_20261013.md`
+(живой пример развёртывания + найденные дефекты), `installers\proxy\` (образцы TLS-прокси).
 
 ## Веб-интерфейс (`hds ui`)
 
@@ -772,151 +1063,24 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 * **`index.heartbeat.json`** — кросс-процессный статус/прогресс (свежесть < 30 с).
 * **`watch.lock`** — pid наблюдателя; **`data\llm-host.pid`** — pid резидента; логи — `data\logs\`.
 
-## Доступ и проекты (M1)
+## Серверный режим: доступ, службы, периметр, пакеты (M1–M3, M7–M9)
 
-* **Проекты** — единица разграничения доступа. Корню в `index.roots` можно задать имя
-  проекта: элемент — строка (проект по умолчанию = имя младшей папки; корень диска
-  `D:\` → проект `D:`) или объект `{ path: ..., project: "..." }`. Один файл
-  принадлежит одному проекту (корень с наибольшим совпадающим префиксом).
-* **Идентичность** — `data/access.yaml` (образец: `data/access.example.yaml`):
-  пользователи (логин/пароль — Argon2id) + авто-выдаваемые токены (opaque 256 бит,
-  хранятся хэшем sha256, TTL `access.token_ttl_days`, по умолчанию 90 дней).
-* **Server-режим** (`access.enabled: true`): MCP (`hds mcp-http`) требует
-  `Authorization: Bearer <token>` — без него `401`; `POST /auth/login` выдаёт токен
-  (или `hds login --login ... --password ...`); поиск/RAG фильтруются по проектам
-  токена (админ видит всё); индексацией (`start_indexing`/`stop_indexing`/
-  `reindex_path`) занимается только админ. UI открывается только с админ-токеном.
-* **Десктоп** (по умолчанию, `access.enabled` отсутствует/false) — прежнее поведение
-  без токена и без фильтра.
-* Управление: `hds user add|list|del|passwd|grant|revoke`, `hds token list|revoke`;
-  в UI — карточка «Доступ».
+> Подробно и по сценариям — серверное руководство **`README_SERVER_MULTIUSER.md`**
+> (единый источник: роли §1, сценарии A–F §2–§7, портрет отказов §8, этапы M7/M8/M9
+> §8c–§8e, периметр и конкурентность §11). Ниже — только «что умеет» и ключи конфига.
 
-## Серверный профиль и службы (M2)
+| Этап | Что умеет | Ключи конфига / команды | Где подробно |
+|---|---|---|---|
+| **M1** | доступ и проекты: проект — единица разграничения; логин/пароль (Argon2id) и токены (sha256, TTL 90 дн.); Bearer-гейт → `401`; фильтрация поиска/RAG по проектам; индексация — только админ | `access.enabled`, `access.token_ttl_days`; `index.roots` (имя проекта — строка `- "E:\Archive"` или `{ path, project }`); `hds user …`, `hds token …` | §2–§3, §7 |
+| **M2** | серверный профиль, каталог состояния, OS-службы, headless-UI | `profile: desktop\|server`; `ui: { host, port }`; `hds service <role>` (`watch, mcp-http, ui, llm-host`) | §2a |
+| **M3** | сетевой периметр: наружу только `/mcp` и `/ui` через TLS-прокси; аудит, rate-limit, hardening | `trusted_proxy`; `audit.{enabled, max_mb}`; `rate_limit.{enabled, requests_per_min, burst, login_per_min, max_inflight, max_inflight_per_user, per_token}`; `http.{max_body_kb, max_conns}` | §11 |
+| **M7** | управление службами и выдача токенов из веб-UI (права админа) | `GET/POST /api/services`; `hds token new --user <login> [--ttl-days N]` | §8c |
+| **M8** | серверный пакет: установка одной (unattended) командой, обновление и откат | `installers\install_server.ps1` (`-WhatIf`, `-Roles`, `-EnableAccess`, …) / `install_server.command`; `installers\update.ps1 -Profile server [-RollbackTo <ver>]` | §8d |
+| **M9** | тонкий клиент: Cline к удалённому серверу, без движка/моделей/индекса | `hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`; `setup-client.ps1`; `installers/build_client_release.ps1` | §8e |
 
-Профиль задаётся ключом **`profile: desktop | server`** (`desktop` — по умолчанию;
-серверный профиль сам auth **не** включает — доступ определяет только
-`access.enabled`). Состояние `hds check` показывает профиль и предупреждения
-(server без `access.enabled`/`ui` → `warn` с подсказками).
-
-* **Каталог состояния (server):** `%ProgramData%\hermes-disk-search` (macOS —
-  `/Library/Application Support/hermes-disk-search`). Там живут `config.yaml`
-  (если конфига нет в корне установки — берётся отсюда), `index.db`,
-  `data/` (`access.yaml`, PID mcp-http/llm-host, логи, heartbeat).
-  Desktop-профиль — прежнее поведение (всё рядом с программой).
-* **Bind веб-интерфейса:** секция `ui: { host, port }` (по умолчанию
-  `127.0.0.1:8765`); флаги `hds ui --host/--port` переопределяют. Server:
-  держите `127.0.0.1` — наружу публикует reverse-proxy с TLS (`/mcp`, `/ui`).
-* **Службы** (старт при загрузке без интерактивного входа):
-  `hds service run|install|uninstall|start|stop|status <role>`, роли —
-  `watch | mcp-http | ui | llm-host`. Windows — SCM (`hermes-disk-search-<role>`,
-  автостарт + авторестарт при падении; `run` под SCM обслуживает крейт
-  `windows-service`); macOS — LaunchDaemon (`com.hermes-disk-search.<role>`,
-  `RunAtLoad` + `KeepAlive`). Управляющие подкоманды требуют прав администратора.
-* **Установка server-пакета:** `installers\install_server.ps1` (Windows,
-  из-под администратора; службы предпочтительно через SCM, фолбэк — AtStartup-
-  задача SYSTEM; снимает десктопные AtLogOn-задачи ролей) и
-  `installers/install_server.command` (macOS, под sudo).
-* **Headless-UI (server):** без ярлыков и авто-браузера — `run_ui.ps1` видит
-  server-профиль и не открывает браузер; админ ходит через reverse-proxy.
-  Десктопный автозапуск (`install_autostart.ps1`, AtLogOn) не менялся.
-
-## Управление службами и токенами из UI (M7)
-
-* **Карточка «Службы (server-профиль)»** в Rust-UI: состояние 4 ролей (`watch | mcp-http |
-  ui | llm-host`) и кнопки `install / uninstall / start / stop / restart`
-  (`GET/POST /api/services`). Требует прав администратора (или UI, запущенного как служба
-  `LocalSystem`); в desktop-профиле — сообщение «служб нет» без кнопок. Перезапуск роли `ui`
-  не подвешивает страницу: ответ отдаётся сразу, перезапуск — отложенным helper'ом.
-* **«Выдать токен»** (карточка «Доступ») и CLI `hds token new --user <login> [--ttl-days N]`:
-  plain-токен показывается **один раз** (`POST /api/access/token/new`); в `data/access.yaml`
-  пишется только `token_sha256`, в аудит — `admin_op` без токена; отзыв — как раньше.
-* Сценарий и API — `README_SERVER_MULTIUSER.md` §8c; план и рантайм-приёмка —
-  `PLAN_M7_UI_CONTROL.md`.
-
-## Установка серверного пакета (M8)
-
-Серверный пакет ставится **одной командой** (формат поставки — zip + скрипты;
-MSI/`.pkg` нет). Установщики **unattended**: параметры вместо приглашений, без
-новых параметров — прежнее поведение M2.
-
-* **Windows** (администратор): `installers\install_server.ps1` — параметры
-  `-StateDir -McpHost/-McpPort -UiHost/-UiPort -Parallel -GpuDevice/-GpuPreset
-  -Roots -EnableAccess -AdminLogin/-AdminPassword -Fetch/-NoFetch -WhatIf`;
-  службы SCM (фолбэк — AtStartup-задача SYSTEM), снимает десктопные AtLogOn-задачи.
-  **`-WhatIf`** печатает план и тело `config.yaml` **без изменений и без админа**;
-  **`-Roles ""`** — config-only.
-* **macOS** (`sudo`): `installers/install_server.command` — паритетный набор
-  флагов (`--statedir/--mcp-*/--ui-*/--parallel/--gpu-*/--roots/--enable-access/
-  --admin-*/--fetch/--no-fetch/--whatif`), LaunchDaemon, ad-hoc `codesign`,
-  снятие карантина.
-* **Генерация `config.yaml`** серверного профиля (`profile: server`,
-  `access.enabled`, `llm_server.parallel`, `gpu.device_index`/`gpu.preset`,
-  `index.roots`, `mcp_http`/`ui`); существующий конфиг **не затирается**. Первый
-  админ — `hds user add --admin` (пароль только хэшем argon2id). `-Fetch` качает
-  рантайм/модели unattended (`fetch_*` без `Read-Host`).
-* **Обновление/откат:** `installers\update.ps1 -Profile server` останавливает
-  4 службы (ожидание `STOPPED`), подменяет `app\current`, стартует и проверяет
-  `/health`; `-RollbackTo <ver>` — возврат; `-ListVersions` — список. Desktop —
-  прежний путь (Планировщик).
-* Сценарий и приёмка — `README_SERVER_MULTIUSER.md` §8d,
-  `PLAN_M8_INSTALL_PACKAGES.md`.
-
-## Клиентский пакет (M9)
-
-**Тонкий клиент** Win/macOS: подключает Cline к **удалённому** серверу disk-search и
-ничего тяжёлого не ставит (ни движка, ни моделей, ни индекса, ни sidecar).
-
-* **`hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`** — записывает
-  MCP-сервер `disk-search` в настройки Cline (`~/.cline/...`) с **внешним** URL и заголовком
-  `Authorization: Bearer`, копирует правило и скилл. Без `--server-url` — прежнее локальное
-  поведение (из `config.yaml`); окна моделей в клиентском режиме не трогаются (локального
-  `llm_server` нет). Токен можно передать через `HDS_CLINE_TOKEN` (не в командной строке).
-* **Мастер:** `setup-client.ps1`/`setup-client.cmd` (Windows) и
-  `installers/install_client.command` (macOS) — параметры `-ServerUrl`/`--server-url`,
-  `-Token`/`--token`, `-McpPath`/`--mcp-path`, `-DryRun`/`--dry-run`; шаги: `GET <url>/health`
-  → `hds cline-sync` → «перезапустите Cline». Без прав администратора; идемпотентно.
-* **Тонкая сборка:** `installers/build_client_release.ps1` (+ `_macos.sh`) — в пакет входят
-  только `bin\hds(.exe)`, правило/скилл, мастеры, `README`, `sha256.txt`; сборщик **отвергает**
-  «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
-* Токен выписывает админ сервера: `hds token new --user <логин>` (plain — один раз). Без TLS
-  (`http://`) токен идёт открытым текстом — используйте `https://` (reverse-proxy на сервере).
-* Сценарий — `README_SERVER_MULTIUSER.md` §8e; план — `PLAN_M9_CLIENT_PACKAGE.md`.
-
-## Сетевой периметр (M3): TLS-прокси, аудит, rate-limit
-
-Наружу публикуются **только** `/mcp` и `/ui` через reverse-proxy с TLS
-(образцы — `installers/proxy/{Caddyfile,nginx.conf}`; `install_server.*` при
-наличии `caddy`/`nginx` копируют образец и подсказывают команду). Фасад
-`:8010–8012` (`/v1/*`) — **только localhost**. TLS терминирует прокси;
-сертификаты настраивает оператор. Подробности и сценарии —
-`README_SERVER_MULTIUSER.md` §11.
-
-* **Заголовки прокси:** ключ `trusted_proxy` (по умолчанию `false`). Без него
-  `X-Forwarded-For/Proto` **игнорируются** (напрямую подключённый клиент не
-  может подделать свой IP); при `trusted_proxy: true` реальный клиент —
-  правая запись XFF (её дописывает наш прокси). Диагностика: `GET /health`
-  MCP-сервера возвращает `client_ip` — как сервер видит клиента.
-* **Аудит:** `hds-core::audit`, append-only JSONL в
-  `<state_dir>/data/logs/audit.jsonl`, ротация по размеру (`audit.max_mb`,
-  дефолт 50 → `audit.jsonl.1`). События: `login_ok`/`login_fail`/
-  `unauthorized`/`tool_call` (пользователь/инструмент/проекты)/`admin_op`/
-  `token_revoke`. Включение: `audit.enabled`; без ключа — server: вкл,
-  desktop: выкл. Тела запросов и токены не логируются. Состояние —
-  `hds check` и `/api/diagnostics` (`audit`).
-* **Rate-limit:** token-bucket (ключ — **пользователь**: `user:<логин>`, иначе
-  реальный IP; `rate_limit.per_token: true` — прежний пер-токенный ключ);
-  `rate_limit: { enabled, requests_per_min: 120, burst: 30, login_per_min: 10,
-  max_inflight: 4, max_inflight_per_user: 2, requests_per_min_per_user: 120,
-  per_token: false }`; `POST /auth/login` ограничен жёстче (антибрутфорс, по
-  IP); `ask_my_files` — лимит параллелизма (глобально `max_inflight`, на
-  пользователя `max_inflight_per_user`). Превышение → `429` +
-  `Retry-After` + `X-RateLimit-Limit`. Без ключа: server — вкл, desktop —
-  выкл; лимиты в памяти процесса (mcp-http и ui считаются независимо).
-* **Hardening:** `http.max_body_kb` (дефолт 512; 0 — без лимита) → тело
-  больше лимита получает `413` без чтения; `http.max_conns` (дефолт 32;
-  0 — без предела) → сверх предела короткий `503` без спавна потоков;
-  ошибки — единый JSON `{error, hint}` без внутренних путей; UI-гейт в
-  server-поставке fail-closed при нечитаемом конфиге (ревью M2 F2).
+⚠️ После M1 **переиндексация обязательна** (схема БД изменилась — см. «Индексная БД и
+файлы-сигналы» выше). Без `access.enabled` (десктоп) всё работает как раньше: без токенов
+и без фильтра.
 
 ## Настройки (`config.yaml`)
 
