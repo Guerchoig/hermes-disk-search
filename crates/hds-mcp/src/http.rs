@@ -11,6 +11,7 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 
 use serde_json::{json, Value};
 
@@ -59,8 +60,14 @@ pub fn route(
                 "transport": "streamable-http",
                 // T1: как сервер видит клиента — живая диагностика прокси
                 // (без trusted_proxy здесь будет IP прокси, не клиента).
-                // F10.1 (T0): версию не публикуем (README: «без версий»).
-                "client_ip": client_ip
+                "client_ip": client_ip,
+                // Логистика тонкого клиента (M9/W7 `PLAN_SERVER_MULTIUSER.md`):
+                // версия продукта из `version.txt` поставки. Мастера
+                // (`setup-client.ps1`, `install_client.command`) сверяют её со
+                // своей и предупреждают при расхождении. F10.1 (T0) публикацию
+                // версии отменял — решение пересмотрено осознанно: без неё
+                // клиент не может узнать, что отстал от сервера.
+                "version": hds_core::client::product_version()
             })
             .to_string(),
         ),
@@ -364,6 +371,61 @@ fn write_reply_with(
     resp.push_str(&body);
     let _ = stream.write_all(resp.as_bytes());
     let _ = stream.flush();
+}
+
+/// Отдать клиентский пакет (M9): тело — **байты** (zip), поэтому заголовки пишем
+/// сами, а файл — чанками: `Reply` текстовый (`String`) и для бинарника не годится.
+fn serve_client_package(stream: &mut TcpStream, path: &Path) {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("hds-client.zip");
+    let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) if len > 0 => f,
+        _ => {
+            write_reply(stream, client_package_missing());
+            return;
+        }
+    };
+    let head = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {len}\r\n\
+         Content-Disposition: attachment; filename=\"{name}\"\r\nConnection: close\r\n\r\n"
+    );
+    if stream.write_all(head.as_bytes()).is_err() {
+        return;
+    }
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        match file.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if stream.write_all(&buf[..n]).is_err() {
+                    return;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+    let _ = stream.flush();
+}
+
+/// Ответ, когда клиентский пакет не вложен в поставку (dev-сборка): 404 и
+/// подсказка, где его взять.
+fn client_package_missing() -> Reply {
+    (
+        404,
+        "application/json",
+        json!({
+            "error": "client-package-missing",
+            "hint": "пакет не вложен в поставку (dev-сборка): соберите его \
+                     installers/build_client_release.ps1 (Windows) или \
+                     build_client_release_macos.sh (macOS), либо возьмите ассет \
+                     hds-client-<версия>-<платформа>.zip со страницы релиза",
+            "version": hds_core::client::product_version()
+        })
+        .to_string(),
+    )
 }
 
 /// Тяжёлый запрос? F6 (T0): разбираем JSON-RPC — `tools/call` с
@@ -806,6 +868,39 @@ fn serve_request(
     if let (Some(l), Some(retry)) = (limits, over) {
         let r = too_many(false, retry);
         write_reply_with(stream, r, &rate_limit_headers(l, retry));
+        return;
+    }
+    // Логистика тонкого клиента (M9): скачивание клиентского пакета, вложенного в
+    // поставку. Путь — внутри опубликованного `<mcp-path>`-префикса (образцы
+    // reverse-proxy публикуют наружу только `/mcp` и `/ui`, `installers/proxy/`),
+    // гейт — тот же Bearer, что у `/mcp` (клиент качает своим токеном).
+    if m == "GET" && p_only == hds_core::client::package_route(mp) {
+        if env.enabled && auth::resolve_bearer(env, head.authorization.as_deref()).is_none() {
+            if let Some(a) = &env.audit {
+                a.record(
+                    &hds_core::audit::AuditEvent {
+                        ts: 0,
+                        event: "unauthorized".into(),
+                        user: None,
+                        ip: ip.clone(),
+                        method: m.into(),
+                        path: p.into(),
+                        tool: None,
+                        projects: None,
+                        token: None,
+                        status: 401,
+                        ms: 0,
+                    }
+                    .now(),
+                );
+            }
+            write_reply(stream, unauthorized());
+            return;
+        }
+        match hds_core::client::package() {
+            Some(path) => serve_client_package(stream, &path),
+            None => write_reply(stream, client_package_missing()),
+        }
         return;
     }
     // Тяжёлый RAG-инструмент — под лимит параллелизма (слот освобождается

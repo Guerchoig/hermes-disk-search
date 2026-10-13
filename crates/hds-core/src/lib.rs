@@ -24,6 +24,7 @@
 
 pub mod access;
 pub mod audit;
+pub mod client;
 pub mod cline;
 pub mod config;
 pub mod db;
