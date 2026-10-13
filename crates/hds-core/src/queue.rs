@@ -270,7 +270,29 @@ impl HeavyQueue {
         let mut enqueued: Option<u64> = None;
         let mut st = self.lock();
         loop {
-            // 0) Пер-пользовательский предел (M4 T4 §3.3) — только для запроса,
+            // 0) Потолок ожидания — ДО выдачи слота (F12, релизная приёмка
+            //    13.10.2026). Заявка, которая уже стояла в очереди, не получает
+            //    слот после `queue.wait_timeout_sec`, даже если он освободился
+            //    ровно в этот момент: раньше быстрый путь проверялся раньше
+            //    дедлайна, и гонка «release ↔ дедлайн» подменяла обещанный
+            //    клиенту `503` на исполнение (ловилось сокет-тестом
+            //    `queue_full_and_timeout_codes_reach_client` на CI).
+            //    Быстрый путь С ПЕРВОЙ попытки (`enqueued.is_none()`) ожиданием не
+            //    является — его дедлайн не касается.
+            if enqueued.is_some() && Instant::now() >= deadline {
+                let depth = st.waiting_total() as u32;
+                record_wait(&mut st, started.elapsed().as_millis() as u64);
+                if let Some(seq) = enqueued.take() {
+                    remove_waiter(&mut st, user, seq);
+                }
+                st.timeouts += 1;
+                drop(st);
+                return Err(QueueReject::Timeout {
+                    waited_sec: started.elapsed().as_secs(),
+                    depth,
+                });
+            }
+            // 0.1) Пер-пользовательский предел (M4 T4 §3.3) — только для запроса,
             //    который ЕЩЁ НЕ в очереди: ждать бесполезно, это лимит на
             //    пользователя, а не на свободные слоты → сразу `429`.
             //    Уже стоящего в очереди не перепроверяем (до него дойдёт ход по
@@ -841,6 +863,37 @@ mod tests {
         let st = q.stats();
         assert_eq!(st.timeouts, 1);
         assert_eq!(st.depth, 0, "таймаут снимает заявку");
+    }
+
+    /// F12 (релизная приёмка 13.10.2026): слот, освободившийся ПОСЛЕ потолка
+    /// ожидания, уже стоящей в очереди заявке не выдаётся — клиент получает
+    /// обещанный `Timeout` (503), а не исполнение.
+    ///
+    /// Раньше быстрый путь проверялся до дедлайна: пробуждение по `release`
+    /// выигрывало гонку у просроченного ожидания, и `503` подменялся на `200`
+    /// (сокет-тест `queue_full_and_timeout_codes_reach_client` падал на CI).
+    #[test]
+    fn slot_freed_after_deadline_rejects() {
+        let q = queue(QueuePolicy::RoundRobin, 1, 5, 1);
+        let held = q.acquire("user:a", || true).expect("слот свободен");
+        // Освобождаем слот позже потолка ожидания (1 с).
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(1400));
+            drop(held);
+        });
+        let err = q
+            .acquire("user:b", || true)
+            .expect_err("после дедлайна слот не выдаётся");
+        assert!(
+            matches!(err, QueueReject::Timeout { depth: 1, .. }),
+            "ждали Timeout с глубиной 1, получено {err:?}"
+        );
+        let st = q.stats();
+        assert_eq!(st.timeouts, 1);
+        assert_eq!(st.granted, 1, "слот так и не был выдан второй заявке");
+        releaser.join().unwrap();
+        // Слот вернулся — следующая заявка проходит.
+        assert!(q.acquire("user:c", || true).is_ok());
     }
 
     /// Обрыв клиента, пока запрос ждёт, освобождает место (место не «течёт»).
