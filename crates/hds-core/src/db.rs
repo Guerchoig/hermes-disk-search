@@ -174,12 +174,16 @@ pub fn open_rw(db_path: &Path, dim: i64, opts: &DbOptions) -> Result<Connection>
     register_vec0();
     let conn = Connection::open(db_path)?;
     conn.execute_batch(&format!(
-        "PRAGMA journal_mode={};\n\
+        // `busy_timeout` — ПЕРВЫМ: смена `journal_mode` берёт блокировку БД, а до
+        // установки таймаута (нулевой дефолт) такая операция падала бы с
+        // «database is locked», не дожидаясь освобождения — при M4-конкурентности
+        // (читатели + писатель) это давало отказ вместо ожидания.
+        "PRAGMA busy_timeout={};\n\
+         PRAGMA journal_mode={};\n\
          PRAGMA synchronous=NORMAL;\n\
-         PRAGMA foreign_keys=ON;\n\
-         PRAGMA busy_timeout={};",
-        opts.safe_journal_mode(),
-        opts.busy_timeout_ms.max(0)
+         PRAGMA foreign_keys=ON;",
+        opts.busy_timeout_ms.max(0),
+        opts.safe_journal_mode()
     ))?;
 
     // M1 (PLAN_M1_ACCESS_PROJECTS.md T2): старая схема без `project` у files —

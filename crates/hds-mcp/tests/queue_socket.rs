@@ -181,6 +181,22 @@ fn wait_for(what: &str, timeout: Duration, cond: impl Fn() -> bool) {
     panic!("не дождались: {what}");
 }
 
+/// Трасса шага сценария: время от старта + снимок очереди. Попадает в сообщение
+/// об ошибке — падение на CI (другая ОС, другие тайминги) разбирается по ней, а
+/// не наугад.
+fn trace_step(dir: &Path, t0: Instant, trace: &mut Vec<String>, what: &str) {
+    let snap = snapshot(dir)
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let ms = t0.elapsed().as_millis();
+    trace.push(format!("[{ms:>6} ms] {what} | {snap}"));
+}
+
+/// Трасса в текст сообщения об ошибке.
+fn trace_block(trace: &[String]) -> String {
+    format!("трасса шагов:\n  {}", trace.join("\n  "))
+}
+
 /// Занятый слот + ожидающий, который не дождался → `503`; следующий при полной
 /// глубине (`max_depth: 1`) → `429`. Оба кода доходят до клиента, метрики — в снапшоте.
 #[test]
@@ -193,12 +209,30 @@ fn queue_full_and_timeout_codes_reach_client() {
     let addr = spawn_server(&cfg);
 
     // 1) Тяжёлый запрос занял единственный слот (висит на блокировке БД).
-    let _held = hold_slot(addr);
+    // Ответ держателя читаем в фоне (само соединение не закрываем): момент
+    // «держатель отдал слот» попадает в трассу.
+    let t0 = Instant::now();
+    let mut trace: Vec<String> = Vec::new();
+    let held = hold_slot(addr);
+    let holder_left = std::sync::Arc::new(std::sync::Mutex::new(None::<u128>));
+    {
+        let mut sock = held.try_clone().expect("клон соединения держателя");
+        let t0c = t0;
+        let slot = std::sync::Arc::clone(&holder_left);
+        std::thread::spawn(move || {
+            let mut resp = String::new();
+            let _ = sock.read_to_string(&mut resp);
+            if let Ok(mut g) = slot.lock() {
+                *g = Some(t0c.elapsed().as_millis());
+            }
+        });
+    }
     wait_for(
         "executing=1 в снапшоте очереди",
         Duration::from_secs(30),
         || snapshot(&dir).is_some_and(|v| v["executing"] == 1),
     );
+    trace_step(&dir, t0, &mut trace, "1) держатель занял слот");
     let snap = snapshot(&dir).expect("снапшот очереди пишет MCP-процесс");
     assert_eq!(snap["enabled"], true, "{snap}");
     assert_eq!(snap["max_inflight"], 1, "{snap}");
@@ -220,13 +254,16 @@ fn queue_full_and_timeout_codes_reach_client() {
         Duration::from_secs(10),
         || snapshot(&dir).is_some_and(|v| v["depth"] == 1),
     );
+    trace_step(&dir, t0, &mut trace, "2) ожидающий в очереди (depth=1)");
 
     // 3) Третий — очередь полна (`max_depth: 1`) → 429 сразу.
     let full = send_heavy(addr);
+    trace_step(&dir, t0, &mut trace, "3) третий запрос отправлен");
     assert!(
         full.starts_with("HTTP/1.1 429"),
-        "ожидался 429, получено: {:.200}",
-        full
+        "ожидался 429, получено: {:.200}\n{}",
+        full,
+        trace_block(&trace)
     );
     assert!(full.contains("Retry-After:"), "{full}");
     assert!(full.contains("X-Queue-Depth: 1"), "{full}");
@@ -236,12 +273,23 @@ fn queue_full_and_timeout_codes_reach_client() {
         body_of(&full)
     );
 
-    // 4) Ожидающий не дождался за 1 с → 503 (не обрыв соединения — регресс F4).
+    // 4) Ожидающий не дождался за `wait_timeout_sec` → 503 (не обрыв соединения —
+    // регресс F4).
     let r = waiter.join().unwrap();
+    let left = *holder_left.lock().unwrap_or_else(|e| e.into_inner());
+    trace.push(format!(
+        "[{:>6} ms] 4) ответ ожидающего получен; держатель отдал слот: {}",
+        t0.elapsed().as_millis(),
+        match left {
+            Some(ms) => format!("на {ms} ms"),
+            None => "ещё держит".to_string(),
+        }
+    ));
     assert!(
         r.starts_with("HTTP/1.1 503"),
-        "ожидался 503, получено: {:.200}",
-        r
+        "ожидался 503, получено: {:.200}\n{}",
+        r,
+        trace_block(&trace)
     );
     assert!(r.contains("Retry-After:"), "{r}");
     assert!(
