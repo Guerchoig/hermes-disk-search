@@ -5,9 +5,25 @@ disk-search. Движка, моделей, индекса и sidecar здесь 
 
 ## Что внутри
 - `bin\hds.exe` (Windows) / `bin/hds` (macOS) — утилита проводки;
-- `setup-client.ps1` / `setup-client.cmd` (Windows), `installers/install_client.command` (macOS);
+- `setup-client.ps1` / `setup-client.cmd` (Windows), `install_client.command` (macOS);
 - `cline-rules\`, `hermes-skill\` — правило и скилл Cline (копируются в `~/.cline`);
+- `version.txt` — версия пакета (мастер сверяет её с `version` из `/health` сервера);
 - `sha256.txt` — контрольные суммы `bin/*`.
+
+## Как получить пакет
+Два канала (файл один и тот же):
+1. **с сервера** (своим токеном; так удобнее без доступа к GitHub):
+   ```powershell
+   curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
+   Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
+   Get-ChildItem .\hds-client -Recurse | Unblock-File
+   ```
+   ```bash
+   curl -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
+     unzip -q hds-client.zip -d hds-client && xattr -dr com.apple.quarantine hds-client
+   ```
+2. **ассетом релиза** `hds-client-<версия>-<платформа>.zip` со страницы релизов.
+3. (для разработчика) собрать из репозитория: `installers/build_client_release.ps1 -Version <версия>`.
 
 ## Установка (Windows)
 1. Токен выписывает администратор сервера: `hds token new --user <логин>`

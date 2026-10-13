@@ -91,11 +91,33 @@ foreach ($f in @("config.example.yaml", "README.md", "NOTICE.md")) {
     if (Test-Path $src) { Copy-Item $src (Join-Path $stage $f) -Force }
 }
 
-# sha256 manifest for bin/*
+# --- версия продукта и вложенный клиентский пакет (M9/W7) --------------------
+# version.txt: версию отсюда отдают /health и мастера тонкого клиента
+# (hds_core::client::product_version). Единственный источник — аргумент -Version.
+Set-Content -Encoding ascii (Join-Path $stage "version.txt") -Value $Version
+
+# Тонкий клиентский пакет собираем тем же скриптом (hds.exe уже собран) и
+# ВКЛАДЫВАЕМ в поставку: сервер отдаёт его по `<mcp-path>/client-package.zip`
+# (канал поставки «с сервера»), а сам zip уходит в релиз отдельным ассетом.
+Write-Host "[m9] building embedded thin client package..."
+& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\build_client_release.ps1") -Version $Version -SkipBuild
+if ($LASTEXITCODE -ne 0) { throw "build_client_release.ps1 failed" }
+$clientZip = Join-Path $root "dist\hds-client-$Version-windows-x64.zip"
+if (-not (Test-Path $clientZip)) { throw "missing $clientZip" }
+$clientDst = Join-Path $stage "client"
+New-Item -ItemType Directory -Force -Path $clientDst | Out-Null
+Copy-Item $clientZip $clientDst -Force
+if (Test-Path "$clientZip.sha256.txt") { Copy-Item "$clientZip.sha256.txt" $clientDst -Force }
+
+# sha256 manifest for bin/* and client/*
 $lines = @()
 foreach ($f in Get-ChildItem -File $binDir) {
     $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
     $lines += ("{0}  bin/{1}" -f $h, $f.Name)
+}
+foreach ($f in Get-ChildItem -File $clientDst) {
+    $h = (Get-FileHash $f.FullName -Algorithm SHA256).Hash.ToLower()
+    $lines += ("{0}  client/{1}" -f $h, $f.Name)
 }
 $lines | Set-Content -Encoding ascii (Join-Path $stage "sha256.txt")
 

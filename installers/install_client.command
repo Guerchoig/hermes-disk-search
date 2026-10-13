@@ -65,17 +65,39 @@ fi
 [ -n "$TOKEN" ] || { echo "[!!] token is required"; exit 2; }
 
 BASE="${SERVER_URL%/}"
+MCP_PATH="${MCP_PATH%/}"
+SRV_VER=""
 if [ "$SKIP_HEALTH" != "yes" ]; then
     echo "== checking connection: $BASE/health =="
+    BODY="$(curl -s --max-time 10 "$BASE/health" 2>/dev/null || true)"
     CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "$BASE/health" 2>/dev/null || true)"
     if [ "$CODE" = "200" ]; then
         echo "[ok] server reachable (200)"
+        # W7: /health publishes the product version (M9) - read it for the check
+        SRV_VER="$(printf '%s' "$BODY" | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
     elif [ -n "$CODE" ] && [ "$CODE" != "000" ]; then
         echo "[!!] server responded $CODE"
     else
         echo "[!!] server not reachable - check the URL/TLS/network (--skip-health to ignore)"
         exit 3
     fi
+fi
+
+# client vs server version (W7): warn and point at the matching package.
+# The client package carries version.txt (written by build_client_release_macos.sh).
+LOCAL_VER=""
+if [ -f "$ROOT/version.txt" ]; then
+    LOCAL_VER="$(tr -d ' \t\r\n' < "$ROOT/version.txt")"
+fi
+if [ -n "$LOCAL_VER" ] && [ -n "$SRV_VER" ]; then
+    if [ "$LOCAL_VER" = "$SRV_VER" ]; then
+        echo "[ok] client/server versions match ($LOCAL_VER)"
+    else
+        echo "[!!] version mismatch: client $LOCAL_VER, server $SRV_VER"
+        echo "     get the matching package: $BASE$MCP_PATH/client-package.zip (with your token) or the release asset"
+    fi
+elif [ -z "$LOCAL_VER" ]; then
+    echo "[i] no version.txt here (dev layout) - version check skipped"
 fi
 
 echo "== writing Cline settings (MCP + rule + skill) =="

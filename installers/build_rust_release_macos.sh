@@ -76,8 +76,29 @@ for f in config.example.yaml README.md NOTICE.md; do
     fi
 done
 
-# --- sha256 manifest for bin/* -------------------------------------------------
-( cd "$STAGE" && shasum -a 256 bin/* > sha256.txt )
+# --- версия продукта и вложенный клиентский пакет (M9/W7) ----------------------
+# version.txt: версию отсюда отдают /health и мастера тонкого клиента
+# (hds_core::client::product_version). Источник — аргумент <version> скрипта.
+printf '%s\n' "$VERSION" > "$STAGE/version.txt"
+
+# Тонкий клиентский пакет собираем тем же скриптом (hds уже собран) и ВКЛАДЫВАЕМ
+# в поставку: сервер отдаёт его по `<mcp-path>/client-package.zip`, а сам zip
+# уходит в релиз отдельным ассетом.
+echo "[m9] building embedded thin client package (macOS)..."
+bash "$ROOT/installers/build_client_release_macos.sh" "$VERSION" --skip-build
+CPKG_ZIP="$ROOT/dist/hds-client-$VERSION-macos-arm64.zip"
+if [ ! -f "$CPKG_ZIP" ]; then
+    echo "missing $CPKG_ZIP" >&2
+    exit 1
+fi
+mkdir -p "$STAGE/client"
+cp -f "$CPKG_ZIP" "$STAGE/client/"
+if [ -f "$CPKG_ZIP.sha256.txt" ]; then
+    cp -f "$CPKG_ZIP.sha256.txt" "$STAGE/client/"
+fi
+
+# --- sha256 manifest for bin/* and client/* -------------------------------------
+( cd "$STAGE" && shasum -a 256 bin/* client/* > sha256.txt )
 
 echo "[w4] staged: $STAGE"
 

@@ -51,6 +51,8 @@ if (-not $Token) { Write-Host "[!!] token is required" -ForegroundColor Red; exi
 
 # --- 1. connection check: GET <ServerUrl>/health ---
 $base = $ServerUrl.TrimEnd('/')
+$mcpPath = if ($McpPath) { $McpPath.TrimEnd('/') } else { "/mcp" }
+$srvVer = ""
 if (-not $SkipHealth) {
     $health = "$base/health"
     Write-Host "== checking connection: $health =="
@@ -58,6 +60,8 @@ if (-not $SkipHealth) {
         $r = Invoke-WebRequest -Uri $health -UseBasicParsing -TimeoutSec 10
         if ($r.StatusCode -eq 200) {
             Write-Host "[ok] server reachable ($($r.StatusCode))"
+            # W7: /health publishes the product version (M9) - read it for the check
+            try { $srvVer = [string]($r.Content | ConvertFrom-Json).version } catch { $srvVer = "" }
         } else {
             Write-Host "[!!] server responded $($r.StatusCode)" -ForegroundColor Yellow
         }
@@ -66,6 +70,24 @@ if (-not $SkipHealth) {
         Write-Host "     check the URL, the TLS certificate and the network (-SkipHealth to ignore)" -ForegroundColor Yellow
         exit 3
     }
+}
+
+# --- 1b. client vs server version (W7): warn and point at the matching package ---
+# The client package carries version.txt (written by build_client_release.ps1);
+# the server reports its version in /health. A mismatch means the rule/skill or
+# the tool schema may be older than the server.
+$localVer = ""
+$verFile = Join-Path $root "version.txt"
+if (Test-Path $verFile) { $localVer = (Get-Content $verFile -Raw).Trim() }
+if ($localVer -and $srvVer) {
+    if ($localVer -eq $srvVer) {
+        Write-Host "[ok] client/server versions match ($localVer)"
+    } else {
+        Write-Host "[!!] version mismatch: client $localVer, server $srvVer" -ForegroundColor Yellow
+        Write-Host "     get the matching package: $base$mcpPath/client-package.zip (with your token) or the release asset" -ForegroundColor Yellow
+    }
+} elseif (-not $localVer) {
+    Write-Host "[i] no version.txt here (dev layout) - version check skipped"
 }
 
 # --- 2. write Cline settings (MCP + rule + skill) via hds cline-sync ---

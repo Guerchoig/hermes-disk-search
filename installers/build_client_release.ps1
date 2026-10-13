@@ -62,6 +62,10 @@ foreach ($d in @("cline-rules", "hermes-skill")) {
 $readme = Join-Path $root "installers\client_readme.md"
 if (Test-Path $readme) { Copy-Item $readme (Join-Path $stage "README.md") -Force }
 
+# Версия продукта рядом с клиентом (M9/W7): мастер сверяет её с `version` из
+# /health сервера и предупреждает, если клиент отстал (hds_core::client).
+Set-Content -Encoding ascii (Join-Path $stage "version.txt") -Value $Version
+
 # --- guard: a thin client must NOT carry heavy/server parts ------------------
 $forbidden = @("hds_mcp.exe", "llm_host.exe", "hds_mcp", "llm_host",
                "sidecar", "runtime-manifests", "assets", "install_server.ps1",

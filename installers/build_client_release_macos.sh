@@ -38,6 +38,10 @@ done
 [ -f "$ROOT/installers/install_client.command" ] && cp -f "$ROOT/installers/install_client.command" "$STAGE/install_client.command"
 [ -f "$ROOT/installers/client_readme.md" ] && cp -f "$ROOT/installers/client_readme.md" "$STAGE/README.md"
 
+# Версия продукта рядом с клиентом (M9/W7): мастер сверяет её с `version` из
+# /health сервера и предупреждает, если клиент отстал (hds_core::client).
+printf '%s\n' "$VER" > "$STAGE/version.txt"
+
 # ad-hoc sign (best effort)
 if command -v codesign >/dev/null 2>&1; then
     codesign --force -s - "$STAGE/bin/hds" >/dev/null 2>&1 || echo "[..] codesign skipped"
