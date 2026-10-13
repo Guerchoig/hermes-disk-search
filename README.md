@@ -86,7 +86,8 @@
 | `hds-<версия>-windows-x64.zip.sha256.txt`                  | по желанию     | контрольная сумма архива (шаг 2)                                                                                                                                                                                              |
 | `hds-engine-runtime-windows-x64-cuda.zip` (~570 МБ)             | нет\*                | рантайм движка (LLM + ASR) под **NVIDIA/CUDA**; для машин без NVIDIA есть `hds-engine-runtime-windows-x64-vulkan.zip` (~90 МБ, тот же рантайм под Vulkan).\*Установщик качает рантайм сам по манифесту из upstream; ассеты нужны только для установки **без интернета** (шаг 5′)   |
 | `hds-<версия>-macos-arm64.zip`                             | только для Mac | версия для Apple Silicon (см. «Установка — macOS»)                                                                                                                                                                              |
-| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                  | архивы исходников (для сборки из кода)                                                                                                                                                                                  |
+| `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                  | архивы исходников (для сборки из кода)
+| `hds-client-<версия>-windows-x64.zip` (+ `.sha256.txt`) | для тонкого клиента | клиент для ноутбука (Cline без Hermes, M9); **тот же файл** сервер отдаёт по `<ServerUrl>/mcp/client-package.zip` (см. «Клиент (ноутбук)»)                                                                                                                                                                                  |
 
 > **Модели в релиз не входят.** Установщик докачает их с HuggingFace: чат Qwen3.5-9B,
 > эмбеддинги bge-m3, реранкер bge-reranker — вместе ≈9 ГБ (плюс, по желанию, whisper ≈1.5 ГБ
@@ -342,6 +343,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 | `hds-engine-runtime-windows-x64-cuda.zip`                        | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима (NVIDIA/CUDA; есть и Vulkan-вариант для AMD/Intel) по`runtime-manifests\engine-manifest.json`; установщик скачивает его сам                                                                                                   |
 | `hds-engine-runtime-macos-arm64-metal.zip`                       | офлайн-установка | то же для macOS (Metal) —**best-effort**                                                                                                                                                                                                                                            |
 | `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                          | архивы исходников (`git archive`), только для сборки из кода                                                                                                                                                                                               |
+| `hds-client-<версия>-windows-x64.zip` (+ `.sha256.txt`) | для тонкого клиента | клиент для ноутбука (Cline без Hermes, M9): `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt`; тот же файл вложен в серверную поставку (`client/`) и отдаётся сервером по `/mcp/client-package.zip` |
 
 Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
 `runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
@@ -632,21 +634,38 @@ macOS: `installers\install_macos.command`, `installers\install_server.command`, 
 hds user add --login laptop --password "<пароль>" [--projects "D:\"]
 hds token new --user laptop --ttl-days 90          # plain-токен показывается один раз → отдать на ноутбук
 
-# 2) НА НОУТБУКЕ (права админа не нужны)
-powershell -File installers\build_client_release.ps1 -Version 0.18.0   # dist\hds-client-<ver>-windows-x64(+.zip)
+# 2) НА НОУТБУКЕ — получить клиентский пакет (права админа не нужны), два канала:
+#    а) со страницы релизов: hds-client-<версия>-windows-x64.zip (+ .sha256.txt)
+#    б) с сервера, своим токеном (тот же пакет той же версии, что у сервера):
+curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip http://192.168.0.101:8787/mcp/client-package.zip
+Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
+Get-ChildItem .\hds-client -Recurse | Unblock-File          # сняли «скачано из интернета»
+#    (dev-вариант: собрать пакет самому из репозитория —
+#     powershell -File installers\build_client_release.ps1 -Version <версия>)
+
+# 3) НА НОУТБУКЕ — подключить Cline мастером
+cd .\hds-client
 .\setup-client.ps1 -ServerUrl http://192.168.0.101:8787 -Token <ТОКЕН> [-McpPath /mcp] [-DryRun] [-SkipHealth]
 #   проще двойным щелчком:  setup-client.cmd -ServerUrl http://192.168.0.101:8787 -Token <ТОКЕН>
-# macOS:
-bash installers/install_client.command --server-url http://192.168.0.101:8787 --token <ТОКЕН> [--dry-run] [--skip-health]
+# macOS (пакет hds-client-<версия>-macos-arm64.zip; на скачанный — xattr -dr com.apple.quarantine):
+bash install_client.command --server-url http://192.168.0.101:8787 --token <ТОКЕН> [--dry-run] [--skip-health]
 
-# 3) вручную (без мастера)
+# 4) вручную (без мастера)
 hds cline-sync --server-url http://192.168.0.101:8787 --token <ТОКЕН>
 hds login --login laptop --password "<пароль>" --url http://192.168.0.101:8765   # токен самому (эндпоинт /auth/login)
 
-# 4) проверка соединения с ноутбука
-Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # ожидаем 200 {"app":"disk-search",…}
+# 5) проверка соединения с ноутбука
+Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # 200 {"app":"disk-search","version":…}
 ```
 
+* **Откуда пакет:** (а) ассет релиза `hds-client-<версия>-<платформа>.zip` — тот же файл,
+  что вложен в серверную поставку; (б) скачать с сервера по
+  `<ServerUrl>/mcp/client-package.zip` с заголовком `Authorization: Bearer <ТОКЕН>`
+  (гейт как у `/mcp`; так удобнее, когда GitHub недоступен). Через reverse-proxy путь
+  работает: он внутри опубликованного `/mcp`-префикса.
+* **Версии:** пакет несёт `version.txt`, сервер отдаёт свою версию в `/health`. Мастер
+  сверяет их и при расхождении предупреждает — правило/скилл и схема инструментов могли
+  отстать (W7).
 * Мастер: проверяет `GET <ServerUrl>/health`, пишет MCP-запись (`type: streamableHttp`,
   заголовок `Authorization: Bearer …`) в оба файла Cline, кладёт правило и скилл, затем просит
   перезапустить Cline. Повторный запуск ничего не дублирует (`-DryRun` — только план).

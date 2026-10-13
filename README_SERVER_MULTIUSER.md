@@ -426,6 +426,24 @@ sudo bash installers/install_server.command \
 ничего тяжёлого не ставит (ни движка, ни моделей, ни индекса, ни sidecar) — вся работа
 на сервере. Формат поставки — zip + скрипты; права администратора **не** нужны.
 
+**Шаг 0 (на клиентской машине): получить клиентский пакет.** Два канала:
+
+* **с сервера** (своим токеном — гейт как у `/mcp`, путь внутри опубликованного
+  `/mcp`-префикса, работает и через TLS-прокси):
+  ```powershell
+  curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
+  Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
+  Get-ChildItem .\hds-client -Recurse | Unblock-File
+  ```
+  ```bash
+  curl -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
+    unzip -q hds-client.zip -d hds-client && xattr -dr com.apple.quarantine hds-client
+  ```
+* **ассетом релиза** — `hds-client-<версия>-<платформа>.zip` (тот же файл, что вложен в
+  серверную поставку в `client/`);
+* (dev) собрать самому из репозитория: `installers/build_client_release.ps1 -Version <версия>`
+  / `build_client_release_macos.sh <версия>`.
+
 **Шаг 1 (на сервере): выписать токен** для клиента:
 
 ```powershell
@@ -470,11 +488,16 @@ bash installers/install_client.command --server-url https://host/ --token <beare
 * **Безопасность:** токен передаётся в Cline как заголовок `Authorization`; в логи/аудит он не
   пишется; мастер передаёт его в `hds` через переменную `HDS_CLINE_TOKEN` (не в командной
   строке). Без TLS (`http://`) токен идёт открытым текстом — используйте `https://`.
-* **Тонкая сборка:** `installers/build_client_release.ps1` (Windows) / `build_client_release_macos.sh`
-  (macOS) — в пакет входят только `bin\hds(.exe)`, правило/скилл, мастеры, `README`, `sha256.txt`;
-  сборщик **отвергает** «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
-* **Проверка:** `GET https://host/health` → 200; в Cline виден сервер `disk-search`; после
-  перезапуска — вопрос по файлам работает через внешний сервер.
+* **Откуда берётся пакет:** релизный ассет `hds-client-<версия>-<платформа>.zip` — и он же
+  вложен в серверную поставку (`client/`), откуда сервер отдаёт его по
+  `<mcp-path>/client-package.zip` (Bearer-гейт как у `/mcp`). Тонкую сборку делает
+  `installers/build_client_release.ps1` (Windows) / `build_client_release_macos.sh` (macOS):
+  в пакет входят только `bin\hds(.exe)`, правило/скилл, мастер, `README`, `version.txt`,
+  `sha256.txt`; сборщик **отвергает** «тяжёлые» части (`hds_mcp`/`llm_host`/`sidecar`/`runtime-manifests`).
+* **Версии (W7):** пакет несёт `version.txt`, сервер публикует `version` в `/health`; мастер
+  сверяет их и предупреждает при расхождении (правило/скилл могли отстать).
+* **Проверка:** `GET https://host/health` → 200 (`version` — версия сервера); в Cline виден
+  сервер `disk-search`; после перезапуска — вопрос по файлам работает через внешний сервер.
 
 ## 9. Десктоп-режим (по умолчанию)
 

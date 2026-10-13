@@ -45,6 +45,8 @@
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
 | `hds-engine-runtime-macos-arm64-metal.zip` | нет (best-effort) | рантайм движка под Metal |
+| `hds-client-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | тонкий клиент (M9): `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt`, `sha256.txt`; тот же файл вложен в серверную поставку (`client/`) |
+| `hds-client-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же для Apple Silicon (мастер `install_client.command`) |
 | `hermes-disk-search-<ver>-windows.zip` / `-macos.zip` | нет | `git archive HEAD` — исходники (для сборки из кода) |
 
 Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ) и исходники sidecar в архив
@@ -56,9 +58,12 @@
   ставится `fetch_engine_runtime.ps1 -PatchEngine`);
 - `clip-onnx-v1` — ONNX-модели CLIP (~850 МБ; `installers/publish_clip_models.ps1`).
 
-Тонкий клиент (`installers/build_client_release.ps1`, M9) релизным ассетом **не
-публикуется**: он собирается по запросу (в архиве только `bin\hds` + правило/скилл +
-мастеры), а актуальные исходники всегда лежат в репозитории.
+**Тонкий клиент (M9) публикуется двумя каналами.** (1) Ассетом релиза —
+`hds-client-<ver>-windows-x64.zip` / `-macos-arm64.zip` (+ `.sha256.txt`). (2) Внутрь
+серверной поставки, в `<корень>/client/`, откуда сервер отдаёт его по
+`<mcp-path>/client-package.zip` (Bearer-гейт как у `/mcp`): клиент качает пакет **своим
+токеном**, не ходя на GitHub. Пакет содержит только `bin\hds(.exe)` + правило/скилл +
+мастер + `version.txt`; версия объявляется в `/health` и сверяется мастером (W7).
 
 ## 3. Версионирование
 
@@ -116,7 +121,7 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 | `check-version` | ubuntu | да | версия тега/входа = `__version__` в `hds/__init__.py` |
 | `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, тесты воркспейса |
 | `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + воркер + модули, `uv`) |
-| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, `zip` + `sha256`, smoke `hds.exe --help` |
+| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`) |
 | `build-macos` | macos | нет (best-effort) | то же для `macos-arm64` |
 | `fetch-engine-runtime-windows-cuda` | windows | да | рантайм движка по манифесту (sha256) под CUDA → `hds-engine-runtime-windows-x64-cuda.zip` |
 | `fetch-engine-runtime-windows-vulkan` | windows | да | то же под Vulkan → `hds-engine-runtime-windows-x64-vulkan.zip` |
@@ -160,6 +165,10 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
 - **`.venv` без `pyvenv.cfg` — не интерпретатор** (лаунчер падает с «failed to locate
   pyvenv.cfg»): такой venv пропускается, тест mock-воркера скипается, sidecar в dev-режиме
   не поднимется. РЕГРЕССИЯ 13.10.2026 (см. `crates/hds-extract/src/worker.rs`).
+- **Клиентский пакет собирается вместе с серверной поставкой** (`build_rust_release*`
+  зовёт `build_client_release*` с `-SkipBuild`): он и ассет релиза, и содержимое
+  `<корень>/client/` (раздача сервером по `<mcp-path>/client-package.zip`). Версию
+  задаёт `-Version`/тег — держите её равной `__version__` (джоба `check-version`).
 - **Рантайм движка собирается только с явным `-Backend`**: на раннере без NVIDIA режим
   `auto` выбирает Vulkan — так в v0.17.0 в `hds-engine-runtime-windows-x64-cuda.zip` лежал
   Vulkan-рантайм (~86 МБ вместо ~570 МБ). Джоба `fetch-engine-runtime-windows` идёт

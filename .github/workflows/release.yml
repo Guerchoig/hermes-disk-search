@@ -140,6 +140,11 @@ jobs:
           $ver = "${{ inputs.version || github.ref_name }}" -replace '^v', ''
           Expand-Archive -Path "dist\hds-$ver-windows-x64.zip" -DestinationPath dist\check
           dist\check\bin\hds.exe --help
+          # M9: внутрь поставки вложен клиентский пакет (канал «скачать с сервера»)
+          if (-not (Test-Path "dist\check\client\hds-client-$ver-windows-x64.zip")) {
+            throw "embedded client package is missing in the server archive"
+          }
+          Write-Host ("version.txt: " + (Get-Content dist\check\version.txt -Raw).Trim())
 
       - uses: actions/upload-artifact@v5
         with:
@@ -302,6 +307,8 @@ jobs:
           $mandatory = @(
             "hds-$noV-windows-x64.zip",
             "hds-$noV-windows-x64.zip.sha256.txt",
+            "hds-client-$noV-windows-x64.zip",
+            "hds-client-$noV-windows-x64.zip.sha256.txt",
             "hds-engine-runtime-windows-x64-cuda.zip",
             "hds-engine-runtime-windows-x64-vulkan.zip"
           )
