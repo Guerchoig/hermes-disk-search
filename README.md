@@ -84,7 +84,7 @@
 | ------------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `hds-<версия>-windows-x64.zip` (~210 МБ)                 | **да**          | само приложение:`bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
 | `hds-<версия>-windows-x64.zip.sha256.txt`                  | по желанию     | контрольная сумма архива (шаг 2)                                                                                                                                                                                              |
-| `hds-engine-runtime-windows-x64-cuda.zip` (~90 МБ)             | нет\*                | рантайм движка (LLM + ASR).\*Установщик скачивает его сам по манифесту из upstream; ассет нужен только для установки **без интернета** (шаг 5′)   |
+| `hds-engine-runtime-windows-x64-cuda.zip` (~90 МБ)             | нет\*                | рантайм движка (LLM + ASR) под **NVIDIA/CUDA**; для машин без NVIDIA есть `hds-engine-runtime-windows-x64-vulkan.zip` (тот же рантайм под Vulkan).\*Установщик качает рантайм сам по манифесту из upstream; ассеты нужны только для установки **без интернета** (шаг 5′)   |
 | `hds-<версия>-macos-arm64.zip`                             | только для Mac | версия для Apple Silicon (см. «Установка — macOS»)                                                                                                                                                                              |
 | `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                  | архивы исходников (для сборки из кода)                                                                                                                                                                                  |
 
@@ -144,8 +144,9 @@ pymorphy3/mpxj, реранкера и GPU; строка про whisper/Vulkan п
 
 ### Шаг 5′. Установка без интернета (офлайн)
 
-Скачайте на другой машине `hds-<версия>-windows-x64.zip` **и**
-`hds-engine-runtime-windows-x64-cuda.zip`, распакуйте приложение (шаг 3), затем положите рантайм
+Скачайте на другой машине `hds-<версия>-windows-x64.zip` **и** рантайм движка под свою
+видеокарту — `hds-engine-runtime-windows-x64-cuda.zip` (NVIDIA) **или**
+`hds-engine-runtime-windows-x64-vulkan.zip` (AMD/Intel, без NVIDIA), распакуйте приложение (шаг 3), затем положите рантайм
 движка туда, где его ищет `llm-host`, и запустите установщик с `-SkipEngine`:
 
 ```powershell
@@ -153,6 +154,7 @@ pymorphy3/mpxj, реранкера и GPU; строка про whisper/Vulkan п
 $engine = Join-Path $env:APPDATA 'OpenResearchTools\TranscribeOffline\Engine'
 New-Item -ItemType Directory -Force $engine | Out-Null
 Expand-Archive .\hds-engine-runtime-windows-x64-cuda.zip -DestinationPath $engine -Force
+# без NVIDIA — тот же путь, но архив hds-engine-runtime-windows-x64-vulkan.zip
 
 # поставить всё, кроме скачиваемого движка и моделей
 powershell -NoProfile -ExecutionPolicy Bypass -File .\setup.ps1 -SkipEngine -SkipModels
@@ -337,7 +339,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 | ------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`)         | **да (Windows)**        | основной архив:`bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
 | `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`)         | **да (macOS)**          | то же для Apple Silicon —**best-effort**                                                                                                                                                                                                                                            |
-| `hds-engine-runtime-windows-x64-cuda.zip`                        | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима по`runtime-manifests\engine-manifest.json`; установщик скачивает его сам                                                                                                   |
+| `hds-engine-runtime-windows-x64-cuda.zip`                        | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима (NVIDIA/CUDA; есть и Vulkan-вариант для AMD/Intel) по`runtime-manifests\engine-manifest.json`; установщик скачивает его сам                                                                                                   |
 | `hds-engine-runtime-macos-arm64-metal.zip`                       | офлайн-установка | то же для macOS (Metal) —**best-effort**                                                                                                                                                                                                                                            |
 | `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                          | архивы исходников (`git archive`), только для сборки из кода                                                                                                                                                                                               |
 

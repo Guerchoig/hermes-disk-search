@@ -8,7 +8,10 @@ name: Rust CI
 
 on:
   push:
-    branches: [main, w2-llm-host]
+    # Ветки, с которых собирается продукт и режется релиз (RELEASING.md §4):
+    # `server-multiuser` — текущая боевая ветка серверной подсистемы; `main` и
+    # `w2-llm-host` — история (main = Python-эпоха, w2-llm-host = ядро на Rust).
+    branches: [main, w2-llm-host, server-multiuser]
   pull_request:
   workflow_dispatch:
 
