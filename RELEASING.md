@@ -160,6 +160,10 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
 - **`.venv` без `pyvenv.cfg` — не интерпретатор** (лаунчер падает с «failed to locate
   pyvenv.cfg»): такой venv пропускается, тест mock-воркера скипается, sidecar в dev-режиме
   не поднимется. РЕГРЕССИЯ 13.10.2026 (см. `crates/hds-extract/src/worker.rs`).
+- **Рантайм движка собирается только с явным `-Backend`**: на раннере без NVIDIA режим
+  `auto` выбирает Vulkan — так в v0.17.0 в `hds-engine-runtime-windows-x64-cuda.zip` лежал
+  Vulkan-рантайм (~86 МБ вместо ~570 МБ). Джоба `fetch-engine-runtime-windows` идёт
+  матрицей `cuda`/`vulkan` именно поэтому.
 - **Не выпускать с красными тестами** и не «глушить» мигающие тесты: `test-rust`
   блокирует выпуск, а мигание почти всегда означает гонку/тайминг в продукте.
 - **Кросс-платформенность обязательна**: блокирующая джоба `test-rust` идёт на ubuntu,

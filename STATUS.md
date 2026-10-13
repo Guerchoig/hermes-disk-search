@@ -1,6 +1,15 @@
 # Состояние проекта hermes-disk-search — контекст для нового чата
 
-> Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (private).
+> Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
+>
+> **Релиз 0.18.0 выпущен (13.10.2026, ветка `server-multiuser`, тег `v0.18.0`):** вся
+> серверная подсистема M1–M9 в релизе; ассеты — Windows x64, **два** рантайма движка
+> (CUDA и новый **Vulkan** для машин без NVIDIA), macOS (best-effort) + исходники. Правила
+> выпуска переписаны (`RELEASING.md`), релизный CI — `.github/workflows/release.yml`:
+> джоба `check-version` (тег = `__version__`), оба Windows-рантайма **блокирующие**,
+> идемпотентная публикация (повторный прогон перезаливает ассеты). Ветка
+> `server-multiuser` прогоняется в `rust.yml` — релиз впервые собрался по-настоящему
+> зелёным на Linux/macOS/Windows; что нового — `RELEASE_NOTES_v0.18.0.md`.
 >
 > **M1 «Фундамент доступа» выполнен (07.10.2026, ветка `server-multiuser`):** проекты
 > (`index.roots` → `files.project`, переиндексация обязательна), Argon2id-пароли +
