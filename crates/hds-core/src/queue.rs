@@ -302,14 +302,24 @@ impl HeavyQueue {
                 None => st.users.get(user).is_some_and(|q| !q.waiting.is_empty()),
             };
             if self.can_admit(&st, user) && !ahead_of_me {
-                if let Some(seq) = enqueued.take() {
-                    remove_waiter(&mut st, user, seq);
-                    rotate_rr(&mut st, user);
-                }
+                // F11 (релизная приёмка): быстрый путь С ПЕРВОЙ попытки ожиданием
+                // не является — пишем честный ноль, а не «сколько успел занять
+                // цикл» (`started.elapsed()` на загруженной машине давал 1 мс:
+                // тест `admits_immediately_when_free` падал, а p50/p95 очереди
+                // засорялись «ожиданием» от каждого мгновенного запроса).
+                // Заявка, уже стоявшая в очереди (`enqueued`), — настоящее
+                // ожидание, его и измеряем.
+                let waited = match enqueued.take() {
+                    Some(seq) => {
+                        remove_waiter(&mut st, user, seq);
+                        rotate_rr(&mut st, user);
+                        started.elapsed()
+                    }
+                    None => Duration::ZERO,
+                };
                 st.executing += 1;
                 st.granted += 1;
                 st.users.entry(user.to_string()).or_default().executing += 1;
-                let waited = started.elapsed();
                 record_wait(&mut st, waited.as_millis() as u64);
                 drop(st);
                 return Ok(QueueTicket {

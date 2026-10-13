@@ -56,9 +56,19 @@ pub fn discover_python(root: &Path) -> Option<PathBuf> {
     if let Some(p) = find_python_exe(&root.join("sidecar").join("python")) {
         return Some(p);
     }
-    let venv = root.join(".venv").join("Scripts").join("python.exe");
-    if venv.exists() {
-        return Some(venv);
+    // Фолбэк для разработки: `.venv` проекта. Берём только ЦЕЛЫЙ venv: лаунчер
+    // `Scripts\python.exe` требует рядом `pyvenv.cfg` и без него падает с
+    // «failed to locate pyvenv.cfg» — недоделанный/обрушенный venv на машине
+    // разработчика выглядел как «рабочий» интерпретатор, и воркер не поднимался
+    // с непонятной ошибкой («поток вывода закрыт (процесс упал?)»).
+    // РЕГРЕССИЯ (13.10.2026): релизная приёмка падала на тесте mock-воркера —
+    // в репозитории лежал `.venv` без `pyvenv.cfg`.
+    let venv = root.join(".venv");
+    if venv.join("pyvenv.cfg").exists() {
+        let py = venv.join("Scripts").join("python.exe");
+        if py.exists() {
+            return Some(py);
+        }
     }
     None
 }
@@ -346,4 +356,78 @@ fn start_process(cfg: &WorkerConfig) -> Result<(Child, ChildStdin, Receiver<Stri
         }
     });
     Ok((child, stdin, rx))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Свой временный каталог (внешних зависимостей у крейта нет — tempfile
+    /// не тянем).
+    fn tmp_root(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir =
+            std::env::temp_dir().join(format!("hds-extract-{tag}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Явный `HDS_EXTRACT_PYTHON` сильнее всего — тесты поиска тогда не имеют смысла.
+    fn skip_if_env_python() -> bool {
+        std::env::var("HDS_EXTRACT_PYTHON").is_ok_and(|v| !v.is_empty())
+    }
+
+    /// РЕГРЕССИЯ (13.10.2026): `.venv` без `pyvenv.cfg` — не интерпретатор.
+    ///
+    /// Лаунчер `Scripts\python.exe` требует `pyvenv.cfg` рядом и без него падает с
+    /// «failed to locate pyvenv.cfg»; воркер не поднимался, а релизная приёмка
+    /// падала на тесте mock-воркера. Такой venv пропускаем (интерпретатора нет),
+    /// целый — берём.
+    #[test]
+    fn broken_venv_is_not_an_interpreter() {
+        if skip_if_env_python() {
+            println!("пропуск: задан HDS_EXTRACT_PYTHON");
+            return;
+        }
+        let root = tmp_root("broken-venv");
+        let scripts = root.join(".venv").join("Scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(scripts.join("python.exe"), b"").unwrap();
+        assert_eq!(
+            discover_python(&root),
+            None,
+            "обрушенный venv (нет pyvenv.cfg) не годится как интерпретатор"
+        );
+
+        std::fs::write(root.join(".venv").join("pyvenv.cfg"), b"home = x").unwrap();
+        assert_eq!(
+            discover_python(&root),
+            Some(scripts.join("python.exe")),
+            "целый venv — валидный фолбэк для разработки"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Поставка (`sidecar/python`) приоритетнее dev-venv.
+    #[test]
+    fn shipped_python_wins_over_venv() {
+        if skip_if_env_python() {
+            println!("пропуск: задан HDS_EXTRACT_PYTHON");
+            return;
+        }
+        let root = tmp_root("sidecar-priority");
+        let shipped = root.join("sidecar").join("python").join("portable");
+        std::fs::create_dir_all(&shipped).unwrap();
+        std::fs::write(shipped.join("python.exe"), b"").unwrap();
+        let venv_scripts = root.join(".venv").join("Scripts");
+        std::fs::create_dir_all(&venv_scripts).unwrap();
+        std::fs::write(venv_scripts.join("python.exe"), b"").unwrap();
+        std::fs::write(root.join(".venv").join("pyvenv.cfg"), b"home = x").unwrap();
+
+        assert_eq!(discover_python(&root), Some(shipped.join("python.exe")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }
