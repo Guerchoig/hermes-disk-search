@@ -88,6 +88,8 @@
 | `hds-<версия>-macos-arm64.zip`                             | только для Mac | версия для Apple Silicon (см. «Установка — macOS»)                                                                                                                                                                              |
 | `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                  | архивы исходников (для сборки из кода)
 | `hds-client-<версия>-windows-x64.zip` (+ `.sha256.txt`) | для тонкого клиента | клиент для ноутбука (Cline без Hermes, M9); **тот же файл** сервер отдаёт по `<ServerUrl>/mcp/client-package.zip` (см. «Клиент (ноутбук)»)                                                                                                                                                                                  |
+| `client-install.ps1` / `client-install.sh` | для тонкого клиента | скрипт-установщик (токен — аргументом): сам скачает пакет с сервера под платформу клиента (`?platform=`), распакует и подключит Cline; сервер отдаёт его **публично** по `/mcp/client-install.ps1\|sh` |
+
 
 > **Модели в релиз не входят.** Установщик докачает их с HuggingFace: чат Qwen3.5-9B,
 > эмбеддинги bge-m3, реранкер bge-reranker — вместе ≈9 ГБ (плюс, по желанию, whisper ≈1.5 ГБ
@@ -344,6 +346,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 | `hds-engine-runtime-macos-arm64-metal.zip`                       | офлайн-установка | то же для macOS (Metal) —**best-effort**                                                                                                                                                                                                                                            |
 | `hermes-disk-search-<версия>-windows.zip` / `-macos.zip` | нет                          | архивы исходников (`git archive`), только для сборки из кода                                                                                                                                                                                               |
 | `hds-client-<версия>-windows-x64.zip` (+ `.sha256.txt`) | для тонкого клиента | клиент для ноутбука (Cline без Hermes, M9): `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt`; тот же файл вложен в серверную поставку (`client/`) и отдаётся сервером по `/mcp/client-package.zip` |
+| `client-install.ps1` / `client-install.sh` | для тонкого клиента | скрипт-установщик (токен — аргументом): скачивает пакет с сервера под платформу клиента (`?platform=`), распаковывает, снимает блокировку/карантин и запускает мастер; сервер отдаёт его публично по `/mcp/client-install.ps1\|sh` |
 
 Модели CLIP в релиз не входят (≈850 МБ) — отдельный тег `clip-onnx-v1`, установщик скачивает по
 `runtime-manifests\clip-manifest.json`. GGUF/whisper — по URL из `installers\fetch_llm_models.ps1` /
@@ -629,6 +632,26 @@ macOS: `installers\install_macos.command`, `installers\install_server.command`, 
 
 ### 9. Клиент (ноутбук): подключение к серверу
 
+**Установка клиента — три шага** (самый быстрый путь; подробности и ручной вариант — ниже):
+
+1. **Админ выдаёт токен** и говорит адрес сервера:
+   ```powershell
+   hds user add --login laptop --password "<пароль>" [--projects "D:\"]
+   hds token new --user laptop --ttl-days 90        # plain-токен показывается один раз → отдать на ноутбук
+   ```
+2. **Пользователь скачивает скрипт-установщик из общедоступного места** (для этого токен
+   **не нужен**): с сервера — `curl.exe -f https://host/mcp/client-install.ps1 -o client-install.ps1`
+   (macOS: `.../mcp/client-install.sh`), либо ассетом релиза `client-install.ps1` / `client-install.sh`.
+3. **Запускает его с токеном** — скрипт сам скачает клиентский пакет с сервера (тот, что под
+   платформу клиента), распакует, снимет «скачано из интернета»/карантин и подключит Cline:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\client-install.ps1 -Token <ТОКЕН> -ServerUrl https://host
+   # macOS:  bash client-install.sh --token <ТОКЕН> --server-url https://host
+   ```
+   Затем перезапустите Cline (Desktop/CLI). Права администратора не нужны.
+
+### 9.1. Ручной путь (ровно то, что делает скрипт)
+
 ```powershell
 # 1) НА СЕРВЕРЕ — учётка и токен для ноутбука
 hds user add --login laptop --password "<пароль>" [--projects "D:\"]
@@ -663,6 +686,13 @@ Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # 2
   `<ServerUrl>/mcp/client-package.zip` с заголовком `Authorization: Bearer <ТОКЕН>`
   (гейт как у `/mcp`; так удобнее, когда GitHub недоступен). Через reverse-proxy путь
   работает: он внутри опубликованного `/mcp`-префикса.
+* **Платформа пакета:** в поставке лежат **оба** пакета, и сервер выбирает нужный по
+  `?platform=windows-x64|macos-arm64`, иначе по `User-Agent` клиента, иначе по своей
+  платформе. Скрипты-установщики подставляют параметр сами; вручную:
+  `curl.exe -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip "https://host/mcp/client-package.zip?platform=macos-arm64"`.
+* **Скрипты-установщики** (`client-install.ps1` / `client-install.sh`) отдаются сервером
+  **публично** (без токена) по `<ServerUrl>/mcp/client-install.ps1|sh` — в них нет секретов,
+  токен пользователь передаёт аргументом; те же файлы лежат ассетами релиза.
 * **Версии:** пакет несёт `version.txt`, сервер отдаёт свою версию в `/health`. Мастер
   сверяет их и при расхождении предупреждает — правило/скилл и схема инструментов могли
   отстать (W7).

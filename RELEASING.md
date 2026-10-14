@@ -47,6 +47,7 @@
 | `hds-engine-runtime-macos-arm64-metal.zip` | нет (best-effort) | рантайм движка под Metal |
 | `hds-client-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | тонкий клиент (M9): `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt`, `sha256.txt`; тот же файл вложен в серверную поставку (`client/`) |
 | `hds-client-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же для Apple Silicon (мастер `install_client.command`) |
+| `client-install.ps1` / `client-install.sh` | **да** | скрипт-установщик для клиента (токен — аргументом): скачивает пакет с сервера под платформу клиента, распаковывает и запускает мастер. Сервер отдаёт тот же файл **публично** по `<mcp-path>/client-install.ps1\|sh` |
 | `hermes-disk-search-<ver>-windows.zip` / `-macos.zip` | нет | `git archive HEAD` — исходники (для сборки из кода) |
 
 Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ) и исходники sidecar в архив
@@ -58,12 +59,15 @@
   ставится `fetch_engine_runtime.ps1 -PatchEngine`);
 - `clip-onnx-v1` — ONNX-модели CLIP (~850 МБ; `installers/publish_clip_models.ps1`).
 
-**Тонкий клиент (M9) публикуется двумя каналами.** (1) Ассетом релиза —
-`hds-client-<ver>-windows-x64.zip` / `-macos-arm64.zip` (+ `.sha256.txt`). (2) Внутрь
-серверной поставки, в `<корень>/client/`, откуда сервер отдаёт его по
-`<mcp-path>/client-package.zip` (Bearer-гейт как у `/mcp`): клиент качает пакет **своим
-токеном**, не ходя на GitHub. Пакет содержит только `bin\hds(.exe)` + правило/скилл +
-мастер + `version.txt`; версия объявляется в `/health` и сверяется мастером (W7).
+**Тонкий клиент (M9) публикуется двумя каналами.** (1) Ассетами релиза —
+`hds-client-<ver>-windows-x64.zip` / `-macos-arm64.zip` (+ `.sha256.txt`) и скриптами
+`client-install.ps1` / `client-install.sh`. (2) Внутрь **серверной** поставки, в
+`<корень>/client/`, откуда сервер отдаёт их по `<mcp-path>/…`: пакет —
+`client-package.zip` (Bearer-гейт как у `/mcp`; платформа выбирается `?platform=` → `User-Agent`
+→ платформа сервера), скрипт-установщик — **публично** (токен пользователь передаёт
+аргументом). В поставке держим **оба** пакета (кросс-вложение на релизе), чтобы сервер мог
+выдать клиенту его платформу. Пакет содержит только `bin\hds(.exe)` + правило/скилл + мастер +
+`version.txt`; версия объявляется в `/health` и сверяется мастером (W7).
 
 ## 3. Версионирование
 
@@ -126,7 +130,7 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 | `fetch-engine-runtime-windows-cuda` | windows | да | рантайм движка по манифесту (sha256) под CUDA → `hds-engine-runtime-windows-x64-cuda.zip` |
 | `fetch-engine-runtime-windows-vulkan` | windows | да | то же под Vulkan → `hds-engine-runtime-windows-x64-vulkan.zip` |
 | `fetch-engine-runtime-macos` | macos | нет (best-effort) | то же под Metal |
-| `release` | windows | — | публикует релиз, если **Windows-джобы** успешны (`build-windows` + оба рантайма); mac-ассеты подключаются, если их джобы прошли |
+| `release` | windows | — | публикует релиз, если **Windows-джобы** успешны (`build-windows` + оба рантайма); mac-ассеты подключаются, если их джобы прошли; здесь же — кросс-вложение обоих клиентских пакетов в оба серверных архива и пересчёт их sha256 |
 
 `release` идемпотентен: если релиз уже существует, ассеты перезаливаются
 (`gh release upload --clobber`), новый тег не создаётся. При `workflow_dispatch` тег
@@ -167,8 +171,14 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
   не поднимется. РЕГРЕССИЯ 13.10.2026 (см. `crates/hds-extract/src/worker.rs`).
 - **Клиентский пакет собирается вместе с серверной поставкой** (`build_rust_release*`
   зовёт `build_client_release*` с `-SkipBuild`): он и ассет релиза, и содержимое
-  `<корень>/client/` (раздача сервером по `<mcp-path>/client-package.zip`). Версию
-  задаёт `-Version`/тег — держите её равной `__version__` (джоба `check-version`).
+  `<корень>/client/` (раздача сервером по `<mcp-path>/client-package.zip`), туда же кладутся
+  скрипты `client-install.ps1|sh` (публичная раздача). Версию задаёт `-Version`/тег —
+  держите её равной `__version__` (джоба `check-version`).
+- **Локальная сборка кладёт клиентский пакет только своей платформы** (Windows-сборка —
+  `*-windows-x64.zip`). Оба пакета в серверном архиве появляются на релизе: шаг
+  «Cross-embed both client packages» в `release.yml` докладывает недостающий и пересчитывает
+  `sha256` архива. При ручной проверке раздачи указывайте платформу явно:
+  `…/mcp/client-package.zip?platform=macos-arm64` (иначе берётся платформа сервера/`User-Agent`).
 - **Рантайм движка собирается только с явным `-Backend`**: на раннере без NVIDIA режим
   `auto` выбирает Vulkan — так в v0.17.0 в `hds-engine-runtime-windows-x64-cuda.zip` лежал
   Vulkan-рантайм (~86 МБ вместо ~570 МБ). Джоба `fetch-engine-runtime-windows` идёт

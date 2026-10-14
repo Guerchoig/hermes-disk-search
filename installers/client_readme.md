@@ -10,7 +10,24 @@ disk-search. Движка, моделей, индекса и sidecar здесь 
 - `version.txt` — версия пакета (мастер сверяет её с `version` из `/health` сервера);
 - `sha256.txt` — контрольные суммы `bin/*`.
 
-## Как получить пакет
+## Установка одной командой (рекомендуется)
+Скачайте скрипт-установщик (для этого токен **не** нужен — скрипт отдаётся публично)
+и запустите его с токеном:
+
+```powershell
+curl.exe -f https://host/mcp/client-install.ps1 -o client-install.ps1
+powershell -ExecutionPolicy Bypass -File .\client-install.ps1 -Token <ТОКЕН> -ServerUrl https://host
+```
+```bash
+curl -f https://host/mcp/client-install.sh -o client-install.sh
+bash client-install.sh --token <ТОКЕН> --server-url https://host
+```
+
+Скрипт сам скачает клиентский пакет под вашу платформу (`?platform=`), распакует его,
+снимет блокировку/карантин и запустит мастер (он же сверяет версии). Затем перезапустите
+Cline. Права администратора не нужны.
+
+## Как получить пакет вручную
 Два канала (файл один и тот же):
 1. **с сервера** (своим токеном; так удобнее без доступа к GitHub):
    ```powershell
