@@ -288,6 +288,59 @@ jobs:
           git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
           git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-macos.zip" HEAD
 
+      - name: Client bootstrap scripts into dist (public installers)
+        shell: pwsh
+        run: |
+          # Скрипты, которые сервер отдаёт ПУБЛИЧНО (без токена) — их публикуем и
+          # ассетом, чтобы «общедоступное место» было и без сервера.
+          Copy-Item installers/client-install.ps1, installers/client-install.sh dist -Force
+          Get-ChildItem dist -Filter "client-install.*" | ForEach-Object { Write-Host ("  " + $_.Name) }
+
+      - name: Cross-embed both client packages into server archives
+        shell: pwsh
+        env:
+          VERSION: ${{ inputs.version || github.ref_name }}
+        run: |
+          # В поставке должны лежать ОБА клиентских пакета (windows-x64 + macos-arm64):
+          # тогда сервер выдаёт клиенту его платформу (см. hds_core::client::pick_package).
+          # Каждый build-* собирает свой пакет сам, поэтому недостающий докладываем сюда
+          # и пересчитываем sha256 серверного архива (он изменился).
+          $ver = "$env:VERSION" -replace '^v', ''
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $pkgs = @(Get-ChildItem dist -Filter "hds-client-$ver-*.zip" -ErrorAction SilentlyContinue)
+          if ($pkgs.Count -eq 0) { throw "no client packages found in dist" }
+          Write-Host ("[..] client packages: " + (($pkgs | ForEach-Object { $_.Name }) -join ", "))
+          $servers = @(Get-ChildItem dist -Filter "hds-*-windows-x64.zip" -ErrorAction SilentlyContinue) +
+                     @(Get-ChildItem dist -Filter "hds-*-macos-arm64.zip" -ErrorAction SilentlyContinue) |
+                     Where-Object { $_.Name -notlike "hds-client-*" }
+          if (@($servers).Count -eq 0) { throw "no server archives found in dist" }
+          foreach ($zip in $servers) {
+            $changed = $false
+            $archive = [System.IO.Compression.ZipFile]::Open($zip.FullName, 'Update')
+            try {
+              foreach ($p in $pkgs) {
+                $entry = "client/" + $p.Name
+                if ($archive.GetEntry($entry)) { continue }
+                [void][System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                  $archive, $p.FullName, $entry, [System.IO.Compression.CompressionLevel]::Optimal)
+                $changed = $true
+              }
+            } finally { $archive.Dispose() }
+            if (-not $changed) { Write-Host "[i] $($zip.Name): оба пакета уже внутри"; continue }
+            $h = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
+            "$h  $($zip.Name)" | Set-Content -Encoding ascii "$($zip.FullName).sha256.txt"
+            # Проверка: оба пакета реально внутри архива.
+            $check = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
+            try {
+              foreach ($p in $pkgs) {
+                if (-not $check.GetEntry("client/" + $p.Name)) {
+                  throw "$($zip.Name): missing client/$($p.Name)"
+                }
+              }
+            } finally { $check.Dispose() }
+            Write-Host "[ok] $($zip.Name): вложены оба пакета, sha256 обновлён"
+          }
+
       - name: Publish release (idempotent)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -309,6 +362,8 @@ jobs:
             "hds-$noV-windows-x64.zip.sha256.txt",
             "hds-client-$noV-windows-x64.zip",
             "hds-client-$noV-windows-x64.zip.sha256.txt",
+            "client-install.ps1",
+            "client-install.sh",
             "hds-engine-runtime-windows-x64-cuda.zip",
             "hds-engine-runtime-windows-x64-vulkan.zip"
           )
@@ -320,6 +375,7 @@ jobs:
           $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += Get-ChildItem dist -Filter "hds-engine-runtime-windows-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += Get-ChildItem dist -Filter "hds-*-macos-arm64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "client-install.*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += Get-ChildItem dist -Filter "hds-engine-runtime-macos-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += "hermes-disk-search-$tag-windows.zip"
           $assets += "hermes-disk-search-$tag-macos.zip"

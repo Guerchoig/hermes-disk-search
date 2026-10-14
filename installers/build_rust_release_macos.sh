@@ -96,6 +96,13 @@ cp -f "$CPKG_ZIP" "$STAGE/client/"
 if [ -f "$CPKG_ZIP.sha256.txt" ]; then
     cp -f "$CPKG_ZIP.sha256.txt" "$STAGE/client/"
 fi
+# Скрипты-бутстрапы: сервер отдаёт их публично (без токена) по
+# `<mcp-path>/client-install.ps1|sh`; токен пользователь передаёт аргументом.
+for f in client-install.ps1 client-install.sh; do
+    if [ -f "$ROOT/installers/$f" ]; then
+        cp -f "$ROOT/installers/$f" "$STAGE/client/"
+    fi
+done
 
 # --- sha256 manifest for bin/* and client/* -------------------------------------
 ( cd "$STAGE" && shasum -a 256 bin/* client/* > sha256.txt )

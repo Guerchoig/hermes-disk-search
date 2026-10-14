@@ -109,6 +109,14 @@ New-Item -ItemType Directory -Force -Path $clientDst | Out-Null
 Copy-Item $clientZip $clientDst -Force
 if (Test-Path "$clientZip.sha256.txt") { Copy-Item "$clientZip.sha256.txt" $clientDst -Force }
 
+# Скрипты-бутстрапы: сервер отдаёт их ПУБЛИЧНО (без токена) по
+# `<mcp-path>/client-install.ps1|sh` — это и есть «общедоступное место», откуда
+# клиент скачивает установщик; токен пользователь передаёт аргументом.
+foreach ($f in @("client-install.ps1", "client-install.sh")) {
+    $src = Join-Path $root "installers\$f"
+    if (Test-Path $src) { Copy-Item $src $clientDst -Force }
+}
+
 # sha256 manifest for bin/* and client/*
 $lines = @()
 foreach ($f in Get-ChildItem -File $binDir) {

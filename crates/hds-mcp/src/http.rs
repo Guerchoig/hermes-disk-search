@@ -241,6 +241,9 @@ struct ReqHead {
     authorization: Option<String>,
     x_forwarded_for: Option<String>,
     x_forwarded_proto: Option<String>,
+    /// `User-Agent` — по нему выбирается клиентский пакет под платформу клиента
+    /// (M9, `hds_core::client::platform_from_user_agent`).
+    user_agent: Option<String>,
 }
 
 /// Исход чтения запроса (M3 T4): тело сверх лимита — `413` без чтения тела.
@@ -315,6 +318,9 @@ fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
         if let Some(v) = low.strip_prefix("x-forwarded-proto:") {
             h.x_forwarded_proto = Some(v.trim().to_string());
         }
+        if let Some(v) = low.strip_prefix("user-agent:") {
+            h.user_agent = Some(v.trim().to_string());
+        }
     }
     // M3 T4 (F8): тело сверх лимита — сразу 413. F4 (T0): дочитываем тело
     // (в пределах cap), иначе закрытие с непрочитанным телом → RST.
@@ -373,25 +379,55 @@ fn write_reply_with(
     let _ = stream.flush();
 }
 
-/// Отдать клиентский пакет (M9): тело — **байты** (zip), поэтому заголовки пишем
-/// сами, а файл — чанками: `Reply` текстовый (`String`) и для бинарника не годится.
-fn serve_client_package(stream: &mut TcpStream, path: &Path) {
-    let name = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("hds-client.zip");
+/// Имя скрипта-бутстрапа, если путь запроса — `<mcp-path>/<client-install.ps1|sh>`
+/// (публичный путь, без токена).
+fn script_file_for(path_only: &str, mcp_path: &str) -> Option<String> {
+    let prefix = format!("{}/", mcp_path.trim_end_matches('/'));
+    let rest = path_only.strip_prefix(&prefix)?;
+    hds_core::client::INSTALL_SCRIPTS
+        .iter()
+        .find(|f| **f == rest)
+        .map(|f| (*f).to_string())
+}
+
+/// Значение параметра из query-строки (`?platform=windows` → `windows`).
+fn query_param(path: &str, name: &str) -> Option<String> {
+    let q = path.split_once('?')?.1;
+    q.split('&')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.eq_ignore_ascii_case(name))
+        .map(|(_, v)| v.to_string())
+}
+
+/// Отдать файл «как есть» (zip клиентского пакета, скрипт): тело — **байты**,
+/// поэтому заголовки собираем сами, а файл пишем чанками — `Reply` текстовый
+/// (`String`) и для бинарника не годится.
+fn serve_file_bytes(
+    stream: &mut TcpStream,
+    path: &Path,
+    ctype: &str,
+    extra: &[(&str, String)],
+    name: &str,
+    attachment: bool,
+) {
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     let mut file = match std::fs::File::open(path) {
         Ok(f) if len > 0 => f,
         _ => {
-            write_reply(stream, client_package_missing());
+            write_reply(stream, script_missing(name));
             return;
         }
     };
-    let head = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/zip\r\nContent-Length: {len}\r\n\
-         Content-Disposition: attachment; filename=\"{name}\"\r\nConnection: close\r\n\r\n"
-    );
+    let mut head = format!("HTTP/1.1 200 OK\r\nContent-Type: {ctype}\r\nContent-Length: {len}\r\n");
+    if attachment {
+        head.push_str(&format!(
+            "Content-Disposition: attachment; filename=\"{name}\"\r\n"
+        ));
+    }
+    for (k, v) in extra {
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    head.push_str("Connection: close\r\n\r\n");
     if stream.write_all(head.as_bytes()).is_err() {
         return;
     }
@@ -410,14 +446,38 @@ fn serve_client_package(stream: &mut TcpStream, path: &Path) {
     let _ = stream.flush();
 }
 
-/// Ответ, когда клиентский пакет не вложен в поставку (dev-сборка): 404 и
-/// подсказка, где его взять.
-fn client_package_missing() -> Reply {
+/// 404, когда клиентский файл не вложен в поставку (dev-сборка / не собрали).
+fn script_missing(name: &str) -> Reply {
+    (
+        404,
+        "application/json",
+        json!({
+            "error": "client-file-missing",
+            "file": name,
+            "hint": "файл не вложен в поставку: соберите серверный архив \
+                     (installers/build_rust_release.ps1 — он кладёт client/), либо \
+                     возьмите клиентские файлы со страницы релиза",
+            "version": hds_core::client::product_version()
+        })
+        .to_string(),
+    )
+}
+
+/// 404, когда клиентского пакета (zip) в поставке нет: перечисляем, что есть, и
+/// подсказываем, где взять нужную платформу.
+fn client_package_missing(root: &Path, want: &str) -> Reply {
+    let have: Vec<String> = hds_core::client::packages_in(root)
+        .iter()
+        .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+        .map(|s| s.to_string())
+        .collect();
     (
         404,
         "application/json",
         json!({
             "error": "client-package-missing",
+            "platform": want,
+            "available": have,
             "hint": "пакет не вложен в поставку (dev-сборка): соберите его \
                      installers/build_client_release.ps1 (Windows) или \
                      build_client_release_macos.sh (macOS), либо возьмите ассет \
@@ -870,38 +930,86 @@ fn serve_request(
         write_reply_with(stream, r, &rate_limit_headers(l, retry));
         return;
     }
-    // Логистика тонкого клиента (M9): скачивание клиентского пакета, вложенного в
-    // поставку. Путь — внутри опубликованного `<mcp-path>`-префикса (образцы
-    // reverse-proxy публикуют наружу только `/mcp` и `/ui`, `installers/proxy/`),
-    // гейт — тот же Bearer, что у `/mcp` (клиент качает своим токеном).
-    if m == "GET" && p_only == hds_core::client::package_route(mp) {
-        if env.enabled && auth::resolve_bearer(env, head.authorization.as_deref()).is_none() {
-            if let Some(a) = &env.audit {
-                a.record(
-                    &hds_core::audit::AuditEvent {
-                        ts: 0,
-                        event: "unauthorized".into(),
-                        user: None,
-                        ip: ip.clone(),
-                        method: m.into(),
-                        path: p.into(),
-                        tool: None,
-                        projects: None,
-                        token: None,
-                        status: 401,
-                        ms: 0,
-                    }
-                    .now(),
-                );
+    // Логистика тонкого клиента (M9): оба пути — внутри опубликованного
+    // `<mcp-path>`-префикса (образцы reverse-proxy публикуют наружу только `/mcp`
+    // и `/ui`, `installers/proxy/`).
+    if m == "GET" {
+        // (а) скрипт-бутстрап — ПУБЛИЧНО (без токена): в нём секретов нет, токен
+        //     пользователь передаёт аргументом. Это и есть «общедоступное место»,
+        //     откуда клиент скачивает сам установщик.
+        if let Some(file) = script_file_for(p_only, mp) {
+            match hds_core::client::package_file(&file) {
+                Some(path) => serve_file_bytes(
+                    stream,
+                    &path,
+                    "text/plain; charset=utf-8",
+                    &[],
+                    &file,
+                    false,
+                ),
+                None => write_reply(stream, script_missing(&file)),
             }
-            write_reply(stream, unauthorized());
             return;
         }
-        match hds_core::client::package() {
-            Some(path) => serve_client_package(stream, &path),
-            None => write_reply(stream, client_package_missing()),
+        // (б) клиентский пакет — за тем же Bearer-гейтом, что `/mcp`. Платформа:
+        //     `?platform=…` → `User-Agent` → платформа сервера. В поставке лежат оба
+        //     пакета (windows-x64 и macos-arm64), поэтому сервер может выдать клиенту
+        //     «его» пакет.
+        if p_only == hds_core::client::package_route(mp) {
+            if env.enabled && auth::resolve_bearer(env, head.authorization.as_deref()).is_none() {
+                if let Some(a) = &env.audit {
+                    a.record(
+                        &hds_core::audit::AuditEvent {
+                            ts: 0,
+                            event: "unauthorized".into(),
+                            user: None,
+                            ip: ip.clone(),
+                            method: m.into(),
+                            path: p.into(),
+                            tool: None,
+                            projects: None,
+                            token: None,
+                            status: 401,
+                            ms: 0,
+                        }
+                        .now(),
+                    );
+                }
+                write_reply(stream, unauthorized());
+                return;
+            }
+            let want = query_param(p, "platform")
+                .and_then(|v| hds_core::client::normalize_platform(&v))
+                .or_else(|| {
+                    head.user_agent
+                        .as_deref()
+                        .and_then(hds_core::client::platform_from_user_agent)
+                })
+                .unwrap_or_else(hds_core::client::current_platform);
+            let root = hds_core::config::project_root();
+            match hds_core::client::pick_package(&root, &want) {
+                Some(path) => {
+                    let name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("hds-client.zip")
+                        .to_string();
+                    serve_file_bytes(
+                        stream,
+                        &path,
+                        "application/zip",
+                        &[
+                            ("X-Client-Package", name.clone()),
+                            ("X-Client-Platform", want.clone()),
+                        ],
+                        &name,
+                        true,
+                    );
+                }
+                None => write_reply(stream, client_package_missing(&root, &want)),
+            }
+            return;
         }
-        return;
     }
     // Тяжёлый RAG-инструмент — под лимит параллелизма (слот освобождается
     // после route; лимитер — не Arc здесь, поэтому слот снимаем вручную).
