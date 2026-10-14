@@ -564,9 +564,39 @@ fn close_queue(cfg: &AutoTranscribeConfig, job: &QJob, ok: bool) {
 /// Нужна и демону (жёсткий отказ без модели, §0 п.6), и диагностике (`hds check`,
 /// `hds whisper-check`) — чтобы было видно, готова ли автотранскрибация.
 pub fn default_diarization_model() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    let root = base.config_dir().join("OpenResearchTools").join("models");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+    for root in models_roots() {
+        if let Some(p) = diarization_in_dir(&root) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// R3.4 (PLAN_TRANSCRIBE_SERVICE): каталоги моделей в приоритете — env `HDS_MODELS_DIR` →
+/// `%ProgramData%\hermes-disk-search\models` (машинный, виден службам под LocalSystem) →
+/// общий каталог движка `%APPDATA%\OpenResearchTools\models`.
+fn models_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(v) = std::env::var_os("HDS_MODELS_DIR") {
+        if !v.is_empty() {
+            out.push(PathBuf::from(v));
+        }
+    }
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        let p = PathBuf::from(pd);
+        if !p.as_os_str().is_empty() {
+            out.push(p.join("hermes-disk-search").join("models"));
+        }
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        out.push(base.config_dir().join("OpenResearchTools").join("models"));
+    }
+    out
+}
+
+/// Поиск sortformer-модели в одном каталоге моделей.
+fn diarization_in_dir(root: &std::path::Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .map(|e| e.path())
@@ -639,6 +669,32 @@ pub fn transcribe_once(cfg: &AutoTranscribeConfig, path: &Path) -> Result<Transc
 /// Поток работы: событие ФС → `wait_stable` → [`should_enqueue`] → очередь → движок →
 /// выход + sidecar → утилизация → манифест. Периодический reconcile догоняет
 /// пропущенное. Остановка — `Ctrl+C` или файл `transcribe.stop`.
+/// R3.7 (PLAN_TRANSCRIBE_SERVICE): служба `transcribe` (SCM `depend= llm-host`) может
+/// стартовать раньше владельца GPU — ждём доступности его фасада ограниченно (backoff),
+/// затем продолжаем (задания всё равно падают мягко, если владелец ещё не поднялся).
+fn wait_for_owner(cfg: &AutoTranscribeConfig) {
+    let url = cfg.transcribe.url.trim_end_matches('/').to_string();
+    let hostport = url.split("://").nth(1).unwrap_or(&url).to_string();
+    let Ok(addr) = hostport.parse::<std::net::SocketAddr>() else {
+        return; // нестандартный адрес — не блокируем старт
+    };
+    if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok() {
+        return;
+    }
+    println!("[transcribe] владелец GPU ({hostport}) ещё не поднят — ждём (до 60 с)…");
+    let start = std::time::Instant::now();
+    let mut delay = Duration::from_millis(500);
+    while start.elapsed() < Duration::from_secs(60) {
+        std::thread::sleep(delay);
+        delay = (delay * 2).min(Duration::from_secs(5));
+        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(800)).is_ok() {
+            println!("[transcribe] владелец GPU доступен");
+            return;
+        }
+    }
+    println!("[transcribe] владелец GPU не поднялся за 60 с — продолжаю (задания будут ждать)");
+}
+
 pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig) -> Result<i32> {
     if !cfg.enabled {
         println!("[transcribe] auto_transcribe.enabled: false — конвейер выключен");
@@ -659,6 +715,7 @@ pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig) -> Result<i32> {
     };
     let stop_file = root.join("transcribe.stop");
     let _ = std::fs::remove_file(&stop_file);
+    wait_for_owner(cfg);
 
     let mut manifest = Manifest::load(&cfg.state_dir);
     let mut queue = load_queue(&cfg.queue_file);

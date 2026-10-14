@@ -1,9 +1,21 @@
 # Sample Caddy reverse proxy for hermes-disk-search (M3 T1,
-# PLAN_M3_NETWORK_PERIMETER.md par. 3.1).
+# PLAN_M3_NETWORK_PERIMETER.md par. 3.1; R4.6 PLAN_TRANSCRIBE_SERVICE.md).
 #
-# Only /mcp and /ui are published; TLS terminates at the proxy; the app itself
-# listens on 127.0.0.1 (ui.host / mcp_http.host in config.yaml). The facade
-# ports 8010-8012 (/v1/*) are NOT published - localhost only.
+# Published paths:
+#   /mcp*    MCP streamable-http (Cline/Hermes clients, admin tooling)
+#   /ui*     web UI: admin page (/ui/) and the USER page (/ui/user/)
+#   /health  public probe (app name + product version) - used by the client
+#            installers to compare client/server versions
+#
+# Publicly reachable WITHOUT a token (the app enforces it too):
+#   /health, /mcp/client-install.ps1, /mcp/client-install.sh
+# Everything else needs `Authorization: Bearer <token>`; the UI additionally
+# accepts ?token=... for the first page load (the browser cannot send headers
+# when navigating).
+#
+# TLS terminates at the proxy; the app itself listens on 127.0.0.1
+# (ui.host / mcp_http.host in config.yaml). The facade ports 8010-8012
+# (/v1/*) are NOT published - localhost only.
 #
 # After publishing, set `trusted_proxy: true` in config.yaml so the app
 # honors X-Forwarded-For / X-Forwarded-Proto from this proxy.
@@ -20,9 +32,14 @@ hds.example.com {
     # MCP (Cline/Hermes clients): long calls (ask_my_files) need a big timeout.
     reverse_proxy /mcp* 127.0.0.1:8787
 
-    # Admin UI (headless in server profile).
+    # Web UI (admin + user page). The app serves /ui/... itself as well as the
+    # same routes at the root (dev access on 127.0.0.1:8765).
     reverse_proxy /ui* 127.0.0.1:8765
 
+    # Public probe: {"app": ..., "version": ...} - version check for clients.
+    reverse_proxy /health 127.0.0.1:8787
+
+    # Direct access to the UI root is not needed: / goes 404 (see below).
     # Do not reveal server internals.
     header -Server
 }

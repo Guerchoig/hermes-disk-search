@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hds_core::config::{dig, load, project_root, replace_file, Config};
+use hds_core::config::{dig, load, profile, project_root, replace_file, Config};
 use hds_index::autotranscribe::{self, AutoTranscribeConfig, FileMeta};
 use hds_index::transcribe::{detect_speaker_slots, DEFAULT_OUT_FORMAT, DEFAULT_UNASSIGNED_LABEL};
 use serde_json::{json, Value};
@@ -119,6 +119,14 @@ fn service_dir(cfg: &Config) -> PathBuf {
     }
 }
 
+/// Снять ведущий BOM (U+FEFF), если он есть: файл `.md` мог быть сохранён
+/// редактором Windows (Блокнот) с BOM — тогда первая строка `### SPEAKER_00 …`
+/// не распознавалась бы (метка ищется от начала строки). Запись после правки
+/// идёт уже без BOM — это и есть нормализация.
+fn strip_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// Имя sidecar по стему выхода (`клип.md` → `клип.speakers.json`).
 fn sidecar_name(file: &Path) -> String {
     let stem = file
@@ -165,7 +173,7 @@ fn speakers_of_file(file: &Path, sidecar: &Value) -> Vec<String> {
     if let Ok(md) = std::fs::metadata(file) {
         if md.len() <= MAX_PREVIEW_BYTES {
             if let Ok(text) = std::fs::read_to_string(file) {
-                return detect_speaker_slots(&text);
+                return detect_speaker_slots(strip_bom(&text));
             }
         }
     }
@@ -259,7 +267,7 @@ pub fn file_json(name: &str) -> Value {
         return json!({ "ok": false, "error": "файл слишком большой для превью" });
     }
     let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+        Ok(t) => strip_bom(&t).to_string(),
         Err(e) => return json!({ "ok": false, "error": format!("чтение: {e}") }),
     };
     let sidecar = read_sidecar(&cfg, &path);
@@ -292,6 +300,7 @@ pub fn file_json(name: &str) -> Value {
 /// (до пробела) и, если он есть в карте, заменяем его. Упоминания метки в тексте
 /// реплики не трогаем — как и сканер. Возвращает `(текст, число замен)`.
 pub fn replace_speaker_labels(text: &str, map: &[(String, String)]) -> (String, usize) {
+    let text = strip_bom(text);
     let mut out = String::with_capacity(text.len());
     let mut replaced = 0usize;
     for (i, line) in text.split('\n').enumerate() {
@@ -425,7 +434,7 @@ pub fn speakers_json(name: &str, names: &Value) -> Value {
     }
     let sidecar = read_sidecar(&cfg, &path);
     let text = match std::fs::read_to_string(&path) {
-        Ok(t) => t,
+        Ok(t) => strip_bom(&t).to_string(),
         Err(e) => return json!({ "ok": false, "error": format!("чтение: {e}") }),
     };
     let pairs = rename_pairs(&sidecar, names);
@@ -523,6 +532,46 @@ pub fn apply_json(name: &str) -> Value {
     })
 }
 
+/// Имя задачи Планировщика автозапуска демона (desktop; `install_autostart.ps1`).
+pub const AUTOSTART_TASK: &str = "HermesDiskSearchTranscribe";
+
+/// Задача Планировщика зарегистрирована? (desktop-автозапуск демона.)
+///
+/// Значение кэшируется на процесс: UI спрашивает состояние карточкой каждые
+/// несколько секунд, а `schtasks` — внешний процесс (звать его на каждый
+/// запрос нельзя). Набор задач во время работы UI не меняется.
+#[cfg(windows)]
+fn autostart_task_exists() -> bool {
+    static TASK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TASK.get_or_init(|| {
+        std::process::Command::new("schtasks")
+            .args(["/query", "/tn", AUTOSTART_TASK])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    })
+}
+
+#[cfg(not(windows))]
+fn autostart_task_exists() -> bool {
+    false
+}
+
+/// Форма управления демоном (R3.9):
+/// * `service` — server-профиль: SCM `hermes-disk-search-transcribe`
+///   (`hds service start|stop|restart transcribe`);
+/// * `task` — desktop с задачей Планировщика `HermesDiskSearchTranscribe`;
+/// * `process` — desktop без задачи: кнопки UI поднимают/останавливают процесс.
+pub fn daemon_form(cfg: &Config) -> &'static str {
+    if profile(cfg).is_server() {
+        "service"
+    } else if autostart_task_exists() {
+        "task"
+    } else {
+        "process"
+    }
+}
+
 /// Статус демона `hds transcribe-watch` (для кнопок на закладке «Транскрибация»).
 ///
 /// «Запущен» определяется по `transcribe.lock` (демон держит его RAII-файлом);
@@ -538,6 +587,14 @@ pub fn daemon_status() -> Value {
         .ok()
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|_| running);
+    // R3.9: форма управления + живое состояние роли SCM (только server-профиль —
+    // `sc query`/`sc qc` это два внешних процесса, в desktop они не нужны).
+    let form = daemon_form(&cfg);
+    let service = if profile(&cfg).is_server() {
+        serde_json::to_value(hds_core::service::status("transcribe")).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
     json!({
         "running": running,
         "stale": stale,
@@ -548,7 +605,63 @@ pub fn daemon_status() -> Value {
         "inbox_dir": at.inbox_dir.as_ref().map(|p| p.display().to_string()),
         "out_dir": at.out_dir.as_ref().map(|p| p.display().to_string()),
         "poll_seconds": at.poll_seconds,
+        // R3.9: форма управления (service/task/process) + состояние роли SCM.
+        "form": form,
+        "task": form == "task",
+        "service": service,
     })
+}
+
+/// Действия демоном в server-профиле (R3.9): идём в SCM
+/// (`hds service start|stop|restart transcribe`), а не поднимаем свой процесс —
+/// иначе рядом со службой появился бы дубль-демон (риск плана R3.10).
+///
+/// `hds_exe` нужен `sc.exe`/`launchctl` для управления ролью (как в
+/// `/api/services`); в службе UI (LocalSystem) прав хватает, при ручном запуске
+/// без прав `control_reply` вернёт понятную подсказку.
+fn daemon_service_json(action: &str) -> Value {
+    let action = action.trim();
+    if action.is_empty() || action == "status" {
+        return json!({ "ok": true, "form": "service", "msg": "состояние службы",
+            "status": daemon_status() });
+    }
+    let Some(exe) = crate::hds_exe() else {
+        return json!({ "ok": false, "form": "service",
+            "msg": "не найден бинарь hds (рядом с UI / bin / target/{release,debug})" });
+    };
+    let with_form = |mut v: Value| -> Value {
+        v["form"] = json!("service");
+        v
+    };
+    match action {
+        "install" | "uninstall" | "start" | "stop" => {
+            let r = hds_core::service::control(action, "transcribe", &exe);
+            with_form(crate::control_reply(action, "transcribe", &r))
+        }
+        "restart" => {
+            let stop = hds_core::service::control("stop", "transcribe", &exe);
+            if !stop.ok() {
+                return with_form(crate::control_reply("stop", "transcribe", &stop));
+            }
+            // `sc.exe stop` асинхронн: ждём фактического останова перед старт,
+            // иначе `start` вернёт 1053/1062 (как в `/api/services` restart).
+            let stopped = crate::wait_stopped("transcribe", crate::RESTART_STOP_TIMEOUT);
+            let start = hds_core::service::control("start", "transcribe", &exe);
+            let mut body = crate::control_reply(
+                if start.ok() { "restart" } else { "start" },
+                "transcribe",
+                &start,
+            );
+            if !stopped {
+                body["hint"] = json!(
+                    "служба не перешла в stopped за отведённое время — проверьте состояние и повторите restart"
+                );
+            }
+            with_form(body)
+        }
+        other => json!({ "ok": false, "form": "service",
+            "msg": format!("неизвестное действие: {other} (start|stop|restart|status)") }),
+    }
 }
 
 /// Управление демоном из UI: `start` | `stop` | `restart` | `status`.
@@ -556,7 +669,13 @@ pub fn daemon_status() -> Value {
 /// Демон запускается **detached** (без окна), как резидент в `/api/llm-host/restart`;
 /// вывод демона отбрасывается (в UI журнала нет — смотреть `data/auto-transcribe*`).
 /// Дубль невозможен: демон сам держит `transcribe.lock`; устаревший lock снимается.
+///
+/// R3.9: в server-профиле действия уходят в SCM ([`daemon_service_json`]).
 pub fn daemon_json(action: &str) -> Value {
+    let cfg = load().unwrap_or(Config::Null);
+    if profile(&cfg).is_server() {
+        return daemon_service_json(action);
+    }
     let root = project_root();
     let lock = root.join("transcribe.lock");
     let stop = root.join("transcribe.stop");
@@ -756,5 +875,20 @@ mod tests {
             vec![("Иван".to_string(), "Пётр".to_string())],
             "вторая правка меняет прошлое имя, а не метку"
         );
+    }
+
+    /// Файл `.md`, сохранённый редактором Windows с BOM, обрабатывается так же:
+    /// метка первой строки распознаётся и заменяется (найдено живой приёмкой R5).
+    #[test]
+    fn bom_is_tolerated() {
+        let text = "\u{feff}### SPEAKER_00 [00:00:01 - 00:00:02]\nПривет\n";
+        let map = vec![("SPEAKER_00".to_string(), "Иван".to_string())];
+        let (out, n) = replace_speaker_labels(text, &map);
+        assert_eq!(n, 1, "BOM не должен мешать замене: {out}");
+        assert!(
+            out.starts_with("### Иван"),
+            "BOM снят, имя подставлено: {out}"
+        );
+        assert!(!out.contains('\u{feff}'), "BOM убран из результата");
     }
 }

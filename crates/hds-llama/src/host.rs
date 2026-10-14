@@ -989,11 +989,44 @@ fn whisper_device(
     }
 }
 
-/// whisper-модель из общего каталога движка: `*.bin`/`*.gguf` в каталоге `*whisper*`.
+/// R3.4 (PLAN_TRANSCRIBE_SERVICE): каталоги моделей в порядке приоритета —
+/// env `HDS_MODELS_DIR` → `%ProgramData%\hermes-disk-search\models` (машинный, виден
+/// службам под LocalSystem) → общий каталог движка `%APPDATA%\OpenResearchTools\models`.
+/// Перебор идёт по списку: первый каталог с найденной моделью побеждает.
+fn models_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(v) = std::env::var_os("HDS_MODELS_DIR") {
+        if !v.is_empty() {
+            out.push(PathBuf::from(v));
+        }
+    }
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        let p = PathBuf::from(pd);
+        if !p.as_os_str().is_empty() {
+            out.push(p.join("hermes-disk-search").join("models"));
+        }
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        out.push(base.config_dir().join("OpenResearchTools").join("models"));
+    }
+    out
+}
+
+/// whisper-модель из общего каталога моделей: `*.bin`/`*.gguf` в каталоге `*whisper*`.
+///
+/// R3.4: каталоги перебираются в приоритете [`models_roots`].
 fn default_whisper_model() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    let root = base.config_dir().join("OpenResearchTools").join("models");
-    for e in std::fs::read_dir(&root).ok()?.flatten() {
+    for root in models_roots() {
+        if let Some(p) = whisper_in_dir(&root) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Поиск whisper-модели в одном каталоге моделей.
+fn whisper_in_dir(root: &std::path::Path) -> Option<PathBuf> {
+    for e in std::fs::read_dir(root).ok()?.flatten() {
         let dir = e.path();
         let is_whisper = dir
             .file_name()
@@ -1017,12 +1050,20 @@ fn default_whisper_model() -> Option<PathBuf> {
     None
 }
 
-/// sortformer-модель диаризации из общего каталога движка: первый `*.gguf` в
-/// каталоге `*sortformer*` (там же, где движок хранит скачанные модели).
+/// sortformer-модель диаризации из общего каталога моделей: первый `*.gguf` в
+/// каталоге `*sortformer*`. R3.4: каталоги перебираются в приоритете [`models_roots`].
 fn default_diarization_model() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    let root = base.config_dir().join("OpenResearchTools").join("models");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&root)
+    for root in models_roots() {
+        if let Some(p) = diarization_in_dir(&root) {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// Поиск sortformer-модели в одном каталоге моделей.
+fn diarization_in_dir(root: &std::path::Path) -> Option<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
         .ok()?
         .flatten()
         .map(|e| e.path())

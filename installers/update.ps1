@@ -37,10 +37,10 @@ if (-not (Test-Path $Root)) { throw "root not found: $Root" }
 $Root = (Resolve-Path $Root).Path
 $cur = Join-Path $Root "app\current"
 $SvcPrefix = "hermes-disk-search-"
-# Stop order: dependents first, resident (GPU owner) last.
-$ServerStopRoles = @("ui", "mcp-http", "watch", "llm-host")
-# Start order: resident first, then the rest.
-$ServerStartRoles = @("llm-host", "watch", "mcp-http", "ui")
+# Stop order: dependents first, resident (GPU owner) last. `transcribe` depends on llm-host.
+$ServerStopRoles = @("ui", "mcp-http", "watch", "transcribe", "llm-host")
+# Start order: resident first, then the rest (`transcribe` after llm-host).
+$ServerStartRoles = @("llm-host", "transcribe", "watch", "mcp-http", "ui")
 $tasks = @("HermesDiskSearchLlmHost", "HermesDiskSearchWatch", "HermesDiskSearchMcp", "HermesDiskSearchUi")
 
 # --- helpers ---------------------------------------------------------------

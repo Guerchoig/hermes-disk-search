@@ -15,6 +15,7 @@ pub mod config_edit;
 pub mod page;
 pub mod transcribe;
 pub mod tree;
+pub mod user;
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -306,8 +307,9 @@ fn llm_host_status(cfg: &Config) -> Value {
     }
 }
 
-/// `/api/search?q=&limit=&kinds=`.
-pub fn search_json(query: &str, limit: i64, kinds: &str) -> Value {
+/// `/api/search?q=&limit=&kinds=` — `projects` фильтрует выдачу по проектам
+/// токена (R4.3): `None` — без фильтра (админ/десктоп), `Some(&[])` — ничего.
+pub fn search_json(query: &str, limit: i64, kinds: &str, projects: Option<&[String]>) -> Value {
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => return json!({ "error": e.message() }),
@@ -341,7 +343,7 @@ pub fn search_json(query: &str, limit: i64, kinds: &str) -> Value {
         &cfg,
         query,
         kinds_v.as_deref(),
-        None,
+        projects,
         lim,
     );
     side.shutdown();
@@ -416,14 +418,13 @@ fn run_index_bg(full: bool) -> Result<(), String> {
         let _ = std::fs::remove_file(&stop);
     }
     let side = sidecar()?;
-    let media = hds_index::transcribe::MediaRouter::new(&side, &cfg);
     let args = hds_index::RunIndexArgs {
         full,
         prune: true,
         quiet: true,
         ..Default::default()
     };
-    let r = hds_index::pipeline::run_index(&conn, &cfg, &emb, &media, &side, &args);
+    let r = hds_index::pipeline::run_index(&conn, &cfg, &emb, &side, &side, &args);
     side.shutdown();
     r.map(|_| ()).map_err(|e| e.message())
 }
@@ -1594,26 +1595,16 @@ fn spawn_deferred_restart(role: &str) -> bool {
         .is_ok()
 }
 
-/// Гейт UI (M1 T5): при `access.enabled` весь UI — только для админ-токена.
+/// Конфиг для гейтов UI: `Ok(Some(cfg))` — прочитан, `Ok(None)` — не читается
+/// (десктоп: прежнее поведение «вход свободный»), `Err(reply)` — fail-closed.
 ///
-/// `access_path` — явный путь (тесты); `None` — `data/access.yaml` по умолчанию.
-/// Возвращает `Some(ctx)` — валидный админ (server-режим), `None` — доступ
-/// выключен (десктоп, вход свободный), `Err` — 401 (с аудитом `unauthorized`,
-/// M3 T2 — только если аудит включён конфигом; десктоп по умолчанию не пишет).
-fn ui_auth_gate(
-    h: &ReqHeaders,
-    access_path: Option<&std::path::Path>,
-    method: &str,
-    path: &str,
-    query: &str,
-) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
-    let cfg = match load() {
-        Ok(c) => c,
+/// M3 T4 (F2): в server-поставке нечитаемый/битый config.yaml молча открывал UI
+/// без токена. Fail-closed: если в системном каталоге состояния лежит конфиг с
+/// `profile: server`, гейт закрывается (401) — безопаснее.
+fn ui_gate_config() -> Result<Option<Config>, Reply> {
+    match load() {
+        Ok(c) => Ok(Some(c)),
         Err(_) => {
-            // M3 T4 (F2): в server-поставке нечитаемый/битый config.yaml
-            // молча открывал UI без токена. Fail-closed: если в системном
-            // каталоге состояния лежит конфиг с `profile: server`, гейт
-            // закрывается (401) — безопаснее; десктоп — прежнее поведение.
             let sys_cfg = hds_core::config::system_state_dir().map(|d| d.join("config.yaml"));
             let server_cfg = sys_cfg
                 .filter(|p| p.is_file())
@@ -1630,66 +1621,186 @@ fn ui_auth_gate(
                     .to_string(),
                 ));
             }
-            return Ok(None); // без конфига — прежнее поведение (desktop)
+            Ok(None) // без конфига — прежнее поведение (desktop)
         }
-    };
-    let enabled = dig(&cfg, "access.enabled")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !enabled {
-        return Ok(None);
     }
-    // Токен берём из заголовка `Authorization: Bearer`; если его нет — из
-    // `?token=...` в URL. Браузер не может прислать заголовок при навигации,
-    // поэтому первый GET `/` приходит без Authorization: фронтенд (`page.rs`)
-    // читает `?token=`, кладёт его в localStorage и подставляет заголовок для
-    // последующих API-запросов. Без этого `?token=` не срабатывал бы вовсе
-    // (гейт отклонял саму страницу) — расхождение кода с докой.
+}
+
+/// Включён ли гейт доступа (`access.enabled`).
+fn ui_access_enabled(cfg: &Config) -> bool {
+    dig(cfg, "access.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Токен запроса: заголовок `Authorization: Bearer`, иначе `?token=`.
+///
+/// Браузер не может прислать заголовок при навигации, поэтому первый GET `/`
+/// приходит без Authorization: фронтенд (`page.rs`) читает `?token=`, кладёт его
+/// в localStorage и подставляет заголовок для последующих API-запросов. Без
+/// этого `?token=` не срабатывал бы вовсе (гейт отклонял саму страницу).
+fn ui_plain_token(h: &ReqHeaders, query: &str) -> Option<String> {
     let header_tok = h.authorization.as_deref().and_then(|x| {
         x.split_once(' ')
             .filter(|(s, _)| s.eq_ignore_ascii_case("bearer"))
             .map(|(_, t)| t.trim().to_string())
+            .filter(|t| !t.is_empty())
     });
-    let plain: Option<String> = header_tok.or_else(|| qp(query, "token").filter(|v| !v.is_empty()));
+    header_tok.or_else(|| qp(query, "token").filter(|v| !v.is_empty()))
+}
+
+/// Контекст по plain-токену (нет токена / истёк / отозван / отключён → `None`).
+fn ui_token_ctx(
+    cfg: &Config,
+    access_path: Option<&std::path::Path>,
+    plain: Option<&str>,
+) -> Option<hds_core::access::AuthCtx> {
+    let t = plain?;
     let acc = match access_path {
         Some(p) => hds_core::access::load_at(p),
         // F10.4 (M2-ревью): конфиг уже загружен (`cfg`) — путь строим из него,
         // не парсим config.yaml повторно на каждый запрос.
-        None => hds_core::access::load_at(&hds_core::access::access_path_from(&cfg)),
+        None => hds_core::access::load_at(&hds_core::access::access_path_from(cfg)),
     };
-    let ctx = plain.as_deref().and_then(|t| {
-        acc.ok()
-            .and_then(|a| hds_core::access::resolve_token(&a, t, access_now_unix()))
-    });
+    acc.ok()
+        .and_then(|a| hds_core::access::resolve_token(&a, t, access_now_unix()))
+}
+
+/// Аудит отказа доступа (M3 T2 / R4.2): `unauthorized` (нет валидного токена)
+/// или `forbidden` (валидный токен без прав). Пишется только если аудит включён
+/// конфигом — десктоп по умолчанию не пишет.
+fn ui_audit_denied(
+    cfg: &Config,
+    h: &ReqHeaders,
+    method: &str,
+    path: &str,
+    event: &str,
+    user: Option<String>,
+    status: u16,
+) {
+    if let Some(a) = hds_core::audit::Audit::from_config(cfg) {
+        a.record(
+            &hds_core::audit::AuditEvent {
+                ts: 0,
+                event: event.into(),
+                user,
+                ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
+                method: method.into(),
+                path: path.into(),
+                tool: None,
+                projects: None,
+                token: None,
+                status,
+                ms: 0,
+            }
+            .now(),
+        );
+    }
+}
+
+/// `401` + аудит `unauthorized`.
+fn ui_unauthorized(cfg: &Config, h: &ReqHeaders, method: &str, path: &str, hint: &str) -> Reply {
+    ui_audit_denied(cfg, h, method, path, "unauthorized", None, 401);
+    (
+        401,
+        "application/json",
+        json!({ "error": "unauthorized", "hint": hint }).to_string(),
+    )
+}
+
+/// `403` + аудит `forbidden` (валидный не-админ на админском API — R4.2).
+fn ui_forbidden(cfg: &Config, h: &ReqHeaders, method: &str, path: &str, user: &str) -> Reply {
+    ui_audit_denied(
+        cfg,
+        h,
+        method,
+        path,
+        "forbidden",
+        Some(user.to_string()),
+        403,
+    );
+    (
+        403,
+        "application/json",
+        json!({ "error": "forbidden",
+                "hint": "нужны права администратора (этот раздел — только для админа)",
+                "user": user })
+        .to_string(),
+    )
+}
+
+/// Гейт UI (M1 T5): при `access.enabled` весь админский UI — только для админа.
+///
+/// `access_path` — явный путь (тесты); `None` — `data/access.yaml` по умолчанию.
+/// Возвращает `Some(ctx)` — валидный админ (server-режим), `None` — доступ
+/// выключен (десктоп, вход свободный), `Err` — 401 (нет/невалидный токен) или
+/// 403 (валидный не-админ, R4.2); оба отказа — с аудитом, если он включён.
+fn ui_auth_gate(
+    h: &ReqHeaders,
+    access_path: Option<&std::path::Path>,
+    method: &str,
+    path: &str,
+    query: &str,
+) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
+    let Some(cfg) = ui_gate_config()? else {
+        return Ok(None);
+    };
+    if !ui_access_enabled(&cfg) {
+        return Ok(None);
+    }
+    let plain = ui_plain_token(h, query);
+    let ctx = ui_token_ctx(&cfg, access_path, plain.as_deref());
     match ctx {
         Some(c) if c.admin => Ok(Some(c)),
-        _ => {
-            // M3 T2: аудит отказа (без токена или не-админ).
-            if let Some(a) = hds_core::audit::Audit::from_config(&cfg) {
-                a.record(
-                    &hds_core::audit::AuditEvent {
-                        ts: 0,
-                        event: "unauthorized".into(),
-                        user: None,
-                        ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
-                        method: method.into(),
-                        path: path.into(),
-                        tool: None,
-                        projects: None,
-                        token: None,
-                        status: 401,
-                        ms: 0,
-                    }
-                    .now(),
-                );
-            }
-            Err((
-                401,
-                "application/json",
-                json!({ "error": "unauthorized", "hint": "UI: Bearer admin token (?token=...)" })
-                    .to_string(),
-            ))
-        }
+        Some(c) => Err(ui_forbidden(&cfg, h, method, path, &c.user)),
+        None => Err(ui_unauthorized(
+            &cfg,
+            h,
+            method,
+            path,
+            "UI: Bearer admin token (?token=...)",
+        )),
+    }
+}
+
+/// Пользовательский гейт (R4.2): при `access.enabled` — любой **валидный**
+/// токен (админ или не-админ). Пускает страницу `/ui/user/` и «безопасные» API
+/// (поиск, транскрипты/спикеры) — см. [`is_user_route`].
+///
+/// `None` — доступ выключен (десктоп: вход свободный, как раньше).
+fn ui_user_gate(
+    h: &ReqHeaders,
+    access_path: Option<&std::path::Path>,
+    method: &str,
+    path: &str,
+    query: &str,
+) -> Result<Option<hds_core::access::AuthCtx>, Reply> {
+    let Some(cfg) = ui_gate_config()? else {
+        return Ok(None);
+    };
+    if !ui_access_enabled(&cfg) {
+        return Ok(None);
+    }
+    let plain = ui_plain_token(h, query);
+    match ui_token_ctx(&cfg, access_path, plain.as_deref()) {
+        Some(c) => Ok(Some(c)),
+        None => Err(ui_unauthorized(
+            &cfg,
+            h,
+            method,
+            path,
+            "UI: нужен валидный токен (вход по логину/паролю или ?token=...)",
+        )),
+    }
+}
+
+/// Фильтр проектов из токена (R4.3): админ/десктоп — без фильтра; обычный
+/// пользователь — только его проекты (**пустой список = не видит ничего**).
+fn project_filter(auth: Option<&hds_core::access::AuthCtx>) -> Option<Vec<String>> {
+    match auth {
+        None => None,
+        Some(a) if a.admin => None,
+        Some(a) => Some(a.projects.clone()),
     }
 }
 
@@ -1709,20 +1820,85 @@ pub fn route_with_access(
     body: &str,
     access_path: Option<&std::path::Path>,
 ) -> Reply {
-    let (server_mode, admin_user) = match ui_auth_gate(h, access_path, method, path, query) {
-        Ok(v) => (v.is_some(), v.map(|c| c.user)),
-        Err(reply) => return reply,
+    route_full(method, path, query, h, body, access_path, None)
+}
+
+/// Снять префикс `/ui` (R4.6): reverse-proxy публикует UI как `/ui/*`, а сам
+/// сервер обслуживает те же маршруты и от корня — работает и так, и так.
+fn ui_strip_prefix(p: &str) -> String {
+    if p == "/ui" {
+        return String::new();
+    }
+    match p.strip_prefix("/ui/") {
+        Some(rest) => format!("/{rest}"),
+        None => p.to_string(),
+    }
+}
+
+/// «Безопасный» маршрут (R4.2/R4.5): доступен любому валидному токену (админ
+/// или не-админ) — страница пользователя, поиск, транскрипты/спикеры.
+///
+/// Управление демоном транскрибации (`/api/transcribe/daemon`), конфиг, службы,
+/// доступ и индексация сюда **не** входят: это админские маршруты.
+fn is_user_route(p: &str) -> bool {
+    matches!(
+        p,
+        "/user"
+            | "/api/search"
+            | "/api/transcribe/list"
+            | "/api/transcribe/file"
+            | "/api/transcribe/speakers"
+            | "/api/transcribe/apply"
+    ) || p.starts_with("/api/user/")
+}
+
+/// Маршрутизация с явным хранилищем доступа и лимитером (сокет-цикл и тесты).
+///
+/// R4.2: `POST /api/auth/login` — публичный (антибрутфорс `login_per_min` по
+/// IP); страница пользователя и «безопасные» API — под user-гейтом; остальное —
+/// под админ-гейтом (не-админ получает `403`, без токена — `401`).
+pub fn route_full(
+    method: &str,
+    path: &str,
+    query: &str,
+    h: &ReqHeaders,
+    body: &str,
+    access_path: Option<&std::path::Path>,
+    limits: Option<&hds_core::ratelimit::Limiter>,
+) -> Reply {
+    let stripped = ui_strip_prefix(path.trim_end_matches('/'));
+    let p = stripped.as_str();
+    let is_login = method == "POST" && p == "/api/auth/login";
+    let user_route = is_user_route(p);
+    let (server_mode, ctx) = if is_login {
+        (false, None)
+    } else if user_route {
+        match ui_user_gate(h, access_path, method, p, query) {
+            Ok(v) => (v.is_some(), v),
+            Err(reply) => return reply,
+        }
+    } else {
+        match ui_auth_gate(h, access_path, method, p, query) {
+            Ok(v) => (v.is_some(), v),
+            Err(reply) => return reply,
+        }
     };
-    // M3 T2 / F2 (T0): админ-операции UI (POST-маршруты в server-режиме).
-    // Аудит пишем ПОСЛЕ маршрута, с фактическим статусом ответа (раньше
-    // запись шла до маршрута и всегда со `status: 200` — аудит «врал»).
-    let is_admin_op = server_mode && method == "POST" && path.starts_with("/api/");
-    let p = path.trim_end_matches('/');
+    let auth_user = ctx.as_ref().map(|c| c.user.clone());
+    // M3 T2 / F2 (T0): операции UI (POST-маршруты в server-режиме). Аудит пишем
+    // ПОСЛЕ маршрута, с фактическим статусом ответа (раньше запись шла до
+    // маршрута и всегда со `status: 200` — аудит «врал»). R4.2: админские и
+    // пользовательские операции различаем событиями `admin_op`/`user_op`.
+    let is_admin_op = server_mode && method == "POST" && p.starts_with("/api/") && !user_route;
+    let is_user_op = server_mode && method == "POST" && user_route;
     let reply = (|| -> Reply {
         match (method, p) {
             ("GET", "") | ("GET", "/index.html") => {
                 (200, "text/html; charset=utf-8", page::PAGE.to_string())
             }
+            // R4.3: страница пользователя (поиск, установка клиента, транскрипты).
+            ("GET", "/user") => (200, "text/html; charset=utf-8", page::PAGE_USER.to_string()),
+            ("GET", "/api/user/me") => json_ok(user::me_json(ctx.as_ref())),
+            ("GET", "/api/user/client") => json_ok(user::client_json()),
             ("GET", "/api/status") => json_ok(status_json()),
             ("GET", "/api/tree") => json_ok(tree::tree_json(
                 qp(query, "walk").is_some(),
@@ -1761,7 +1937,9 @@ pub fn route_with_access(
                 }
                 let limit = qp(query, "limit").and_then(|v| v.parse().ok()).unwrap_or(8);
                 let kinds = qp(query, "kinds").unwrap_or_default();
-                json_ok(search_json(&q, limit, &kinds))
+                // R4.3: выдача фильтруется проектами токена (пустой список = ничего).
+                let projects = project_filter(ctx.as_ref());
+                json_ok(search_json(&q, limit, &kinds, projects.as_deref()))
             }
             ("GET", "/api/ask") => {
                 let q = qp(query, "q").unwrap_or_default();
@@ -1773,6 +1951,22 @@ pub fn route_with_access(
                     );
                 }
                 json_ok(ask_json(&q))
+            }
+            // R4.1/R4.7: вход по логину/паролю. Контракт (тело, ответ, коды
+            // ошибок) — тот же, что у MCP `/auth/login` и CLI `hds login`.
+            // Публичный маршрут: гейта нет, защита — `login_per_min` по IP.
+            ("POST", "/api/auth/login") => {
+                let ip = h.client_ip.clone().unwrap_or_else(|| "-".into());
+                if let Some(retry) = limits.and_then(|l| l.check_login(&ip)) {
+                    return (
+                        429,
+                        "application/json",
+                        json!({ "error": "rate limited",
+                                "hint": format!("слишком много попыток входа, повторите через {retry}s") })
+                        .to_string(),
+                    );
+                }
+                ui_login(body, access_path, &ip)
             }
             ("POST", _) => {
                 if !csrf_ok(h, server_mode) {
@@ -1931,7 +2125,7 @@ pub fn route_with_access(
             ),
         }
     })();
-    if is_admin_op {
+    if is_admin_op || is_user_op {
         if let Some(a) = load()
             .ok()
             .and_then(|c| hds_core::audit::Audit::from_config(&c))
@@ -1939,8 +2133,12 @@ pub fn route_with_access(
             a.record(
                 &hds_core::audit::AuditEvent {
                     ts: 0,
-                    event: "admin_op".into(),
-                    user: admin_user,
+                    event: if is_admin_op {
+                        "admin_op".into()
+                    } else {
+                        "user_op".into()
+                    },
+                    user: auth_user,
                     ip: h.client_ip.clone().unwrap_or_else(|| "-".into()),
                     method: method.into(),
                     path: path.into(),
@@ -1955,6 +2153,121 @@ pub fn route_with_access(
         }
     }
     reply
+}
+
+/// `POST /api/auth/login {login,password}` → `{token,expires,user,projects,admin}`.
+///
+/// R4.1/R4.7: тело, ответ и коды ошибок — те же, что у MCP
+/// (`hds-mcp::http::handle_login`) и CLI `hds login`: `200` + токен (plain —
+/// **один раз**, в файл идёт sha256), `401` при неверных данных, `400` на битый
+/// JSON. Плейн-пароль и токен в аудит не пишутся: только отпечаток токена
+/// (`token_issue`), как в MCP. Rate-limit антибрутфорс — на вызывающем
+/// (`login_per_min` по IP).
+fn ui_login(body: &str, access_path: Option<&std::path::Path>, client_ip: &str) -> Reply {
+    let cfg = load().unwrap_or(Config::Null);
+    let audit = hds_core::audit::Audit::from_config(&cfg);
+    let ev = |event: &str, user: Option<&str>, token: Option<&str>, status: u16| {
+        if let Some(a) = &audit {
+            a.record(
+                &hds_core::audit::AuditEvent {
+                    ts: 0,
+                    event: event.into(),
+                    user: user.map(|s| s.to_string()),
+                    ip: client_ip.into(),
+                    method: "POST".into(),
+                    path: "/api/auth/login".into(),
+                    tool: None,
+                    projects: None,
+                    token: token.map(|s| s.to_string()),
+                    status,
+                    ms: 0,
+                }
+                .now(),
+            );
+        }
+    };
+    if !ui_access_enabled(&cfg) {
+        ev("login_fail", None, None, 400);
+        return (
+            400,
+            "application/json",
+            json!({ "error": "авторизация выключена",
+                    "hint": "access.enabled: false — доступ локальный, вход без токена" })
+            .to_string(),
+        );
+    }
+    let v: Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            ev("login_fail", None, None, 400);
+            return (
+                400,
+                "application/json",
+                json!({ "error": format!("bad json: {e}") }).to_string(),
+            );
+        }
+    };
+    let login = v.get("login").and_then(|x| x.as_str()).unwrap_or("");
+    let password = v.get("password").and_then(|x| x.as_str()).unwrap_or("");
+    let path = match access_path {
+        Some(p) => p.to_path_buf(),
+        None => hds_core::access::access_path_from(&cfg),
+    };
+    let acc = match hds_core::access::load_at(&path) {
+        Ok(a) => a,
+        Err(e) => {
+            ev("login_fail", Some(login), None, 500);
+            return (
+                500,
+                "application/json",
+                json!({ "error": e.message() }).to_string(),
+            );
+        }
+    };
+    let ctx = match hds_core::access::authenticate(&acc, login, password) {
+        Some(c) => c,
+        None => {
+            ev("login_fail", Some(login), None, 401);
+            return (
+                401,
+                "application/json",
+                json!({ "error": "неверный логин или пароль" }).to_string(),
+            );
+        }
+    };
+    let ttl = hds_core::access::token_ttl_days(&cfg);
+    let (plain, tok) = match hds_core::access::new_token(&ctx.user, ttl, access_now_unix()) {
+        Ok(t) => t,
+        Err(e) => {
+            ev("login_fail", Some(&ctx.user), None, 500);
+            return (
+                500,
+                "application/json",
+                json!({ "error": e.message() }).to_string(),
+            );
+        }
+    };
+    let mut acc = acc;
+    acc.tokens.push(tok.clone());
+    if let Err(e) = hds_core::access::save_at(&path, &acc) {
+        ev("login_fail", Some(&ctx.user), None, 500);
+        return (
+            500,
+            "application/json",
+            json!({ "error": e.message() }).to_string(),
+        );
+    }
+    let fp = hds_core::access::token_sha256_hex(&plain);
+    let fp = fp[..12.min(fp.len())].to_string();
+    ev("login_ok", Some(&ctx.user), None, 200);
+    ev("token_issue", Some(&ctx.user), Some(&fp), 200);
+    (
+        200,
+        "application/json",
+        json!({ "token": plain, "expires": tok.expires, "user": ctx.user,
+                "projects": ctx.projects, "admin": ctx.admin })
+        .to_string(),
+    )
 }
 
 /// Исход чтения запроса (M3 T4): тело сверх лимита — `413` без чтения тела.
@@ -2210,7 +2523,10 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
                                 write_reply_with(&mut stream, r, &hdrs);
                                 return;
                             }
-                            write_reply(&mut stream, route(&m, &p, &q, &h, &b));
+                            write_reply(
+                                &mut stream,
+                                route_full(&m, &p, &q, &h, &b, None, limits.as_deref()),
+                            );
                         }
                         ReadOutcome::Closed => {}
                     }

@@ -24,7 +24,7 @@ use std::path::PathBuf;
 use serde::Serialize;
 
 /// Поддерживаемые роли службы.
-pub const ROLES: [&str; 4] = ["watch", "mcp-http", "ui", "llm-host"];
+pub const ROLES: [&str; 5] = ["watch", "mcp-http", "ui", "llm-host", "transcribe"];
 
 /// Имя службы Windows для роли (`hermes-disk-search-<role>`).
 pub fn service_name(role: &str) -> String {
@@ -137,8 +137,15 @@ pub fn sc_args(sub: &str, role: &str) -> Vec<String> {
 /// (печатает usage) — живая находка T5 (до этого `install` падал на валидации).
 #[cfg(windows)]
 pub fn sc_install_raw(role: &str, hds_exe: &Path) -> String {
+    // R3.5 (PLAN_TRANSCRIBE_SERVICE): служба `transcribe` зависит от владельца GPU
+    // (`llm-host`) — иначе стартует раньше движка и задание падает.
+    let depend = if role == "transcribe" {
+        format!(" depend= {}", service_name("llm-host"))
+    } else {
+        String::new()
+    };
     format!(
-        " binPath= \"\\\"{}\\\" service run {role}\" start= auto DisplayName= \"Hermes Disk Search: {role}\" obj= LocalSystem",
+        " binPath= \"\\\"{}\\\" service run {role}\" start= auto DisplayName= \"Hermes Disk Search: {role}\" obj= LocalSystem{depend}",
         hds_exe.display()
     )
 }
@@ -483,15 +490,18 @@ pub fn status(role: &str) -> ServiceStatus {
 mod tests {
     use super::{daemon_label, daemon_plist, parse_role, service_name, ControlResult, ROLES};
 
-    /// M2 T4: роли — ровно четыре; имена служб/лейблы однозначно выводятся.
+    /// M2 T4 / PLAN_TRANSCRIBE_SERVICE R3.1: роли — пять (добавлена `transcribe`);
+    /// имена служб/лейблы однозначно выводятся.
     #[test]
     fn roles_and_names() {
         assert_eq!(parse_role("ui"), Some("ui"));
         assert_eq!(parse_role("mcp-http"), Some("mcp-http"));
         assert_eq!(parse_role("watch"), Some("watch"));
         assert_eq!(parse_role("llm-host"), Some("llm-host"));
+        assert_eq!(parse_role("transcribe"), Some("transcribe"));
         assert_eq!(parse_role("nope"), None);
         assert_eq!(service_name("ui"), "hermes-disk-search-ui");
+        assert_eq!(service_name("transcribe"), "hermes-disk-search-transcribe");
         assert_eq!(daemon_label("llm-host"), "com.hermes-disk-search.llm-host");
     }
 
@@ -556,6 +566,25 @@ mod tests {
         assert!(!raw.contains("<role>"), "{raw}");
     }
 
+    /// R3.5 (PLAN_TRANSCRIBE_SERVICE): служба `transcribe` объявляет зависимость от
+    /// владельца GPU (`llm-host`) — иначе SCM стартует её раньше движка.
+    #[cfg(windows)]
+    #[test]
+    fn sc_install_raw_transcribe_depends_on_llm_host() {
+        let raw = super::sc_install_raw("transcribe", std::path::Path::new("C:\\hds\\hds.exe"));
+        assert!(
+            raw.contains("service run transcribe"),
+            "binPath роли: {raw}"
+        );
+        assert!(
+            raw.contains("depend= hermes-disk-search-llm-host"),
+            "нет зависимости от llm-host: {raw}"
+        );
+        // Прочие роли зависимости не несут.
+        let ui = super::sc_install_raw("ui", std::path::Path::new("C:\\hds\\hds.exe"));
+        assert!(!ui.contains("depend="), "у ui не должно быть depend: {ui}");
+    }
+
     /// Простые подкоманды `sc.exe` — по имени службы (T5: `create` тут больше нет).
     #[cfg(windows)]
     #[test]
@@ -592,7 +621,7 @@ mod tests {
         assert!(p.contains("<string>/opt/hds/bin/hds</string>"));
         assert!(p.contains("<string>service</string>"));
         assert!(p.contains("<string>ui</string>"));
-        assert!(ROLES.len() == 4);
+        assert!(ROLES.len() == 5);
     }
 
     /// Разбор вывода `sc query` (M7 T1): живые состояния — чистая функция,

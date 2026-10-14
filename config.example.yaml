@@ -10,14 +10,20 @@ index:
     # - 'E:\Archive'                                   # project = "Archive"
     # - { path: 'D:\Work\Sales', project: 'Sales' }    # тот же проект — другой корень
   exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search-db", "WindowsApps", ".Trash", ".Trashes", "models"]
-  # исключаемые пути-префиксы (каталог или файл целиком; редактируется в UI):
+  # исключаемые пути-префиксы (каталог или файл целиком; редактируется в UI).
+  # Каталоги автотранскрибации (`auto_transcribe.inbox_dir`/`out_dir`/`state_dir`) исключаются
+  # из индексации НЕЯВНО (рантайм) — дублировать их здесь не обязательно. Пример:
+  # exclude_paths:
+  #   - 'D:\media-in'
+  #   - 'D:\media-out'
   exclude_paths: []
   max_file_mb: 200          # предел для обычных файлов
   max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)
   ocr_lang: "rus+eng"
   ocr_tesseract_cmd: ""     # путь к tesseract(.exe), если не в PATH
-  transcribe: true          # транскрипция аудио/видео (движок openresearchtools, владелец — llm-host)
+  transcribe: false         # устарел (legacy): ASR вынесена из индексации, медиа пропускается.
+                            # Транскрибацию настраивайте в секции `auto_transcribe` (см. ниже).
   whisper_model: small
   whisper_device: auto      # auto | cuda | vulkan | cpu | metal
   whisper_load_timeout: 180 # сек; зависание CUDA-загрузки — fallback на CPU
@@ -332,9 +338,13 @@ search:
 # УДАЛЯЕТ исходник (только при успехе). UI: закладка «Транскрибация».
 # Подробности: PLAN_AUTO_TRANSCRIBE.md (спайк формата — tools/parity/T0_1_DIARIZATION_FORMAT.md).
 auto_transcribe:
-  enabled: false              # включить конвейер (демон/задача Планировщика)
+  enabled: false              # включить конвейер (демон/задача Планировщика/служба)
   inbox_dir: 'D:\media_in'    # ВХОД:  исходные медиа (абсолютный путь)
-  out_dir:   'D:\media_out'   # ВЫХОД: транскрибированные/диаризованные (индексируется)
+  # ВЫХОД: транскрибированные/диаризованные выходы (.md). В индекс НЕ попадают:
+  # демон их не индексирует (§8.1 плана) — при необходимости переносите `.md`
+  # в индексируемые папки ВРУЧНУЮ. Папки конвейера (inbox_dir/out_dir/state_dir)
+  # исключаются из индексации неявно — индикатор у полей в UI: «исключена ✓».
+  out_dir:   'D:\media_out'
   recursive: false            # обходить подкаталоги inbox_dir
   # --- движок (перекрывают index.whisper_* только для этого конвейера) ---
   mode: transcript            # transcript = транскрибация + диаризация
@@ -363,8 +373,16 @@ auto_transcribe:
   source_disposal: delete     # после УСПЕХА: delete (удалять исходник) | keep | move
   source_disposal_dir: ''     # для source_disposal: move — каталог архива
   # --- объединение с индексацией (§7 плана) ---
-  index_outputs: true         # индексировать out_dir; ASR исходного медиа в индексации ВЫКЛ
+  index_outputs: false        # устарел (legacy): выходы конвейера в индекс НЕ кладутся (§8.1)
   pause_indexing: true        # на время задания ставить index.pause (выше индексации)
+  # --- кто и как запускает конвейер ---
+  # desktop: задача Планировщика `HermesDiskSearchTranscribe` (`hds transcribe-watch`,
+  #          ставит installers/install_autostart.ps1; модели — setup.ps1, блок
+  #          «Automatic transcription»);
+  # server:  служба `hermes-disk-search-transcribe` (`hds service start|stop transcribe`,
+  #          зависимость от `...-llm-host`); UI-карточка сама показывает форму
+  #          управления (service/task/process) и действия уводит в SCM.
+
 
 
 rerank:                     # реранкер ask_my_files (роль rerank; владелец — llm-host)

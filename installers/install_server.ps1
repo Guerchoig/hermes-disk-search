@@ -22,7 +22,7 @@
 #     -EnableAccess -AdminLogin admin -AdminPassword <secret> -Fetch
 param(
     [string]$Root = "",
-    [string]$Roles = "watch,mcp-http,ui,llm-host",
+    [string]$Roles = "watch,mcp-http,ui,llm-host,transcribe",
     [switch]$KeepAtLogOn,
     # --- M8 T1 (unattended server profile) ---
     [string]$StateDir = "",          # default %ProgramData%\hermes-disk-search
@@ -34,6 +34,11 @@ param(
     [string]$GpuDevice = "",         # GPU index ("1"); "" = do not write
     [string]$GpuPreset = "",         # none|nvidia-one|nvidia-n|amd-n|apple; overrides GpuDevice
     [string]$Roots = "",             # index roots, separated by ; or ,
+    # --- R3.5 (PLAN_TRANSCRIBE_SERVICE): auto-transcription service ---
+    [string]$MediaInbox = "",        # auto_transcribe.inbox_dir (absolute; excluded from indexing)
+    [string]$MediaOut = "",          # auto_transcribe.out_dir (absolute; excluded from indexing)
+    [switch]$EnableTranscribe,       # auto_transcribe.enabled: true
+    [string]$SourceDisposal = "delete",  # delete|keep|move (product default: delete)
     [switch]$EnableAccess,           # access.enabled: true
     [string]$AdminLogin = "",        # create/update the first admin (with -AdminPassword)
     [string]$AdminPassword = "",
@@ -81,10 +86,30 @@ function New-ServerConfig {
     }
     $rootList = @()
     if ($Roots) { $rootList = @($Roots -split '[;,]' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
-    if ($rootList.Count -gt 0) {
+    if ($rootList.Count -gt 0 -or $MediaInbox -or $MediaOut) {
         $lines.Add("index:")
-        $lines.Add("  roots:")
-        foreach ($r in $rootList) { $lines.Add("    - " + (ConvertTo-YamlSingle $r)) }
+        if ($rootList.Count -gt 0) {
+            $lines.Add("  roots:")
+            foreach ($r in $rootList) { $lines.Add("    - " + (ConvertTo-YamlSingle $r)) }
+        }
+        if ($MediaInbox -or $MediaOut) {
+            # auto-transcribe dirs are excluded from indexing (implicitly too; kept explicit for clarity)
+            $lines.Add("  exclude_paths:")
+            if ($MediaInbox) { $lines.Add("    - " + (ConvertTo-YamlSingle $MediaInbox)) }
+            if ($MediaOut) { $lines.Add("    - " + (ConvertTo-YamlSingle $MediaOut)) }
+        }
+    }
+    if ($EnableTranscribe -or $MediaInbox -or $MediaOut) {
+        # R3.5: auto-transcription+diarization service (hds transcribe-watch).
+        $lines.Add("auto_transcribe:")
+        if ($EnableTranscribe) { $lines.Add("  enabled: true") } else { $lines.Add("  enabled: false") }
+        if ($MediaInbox) { $lines.Add("  inbox_dir: " + (ConvertTo-YamlSingle $MediaInbox)) }
+        if ($MediaOut) { $lines.Add("  out_dir: " + (ConvertTo-YamlSingle $MediaOut)) }
+        $lines.Add("  diarization: true")
+        $lines.Add("  diarization_required: true")
+        $sd = if ($SourceDisposal) { $SourceDisposal } else { "delete" }
+        $lines.Add("  source_disposal: $sd")
+        $lines.Add("  pause_indexing: true")
     }
     $lines.Add("mcp_http:")
     $lines.Add("  host: " + (ConvertTo-YamlSingle $McpHost) + "   # publish /mcp only via reverse proxy with TLS")
@@ -156,7 +181,7 @@ foreach ($px in @("caddy", "nginx")) {
 
 # --- Unattended fetch of runtime/models (idempotent; skip with -NoFetch). ---
 if ($Fetch -and -not $NoFetch) {
-    foreach ($name in @('fetch_engine_runtime.ps1', 'fetch_llm_models.ps1', 'fetch_whisper_model.ps1', 'fetch_clip_models.ps1')) {
+    foreach ($name in @('fetch_engine_runtime.ps1', 'fetch_llm_models.ps1', 'fetch_whisper_model.ps1', 'fetch_diarization_model.ps1', 'fetch_clip_models.ps1')) {
         $fs = Join-Path $PSScriptRoot $name
         if (-not (Test-Path $fs)) { $summary += "[..] fetch skipped (not found): $name"; continue }
         try {

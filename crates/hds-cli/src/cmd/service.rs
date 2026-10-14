@@ -8,8 +8,9 @@
 //!   остановки; для `llm-host` сперва убивается ребёнок `llm_host.exe`);
 //!   при запуске вручную диспетчер SCM не срабатывает — роль выполняется
 //!   напрямую (тот же путь, что и на macOS);
-//! * роли: `watch` | `mcp-http` | `ui` | `llm-host` (последний — спавн и
-//!   ожидание `llm_host.exe run`, чтобы SCM контролировал наш процесс);
+//! * роли: `watch` | `mcp-http` | `ui` | `llm-host` | `transcribe` (llm-host — спавн и
+//!   ожидание `llm_host.exe run`, чтобы SCM контролировал наш процесс; transcribe —
+//!   демон автотранскрибации `hds transcribe-watch`);
 //! * `install|uninstall|start|stop|status [role]` — управление: общий код
 //!   `hds-core::service` (M7 T1; Windows — `sc.exe` с автостартом/авторестартом,
 //!   macOS — плейст LaunchDaemon + `launchctl`); печать и exit-код без изменений.
@@ -58,6 +59,7 @@ fn run_role_blocking(role: &str) -> i32 {
         "mcp-http" => crate::cmd::mcp_http::cmd_mcp_http("run", None, None, None),
         "ui" => crate::cmd::ui::cmd_ui(None, None),
         "llm-host" => run_llm_host(),
+        "transcribe" => crate::cmd::transcribe::cmd_transcribe_watch(),
         _ => {
             eprintln!("service: неизвестная роль '{role}'");
             2
@@ -171,11 +173,13 @@ mod scm {
     fn service_main(_args: Vec<std::ffi::OsString>) {
         let role = super::current_service_role();
         let name = super::service_name(&role);
-        let handler = |control: ServiceControl| match control {
+        let role_for_handler = role.clone();
+        let handler = move |control: ServiceControl| match control {
             ServiceControl::Stop | ServiceControl::Shutdown => {
                 // Роли не умеют останавливаться кооперативно — завершаем
-                // процесс (ребёнок llm-host сначала — taskkill /T).
-                super::on_service_stop();
+                // процесс (ребёнок llm-host сначала — taskkill /T); `transcribe`
+                // останавливается кооперативно через `transcribe.stop` (R3.7).
+                super::on_service_stop(&role_for_handler);
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -227,9 +231,17 @@ fn role_from_args(args: &[String]) -> String {
 }
 
 #[cfg(windows)]
-fn on_service_stop() {
+fn on_service_stop(role: &str) {
     use std::os::windows::process::CommandExt;
     use std::sync::atomic::Ordering;
+    // R3.7 (PLAN_TRANSCRIBE_SERVICE): демон `transcribe` умеет кооперативную
+    // остановку — ставим `transcribe.stop`, даём ему выйти (снять lock/index.pause)
+    // и НЕ завершаем процесс принудительно сразу.
+    if role == "transcribe" {
+        let stop = hds_core::config::project_root().join("transcribe.stop");
+        let _ = std::fs::write(&stop, b"");
+        return;
+    }
     let pid = LLM_CHILD_PID.load(Ordering::SeqCst);
     if pid != 0 {
         let _ = std::process::Command::new("taskkill")

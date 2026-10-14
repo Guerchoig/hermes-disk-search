@@ -65,7 +65,15 @@ pub fn clip_for_embedding(text: &str, emb_context: i64) -> String {
 /// Настройки отбора файлов из конфига (`index.exclude_dirs/paths`, лимиты размеров).
 pub fn index_filter(cfg: &Config) -> (Excludes, IndexLimits) {
     let dirs = string_list(cfg, "index.exclude_dirs");
-    let paths = string_list(cfg, "index.exclude_paths");
+    let mut paths = string_list(cfg, "index.exclude_paths");
+    // R2.1 (PLAN_TRANSCRIBE_SERVICE): каталоги конвейера автотранскрибации исключаются
+    // **неявно** (рантайм) — «не обходить и не индексировать». Значения видны в
+    // `/api/config` (`implicit_excludes`) и в `hds check`.
+    for p in implicit_excludes(cfg) {
+        if !paths.contains(&p) {
+            paths.push(p);
+        }
+    }
     let limits = IndexLimits::new(
         dig(cfg, "index.max_file_mb")
             .and_then(|v| v.as_u64())
@@ -75,6 +83,37 @@ pub fn index_filter(cfg: &Config) -> (Excludes, IndexLimits) {
             .unwrap_or(2500),
     );
     (Excludes::new(&dirs, &paths), limits)
+}
+
+/// R2.1 (PLAN_TRANSCRIBE_SERVICE): каталоги конвейера автотранскрибации, исключаемые из
+/// индексации неявно: `auto_transcribe.inbox_dir`, `out_dir`, `state_dir`. `state_dir`
+/// относительный — приводится к абсолютному пути от корня проекта.
+pub fn implicit_excludes(cfg: &Config) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for key in ["auto_transcribe.inbox_dir", "auto_transcribe.out_dir"] {
+        if let Some(s) = dig(cfg, key).and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() && !out.iter().any(|x| x == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    if let Some(s) = dig(cfg, "auto_transcribe.state_dir").and_then(|v| v.as_str()) {
+        let s = s.trim();
+        if !s.is_empty() {
+            let p = Path::new(s);
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                project_root().join(p)
+            };
+            let abs = abs.to_string_lossy().to_string();
+            if !out.iter().any(|x| x == &abs) {
+                out.push(abs);
+            }
+        }
+    }
+    out
 }
 
 /// Список строк из конфига (`index.roots` и т.п.).
@@ -183,6 +222,15 @@ pub fn extract_file(
             })
         }
     };
+    // Медиа вне индексации (R1.1, PLAN_TRANSCRIBE_SERVICE): ранний пропуск — ни стата,
+    // ни content_hash, ни эмбеддингов. Тексты для медиа даёт только автотранскрибация
+    // (`hds transcribe-watch`), результат которой пользователь переносит в индексируемую папку.
+    if kinds::is_media(kind) {
+        return Ok(ExtractOutcome::Early {
+            status: "skipped_media".into(),
+            kind: Some(kind.into()),
+        });
+    }
     let p = path_str(path);
     let (excludes, limits) = index_filter(cfg);
     if excludes.excludes_path(path) {
@@ -634,6 +682,18 @@ pub fn run_index(
     let mut counters: BTreeMap<String, Value> = BTreeMap::new();
     let seen_roots = args.single_paths.is_none();
 
+    // R1.4 (PLAN_TRANSCRIBE_SERVICE): `index.transcribe` — устаревший ключ. ASR вынесена из
+    // конвейера (медиа пропускается как `skipped_media`); предупреждаем, если ключ оставлен.
+    if dig(cfg, "index.transcribe")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        println!(
+            "[warn] ключ `index.transcribe` устарел и не действует: ASR в индексации отключена, \
+             медиа пропускается (skipped_media). Транскрибацию настраивайте в секции `auto_transcribe`."
+        );
+    }
+
     let rep = ProgressReporter::new(if args.quiet { 0 } else { args.progress_sec });
     rep.start();
 
@@ -739,9 +799,11 @@ pub fn run_index(
         if kind == Some("media") && media_will_process(conn, path, args.full)? {
             rep.note();
             let sz = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+            // R1 (PLAN_TRANSCRIBE_SERVICE): ASR в индексации больше нет — медиа
+            // пропускается (`skipped_media`), тексты даёт конвейер автотранскрибации.
             println!(
-                "[..] {} — извлечение аудио + Whisper-транскрипция ({:.0} МБ), \
-                 может занять несколько минут...",
+                "[..] {} — медиа вне индексации ({:.0} МБ): пропускается, тексты даёт \
+                 `hds transcribe-watch`",
                 path_str(path),
                 sz as f64 / 1048576.0
             );

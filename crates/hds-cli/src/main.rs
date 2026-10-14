@@ -120,7 +120,7 @@ fn run(args: &[String]) -> i32 {
             }
         },
         "watch" => cmd::watch::cmd_watch(flag_val(rest, "--roots")),
-        "transcribe-watch" => cmd::transcribe::cmd_transcribe_watch(),
+        "transcribe-watch" => cmd::transcribe::cmd_transcribe_watch_cli(rest),
         "transcribe-once" => match rest.first() {
             Some(p) if !p.starts_with("--") => cmd::transcribe::cmd_transcribe_once(p),
             _ => {

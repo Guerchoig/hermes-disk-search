@@ -125,6 +125,7 @@ Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемы
 | `Download the whisper model now (about 1.5 GB)? [y/N]`                | расшифровка речи в видео/аудио                                                            |
 | `Download the CLIP models now (about 850 MB)? [y/N]`                  | поиск картинок по содержанию                                                               |
 | `Download the Sortformer diarization model now (about 449 MB)? [y/N]` | автотранскрибация: разметка реплик по спикерам                             |
+| `Set up automatic transcription (inbox_dir -> out_dir, speaker labels)? [y/N]` | конвейер «папка → `.md`»: скачает whisper + sortformer, спросит папки и запишет их в `config.yaml` |
 | `Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]`         | содержимое индекса, MCP-сервер и llm-host поднимаются сами при входе |
 | `Start the web UI automatically at logon (port 8765)? [y/N]`          | веб-интерфейс всегда под рукой (иначе — по ярлыку)                          |
 
@@ -259,12 +260,17 @@ cd D:\hds
 6. **Модели** — `fetch_llm_models.ps1` (GGUF chat/embedding/rerank в общий `%LOCALAPPDATA%\llama-runtime`),
    опц. `fetch_whisper_model.ps1` (ASR), опц. `fetch_clip_models.ps1` (CLIP ~850 МБ),
    опц. `fetch_diarization_model.ps1` (sortformer для автотранскрибации ~449 МБ).
-7. **Задачи Планировщика** (по согласию): `HermesDiskSearchLlmHost` (`bin\llm_host.exe run`),
+7. **Автотранскрибация** (по согласию, блок «Automatic transcription»): качает whisper+sortformer
+   (при необходимости, `-ModelsDir` учитывает `HDS_MODELS_DIR`), спрашивает папки конвейера и
+   пишет их в `config.yaml` (`auto_transcribe.inbox_dir/out_dir`, при желании `enabled: true`).
+   Папки конвейера исключаются из индексации неявно — медиа и выходы `.md` в индекс не попадают
+   (перенос `.md` в индексируемые папки — вручную).
+8. **Задачи Планировщика** (по согласию): `HermesDiskSearchLlmHost` (`bin\hds.exe …` → `bin\llm_host.exe run`),
    `HermesDiskSearchWatch` (`bin\hds.exe watch`), `HermesDiskSearchMcp` (`bin\hds.exe mcp-http run`),
    `HermesDiskSearchTranscribe` (`bin\hds.exe transcribe-watch`), опц. `HermesDiskSearchUi`.
-8. **Интеграции** — `install_hermes.ps1` / `install_cline.ps1` (MCP по URL `:8787` или stdio `bin\hds_mcp.exe`).
-9. **Ярлык** на рабочем столе («Hermes Disk Search» → `run_ui.ps1`).
-10. **Диагностика** — `bin\hds.exe check`.
+9. **Интеграции** — `install_hermes.ps1` / `install_cline.ps1` (MCP по URL `:8787` или stdio `bin\hds_mcp.exe`).
+10. **Ярлык** на рабочем столе («Hermes Disk Search» → `run_ui.ps1`).
+11. **Диагностика** — `bin\hds.exe check`.
 
 Флаги: `-SkipModels`, `-SkipEngine`, `-NoAutostart`, `-SkipIntegrations`, `-SmokeTest`
 (мини-индекс на временной БД).
@@ -760,40 +766,56 @@ Invoke-WebRequest 'http://192.168.0.101:8787/health' -UseBasicParsing        # 2
 
 ## Автотранскрибация (`hds transcribe-watch`)
 
-Отдельный демон (`PLAN_AUTO_TRANSCRIBE`, вариант A): видит **готовый** медиафайл в
-`inbox_dir`, прогоняет транскрибацию **и** диаризацию одним вызовом движка
-(`mode: transcript`; владелец GPU — `llm-host`) и пишет `.md` с метками спикеров в
+Отдельный демон (`PLAN_AUTO_TRANSCRIBE`, вариант A; как **служба пакета** — `PLAN_TRANSCRIBE_SERVICE`):
+видит **готовый** медиафайл в `inbox_dir`, прогоняет транскрибацию **и** диаризацию одним вызовом
+движка (`mode: transcript`; владелец GPU — `llm-host`) и пишет `.md` с метками спикеров в
 `out_dir`, после чего **удаляет исходник** — только при успехе.
 
 ```yaml
 auto_transcribe:
   enabled: true
-  inbox_dir: 'D:\media_in'    # сюда кладём медиа
-  out_dir:   'D:\media_out'   # здесь появляются транскрипты (индексируются)
+  inbox_dir: 'D:\media_in'    # сюда кладём медиа (исключается из индексации неявно)
+  out_dir:   'D:\media_out'   # здесь появляются транскрипты; в индекс НЕ попадают
 ```
 
-* **Команды:** `hds transcribe-watch` (демон; автозапуск — задача
-  `HermesDiskSearchTranscribe`), `hds transcribe-once <файл>` (один файл «здесь и
-  сейчас»), `hds transcribe-stop` (мягкая остановка через файл `transcribe.stop`).
-  Дубль демона не поднимется — его держит `transcribe.lock`.
+* **Команды:** `hds transcribe-watch [--dry-run|--help]` (демон; автозапуск — задача
+  `HermesDiskSearchTranscribe` в desktop и служба `hermes-disk-search-transcribe` в server),
+  `hds transcribe-once <файл>` (один файл «здесь и сейчас»), `hds transcribe-stop`
+  (мягкая остановка через файл `transcribe.stop`). Дубль демона не поднимется — его
+  держит `transcribe.lock` (залипший lock видно в `hds check`, пункт `transcribe-daemon`).
+* **Служба (server-профиль):** `hds service start|stop|restart|status transcribe`
+  (`installers/install_server.ps1 -Roles …,transcribe`; SCM `depend= hermes-disk-search-llm-host` —
+  стартует после владельца GPU; `sc stop` останавливает кооперативно через `transcribe.stop`).
+* **Медиа и индексация:** `index.transcribe` — **legacy** (ключ ничего не делает), медиа
+  полностью пропускается индексатором (`skipped_media`), папки конвейера исключаются из
+  индексации неявно. Выходы `.md` тоже не индексируются: перенос в индексируемые папки —
+  **вручную** (PLAN_TRANSCRIBE_SERVICE §8.1).
 * **Формат выхода — как отдаёт движок:** `### SPEAKER_00 [00:00:01 - 00:00:11]`,
-  неприсвоенная реплика — `### UNASSIGNED […]`. Рядом лежат `<stem>.orig.md`
-  (текст до подстановки имён) и `<stem>.speakers.json` (карта «метка → имя»).
+  неприсвоенная реплика — `### UNASSIGNED […]`. Рядом (в каталоге сервисных файлов,
+  `auto_transcribe.state_dir`) лежат `<stem>.orig.md` (текст до подстановки имён) и
+  `<stem>.speakers.json` (карта «метка → имя»); перед правкой `.md` кладётся `<файл>.bak`.
 * **Диаризация обязательна:** без sortformer-модели задание падает
   (`installers\fetch_diarization_model.ps1`, ≈449 МБ) — деградации в `speech` нет.
+  Модели whisper/sortformer ищутся в `%APPDATA%\OpenResearchTools\models`, переопределение —
+  переменная `HDS_MODELS_DIR` (в server-профиле машинный каталог моделей).
 * **Приоритеты (ТЗ):** 1) поиск/чат → 2) автотранскрибация → 3) индексация
   (`gpu.priorities.transcribe = 60`): задание ставит `index.pause` и вытесняет
   индексные роли; запрос чата вытеснить транскрибацию может, индексация — нет.
 * **Утилизация исходника:** `source_disposal: delete` (по умолчанию) | `keep` | `move`
   (+`source_disposal_dir`).
-* **UI:** закладка «Транскрибация» — список файлов `out_dir` с превью, кнопка
+* **UI (админ):** закладка «Транскрибация» — список файлов `out_dir` с превью, кнопка
   «Присвоить имена спикерам» (таблица Спикер|Имя, подставляются **только заполненные**
   строки; перед правкой создаётся `<файл>.bak`), «Перезапустить задание» и поля
-  `inbox_dir`/`out_dir` с сохранением в `config.yaml`.
+  `inbox_dir`/`out_dir` с сохранением в `config.yaml`. У полей — индикатор
+  «исключена из индексации ✓/✗» (неявные `auto_transcribe.*` + явные `index.exclude_paths`).
+* **UI (пользователь):** `/ui/user/` — кабинет для не-админов (поиск по своим проектам,
+  установка клиента Cline, транскрипты/спикеры). Вход — логин/пароль или токен от админа;
+  админские разделы там недоступны (`403`). Подробности — `README_SERVER_MULTIUSER.md` §1a/§6.
 * **Демоном можно управлять из UI** (блок «Демон автотранскрибации»): состояние
-  (работает / остановлен / `lock` без процесса), кнопки **Запустить**, **Остановить**,
-  **Перезапустить**. Остановка мягкая (`transcribe.stop`), запуск — без окна, тем же
-  способом, что резидент в блоке «Резидент llm-host»; дубль невозможен (`transcribe.lock`).
+  (работает / остановлен / `lock` без процесса), **форма** управления (служба SCM / задача
+  Планировщика / процесс) и кнопки **Запустить**, **Остановить**, **Перезапустить**.
+  В server-профиле действия уходят в SCM (`hds service … transcribe`), в desktop — процесс
+  (остановка мягкая через `transcribe.stop`, запуск без окна); дубль невозможен (`transcribe.lock`).
   Если `enabled: false`, запуск честно предупредит, что демон завершится сам.
 * **Идемпотентность:** манифест `data/auto-transcribe/manifest.jsonl` и журнал очереди
   `data/auto-transcribe-queue.jsonl` — уже обработанный файл и свежий выход повторно не

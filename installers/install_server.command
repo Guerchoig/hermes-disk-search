@@ -40,13 +40,14 @@ USAGE
 }
 
 ROOT=""
-ROLES="watch,mcp-http,ui,llm-host"
+ROLES="watch,mcp-http,ui,llm-host,transcribe"
 STATEDIR=""
 MCP_HOST="127.0.0.1"; MCP_PORT="8787"
 UI_HOST="127.0.0.1"; UI_PORT="8765"
 PARALLEL="0"
 GPU_DEVICE=""; GPU_PRESET=""
 ROOTS=""
+MEDIA_INBOX=""; MEDIA_OUT=""; ENABLE_TRANSCRIBE="no"; SOURCE_DISPOSAL="delete"
 ENABLE_ACCESS="no"
 ADMIN_LOGIN=""; ADMIN_PASSWORD=""
 FETCH="no"; NOFETCH="no"; WHATIF="no"
@@ -63,6 +64,10 @@ while [ "$#" -gt 0 ]; do
         --gpu-device) GPU_DEVICE="${2:-}"; shift 2 ;;
         --gpu-preset) GPU_PRESET="${2:-}"; shift 2 ;;
         --roots) ROOTS="${2:-}"; shift 2 ;;
+        --media-inbox) MEDIA_INBOX="${2:-}"; shift 2 ;;
+        --media-out) MEDIA_OUT="${2:-}"; shift 2 ;;
+        --enable-transcribe) ENABLE_TRANSCRIBE="yes"; shift ;;
+        --source-disposal) SOURCE_DISPOSAL="${2:-}"; shift 2 ;;
         --roles) ROLES="${2:-}"; shift 2 ;;
         --enable-access) ENABLE_ACCESS="yes"; shift ;;
         --admin-login) ADMIN_LOGIN="${2:-}"; shift 2 ;;
@@ -105,13 +110,32 @@ gen_config() {
     elif printf '%s' "$GPU_DEVICE" | grep -Eq '^[0-9]+$'; then
         echo "gpu:"; echo "  device_index: $GPU_DEVICE"
     fi
-    if [ -n "$ROOTS" ]; then
+    GEN_MEDIA="no"
+    if [ -n "$MEDIA_INBOX" ] || [ -n "$MEDIA_OUT" ]; then GEN_MEDIA="yes"; fi
+    if [ -n "$ROOTS" ] || [ "$GEN_MEDIA" = "yes" ]; then
         echo "index:"
-        echo "  roots:"
-        printf '%s\n' "$ROOTS" | tr ';,' '\n\n' | while IFS= read -r r; do
-            r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-            [ -n "$r" ] && echo "    - $(yq_single "$r")"
-        done
+        if [ -n "$ROOTS" ]; then
+            echo "  roots:"
+            printf '%s\n' "$ROOTS" | tr ';,' '\n\n' | while IFS= read -r r; do
+                r="$(printf '%s' "$r" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                [ -n "$r" ] && echo "    - $(yq_single "$r")"
+            done
+        fi
+        if [ "$GEN_MEDIA" = "yes" ]; then
+            echo "  exclude_paths:"
+            [ -n "$MEDIA_INBOX" ] && echo "    - $(yq_single "$MEDIA_INBOX")"
+            [ -n "$MEDIA_OUT" ] && echo "    - $(yq_single "$MEDIA_OUT")"
+        fi
+    fi
+    if [ "$ENABLE_TRANSCRIBE" = "yes" ] || [ "$GEN_MEDIA" = "yes" ]; then
+        echo "auto_transcribe:"
+        if [ "$ENABLE_TRANSCRIBE" = "yes" ]; then echo "  enabled: true"; else echo "  enabled: false"; fi
+        [ -n "$MEDIA_INBOX" ] && echo "  inbox_dir: $(yq_single "$MEDIA_INBOX")"
+        [ -n "$MEDIA_OUT" ] && echo "  out_dir: $(yq_single "$MEDIA_OUT")"
+        echo "  diarization: true"
+        echo "  diarization_required: true"
+        echo "  source_disposal: $SOURCE_DISPOSAL"
+        echo "  pause_indexing: true"
     fi
     echo "mcp_http:"
     echo "  host: $(yq_single "$MCP_HOST")   # publish /mcp only via reverse proxy with TLS"
@@ -186,7 +210,7 @@ done
 if [ "$FETCH" = "yes" ] && [ "$NOFETCH" != "yes" ]; then
     PWSH="$(command -v pwsh || true)"
     if [ -n "$PWSH" ]; then
-        for f in fetch_engine_runtime.ps1 fetch_llm_models.ps1 fetch_whisper_model.ps1 fetch_clip_models.ps1; do
+        for f in fetch_engine_runtime.ps1 fetch_llm_models.ps1 fetch_whisper_model.ps1 fetch_diarization_model.ps1 fetch_clip_models.ps1; do
             s="$HERE/$f"
             if [ ! -f "$s" ]; then summary+=("[..] fetch skipped (not found): $f"); continue; fi
             if "$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$s"; then summary+=("[ok] fetched: $f"); else summary+=("[!!] fetch failed: $f"); fi

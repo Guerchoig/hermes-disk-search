@@ -20,6 +20,7 @@ use hds_extract::discover_python;
 use serde_json::Value;
 
 use crate::Sidecar;
+use crate::{pipeline, walk};
 
 /// Таймаут сетевого зонда (как `_PROBE_TIMEOUT = 3` в Python).
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -1441,6 +1442,136 @@ fn check_gpu_roles_live(
 }
 
 /// Все проверки (композиция; сеть/воркер — здесь, чистые части — отдельно).
+/// R1.4 (PLAN_TRANSCRIBE_SERVICE): `index.transcribe` — legacy-ключ. ASR вынесена из конвейера
+/// индексации: медиа пропускается как `skipped_media`, тексты медиа даёт только автотранскрибация.
+pub fn check_index_transcribe_legacy(cfg: &Config) -> Check {
+    let on = dig(cfg, "index.transcribe")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if on {
+        Check::new(
+            "index-transcribe",
+            "warn",
+            "ключ index.transcribe устарел и не действует",
+        )
+        .msg(
+            "ASR в индексации отключена: медиа пропускается (skipped_media); тексты медиа даёт \
+             только автотранскрибация (`hds transcribe-watch`).",
+        )
+        .fix(
+            "уберите `index.transcribe` из config.yaml (или поставьте false); транскрибацию \
+             настраивайте в секции `auto_transcribe`",
+        )
+    } else {
+        Check::new(
+            "index-transcribe",
+            "ok",
+            "ASR в индексации отключена (медиа пропускается)",
+        )
+    }
+}
+
+/// R2.4 (PLAN_TRANSCRIBE_SERVICE): пункт `auto-transcribe-dirs` — каталоги `inbox_dir`/`out_dir`
+/// абсолютные, существуют, различны, не вложены друг в друга и **исключены** из индексации
+/// (неявно через `auto_transcribe.*` или явно в `index.exclude_paths`).
+pub fn check_auto_transcribe_dirs(cfg: &Config) -> Check {
+    let enabled = dig(cfg, "auto_transcribe.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let inbox = dig(cfg, "auto_transcribe.inbox_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let out = dig(cfg, "auto_transcribe.out_dir")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if !enabled && inbox.is_empty() && out.is_empty() {
+        return Check::new(
+            "auto-transcribe-dirs",
+            "ok",
+            "автотранскрибация не настроена",
+        );
+    }
+    let mut problems: Vec<String> = Vec::new();
+    if inbox.is_empty() {
+        problems.push("не задан `auto_transcribe.inbox_dir`".into());
+    }
+    if out.is_empty() {
+        problems.push("не задан `auto_transcribe.out_dir`".into());
+    }
+    for (name, path) in [("inbox_dir", &inbox), ("out_dir", &out)] {
+        if path.is_empty() {
+            continue;
+        }
+        let p = Path::new(path);
+        if !p.is_absolute() {
+            problems.push(format!("{name} не абсолютный: {path}"));
+        } else if !p.is_dir() {
+            problems.push(format!("{name} не существует: {path}"));
+        }
+    }
+    if !inbox.is_empty() && !out.is_empty() {
+        if inbox == out {
+            problems.push("inbox_dir и out_dir совпадают".into());
+        } else {
+            let ni = walk::normalize_path(&inbox);
+            let no = walk::normalize_path(&out);
+            if ni.starts_with(&format!("{no}/")) || no.starts_with(&format!("{ni}/")) {
+                problems.push("inbox_dir и out_dir вложены друг в друга".into());
+            }
+        }
+    }
+    // обе папки исключены из индексации (неявные/явные excludes)
+    let (excl, _) = pipeline::index_filter(cfg);
+    for (name, path) in [("inbox_dir", &inbox), ("out_dir", &out)] {
+        if !path.is_empty()
+            && !excl.matches_prefix(Path::new(path))
+            && !excl.excludes_path(Path::new(path))
+        {
+            problems.push(format!("{name} не исключён из индексации ({path})"));
+        }
+    }
+    if problems.is_empty() {
+        Check::new(
+            "auto-transcribe-dirs",
+            "ok",
+            "каталоги автотранскрибации корректны и исключены",
+        )
+        .msg("Транскрипты ищутся только после переноса из `out_dir` в индексируемую папку.")
+    } else {
+        Check::new("auto-transcribe-dirs", "warn", "каталоги автотранскрибации")
+            .msg(problems.join("; "))
+            .fix(
+                "задайте абсолютные, разные, не вложенные `auto_transcribe.inbox_dir`/`out_dir`; \
+                 они неявно исключаются из индексации",
+            )
+    }
+}
+
+/// R3.11 (PLAN_TRANSCRIBE_SERVICE): единственный демон автотранскрибации. `transcribe.lock`
+/// с живым PID — норма; залипший файл без процесса — предупреждение (мусор/попытка второго демона).
+pub fn check_transcribe_daemon() -> Check {
+    let lock = config::project_root().join("transcribe.lock");
+    if !lock.exists() {
+        return Check::new("transcribe-daemon", "ok", "демон transcribe не запущен");
+    }
+    let pid = std::fs::read_to_string(&lock)
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok());
+    match pid {
+        Some(p) if crate::watch::pid_alive(p) => {
+            Check::new("transcribe-daemon", "ok", "демон transcribe запущен (один)")
+                .msg(format!("PID {p} жив (transcribe.lock)"))
+        }
+        _ => Check::new("transcribe-daemon", "warn", "залипший transcribe.lock")
+            .msg("файл transcribe.lock без живого процесса")
+            .fix("если служба/задача transcribe не запущена — удалите transcribe.lock"),
+    }
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -1449,6 +1580,9 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
         check_chat(cfg),
     ];
     checks.push(check_diarization(cfg));
+    checks.push(check_index_transcribe_legacy(cfg));
+    checks.push(check_auto_transcribe_dirs(cfg));
+    checks.push(check_transcribe_daemon());
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);

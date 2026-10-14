@@ -24,6 +24,8 @@ pub fn get_config() -> Value {
         "roots": arr("index.roots"),
         "exclude_paths": arr("index.exclude_paths"),
         "exclude_dirs": arr("index.exclude_dirs"),
+        // R2.1: каталоги автотранскрибации, исключаемые из индексации неявно (рантайм).
+        "implicit_excludes": hds_index::pipeline::implicit_excludes(&cfg),
         // §8.4: папки конвейера автотранскрибации — для формы на закладке «Транскрибация»
         "auto_transcribe": {
             "inbox_dir": scal(&cfg, "auto_transcribe.inbox_dir"),

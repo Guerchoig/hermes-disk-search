@@ -193,9 +193,14 @@ pub const PAGE: &str = r#"<!doctype html>
    <div class="muted">Входная папка (исходные медиа) и выходная (транскрипты) —
     сохраняются в <code>config.yaml</code> и применяются к новым запускам демона.</div>
    <div class="row" style="margin-top:8px"><span class="muted" style="min-width:90px">inbox_dir</span>
-    <input id="trinbox" placeholder="D:\\media_in" style="min-width:420px"></div>
+    <input id="trinbox" placeholder="D:\\media_in" style="min-width:420px" oninput="trInd('trinbox','trinboxind')">
+    <span id="trinboxind" class="muted"></span></div>
    <div class="row" style="margin-top:6px"><span class="muted" style="min-width:90px">out_dir</span>
-    <input id="trout" placeholder="D:\\media_out" style="min-width:420px"></div>
+    <input id="trout" placeholder="D:\\media_out" style="min-width:420px" oninput="trInd('trout','troutind')">
+    <span id="troutind" class="muted"></span></div>
+   <div class="muted" style="margin-top:6px">Индикатор: папка исключена из индексации (неявно через
+    <code>auto_transcribe.*</code> или явно в <code>index.exclude_paths</code>)? Медиа индексировать
+    не нужно — достаточно исключить папки конвейера.</div>
    <div class="row" style="margin-top:8px"><button onclick="saveTrDirs()">Сохранить папки</button>
     <span id="trdirmsg" class="muted"></span></div></section>
 
@@ -505,9 +510,23 @@ async function applyTask(){
 }
 async function loadTrDirs(){
   try{ const c=await jget('/api/config'); const a=c.auto_transcribe||{};
+    // R2.5: неявные (auto_transcribe.*) + явные (index.exclude_paths) исключения.
+    trExcl=(c.implicit_excludes||[]).concat(c.exclude_paths||[]);
     document.getElementById('trinbox').value=a.inbox_dir||'';
     document.getElementById('trout').value=a.out_dir||'';
+    trInd('trinbox','trinboxind'); trInd('trout','troutind');
   }catch(e){}
+}
+// R2.5: индикатор «папка исключена из индексации ✓/✗» у полей папок.
+let trExcl=[];
+function trNorm(p){ return String(p||'').trim().replace(/\\/g,'/').replace(/\/+$/,'').toLowerCase(); }
+function trInd(inputId, spanId){
+  const el=document.getElementById(spanId); if(!el){ return; }
+  const v=trNorm(document.getElementById(inputId).value);
+  if(!v){ el.innerHTML=''; return; }
+  const hit=trExcl.some(function(x){ return trNorm(x)===v; });
+  el.innerHTML=hit? '<span class="ok">&#9989; исключена из индексации</span>'
+    : '<span class="err">&#10060; НЕ исключена из индексации</span>';
 }
 async function saveTrDirs(){
   const m=document.getElementById('trdirmsg'); m.textContent='…';
@@ -522,7 +541,13 @@ async function loadDaemon(){
   try{ const d=await jget('/api/transcribe/daemon');
     const st=d.running? '<span class="ok">работает</span>'+(d.pid? ' (pid '+d.pid+')' : '')
       : (d.stale? '<span class="err">lock без процесса</span>' : '<span class="muted">остановлен</span>');
-    el.innerHTML='Состояние: '+st+' · в конфиге: '+(d.enabled? 'включён' : '<span class="err">выключен</span>')
+    // R3.9: форма управления — служба SCM / задача Планировщика / процесс UI.
+    const form=d.form==='service'? '<b>служба SCM</b> (её же видно в карточке «Службы»)'
+      : (d.form==='task'? '<b>задача Планировщика</b> HermesDiskSearchTranscribe'
+         : '<b>процесс</b> (поднимает эта кнопка)');
+    let svc='';
+    if(d.service&&d.service.state){ svc=' · SCM: '+esc(d.service.state)+(d.service.autostart? ', автостарт':''); }
+    el.innerHTML='Форма: '+form+' · состояние: '+st+svc+' · в конфиге: '+(d.enabled? 'включён' : '<span class="err">выключен</span>')
       +' · папки: <span class="muted">'+esc(d.inbox_dir||'—')+' → '+esc(d.out_dir||'—')+'</span>'
       +' · опрос каждые '+(d.poll_seconds||'?')+' с';
   }catch(e){ el.textContent='ошибка: '+e; }
@@ -562,5 +587,229 @@ function initTab(){
 initTab();
 refresh(); setInterval(refresh, 3000); loadDiag(); loadTree(); loadCfg();
 loadChatModels(); loadMcp(); loadServices();
+</script></body></html>
+"#;
+
+/// HTML страницы **пользователя** (R4.3, `PLAN_TRANSCRIBE_SERVICE.md`): три
+/// блока — «Поиск» (выдача фильтруется проектами токена), «Установка клиента»
+/// (логистика M9: скрипт-бутстрап + пакет) и «Транскрипты и спикеры» (задача UI
+/// транскрибации). Открывается по `/ui/user/`; в server-режиме пускает
+/// `ui_user_gate` — любой валидный токен (`?token=…` или вход по логину/паролю).
+///
+/// Страница самодостаточна (одна HTML, без внешних ресурсов) — как [`PAGE`].
+pub const PAGE_USER: &str = r#"<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes Disk Search — кабинет пользователя</title>
+<style>
+ body{font:14px/1.5 system-ui,Segoe UI,Arial;margin:0;background:#0f1720;color:#e6edf3}
+ header{padding:14px 20px;background:#111c28;border-bottom:1px solid #24384f;display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap}
+ h1{font-size:17px;margin:0}
+ main{max-width:880px;margin:0 auto;padding:16px 20px}
+ section{background:#131f2b;border:1px solid #24384f;border-radius:10px;padding:14px 16px;margin:14px 0}
+ h2{font-size:15px;margin:0 0 10px;color:#9fd0ff}
+ input,button{font:inherit;padding:8px 10px;border-radius:8px;border:1px solid #2a3a55;background:#0d1620;color:#e6edf3}
+ input{min-width:220px}button{cursor:pointer;background:#1c2f44}
+ button:hover{background:#25405e}button:disabled{opacity:.5;cursor:default}
+ .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+ pre{white-space:pre-wrap;word-break:break-word;background:#0d1620;border:1px solid #24384f;border-radius:8px;padding:10px;margin:10px 0 0}
+ .muted{color:#8aa0b6}.ok{color:#6ee7a8}.err{color:#ff9a9a}
+ .loc{color:#9fd0ff;word-break:break-all}
+ .res{border-top:1px solid #24384f;padding:8px 0}
+ table.tr{width:100%;border-collapse:collapse}
+ table.tr th,table.tr td{border-bottom:1px solid #24384f;padding:6px 8px;text-align:left;vertical-align:top}
+ table.tr tbody tr{cursor:pointer}
+ table.tr tbody tr:hover{background:#17273a}
+ code{background:#0d1620;padding:1px 4px;border-radius:4px}
+ a{color:#9fd0ff}
+</style></head><body>
+<header>
+ <h1>Hermes Disk Search — кабинет пользователя</h1>
+ <div class="row"><span id="user-who" class="muted">…</span>
+  <button onclick="logout()">Выйти</button></div>
+</header>
+<main>
+ <section id="user-login">
+  <h2>Вход</h2>
+  <div class="row">
+   <input id="login-user" placeholder="логин" autocomplete="username">
+   <input id="login-pass" type="password" placeholder="пароль" autocomplete="current-password">
+   <button onclick="doLogin()">Войти</button>
+   <span id="login-msg" class="muted"></span></div>
+  <div class="muted">Токен хранится только в этом браузере (localStorage). Если админ выдал токен
+   (<code>hds token new</code>), страницу можно открыть как <code>?token=…</code>.</div>
+ </section>
+
+ <section id="user-search">
+  <h2>Поиск по файлам</h2>
+  <div class="row">
+   <input id="q" placeholder="имя, тема или содержимое" style="min-width:400px">
+   <button onclick="doSearch()">Искать</button>
+   <span id="q-msg" class="muted"></span></div>
+  <div id="q-res"></div>
+ </section>
+
+ <section id="user-install">
+  <h2>Установка клиента (Cline)</h2>
+  <div class="row"><button onclick="loadClient()">Обновить данные</button>
+   <span id="install-ver" class="muted">…</span></div>
+  <div id="install-cmd"></div>
+  <div class="muted">Скрипт скачивается <b>без токена</b>, токен передаётся аргументом: скачайте
+   файл и выполните команду ниже. После установки перезапустите Cline Desktop.</div>
+ </section>
+
+ <section id="user-speakers">
+  <h2>Транскрипты и спикеры</h2>
+  <div class="row"><button onclick="loadTr()">Обновить список</button>
+   <span id="tr-dir" class="muted"></span></div>
+  <table class="tr"><thead><tr><th>Файл</th><th>Размер</th><th>Метки</th><th>Имена</th></tr></thead>
+   <tbody id="tr-rows"></tbody></table>
+  <div class="row" style="margin-top:8px">
+   <button id="tr-open-names" onclick="openNames()" disabled>Присвоить имена спикерам</button>
+   <span id="tr-msg" class="muted"></span></div>
+  <pre id="tr-prev" class="muted">выберите файл в списке</pre>
+  <div id="names-box" hidden>
+   <div class="muted">Пустые поля оставляют метку как есть — подставляются только введённые имена.</div>
+   <table class="tr"><tbody id="names-rows"></tbody></table>
+   <div class="row" style="margin-top:8px"><button onclick="applyNames()">Применить</button>
+    <span id="names-msg" class="muted"></span></div>
+  </div>
+ </section>
+</main>
+<script>
+'use strict';
+// Токен: из localStorage или ?token= (как на админской странице). Только это
+// хранилище — никаких cookie: запросы идут с заголовком Authorization.
+const UT=(function(){
+  try{ const t=new URLSearchParams(location.search).get('token');
+    if(t){ localStorage.setItem('hds.token',t); history.replaceState(null,'',location.pathname); } }catch(e){}
+  try{ return localStorage.getItem('hds.token')||''; }catch(e){ return ''; }
+})();
+function authH(){ return UT? {'Authorization':'Bearer '+UT} : {}; }
+function esc(s){ return (''+s).replace(/[&<>"']/g, function(c){
+  return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+async function jget(u){
+  const r=await fetch(u,{headers:authH()});
+  if(r.status===401){ throw new Error('нужен вход (401)'); }
+  if(r.status===403){ throw new Error('раздел только для админа (403)'); }
+  return await r.json();
+}
+async function jpost(u,body){
+  const h=Object.assign({'Content-Type':'application/json','X-HDS-UI':'1'}, authH());
+  const r=await fetch(u,{method:'POST',headers:h,body:JSON.stringify(body||{})});
+  return await r.json();
+}
+function logout(){ try{ localStorage.removeItem('hds.token'); }catch(e){} location.reload(); }
+async function doLogin(){
+  const m=document.getElementById('login-msg'); m.textContent='…';
+  const login=document.getElementById('login-user').value.trim();
+  const password=document.getElementById('login-pass').value;
+  try{ const r=await jpost('/api/auth/login',{login:login,password:password});
+    if(r.token){ try{ localStorage.setItem('hds.token',r.token); }catch(e){}
+      m.textContent=''; location.reload(); return; }
+    m.textContent='ошибка: '+(r.error||'не удалось войти')+(r.hint? ' · '+r.hint : '');
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function loadMe(){
+  const el=document.getElementById('user-who');
+  try{ const j=await jget('/api/user/me');
+    if(j.auth){
+      el.innerHTML='<b>'+esc(j.user)+'</b>'+(j.admin? ' <span class="ok">админ</span>' : '')+
+        ' · проекты: '+esc((j.projects||[]).join(', ')||'—');
+    } else { el.textContent='локальный доступ (без токена)'; }
+    document.getElementById('user-login').style.display=j.auth? 'none':'block';
+  }catch(e){ el.innerHTML='<span class="err">'+esc(''+e)+'</span>'; }
+}
+async function doSearch(){
+  const m=document.getElementById('q-msg'), b=document.getElementById('q-res');
+  const q=document.getElementById('q').value.trim();
+  if(!q){ m.textContent='введите запрос'; return; }
+  m.textContent='ищу…'; b.innerHTML='';
+  try{ const j=await jget('/api/search?q='+encodeURIComponent(q)+'&limit=10');
+    if(j.error){ m.textContent='ошибка: '+j.error; return; }
+    m.textContent='найдено: '+j.length;
+    b.innerHTML=j.length? j.map(function(r){
+      return '<div class="res"><div>'+esc(r.kind||'')+' · '+esc(r.ext||'')+
+        '</div><div class="loc">'+esc(r.location||r.path||'')+'</div>'+
+        '<div>'+esc(r.snippet||r.text||'')+'</div></div>'; }).join('')
+      : '<div class="muted">ничего не найдено (попробуйте другие формулировки)</div>';
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function loadClient(){
+  const v=document.getElementById('install-ver'), c=document.getElementById('install-cmd');
+  v.textContent='…';
+  try{ const j=await jget('/api/user/client');
+    const origin=location.origin;
+    const tok=UT||'<TOKEN>';
+    const ps1=origin+(j.routes.install_ps1||'/mcp/client-install.ps1');
+    const sh=origin+(j.routes.install_sh||'/mcp/client-install.sh');
+    const have=(j.packages_available||[]).length;
+    v.textContent='версия сервера: '+esc(j.version||'?')+' · платформа сервера: '+
+      esc(j.platform||'?')+' · клиентских пакетов на сервере: '+have;
+    c.innerHTML='<div class="res"><b>Windows</b><pre>'+
+      esc('iwr -UseBasicParsing '+ps1+' -OutFile $env:TEMP\\client-install.ps1\n'+
+          'powershell -ExecutionPolicy Bypass -File $env:TEMP\\client-install.ps1 -Token '+tok+
+          ' -ServerUrl '+origin)+'</pre></div>'+
+      '<div class="res"><b>macOS</b><pre>'+
+      esc('curl -f '+sh+' -o client-install.sh && bash client-install.sh --token '+tok+
+          ' --server-url '+origin)+'</pre></div>'+
+      '<div class="muted">MCP на сервере: '+esc(j.server.address||'')+
+      ' · проверка версии: <a href="'+esc(origin+(j.routes.health||'/health'))+
+      '" target="_blank" rel="noreferrer">/health</a> (поле version — сравните с версией клиента)</div>';
+  }catch(e){ v.innerHTML='<span class="err">'+esc('ошибка: '+e)+'</span>'; }
+}
+let trFile=null, trData=null;
+function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
+async function loadTr(){
+  const tb=document.getElementById('tr-rows'), d=document.getElementById('tr-dir');
+  tb.innerHTML='<tr><td colspan=4 class="muted">…</td></tr>';
+  try{ const j=await jget('/api/transcribe/list');
+    d.textContent=(j.dir||'папка не задана')+(j.error? ' · '+j.error : '');
+    const f=j.files||[];
+    if(!f.length){ tb.innerHTML='<tr><td colspan=4 class="muted">нет файлов</td></tr>'; return; }
+    tb.innerHTML=f.map(function(x){
+      return '<tr data-name="'+esc(x.name)+'"><td>'+esc(x.name)+'</td><td class="muted">'+fmtSize(x.size)+
+        '</td><td class="muted">'+esc((x.speakers||[]).join(', '))+'</td><td>'+
+        (x.renamed? '<span class="ok">имена присвоены</span>' : '<span class="muted">не присвоены</span>')+
+        '</td></tr>'; }).join('');
+    Array.prototype.forEach.call(tb.querySelectorAll('tr'), function(r){
+      r.onclick=function(){ openTr(r.getAttribute('data-name')); }; });
+  }catch(e){ tb.innerHTML='<tr><td colspan=4 class="err">ошибка: '+esc(''+e)+'</td></tr>'; }
+}
+async function openTr(name){
+  const p=document.getElementById('tr-prev');
+  trFile=name; trData=null; p.textContent='…';
+  document.getElementById('tr-msg').textContent=name;
+  document.getElementById('tr-open-names').disabled=true;
+  try{ const j=await jget('/api/transcribe/file?name='+encodeURIComponent(name));
+    if(j.error){ p.textContent='ошибка: '+j.error; return; }
+    trData=j; p.textContent=j.text||'';
+    document.getElementById('tr-open-names').disabled=false;
+  }catch(e){ p.textContent='ошибка: '+e; }
+}
+function openNames(){
+  if(!trData){ document.getElementById('tr-msg').textContent='сначала выберите файл'; return; }
+  const saved=trData.saved||{}, spk=trData.speakers||[];
+  const rows=spk.map(function(s){
+    return '<tr><td><code>'+esc(s)+'</code></td><td><input data-sp="'+esc(s)+'" value="'+esc(saved[s]||'')+
+      '" placeholder="имя (пусто — оставить)"></td></tr>'; }).join('');
+  document.getElementById('names-rows').innerHTML=rows||
+    '<tr><td colspan=2 class="muted">метки спикеров не найдены</td></tr>';
+  document.getElementById('names-box').hidden=false;
+  document.getElementById('names-msg').textContent='';
+}
+async function applyNames(){
+  if(!trFile){ return; }
+  const m=document.getElementById('names-msg'); m.textContent='…';
+  const names={};
+  Array.prototype.forEach.call(document.querySelectorAll('#names-rows input[data-sp]'), function(i){
+    names[i.getAttribute('data-sp')]=i.value; });
+  try{ const r=await jpost('/api/transcribe/speakers',{name:trFile,names:names});
+    m.textContent=(r.ok? '' : 'ошибка: ')+(r.msg||r.error||'ok');
+    if(r.ok){ await loadTr(); await openTr(trFile); openNames(); }
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+loadMe(); loadClient(); loadTr();
+
 </script></body></html>
 "#;

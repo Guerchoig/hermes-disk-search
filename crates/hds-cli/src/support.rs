@@ -12,7 +12,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hds_core::config::{self, dig, Config};
 use hds_core::db;
 use hds_core::error::{CoreError, Result};
-use hds_index::transcribe::MediaRouter;
 use hds_index::{Embedder, Sidecar};
 
 // Проверки окружения переехали в `hds-index::diag` (общий код с веб-интерфейсом);
@@ -79,15 +78,6 @@ pub fn build_sidecar(root: &Path) -> Result<Sidecar> {
         ))
     })?;
     Sidecar::spawn_with(&py, root, false, CLI_WORKER_IDLE)
-}
-
-/// Извлекатель боевого пути: медиа (аудио/видео) → владелец GPU по HTTP
-/// (`/internal/transcribe`), остальные виды — Python-воркер.
-///
-/// Возвращает обёртку, которую конвейер (`run_index`/`run_watch`) использует как
-/// `&dyn Extractor`; лемматизация остаётся на том же `Sidecar`.
-pub fn build_media_extractor<'a>(cfg: &Config, sidecar: &'a Sidecar) -> MediaRouter<&'a Sidecar> {
-    MediaRouter::new(sidecar, cfg)
 }
 
 /// `--roots a;b;c` → список путей (пустые элементы игнорируются, как `args.roots.split(';')`).

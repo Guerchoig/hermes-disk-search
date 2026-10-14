@@ -144,18 +144,22 @@ fn ui_auth_gate_and_access_api() {
         Some(&acc_path),
     );
     assert_eq!(status, 401, "server: API без токена — 401");
-    // Токен обычного пользователя — тоже 401 (UI только для админа).
+    // Токен обычного пользователя на админской странице — 403 (R4.2: гейт различает
+    // «нет токена» (401) и «валидный, но без прав» (403)); кабинет /ui/user/ ему открыт.
     add_user(&acc_path, "alice", false);
-    let alice_plain = issue_token(&acc_path, "alice");
-    let (status, _, _) = route_with_access(
-        "GET",
-        "/",
-        "",
-        &headers(Some(&format!("Bearer {alice_plain}"))),
-        "",
-        Some(&acc_path),
+    let alice_h = headers(Some(&format!("Bearer {}", issue_token(&acc_path, "alice"))));
+    for path in ["/", "/api/status"] {
+        let (status, _, _) = route_with_access("GET", path, "", &alice_h, "", Some(&acc_path));
+        assert_eq!(
+            status, 403,
+            "server: не-админ на админском маршруте {path} — 403"
+        );
+    }
+    let (status, _, _) = route_with_access("GET", "/ui/user/", "", &alice_h, "", Some(&acc_path));
+    assert_eq!(
+        status, 200,
+        "server: не-админ — кабинет пользователя открыт"
     );
-    assert_eq!(status, 401, "server: не-админ — 401");
     // Админ-токен — 200.
     let boss_plain = issue_token(&acc_path, "boss");
     let h_admin = headers(Some(&format!("Bearer {boss_plain}")));

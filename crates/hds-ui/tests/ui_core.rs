@@ -604,7 +604,7 @@ fn services_desktop_reports_none_and_rejects_actions() {
     assert_eq!(a["state"], serde_json::Value::Null, "{a}");
 }
 
-/// server-профиль GET: 4 роли с контрактными полями (чтение SCM — read-only).
+/// server-профиль GET: 5 ролей с контрактными полями (чтение SCM — read-only).
 #[test]
 fn services_server_lists_four_roles() {
     use hds_core::config::Profile;
@@ -612,7 +612,12 @@ fn services_server_lists_four_roles() {
     let v = hds_ui::services_json_profile(Profile::Server);
     assert_eq!(v["profile"], "server");
     let arr = v["services"].as_array().unwrap();
-    assert_eq!(arr.len(), 4, "{v}");
+    assert_eq!(arr.len(), 5, "{v}");
+    // R3.1 (PLAN_TRANSCRIBE_SERVICE): пятая роль — transcribe.
+    assert!(
+        arr.iter().any(|s| s["role"] == "transcribe"),
+        "нет роли transcribe: {v}"
+    );
     for s in arr {
         for key in ["role", "kind", "state", "autostart", "detail"] {
             assert!(s.get(key).is_some(), "нет {key}: {s}");

@@ -28,6 +28,51 @@ function Ok($m) { Write-Host "[ok] $m" -ForegroundColor Green }
 function Warn($m) { Write-Host "[--] $m" -ForegroundColor Yellow }
 function Note($m) { Write-Host "     $m" -ForegroundColor DarkGray }
 
+# Set a scalar inside a top-level section of config.yaml, keeping every other
+# line (comments included) as is - the same line-based editor the Rust UI uses.
+# Returns $false when the section is missing (then nothing is written).
+function Set-ConfigScalar {
+    param([string]$Path, [string]$Section, [string]$Key, [string]$Value)
+    try {
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $lines = @([System.IO.File]::ReadAllText($Path, $enc) -split "`n")
+        $start = -1
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($lines[$i].TrimEnd() -eq ($Section + ":")) { $start = $i; break }
+        }
+        if ($start -lt 0) { return $false }
+        $end = $lines.Count
+        for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+            $l = $lines[$i]
+            if ($l.Trim().Length -gt 0 -and -not ($l.StartsWith(" ") -or $l.StartsWith("`t"))) { $end = $i; break }
+        }
+        $quoted = "'" + $Value.Replace("'", "''") + "'"
+        $done = $false
+        for ($i = $start + 1; $i -lt $end; $i++) {
+            if ($lines[$i].TrimStart().StartsWith($Key + ":")) {
+                $indent = $lines[$i].Length - $lines[$i].TrimStart().Length
+                # Keep the trailing comment of the line (paths never contain '#').
+                $comment = ""
+                $hash = $lines[$i].IndexOf("#")
+                if ($hash -ge 0) { $comment = "  " + $lines[$i].Substring($hash) }
+                $lines[$i] = (" " * $indent) + $Key + ": " + $quoted + $comment
+                $done = $true
+                break
+            }
+        }
+        if (-not $done) {
+            $out = New-Object System.Collections.ArrayList
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+                [void]$out.Add($lines[$i])
+                if ($i -eq $start) { [void]$out.Add("  " + $Key + ": " + $quoted) }
+            }
+            $lines = $out.ToArray()
+        }
+        [System.IO.File]::WriteAllText($Path, ($lines -join "`n"), $enc)
+        return $true
+    } catch { return $false }
+}
+
 # --- 1. Mark of the Web -----------------------------------------------------
 # A release archive unpacked by Explorer marks every file as "downloaded from the
 # internet"; the RemoteSigned policy then demands a signature for scripts. This
@@ -275,6 +320,70 @@ if (-not $SkipModels) {
     }
 } else {
     Step "Models (skipped)"
+}
+
+# --- 7b. Automatic transcription (desktop branch, R3.8) ---------------------
+# The AtLogOn task HermesDiskSearchTranscribe (install_autostart.ps1, section 8)
+# never needs these models to be present: the daemon downloads nothing and stops
+# with a clear message. Here we only fetch them into the shared engine models
+# directory and offer to set the pipeline folders (auto_transcribe.*).
+Step "Automatic transcription (speech-to-text + speaker labels)"
+if ($SkipModels) {
+    Warn "models skipped: powershell -File installers\fetch_whisper_model.ps1"
+    Note "                 powershell -File installers\fetch_diarization_model.ps1"
+} else {
+    $ansTr = Read-Host "[?] Set up automatic transcription (inbox_dir -> out_dir, speaker labels)? [y/N]"
+    if ($ansTr -match '^[Yy]') {
+        # -ModelsDir: env override first (server deployments keep models under
+        # ProgramData), otherwise the scripts' default (%APPDATA%\OpenResearchTools\models).
+        $modelsDir = ""
+        if ($env:HDS_MODELS_DIR) { $modelsDir = $env:HDS_MODELS_DIR }
+        foreach ($pair in @(
+                @{ script = "fetch_whisper_model.ps1"; what = "whisper (ASR)" },
+                @{ script = "fetch_diarization_model.ps1"; what = "Sortformer (diarization)" })) {
+            $script = Join-Path $root ("installers\" + $pair.script)
+            if (-not (Test-Path $script)) { Warn "$($pair.script) not found"; continue }
+            $argsTr = @()
+            if ($modelsDir) { $argsTr += @("-ModelsDir", $modelsDir) }
+            Write-Host "[..] fetching $($pair.what)..."
+            try {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $script @argsTr
+                if ($LASTEXITCODE -ne 0) { Warn "$($pair.script): exit code $LASTEXITCODE" }
+            } catch { Warn "$($pair.what): $_" }
+        }
+
+        # Folders of the pipeline: written into config.yaml (the daemon reads them
+        # on start). Empty answer = keep the current value.
+        if (Test-Path $cfg) {
+            $inbox = Read-Host "[?] Folder to watch for media (auto_transcribe.inbox_dir, empty = skip)"
+            $outDir = Read-Host "[?] Folder for transcripts (auto_transcribe.out_dir, empty = skip)"
+            if ($inbox) {
+                if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "inbox_dir" -Value $inbox) {
+                    Ok "auto_transcribe.inbox_dir = $inbox"
+                } else { Warn "auto_transcribe section not found in config.yaml - set inbox_dir manually" }
+            }
+            if ($outDir) {
+                if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "out_dir" -Value $outDir) {
+                    Ok "auto_transcribe.out_dir = $outDir"
+                } else { Warn "auto_transcribe section not found in config.yaml - set out_dir manually" }
+            }
+            if ($inbox -and $outDir) {
+                $ansEn = Read-Host "[?] Enable the daemon now (auto_transcribe.enabled: true)? [y/N]"
+                if ($ansEn -match '^[Yy]') {
+                    if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "enabled" -Value "true") {
+                        Ok "auto_transcribe.enabled = true (restart the daemon/task to apply)"
+                    } else { Warn "auto_transcribe section not found - set enabled manually" }
+                }
+            }
+            Note "The pipeline folders are excluded from indexing implicitly (auto_transcribe.*)."
+        } else {
+            Warn "config.yaml not found - folders must be set later"
+        }
+    } else {
+        Warn "skipped: automatic transcription stays off (auto_transcribe.enabled: false)"
+        Note "Enable later: config.yaml -> auto_transcribe (see config.example.yaml);"
+        Note "the AtLogOn task HermesDiskSearchTranscribe is registered in section 8."
+    }
 }
 
 # --- 8. Logon tasks ---------------------------------------------------------

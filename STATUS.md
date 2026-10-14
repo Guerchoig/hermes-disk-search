@@ -2,6 +2,28 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
+> **Ветка `server-multiuser`, этап «Автотранскрибация как служба пакета» закрыт (14.10.2026,
+> план `PLAN_TRANSCRIBE_SERVICE.md`, R0–R5):** транскрибация+диаризация стала полноправной
+> **службой пакета** — 5-я роль `transcribe` (`hermes-disk-search-transcribe`, SCM
+> `depend= …-llm-host`, кооперативная остановка через `transcribe.stop`), desktop-ветка —
+> задача `HermesDiskSearchTranscribe`, `setup.ps1` получил блок «Automatic transcription»
+> (модели whisper+sortformer + папки конвейера в `config.yaml`), `transcribe-watch --help`
+> больше не запускает демон (есть `--dry-run`). **Медиа вне индексации**: ASR в конвейере
+> индексации убран (`skipped_media`), `index.transcribe` — legacy, папки конвейера
+> (`inbox_dir`/`out_dir`/`state_dir`) исключаются неявно (в UI — индикатор «исключена ✓/✗»),
+> выходы `.md` в индекс не кладутся (перенос вручную, §8.1). **Кабинет пользователя**
+> `/ui/user/` (R4): вход по логину/паролю (`POST /api/auth/login` — контракт `hds login`
+> и MCP, антибрутфорс `login_per_min`), три блока (поиск по проектам токена, установка
+> клиента Cline, транскрипты/спикеры), разделение гейтов: админские маршруты → `403`
+> не-админу, без токена → `401`, не-админ правит `.md`/имена спикеров (`.bak`, path-safety);
+> образцы прокси публикуют `/mcp`, `/ui`, `/health`. Проверки: `cargo fmt --check`,
+> `clippy -D warnings`, `cargo test --workspace` — зелёные; живая приёмка кабинета
+> (`tools/parity/out/r5/`: логин 200/401, rate-limit 429, `403`/`401` матрица, правка `.md`
+> не-админом с `.bak`/sidecar, аудит `login_ok|token_issue|login_fail|unauthorized|forbidden|user_op`,
+> `form: process` в карточке демона). Релиз — `RELEASE_NOTES_v0.20.0.md` (версия 0.20.0).
+> ⚠ Приёмка SCM-службы (`sc query …transcribe → RUNNING` после перезагрузки) требует
+> админской сессии и на dev-машине из неадминской сессии не выполнялась.
+>
 > **Релиз 0.19.0 (13.10.2026, ветка `server-multiuser`, тег `v0.19.0`):** логистика тонкого
 > клиента закрыта — установка в **три шага** (админ выдаёт токен → пользователь скачивает
 > скрипт-установщик `client-install.ps1|sh` из общедоступного места (токен не нужен) →

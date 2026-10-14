@@ -9,7 +9,6 @@ use hds_core::access::AuthCtx;
 use hds_core::config::{self, db_abs_path, dig, load, project_root, Config};
 use hds_core::db;
 use hds_index::heartbeat::{self, HeartbeatFile};
-use hds_index::transcribe::MediaRouter;
 use hds_index::{Embedder, RunIndexArgs, Sidecar};
 use hds_search::{format_location, SearchResult};
 
@@ -340,7 +339,6 @@ pub fn reindex_path(path: &str) -> String {
         Err(e) => return format!("Воркер извлечения/лемматизации: {e}"),
     };
     let abs = std::fs::canonicalize(path).unwrap_or_else(|_| Path::new(path).to_path_buf());
-    let media = MediaRouter::new(&side, &cfg);
     let args = RunIndexArgs {
         single_paths: Some(vec![abs.clone()]),
         full: true,
@@ -348,7 +346,7 @@ pub fn reindex_path(path: &str) -> String {
         quiet: true,
         ..RunIndexArgs::default()
     };
-    let res = hds_index::pipeline::run_index(&conn, &cfg, &emb, &media, &side, &args);
+    let res = hds_index::pipeline::run_index(&conn, &cfg, &emb, &side, &side, &args);
     side.shutdown();
     match res {
         Ok(counters) => format!("Переиндексация {}: {}", abs.display(), counters),
@@ -367,14 +365,13 @@ fn run_indexing(full: bool) -> Result<(), String> {
     if stop.exists() {
         let _ = std::fs::remove_file(&stop); // leftover от прошлой остановки
     }
-    let media = MediaRouter::new(&side, &cfg);
     let args = RunIndexArgs {
         full,
         prune: true,
         quiet: true,
         ..RunIndexArgs::default()
     };
-    let r = hds_index::pipeline::run_index(&conn, &cfg, &emb, &media, &side, &args);
+    let r = hds_index::pipeline::run_index(&conn, &cfg, &emb, &side, &side, &args);
     side.shutdown();
     r.map(|_| ()).map_err(|e| e.message())
 }

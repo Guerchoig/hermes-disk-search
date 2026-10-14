@@ -96,6 +96,61 @@ fn skipped_type_and_office_lock() {
 }
 
 #[test]
+fn media_skipped_before_extractor() {
+    // R1.1 (PLAN_TRANSCRIBE_SERVICE): медиа пропускается ранним `skipped_media` — до стата,
+    // хэша и эмбеддингов. Извлекатель не должен вызываться вовсе (паника — доказательство).
+    struct PanicExtractor;
+    impl Extractor for PanicExtractor {
+        fn extract(&self, _p: &Path) -> Result<(String, Vec<Segment>)> {
+            panic!("extractor не должен вызываться для медиа");
+        }
+    }
+    let dir = workdir("media");
+    let conn = open(&dir);
+    let cfg = cfg_yaml(200);
+    for name in ["клип.mp4", "запись.wav", "трек.mp3"] {
+        let p = dir.join(name);
+        std::fs::write(&p, b"x").unwrap();
+        match pipeline::extract_file(&conn, &cfg, &p, false, &PanicExtractor).unwrap() {
+            pipeline::ExtractOutcome::Early { status, kind } => {
+                assert_eq!(status, "skipped_media", "{name}");
+                assert_eq!(kind.as_deref(), Some("media"), "{name}");
+            }
+            _ => panic!("ожидался ранний выход для {name}"),
+        }
+        // Ни стата, ни `content_hash` — строки в БД не появилось.
+        assert!(
+            db::get_file_by_path(&conn, &pipeline::path_str(&p))
+                .unwrap()
+                .is_none(),
+            "медиа {name} не должно попасть в БД"
+        );
+    }
+}
+
+#[test]
+fn implicit_excludes_include_auto_transcribe_dirs() {
+    // R2.1: inbox/out/state_dir автотранскрибации исключаются из индексации неявно.
+    let cfg: Config = serde_yaml::from_str(
+        "index:\n  exclude_paths: []\n\
+         auto_transcribe:\n  inbox_dir: 'D:\\media-in'\n  out_dir: 'D:\\media-out'\n  \
+         state_dir: 'data/auto-transcribe'\n",
+    )
+    .unwrap();
+    let im = pipeline::implicit_excludes(&cfg);
+    assert!(im.iter().any(|p| p == "D:\\media-in"), "im={im:?}");
+    assert!(im.iter().any(|p| p == "D:\\media-out"), "im={im:?}");
+    assert!(
+        im.iter()
+            .any(|p| p.replace('\\', "/").ends_with("data/auto-transcribe")),
+        "state_dir не разрешён: {im:?}"
+    );
+    let (excl, _) = pipeline::index_filter(&cfg);
+    assert!(excl.matches_prefix(Path::new("D:\\media-in\\a.mp3")));
+    assert!(excl.matches_prefix(Path::new("D:\\media-out\\x.md")));
+}
+
+#[test]
 fn skipped_big_respects_limit() {
     let dir = workdir("big");
     let conn = open(&dir);
