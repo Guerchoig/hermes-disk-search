@@ -637,7 +637,7 @@ hds token new --user laptop --ttl-days 90          # plain-токен показ
 # 2) НА НОУТБУКЕ — получить клиентский пакет (права админа не нужны), два канала:
 #    а) со страницы релизов: hds-client-<версия>-windows-x64.zip (+ .sha256.txt)
 #    б) с сервера, своим токеном (тот же пакет той же версии, что у сервера):
-curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip http://192.168.0.101:8787/mcp/client-package.zip
+curl.exe -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip http://192.168.0.101:8787/mcp/client-package.zip
 Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
 Get-ChildItem .\hds-client -Recurse | Unblock-File          # сняли «скачано из интернета»
 #    (dev-вариант: собрать пакет самому из репозитория —

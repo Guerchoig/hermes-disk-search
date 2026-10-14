@@ -14,12 +14,12 @@ disk-search. Движка, моделей, индекса и sidecar здесь 
 Два канала (файл один и тот же):
 1. **с сервера** (своим токеном; так удобнее без доступа к GitHub):
    ```powershell
-   curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
+   curl.exe -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
    Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
    Get-ChildItem .\hds-client -Recurse | Unblock-File
    ```
    ```bash
-   curl -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
+   curl -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
      unzip -q hds-client.zip -d hds-client && xattr -dr com.apple.quarantine hds-client
    ```
 2. **ассетом релиза** `hds-client-<версия>-<платформа>.zip` со страницы релизов.

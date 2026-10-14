@@ -431,12 +431,12 @@ sudo bash installers/install_server.command \
 * **с сервера** (своим токеном — гейт как у `/mcp`, путь внутри опубликованного
   `/mcp`-префикса, работает и через TLS-прокси):
   ```powershell
-  curl.exe -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
+  curl.exe -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip
   Expand-Archive .\hds-client.zip -DestinationPath .\hds-client -Force
   Get-ChildItem .\hds-client -Recurse | Unblock-File
   ```
   ```bash
-  curl -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
+  curl -f -H "Authorization: Bearer <ТОКЕН>" -o hds-client.zip https://host/mcp/client-package.zip && \
     unzip -q hds-client.zip -d hds-client && xattr -dr com.apple.quarantine hds-client
   ```
 * **ассетом релиза** — `hds-client-<версия>-<платформа>.zip` (тот же файл, что вложен в
