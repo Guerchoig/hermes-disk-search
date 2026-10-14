@@ -1027,22 +1027,28 @@ mod tests {
         let q = queue(QueuePolicy::RoundRobin, 1, 5, 30);
         let holder = q.acquire("user:u", || true).expect("слот свободен");
 
-        // Две заявки того же пользователя ждут (глубина 2)...
+        // Две заявки того же пользователя ждут (глубина 2). Ставим их в
+        // очередь СТРОГО по одной: `seq` выдаётся в момент постановки, поэтому
+        // «кто из нитей успел первым» — гонка планировщика, а не свойство
+        // очереди. Флейк 14.10.2026 (CI, релизный прогон v0.20.0): обе нити
+        // спавнились сразу, вторая встала раньше первой и по праву получила
+        // слот первой — порядок выдачи [1, 0] ломал ожидание [0, 1].
         let order = Arc::new(std::sync::Mutex::new(Vec::<usize>::new()));
         let mut joins = Vec::new();
         for i in 0..2 {
-            let q = Arc::clone(&q);
-            let order = Arc::clone(&order);
+            let qc = Arc::clone(&q);
+            let orderc = Arc::clone(&order);
             joins.push(std::thread::spawn(move || {
-                let t = q.acquire("user:u", || true).expect("дождались слота");
-                order.lock().unwrap().push(i);
+                let t = qc.acquire("user:u", || true).expect("дождались слота");
+                orderc.lock().unwrap().push(i);
                 drop(t); // слот уходит следующей заявке
             }));
-        }
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while q.stats().depth < 2 {
-            assert!(Instant::now() < deadline, "заявки не встали в очередь");
-            std::thread::sleep(Duration::from_millis(10));
+            // Ждём постановку ИМЕННО этой заявки, лишь затем спавним следующую.
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while q.stats().depth < i as u32 + 1 {
+                assert!(Instant::now() < deadline, "заявки не встали в очередь");
+                std::thread::sleep(Duration::from_millis(10));
+            }
         }
 
         // ...тогда освобождаем слот: обе разбужены, но сначала — заявка с
