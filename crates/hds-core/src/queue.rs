@@ -913,25 +913,36 @@ mod tests {
 
     /// Порядок выдачи слотов при `max_inflight: 1`: «жадный» A шлёт 3 запроса,
     /// B — один; приходят в порядке A, A, A, B (каждый держит слот 120 мс).
+    ///
+    /// Заявки ставятся в очередь СТРОГО по одной: тест ждёт фактическую
+    /// постановку предыдущей (растёт глубина) и лишь затем пускает следующую.
+    /// Раньше порядок прихода задавали задержки `sleep(25*i)`, и на macOS
+    /// (широкий разброс старта нитей) третий A изредка вставал в очередь после
+    /// B — FIFO-ожидание «переставлялось» (красный CI 15.10.2026).
     fn grant_order(policy: QueuePolicy) -> Vec<String> {
         let q = queue(policy, 1, 20, 10);
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
         let mut handles = Vec::new();
         for (i, user) in ["user:a", "user:a", "user:a", "user:b"].iter().enumerate() {
-            let q = Arc::clone(&q);
-            let log = Arc::clone(&log);
+            let qc = Arc::clone(&q);
+            let logc = Arc::clone(&log);
             let user = user.to_string();
             handles.push(std::thread::spawn(move || {
-                if i > 0 {
-                    std::thread::sleep(Duration::from_millis(25 * i as u64));
-                }
-                let t = q.acquire(&user, || true).expect("слот достанется");
-                log.lock()
+                let t = qc.acquire(&user, || true).expect("слот достанется");
+                logc.lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .push(user.clone());
                 std::thread::sleep(Duration::from_millis(120));
                 drop(t);
             }));
+            // Ждём постановку ИМЕННО этой заявки, лишь затем спавним следующую.
+            if i > 0 {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while q.stats().depth < i as u32 {
+                    assert!(Instant::now() < deadline, "заявки не встали в очередь");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
         }
         for h in handles {
             h.join().unwrap();
