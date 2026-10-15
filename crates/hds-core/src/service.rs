@@ -494,16 +494,52 @@ pub fn status(role: &str) -> ServiceStatus {
 // `<install>\…\bin\hds.exe`. Обёртки `update.cmd` / `update.command` берут корень
 // отсюда (`bin\hds.exe service root`), поэтому парсеры — чистые функции с тестами.
 
+/// Корень поставки по пути к исполняемому файлу.
+///
+/// Работает **на строке**, сохраняя стиль разделителей входа: `sc qc` отдаёт путь
+/// Windows (`\`), плейст LaunchDaemon — POSIX (`/`), а тесты гоняются и на Windows,
+/// и на юниксе (RELEASING.md §7). Иначе `Path` на юниксе считал бы `\` обычным
+/// символом, и разбор Windows-пути вернул бы `None` (живой красный CI 15.10.2026).
+///
+/// Раскладки поставки:
+/// * versioned: `<install>/app/current/bin/hds[.exe]` → `<install>` (владелец `app/`);
+/// * плоская:   `<install>/bin/hds[.exe]`             → `<install>`.
+fn root_of_exe_str(exe: &str) -> Option<String> {
+    let exe = exe.trim();
+    if exe.is_empty() {
+        return None;
+    }
+    let sep = if exe.contains('\\') { '\\' } else { '/' };
+    let comps: Vec<&str> = exe.split(['/', '\\']).filter(|s| !s.is_empty()).collect();
+    // Последний компонент — сам файл, значит нужен хотя бы один каталог перед ним.
+    if comps.len() < 2 {
+        return None;
+    }
+    let mut dir = &comps[..comps.len() - 1];
+    if dir.last() == Some(&"bin") {
+        dir = &dir[..dir.len() - 1];
+    }
+    if dir.len() >= 2 && dir.last() == Some(&"current") && dir[dir.len() - 2] == "app" {
+        dir = &dir[..dir.len() - 2];
+    }
+    if dir.is_empty() {
+        return None;
+    }
+    let mut out = String::new();
+    if exe.starts_with('/') || exe.starts_with('\\') {
+        out.push(sep);
+    }
+    out.push_str(&dir.join(&sep.to_string()));
+    Some(out)
+}
+
 /// Корень установки по записи `binPath` службы (чистая функция — есть тест).
 ///
 /// Принимает и голое значение (`"<путь>" service run <role>`), и целую строку
 /// вывода `sc qc`: путь берётся из первых кавычек, а если их нет — до `.exe`.
-/// Раскладки поставки:
-/// * versioned: `<install>\app\current\bin\hds.exe` → `<install>` (владелец `app\`);
-/// * плоская:   `<install>\bin\hds.exe`             → `<install>`.
 pub fn install_root_from_binpath(binpath: &str) -> Option<PathBuf> {
     let exe = exe_path_in(binpath)?;
-    install_root_from_exe(Path::new(&exe))
+    root_of_exe_str(&exe).map(PathBuf::from)
 }
 
 /// Корень установки по тексту вывода `sc qc` (чистая функция — есть тест).
@@ -526,7 +562,7 @@ pub fn install_root_from_plist(text: &str) -> Option<PathBuf> {
     let start = after.find("<string>")? + "<string>".len();
     let rest = &after[start..];
     let end = rest.find("</string>")?;
-    install_root_from_exe(Path::new(rest[..end].trim()))
+    root_of_exe_str(rest[..end].trim()).map(PathBuf::from)
 }
 
 /// Путь к exe из строки записи службы: между первыми кавычками, иначе — до `.exe`
@@ -545,30 +581,6 @@ fn exe_path_in(s: &str) -> Option<String> {
     let start = low[..end].rfind([' ', '\t']).map(|p| p + 1).unwrap_or(0);
     let path = s[start..end].trim();
     (!path.is_empty()).then(|| path.to_string())
-}
-
-/// Общий шаг: путь к exe → корень установки (см. [`install_root_from_binpath`]).
-fn install_root_from_exe(exe: &Path) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    if dir.as_os_str().is_empty() {
-        return None;
-    }
-    let base = if dir.file_name().map(|n| n == "bin").unwrap_or(false) {
-        dir.parent()?
-    } else {
-        dir
-    };
-    // versioned-раскладка: `<install>\app\current` → корень — владелец `app\`.
-    if base.file_name().map(|n| n == "current").unwrap_or(false) {
-        if let Some(app) = base.parent() {
-            if app.file_name().map(|n| n == "app").unwrap_or(false) {
-                if let Some(root) = app.parent().filter(|p| !p.as_os_str().is_empty()) {
-                    return Some(root.to_path_buf());
-                }
-            }
-        }
-    }
-    Some(base.to_path_buf())
 }
 
 /// Корень установки зарегистрированных ролей (`None` — ни одна не стоит:
