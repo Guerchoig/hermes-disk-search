@@ -40,7 +40,7 @@
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `README_SERVER_MULTIUSER.md`, `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
@@ -52,6 +52,12 @@
 
 Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ) и исходники sidecar в архив
 **не входят**: sidecar собирается в CI и кладётся внутрь, модели установщик качает сам.
+
+**Серверный документ обязателен в поставке.** `README_SERVER_MULTIUSER.md` — то, по чему
+администратор сервера ставит систему, ведёт её и делает короткую памятку пользователям. Сборщики
+(`installers/build_rust_release.ps1`, `installers/build_rust_release_macos.sh`) **падают**, если
+документа нет в стейдже: релиз без него не выходит. Клиентские пакеты несут свою короткую памятку
+(`installers/client_readme.md` → `README.md` внутри клиентского архива).
 
 Отдельные теги (не часть версии продукта):
 

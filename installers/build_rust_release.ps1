@@ -93,9 +93,14 @@ New-Item -ItemType Directory -Force -Path $shortcutDir | Out-Null
 Copy-Item (Join-Path $root "shortcuts\windows\create_shortcut.ps1") $shortcutDir -Force
 
 # docs (NOTICE.md is optional until the attribution text lands)
-foreach ($f in @("config.example.yaml", "README.md", "NOTICE.md")) {
+# README_SERVER_MULTIUSER.md is REQUIRED: it is what the server administrator reads
+# to install the system and to write the short note for end users.
+foreach ($f in @("config.example.yaml", "README.md", "README_SERVER_MULTIUSER.md", "NOTICE.md")) {
     $src = Join-Path $root $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $stage $f) -Force }
+}
+foreach ($f in @("README.md", "README_SERVER_MULTIUSER.md")) {
+    if (-not (Test-Path (Join-Path $stage $f))) { throw "missing $f in $stage (repo root)" }
 }
 
 # --- версия продукта и вложенный клиентский пакет (M9/W7) --------------------

@@ -72,7 +72,9 @@ if [ -n "$SIDECAR_DIR" ]; then
 fi
 
 # --- docs ---------------------------------------------------------------------
-for f in config.example.yaml README.md NOTICE.md; do
+# README_SERVER_MULTIUSER.md is required: the server administrator installs the
+# system and writes the short note for end users from it.
+for f in config.example.yaml README.md README_SERVER_MULTIUSER.md NOTICE.md; do
     if [ -f "$ROOT/$f" ]; then
         cp "$ROOT/$f" "$STAGE/$f"
     fi
