@@ -238,9 +238,12 @@ class WhisperCppModel:
 
     def transcribe(self, path, vad_filter=True, language=None):
         # whisper.cpp принимает только WAV 16 кГц mono — конвертируем ffmpeg'ом
-        ffmpeg = shutil.which("ffmpeg")
+        from .config import dig
+        ffmpeg = dig(self.cfg, "index.ffmpeg_cmd", "") or shutil.which("ffmpeg")
         if not ffmpeg:
-            raise RuntimeError("ffmpeg не найден в PATH (нужен для whisper.cpp)")
+            raise RuntimeError(
+                "ffmpeg не найден в PATH (нужен для whisper.cpp) - "
+                "укажите index.ffmpeg_cmd")
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         tmp.close()
         try:

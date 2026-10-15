@@ -16,7 +16,15 @@ param(
     [switch]$SkipEngine,
     [switch]$NoAutostart,
     [switch]$SkipIntegrations,
-    [switch]$SmokeTest
+    [switch]$SmokeTest,
+    # 0.20.2 (incident 15.10.2026): no more per-component questions - everything
+    # is installed by default, refusing is an explicit switch.
+    [switch]$SkipOcr,          # do not install Tesseract OCR
+    [switch]$SkipWhisper,      # do not download the whisper (ASR) model
+    [switch]$SkipClip,         # do not download the CLIP image models
+    [switch]$SkipDiarization,  # do not download the Sortformer model
+    [switch]$SkipTranscribe,   # do not set up the auto-transcription pipeline
+    [switch]$NonInteractive    # no final "Press Enter" pause (for unattended runs)
 )
 
 $ErrorActionPreference = "Stop"
@@ -108,6 +116,12 @@ $ErrorActionPreference = "Continue"
 
 # --- 3. System dependencies via winget -------------------------------------
 $haveWinget = [bool](Get-Command winget -ErrorAction SilentlyContinue)
+# Machine scope when we are admin: services (LocalSystem) start with a minimal
+# PATH, so a per-user install of ffmpeg/tesseract is invisible to them.
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent(
+    )).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+$wingetScope = @()
+if ($isAdmin) { $wingetScope = @("--scope", "machine") }
 
 Step "System dependencies"
 # ffmpeg (video transcription) - installed automatically
@@ -115,28 +129,34 @@ if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
     Ok "ffmpeg found"
 } elseif ($haveWinget) {
     Write-Host "[..] ffmpeg not found - installing via winget (needed for video transcription)..."
-    winget install -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
+    winget install -e --id Gyan.FFmpeg @wingetScope --accept-source-agreements --accept-package-agreements
     Note "If ffmpeg is still missing from PATH, open a NEW PowerShell window."
 } else {
     Warn "ffmpeg not found and winget is unavailable (video without transcription)."
     Note "Install manually: https://www.gyan.dev/ffmpeg/builds/"
 }
 
-# Tesseract OCR (text inside images/scans) - with user consent
-if ((Get-Command tesseract -ErrorAction SilentlyContinue) -or (Test-Path "$env:ProgramFiles\Tesseract-OCR\tesseract.exe")) {
-    Ok "Tesseract OCR found"
+# Tesseract OCR (text inside images/scans): installed by DEFAULT, no question
+# (opt out with -SkipOcr). Machine scope when we are admin - the services see it
+# and the caller writes index.ocr_* into config.yaml below.
+$ocrExe = ""
+$ocrCandidates = @((Join-Path $env:ProgramFiles "Tesseract-OCR\tesseract.exe"))
+$pf86 = [Environment]::GetEnvironmentVariable("ProgramFiles(x86)")
+if ($pf86) { $ocrCandidates += (Join-Path $pf86 "Tesseract-OCR\tesseract.exe") }
+if ($env:LOCALAPPDATA) { $ocrCandidates += (Join-Path $env:LOCALAPPDATA "Programs\Tesseract-OCR\tesseract.exe") }
+foreach ($cand in $ocrCandidates) { if ($cand -and (Test-Path $cand)) { $ocrExe = $cand; break } }
+if ($SkipOcr) {
+    Warn "Tesseract OCR skipped (-SkipOcr): images are indexed without OCR."
+} elseif ($ocrExe) {
+    Ok "Tesseract OCR found: $ocrExe"
+} elseif ($haveWinget) {
+    Write-Host "[..] installing Tesseract OCR via winget..."
+    winget install -e --id UB-Mannheim.TesseractOCR @wingetScope --accept-source-agreements --accept-package-agreements
+    foreach ($cand in $ocrCandidates) { if ($cand -and (Test-Path $cand)) { $ocrExe = $cand; break } }
+    if (-not $ocrExe) { Note "Russian OCR data: download 'rus.traineddata' from https://github.com/tesseract-ocr/tessdata" }
 } else {
-    $ans = Read-Host "[?] Install Tesseract OCR (text inside images/scans)? [y/N]"
-    if ($ans -match '^[Yy]') {
-        if ($haveWinget) {
-            winget install -e --id UB-Mannheim.TesseractOCR --accept-source-agreements --accept-package-agreements
-            Note "Russian OCR data: if missing, download 'rus' from https://github.com/tesseract-ocr/tessdata"
-        } else {
-            Warn "winget unavailable: https://github.com/UB-Mannheim/tesseract/wiki"
-        }
-    } else {
-        Warn "skipped: images will be indexed without OCR (can be added later)."
-    }
+    Warn "Tesseract OCR not installed and winget is unavailable (images without OCR)."
+    Note "Install manually: https://github.com/UB-Mannheim/tesseract/wiki"
 }
 
 # Visual C++ runtime - the Rust build links against the dynamic MSVC CRT
@@ -243,7 +263,8 @@ if (Test-Path $cfg) {
     if ($missing.Count -gt 0) {
         Warn "config.yaml points at missing drives: $($missing -join ', ')"
         Note "The file was probably copied from another computer."
-        $ans = Read-Host "     Replace those paths with this profile ($env:USERPROFILE)? [Y/n]"
+        # 0.20.2: the question is gone - missing drives are remapped automatically.
+        $ans = "y"
         if ($ans -notmatch '^[Nn]') {
             $up = $env:USERPROFILE
             $rxDb = [regex]::new("(?m)^db_path:.*$")
@@ -261,6 +282,29 @@ if (Test-Path $cfg) {
         }
     } else {
         Ok "all drives referenced by config.yaml exist"
+    }
+}
+
+# OCR keys for the service context: its PATH/LOCALAPPDATA differ from ours, so
+# the binary path and the tessdata directory go into config.yaml explicitly
+# (a user-scope winget install is invisible to LocalSystem).
+if ($ocrExe -and (Test-Path $cfg)) {
+    $tessdata = ""
+    $tdCandidates = @((Join-Path (Split-Path -Parent $ocrExe) "tessdata"))
+    if ($env:LOCALAPPDATA) { $tdCandidates += (Join-Path $env:LOCALAPPDATA "Tesseract-OCR\tessdata") }
+    foreach ($td in $tdCandidates) {
+        if ((Test-Path $td) -and (Test-Path (Join-Path $td "rus.traineddata"))) { $tessdata = $td; break }
+    }
+    if (Set-ConfigScalar -Path $cfg -Section "index" -Key "ocr_tesseract_cmd" -Value $ocrExe) {
+        Ok "index.ocr_tesseract_cmd = $ocrExe"
+    }
+    if ($tessdata) {
+        if (Set-ConfigScalar -Path $cfg -Section "index" -Key "ocr_tessdata" -Value $tessdata) {
+            Ok "index.ocr_tessdata = $tessdata"
+        }
+    } else {
+        Warn "no rus.traineddata found - Russian scans would fall back to 'eng'"
+        Note "Put rus.traineddata into the tessdata dir or set index.ocr_tessdata."
     }
 }
 
@@ -292,31 +336,28 @@ if (-not $SkipModels) {
         Note "Repeat later: powershell -File installers\fetch_llm_models.ps1"
     }
 
-    Step "Whisper model (ASR, optional)"
-    $ans = Read-Host "[?] Download the whisper model now (about 1.5 GB)? [y/N]"
-    if ($ans -match '^[Yy]') {
+    Step "Whisper model (ASR)"
+    if ($SkipWhisper) {
+        Warn "skipped (-SkipWhisper): the model is downloaded on first transcription."
+    } else {
         try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_whisper_model.ps1") }
         catch { Warn "whisper model not downloaded: $_" }
-    } else {
-        Warn "skipped: the model is downloaded on first transcription."
     }
 
-    Step "CLIP ONNX models (image search, optional)"
-    $ans = Read-Host "[?] Download the CLIP models now (about 850 MB)? [y/N]"
-    if ($ans -match '^[Yy]') {
+    Step "CLIP ONNX models (image search)"
+    if ($SkipClip) {
+        Warn "skipped (-SkipClip): CLIP image search stays disabled until the models are present."
+    } else {
         try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_clip_models.ps1") }
         catch { Warn "CLIP models not downloaded: $_" }
-    } else {
-        Warn "skipped: CLIP image search stays disabled until the models are present."
     }
 
-    Step "Diarization model (auto-transcription, optional)"
-    $ans = Read-Host "[?] Download the Sortformer diarization model now (about 449 MB)? [y/N]"
-    if ($ans -match '^[Yy]') {
+    Step "Diarization model (auto-transcription)"
+    if ($SkipDiarization) {
+        Warn "skipped (-SkipDiarization): auto-transcription needs it (installers\fetch_diarization_model.ps1)."
+    } else {
         try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_diarization_model.ps1") }
         catch { Warn "diarization model not downloaded: $_" }
-    } else {
-        Warn "skipped: auto-transcription needs it (installers\fetch_diarization_model.ps1)."
     }
 } else {
     Step "Models (skipped)"
@@ -331,65 +372,68 @@ Step "Automatic transcription (speech-to-text + speaker labels)"
 if ($SkipModels) {
     Warn "models skipped: powershell -File installers\fetch_whisper_model.ps1"
     Note "                 powershell -File installers\fetch_diarization_model.ps1"
+} elseif ($SkipTranscribe) {
+    Warn "skipped (-SkipTranscribe): automatic transcription stays off"
+    Note "Enable later: config.yaml -> auto_transcribe (see config.example.yaml)"
 } else {
-    $ansTr = Read-Host "[?] Set up automatic transcription (inbox_dir -> out_dir, speaker labels)? [y/N]"
-    if ($ansTr -match '^[Yy]') {
-        # -ModelsDir: env override first (server deployments keep models under
-        # ProgramData), otherwise the scripts' default (%APPDATA%\OpenResearchTools\models).
-        $modelsDir = ""
-        if ($env:HDS_MODELS_DIR) { $modelsDir = $env:HDS_MODELS_DIR }
-        foreach ($pair in @(
-                @{ script = "fetch_whisper_model.ps1"; what = "whisper (ASR)" },
-                @{ script = "fetch_diarization_model.ps1"; what = "Sortformer (diarization)" })) {
-            $script = Join-Path $root ("installers\" + $pair.script)
-            if (-not (Test-Path $script)) { Warn "$($pair.script) not found"; continue }
-            $argsTr = @()
-            if ($modelsDir) { $argsTr += @("-ModelsDir", $modelsDir) }
-            Write-Host "[..] fetching $($pair.what)..."
-            try {
-                & powershell -NoProfile -ExecutionPolicy Bypass -File $script @argsTr
-                if ($LASTEXITCODE -ne 0) { Warn "$($pair.script): exit code $LASTEXITCODE" }
-            } catch { Warn "$($pair.what): $_" }
-        }
+    # 0.20.2: set up by DEFAULT (no question). Folders come from config.yaml when
+    # already configured; otherwise <root>\media-in and \media-out are created
+    # (both are excluded from indexing implicitly).
+    # -ModelsDir: env override first (server deployments keep models under
+    # ProgramData), otherwise the scripts' default (%APPDATA%\OpenResearchTools\models).
+    $modelsDir = ""
+    if ($env:HDS_MODELS_DIR) { $modelsDir = $env:HDS_MODELS_DIR }
+    foreach ($pair in @(
+            @{ script = "fetch_whisper_model.ps1"; what = "whisper (ASR)" },
+            @{ script = "fetch_diarization_model.ps1"; what = "Sortformer (diarization)" })) {
+        $script = Join-Path $root ("installers\" + $pair.script)
+        if (-not (Test-Path $script)) { Warn "$($pair.script) not found"; continue }
+        $argsTr = @()
+        if ($modelsDir) { $argsTr += @("-ModelsDir", $modelsDir) }
+        Write-Host "[..] fetching $($pair.what)..."
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $script @argsTr
+            if ($LASTEXITCODE -ne 0) { Warn "$($pair.script): exit code $LASTEXITCODE" }
+        } catch { Warn "$($pair.what): $_" }
+    }
 
-        # Folders of the pipeline: written into config.yaml (the daemon reads them
-        # on start). Empty answer = keep the current value.
-        if (Test-Path $cfg) {
-            $inbox = Read-Host "[?] Folder to watch for media (auto_transcribe.inbox_dir, empty = skip)"
-            $outDir = Read-Host "[?] Folder for transcripts (auto_transcribe.out_dir, empty = skip)"
-            if ($inbox) {
-                if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "inbox_dir" -Value $inbox) {
-                    Ok "auto_transcribe.inbox_dir = $inbox"
-                } else { Warn "auto_transcribe section not found in config.yaml - set inbox_dir manually" }
-            }
-            if ($outDir) {
-                if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "out_dir" -Value $outDir) {
-                    Ok "auto_transcribe.out_dir = $outDir"
-                } else { Warn "auto_transcribe section not found in config.yaml - set out_dir manually" }
-            }
-            if ($inbox -and $outDir) {
-                $ansEn = Read-Host "[?] Enable the daemon now (auto_transcribe.enabled: true)? [y/N]"
-                if ($ansEn -match '^[Yy]') {
-                    if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "enabled" -Value "true") {
-                        Ok "auto_transcribe.enabled = true (restart the daemon/task to apply)"
-                    } else { Warn "auto_transcribe section not found - set enabled manually" }
-                }
-            }
-            Note "The pipeline folders are excluded from indexing implicitly (auto_transcribe.*)."
-        } else {
-            Warn "config.yaml not found - folders must be set later"
+    if (Test-Path $cfg) {
+        $enc = New-Object System.Text.UTF8Encoding($false)
+        $cfgText = [IO.File]::ReadAllText($cfg, $enc)
+        $inbox = ""; $outDir = ""
+        $mIn = [regex]::Match($cfgText, "(?m)^\s*inbox_dir:\s*'([^']+)'")
+        $mOut = [regex]::Match($cfgText, "(?m)^\s*out_dir:\s*'([^']+)'")
+        if ($mIn.Success -and (Test-Path $mIn.Groups[1].Value)) { $inbox = $mIn.Groups[1].Value }
+        if ($mOut.Success -and (Test-Path $mOut.Groups[1].Value)) { $outDir = $mOut.Groups[1].Value }
+        if (-not $inbox) {
+            $inbox = Join-Path $root "media-in"
+            New-Item -ItemType Directory -Force -Path $inbox | Out-Null
         }
+        if (-not $outDir) {
+            $outDir = Join-Path $root "media-out"
+            New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        }
+        if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "inbox_dir" -Value $inbox) {
+            Ok "auto_transcribe.inbox_dir = $inbox"
+        } else { Warn "auto_transcribe section not found in config.yaml - set inbox_dir manually" }
+        if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "out_dir" -Value $outDir) {
+            Ok "auto_transcribe.out_dir = $outDir"
+        } else { Warn "auto_transcribe section not found in config.yaml - set out_dir manually" }
+        if (Set-ConfigScalar -Path $cfg -Section "auto_transcribe" -Key "enabled" -Value "true") {
+            Ok "auto_transcribe.enabled = true (restart the daemon/task to apply)"
+        } else { Warn "auto_transcribe section not found - set enabled manually" }
+        Note "Pipeline: $inbox -> $outDir (folders are excluded from indexing implicitly)."
+        Note "Note: source_disposal=delete removes a source file after a successful run."
     } else {
-        Warn "skipped: automatic transcription stays off (auto_transcribe.enabled: false)"
-        Note "Enable later: config.yaml -> auto_transcribe (see config.example.yaml);"
-        Note "the AtLogOn task HermesDiskSearchTranscribe is registered in section 8."
+        Warn "config.yaml not found - folders must be set later"
     }
 }
 
 # --- 8. Logon tasks ---------------------------------------------------------
 if (-not $NoAutostart) {
     Step "Logon tasks"
-    $ans = Read-Host "[?] Set up autostart at logon (watcher + MCP + llm-host)? [Y/n]"
+    # 0.20.2: no question - autostart is set up unless -NoAutostart was passed.
+    $ans = "y"
     if ($ans -notmatch '^[Nn]') {
         try {
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\install_llm_host_task.ps1") -Start
@@ -398,7 +442,8 @@ if (-not $NoAutostart) {
         try {
             & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "install_autostart.ps1")
         } catch { Warn "watcher/MCP tasks: $_" }
-        $ansUi = Read-Host "[?] Start the web UI automatically at logon (port 8765)? [y/N]"
+        # 0.20.2: no question - the UI logon task is registered too.
+        $ansUi = "y"
         if ($ansUi -match '^[Yy]') {
             try {
                 & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\install_ui_task.ps1")
@@ -457,4 +502,4 @@ Write-Host ""
 Write-Host "== Done. Next step: the web UI ==" -ForegroundColor Cyan
 Write-Host "   Use the 'Hermes Disk Search' desktop shortcut: index roots, Start indexing," -ForegroundColor Cyan
 Write-Host "   watcher, model switching - all in one place." -ForegroundColor Cyan
-Read-Host "Press Enter to exit"
+if (-not $NonInteractive) { Read-Host "Press Enter to exit" }

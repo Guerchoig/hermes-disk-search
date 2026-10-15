@@ -316,9 +316,9 @@ def _ffprobe(path):
 
 
 def _transcribe(path, cfg, is_video, progress_cb=None):
-    ffmpeg = shutil.which("ffmpeg")
+    ffmpeg = dig(cfg, "index.ffmpeg_cmd", "") or shutil.which("ffmpeg")
     if not ffmpeg:
-        return None, "ffmpeg не найден в PATH"
+        return None, "ffmpeg не найден в PATH (или не задан index.ffmpeg_cmd)"
     tmp = None
     try:
         if is_video:

@@ -72,16 +72,26 @@ try {
     }
 
     # --- 4. carry config.yaml into the version ------------------------------
+    # Sources are REAL configs only: the one of the previous version
+    # (app\current) and the one at the install root. The archive sample
+    # (config.example.yaml) is deliberately NOT used: it is a desktop template,
+    # and copying it into the version directory made it shadow the server config
+    # in the state dir (incident 15.10.2026, release 0.20.1: config_path()
+    # prefers <project_root>/config.yaml, i.e. app\current\config.yaml).
     $cfg = Join-Path $verDir "config.yaml"
     if (-not (Test-Path $cfg)) {
+        $carried = $false
         foreach ($cand in @((Join-Path $app "current\config.yaml"),
-                            (Join-Path $Root "config.yaml"),
-                            (Join-Path $verDir "config.example.yaml"))) {
+                            (Join-Path $Root "config.yaml"))) {
             if (Test-Path $cand) {
                 Copy-Item $cand $cfg -Force
                 Write-Host "[ok] config.yaml from $cand"
+                $carried = $true
                 break
             }
+        }
+        if (-not $carried) {
+            Write-Host "[..] no config.yaml to carry over (server: the state dir config is used; desktop: create one via setup.cmd)"
         }
     }
 

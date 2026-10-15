@@ -21,7 +21,15 @@ index:
   max_media_mb: 2500        # предел для аудио/видео (транскрипция)
   ocr: true                 # OCR картинок и пустых страниц PDF (нужен Tesseract)
   ocr_lang: "rus+eng"
-  ocr_tesseract_cmd: ""     # путь к tesseract(.exe), если не в PATH
+  ocr_tesseract_cmd: ""     # путь к tesseract(.exe), если не в PATH (найден и в
+                            # стандартных каталогах: %ProgramFiles%\Tesseract-OCR)
+  ocr_tessdata: ""          # каталог языковых пакетов (*.traineddata), если он НЕ
+                            # рядом с tesseract и не в %LOCALAPPDATA%\Tesseract-OCR
+                            # \tessdata. Нужен службам: их %LOCALAPPDATA% — системный
+                            # профиль, поэтому пользовательский tessdata не виден.
+  ffmpeg_cmd: ""            # путь к ffmpeg(.exe) для legacy Python-путей
+                            # (hds/extract_av.py, whisper.cpp). В Rust-конвейере
+                            # медиа декодирует движок, CLI не требуется.
   transcribe: false         # устарел (legacy): ASR вынесена из индексации, медиа пропускается.
                             # Транскрибацию настраивайте в секции `auto_transcribe` (см. ниже).
   whisper_model: small

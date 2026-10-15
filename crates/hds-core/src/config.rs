@@ -116,6 +116,47 @@ pub fn load() -> Result<Config> {
     load_from(&config_path())
 }
 
+/// Разобранный `config.yaml` с кэшем на процесс (ключ — путь + `mtime` + размер).
+///
+/// Зачем: UI/служба спрашивают конфиг на **каждый** запрос, а `config_path()`
+/// может смениться между запросами — именно так 15.10.2026 (релиз 0.20.1)
+/// живой сервер «переключился» на посторонний `config.yaml` в корне поставки.
+/// Кэш держит результат стабильным для одного файла и перечитывает его при
+/// правке (mtime/размер) — правки конфига из UI применяются сразу.
+pub fn load_cached() -> Result<Config> {
+    load_cached_at(None)
+}
+
+/// Тип кэша конфига: `(путь, mtime_ns, размер, разобранный конфиг)`.
+type ConfigCache = std::sync::Mutex<Option<(PathBuf, u64, u64, Config)>>;
+
+/// [`load_cached`] для конкретного файла (`None` — путь из [`config_path`]).
+pub fn load_cached_at(path: Option<&Path>) -> Result<Config> {
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<ConfigCache> = OnceLock::new();
+
+    let path = path.map(|p| p.to_path_buf()).unwrap_or_else(config_path);
+    let meta = std::fs::metadata(&path).ok();
+    let mtime = meta
+        .as_ref()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0);
+    let len = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+
+    let cell = CACHE.get_or_init(|| Mutex::new(None));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some((p, mt, l, cfg)) = guard.as_ref() {
+        if *p == path && *mt == mtime && *l == len {
+            return Ok(cfg.clone());
+        }
+    }
+    let cfg = load_from(&path)?;
+    *guard = Some((path, mtime, len, cfg.clone()));
+    Ok(cfg)
+}
+
 /// Загрузка `config.yaml` по конкретному пути (UTF-8/BOM — `utf-8-sig` в Python).
 pub fn load_from(path: &Path) -> Result<Config> {
     let text = std::fs::read_to_string(path)?;
@@ -451,6 +492,36 @@ mod tests {
         assert_eq!(profile(&cfg), Profile::Desktop);
         let cfg: Value = serde_yaml::from_str("profile: [server]").unwrap();
         assert_eq!(profile(&cfg), Profile::Desktop);
+    }
+
+    /// 0.20.2: `load_cached_at` держит результат для файла и перечитывает его
+    /// при правке (инцидент 15.10.2026: конфиг спрашивают на каждый запрос).
+    #[test]
+    fn load_cached_at_reads_and_invalidates() {
+        let _env = ENV_LOCK.lock().unwrap();
+        use super::{load_cached_at, profile, Profile};
+
+        let dir = std::env::temp_dir().join(format!("hds-cfg-cache-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("config.yaml");
+        std::fs::write(&f, "profile: desktop\n").unwrap();
+
+        let c1 = load_cached_at(Some(&f)).unwrap();
+        assert_eq!(profile(&c1), Profile::Desktop);
+        // Повторный вызов — из кэша (результат тот же).
+        let c2 = load_cached_at(Some(&f)).unwrap();
+        assert_eq!(profile(&c2), Profile::Desktop);
+
+        // Файл изменился (размер/содержимое) — кэш обязан перечитать.
+        std::fs::write(&f, "profile: server\naccess:\n  enabled: true\n").unwrap();
+        let c3 = load_cached_at(Some(&f)).unwrap();
+        assert_eq!(profile(&c3), Profile::Server, "кэш не инвалидировался");
+        assert_eq!(
+            super::dig(&c3, "access.enabled").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// M2 T2: `state_dir` — `HDS_ROOT` сильнее всего; desktop — корень проекта;

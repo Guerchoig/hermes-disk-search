@@ -35,6 +35,8 @@ const PARAMS: &[(&str, &str)] = &[
     ("AdminPassword", "--admin-password"),
     ("Fetch", "--fetch"),
     ("NoFetch", "--no-fetch"),
+    ("SkipDeps", "--skip-deps"),
+    ("NoConfigPin", "--no-config-pin"),
     ("WhatIf", "--whatif"),
 ];
 

@@ -148,6 +148,16 @@ pub fn sc_install_raw(role: &str, hds_exe: &Path) -> String {
     )
 }
 
+/// Опции `sc.exe config` — та же раскладка, что у `create`, но для **существующей**
+/// службы: `sc create` на занятое имя падает («служба уже существует»), поэтому
+/// смена `binPath` (например при переносе установки в другой каталог или при
+/// повторном `install-server.cmd`) возможна только через `config`.
+/// Живая находка при переносе установки 15.10.2026.
+#[cfg(windows)]
+pub fn sc_config_raw(role: &str, hds_exe: &Path) -> String {
+    sc_install_raw(role, hds_exe)
+}
+
 /// Авторестарт службы при падении (5 с, 5 с, 30 с; сброс счётчика за сутки).
 #[cfg(windows)]
 pub const FAILURE_ARGS: [&str; 2] = [
@@ -161,11 +171,27 @@ pub const FAILURE_ARGS: [&str; 2] = [
 pub fn control(action: &str, role: &str, hds_exe: &Path) -> ControlResult {
     use std::os::windows::process::CommandExt;
     let mut cmd = std::process::Command::new("sc.exe");
+    let mut updating = false;
     if action == "install" {
-        // Опции `create` с вложенными кавыками — только через `raw_arg` (см. `sc_install_raw`).
-        cmd.arg("create")
-            .arg(service_name(role))
-            .raw_arg(sc_install_raw(role, hds_exe));
+        // Опции `create`/`config` с вложенными кавыками — только через `raw_arg`.
+        // Существующая регистрация — это `sc config` (обновляем binPath и прочее);
+        // `sc create` на занятое имя падает, из-за чего перенос установки или
+        // повторный `install-server.cmd` не могли сменить путь к бинарю.
+        let name = service_name(role);
+        updating = std::process::Command::new("sc.exe")
+            .args(["query", &name])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if updating {
+            cmd.arg("config")
+                .arg(&name)
+                .raw_arg(sc_config_raw(role, hds_exe));
+        } else {
+            cmd.arg("create")
+                .arg(&name)
+                .raw_arg(sc_install_raw(role, hds_exe));
+        }
     } else {
         let args = sc_args(action, role);
         if args.is_empty() {
@@ -190,8 +216,13 @@ pub fn control(action: &str, role: &str, hds_exe: &Path) -> ControlResult {
                     .args(FAILURE_ARGS.iter().flat_map(|a| a.split_whitespace()))
                     .output();
                 stdout.push_str(&format!(
-                    "служба {} установлена (автостарт, авторестарт 5с/5с/30с)\n",
-                    service_name(role)
+                    "служба {} {} (binPath, автостарт, авторестарт 5с/5с/30с)\n",
+                    service_name(role),
+                    if updating {
+                        "обновлена"
+                    } else {
+                        "установлена"
+                    }
                 ));
             }
             if action == "status" {
@@ -697,6 +728,23 @@ mod tests {
         );
         assert!(raw.contains("obj= LocalSystem"), "{raw}");
         assert!(!raw.contains("<role>"), "{raw}");
+    }
+
+    /// Перенос установки / повторный `install-server.cmd` (15.10.2026): для уже
+    /// существующей службы нужен `sc config` — `sc create` падает на занятое имя.
+    /// Раскладка опций у `config` та же, что у `create` (binPath/start/obj).
+    #[cfg(windows)]
+    #[test]
+    fn sc_config_raw_matches_install_layout() {
+        let exe = std::path::Path::new("C:\\hds\\app\\current\\bin\\hds.exe");
+        let cfg = super::sc_config_raw("ui", exe);
+        assert_eq!(cfg, super::sc_install_raw("ui", exe));
+        assert!(
+            cfg.contains("binPath= \"\\\"C:\\hds\\app\\current\\bin\\hds.exe\\\" service run ui\""),
+            "{cfg}"
+        );
+        assert!(cfg.contains("start= auto"), "{cfg}");
+        assert!(cfg.contains("obj= LocalSystem"), "{cfg}");
     }
 
     /// R3.5 (PLAN_TRANSCRIBE_SERVICE): служба `transcribe` объявляет зависимость от

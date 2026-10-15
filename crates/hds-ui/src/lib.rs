@@ -1602,7 +1602,10 @@ fn spawn_deferred_restart(role: &str) -> bool {
 /// без токена. Fail-closed: если в системном каталоге состояния лежит конфиг с
 /// `profile: server`, гейт закрывается (401) — безопаснее.
 fn ui_gate_config() -> Result<Option<Config>, Reply> {
-    match load() {
+    // Путь фиксируем при старте (см. `gate_config_path`): посторонний
+    // `config.yaml`, появившийся позже, режим больше не переключает.
+    let pinned = gate_config_path();
+    match hds_core::config::load_cached_at(Some(&pinned)) {
         Ok(c) => Ok(Some(c)),
         Err(_) => {
             let sys_cfg = hds_core::config::system_state_dir().map(|d| d.join("config.yaml"));
@@ -1624,6 +1627,21 @@ fn ui_gate_config() -> Result<Option<Config>, Reply> {
             Ok(None) // без конфига — прежнее поведение (desktop)
         }
     }
+}
+
+/// Путь конфига для гейтов UI.
+///
+/// Если путь задан явно (`HDS_CONFIG` — так стартуют службы после установщика
+/// 0.20.2 и так работают тесты), берём его как есть. Иначе путь **фиксируется
+/// при первом обращении процесса**: `config_path()` мог бы между запросами
+/// переехать на посторонний файл в корне поставки и «тихо» открыть админский UI
+/// (инцидент 15.10.2026, релиз 0.20.1).
+fn gate_config_path() -> std::path::PathBuf {
+    static PINNED: OnceLock<std::path::PathBuf> = OnceLock::new();
+    if std::env::var_os("HDS_CONFIG").is_some() {
+        return hds_core::config::config_path();
+    }
+    PINNED.get_or_init(hds_core::config::config_path).clone()
 }
 
 /// Включён ли гейт доступа (`access.enabled`).

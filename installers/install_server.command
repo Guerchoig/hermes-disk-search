@@ -35,6 +35,8 @@ Options:
   --roots "a;b"             index roots, separated by ; or ,
   --enable-access --admin-login L --admin-password P
   --fetch | --no-fetch      download runtime/models (needs pwsh)
+  --skip-deps               do NOT install machine deps (tesseract/tesseract-lang/ffmpeg)
+  --no-config-pin           keep the root config.yaml and do NOT pin HDS_CONFIG for daemons
   --whatif | --help
 USAGE
 }
@@ -51,6 +53,8 @@ MEDIA_INBOX=""; MEDIA_OUT=""; ENABLE_TRANSCRIBE="no"; SOURCE_DISPOSAL="delete"
 ENABLE_ACCESS="no"
 ADMIN_LOGIN=""; ADMIN_PASSWORD=""
 FETCH="no"; NOFETCH="no"; WHATIF="no"
+# 0.20.2 (incident 15.10.2026): services need their config and their deps.
+SKIP_DEPS="no"; NO_CONFIG_PIN="no"
 POS=()
 
 while [ "$#" -gt 0 ]; do
@@ -74,6 +78,8 @@ while [ "$#" -gt 0 ]; do
         --admin-password) ADMIN_PASSWORD="${2:-}"; shift 2 ;;
         --fetch) FETCH="yes"; shift ;;
         --no-fetch) NOFETCH="yes"; shift ;;
+        --skip-deps) SKIP_DEPS="yes"; shift ;;
+        --no-config-pin) NO_CONFIG_PIN="yes"; shift ;;
         --whatif|--what-if) WHATIF="yes"; shift ;;
         --help|-h) usage; exit 0 ;;
         -*) echo "[!!] unknown option: $1"; usage; exit 2 ;;
@@ -95,6 +101,19 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # YAML single-quoted scalar (backslashes stay literal; only ' is doubled).
 yq_single() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
+
+# set_index_key FILE KEY VALUE - set/replace "  KEY: 'VALUE'" in the top-level
+# `index:` section (comments preserved); creates the section when missing.
+set_index_key() {
+    f="$1"; k="$2"; v="$3"
+    if grep -q "^  ${k}:" "$f" 2>/dev/null; then
+        sed -i '' "s|^  ${k}:.*$|  ${k}: '${v}'|" "$f"
+    elif grep -q "^index:" "$f" 2>/dev/null; then
+        awk -v k="$k" -v v="$v" '{print} /^index:$/ {print "  " k ": \x27" v "\x27"}' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
+    else
+        printf "\nindex:\n  %s: '%s'\n" "$k" "$v" >> "$f"
+    fi
+}
 
 # Server config body (mirrors install_server.ps1 New-ServerConfig).
 gen_config() {
@@ -157,6 +176,16 @@ if [ "$WHATIF" = "yes" ]; then
     if [ "$FETCH" = "yes" ] && [ "$NOFETCH" != "yes" ]; then echo "Fetch:     yes (unattended fetch_*)"; else echo "Fetch:     no"; fi
     echo "Access:    enabled=$ENABLE_ACCESS"
     if [ -n "$ADMIN_LOGIN" ]; then echo "Admin:     $ADMIN_LOGIN"; else echo "Admin:     (none)"; fi
+    if [ "$SKIP_DEPS" = "yes" ]; then
+        echo "Deps:      skipped (--skip-deps)"
+    else
+        echo "Deps:      brew tesseract + tesseract-lang + ffmpeg (machine-wide)"
+    fi
+    if [ "$NO_CONFIG_PIN" = "yes" ]; then
+        echo "ConfigPin: off (--no-config-pin): root config.yaml is left as is"
+    else
+        echo "ConfigPin: root config.yaml renamed aside; HDS_CONFIG pinned in each plist"
+    fi
     echo ""
     echo "--- config.yaml (body) ---"
     printf '%s\n' "$CFG_BODY"
@@ -184,6 +213,16 @@ else
     echo "[ok] config exists (not overwritten): $CFG"
 fi
 
+# --- 0.20.2 (incident 15.10.2026): a stray desktop config.yaml in the install
+# root SHADOWS the server config (config_path() prefers <root>/config.yaml), so
+# the daemons silently ran in desktop mode: no auth gate, another DB,
+# "heartbeat not found". Rename it aside (reversible).
+if [ "$NO_CONFIG_PIN" != "yes" ] && [ -f "$ROOT/config.yaml" ] && [ "$ROOT/config.yaml" != "$CFG" ]; then
+    mv -f "$ROOT/config.yaml" "$ROOT/config.desktop.yaml.bak"
+    echo "[ok] root config.yaml renamed aside: $ROOT/config.desktop.yaml.bak"
+    summary+=("[ok] root config.yaml renamed aside (it shadowed the server config)")
+fi
+
 # --- Desktop LaunchAgents (per-user) are superseded by LaunchDaemons. ---
 for u in /Users/*; do
     for f in "$u/Library/LaunchAgents/"com.hermes-disk-search.*.plist; do
@@ -205,6 +244,38 @@ for px in caddy nginx; do
         echo "[..] $px not found - publish /mcp and /ui via TLS using samples in installers/proxy/"
     fi
 done
+
+# --- 0.20.2: machine deps for the daemons. They start with a minimal PATH, so a
+# user-scope install is invisible to them; Homebrew is machine-wide and the
+# tesseract/tessdata paths are written into config.yaml (index.ocr_* keys).
+if [ "$SKIP_DEPS" = "yes" ]; then
+    summary+=("[..] deps skipped (--skip-deps)")
+elif [ "$(id -u)" -ne 0 ]; then
+    summary+=("[!!] deps: run with sudo to install tesseract/tesseract-lang/ffmpeg")
+elif command -v brew >/dev/null 2>&1; then
+    brew list tesseract >/dev/null 2>&1 || brew install tesseract >/dev/null 2>&1 || true
+    brew list tesseract-lang >/dev/null 2>&1 || brew install tesseract-lang >/dev/null 2>&1 || true
+    brew list ffmpeg >/dev/null 2>&1 || brew install ffmpeg >/dev/null 2>&1 || true
+    TESS="$(command -v tesseract || true)"
+    if [ -n "$TESS" ]; then
+        TD=""
+        for cand in "$(dirname "$TESS")/../share/tessdata" /opt/homebrew/share/tessdata /usr/local/share/tessdata; do
+            if [ -d "$cand" ]; then TD="$cand"; break; fi
+        done
+        set_index_key "$CFG" ocr_tesseract_cmd "$TESS"
+        [ -n "$TD" ] && set_index_key "$CFG" ocr_tessdata "$TD"
+        summary+=("[ok] Tesseract: $TESS (tessdata: ${TD:-next to the binary}, written into config.yaml)")
+    else
+        summary+=("[..] Tesseract missing: OCR of images/scans stays off (brew install tesseract tesseract-lang)")
+    fi
+    if command -v ffmpeg >/dev/null 2>&1; then
+        summary+=("[ok] ffmpeg: $(command -v ffmpeg)")
+    else
+        summary+=("[..] ffmpeg missing (not needed by the Rust pipeline; legacy Python paths only)")
+    fi
+else
+    summary+=("[..] deps skipped: Homebrew not found (install tesseract tesseract-lang ffmpeg manually)")
+fi
 
 # --- Unattended fetch (fetch_*.ps1 need pwsh on macOS). ---
 if [ "$FETCH" = "yes" ] && [ "$NOFETCH" != "yes" ]; then
@@ -247,6 +318,18 @@ IFS=',' ; for role in $ROLES; do
     [ -n "$role" ] || continue
     if "$HDS" service install "$role"; then
         summary+=("[ok] daemon  $role (LaunchDaemon: com.hermes-disk-search.$role)")
+        if [ "$NO_CONFIG_PIN" != "yes" ]; then
+            # Pin the state config for THIS daemon: launchd applies the plist
+            # EnvironmentVariables, so a stray root config.yaml can never flip
+            # the role into desktop mode again.
+            PLIST="/Library/LaunchDaemons/com.hermes-disk-search.$role.plist"
+            if [ -f "$PLIST" ]; then
+                /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:HDS_CONFIG $CFG" "$PLIST" 2>/dev/null \
+                    || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:HDS_CONFIG string $CFG" "$PLIST" 2>/dev/null \
+                    || true
+                summary+=("[ok]   HDS_CONFIG pinned in $PLIST (restart the daemon to apply)")
+            fi
+        fi
     else
         summary+=("[!!] FAILED  $role (see messages above)")
     fi
@@ -264,6 +347,8 @@ if [ "$ENABLE_ACCESS" = "yes" ] && [ -n "$ADMIN_LOGIN" ]; then
     echo "  - Issue an admin token:  $HDS token new --user $ADMIN_LOGIN"
 fi
 echo "  - Start now: $HDS service start <role>"
+echo "  - The daemons read the state config (HDS_CONFIG is pinned in the plist);"
+echo "    restart a role if it was started earlier: $HDS service restart <role>"
 echo "  - Status:    $HDS service status <role>"
 echo "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"
 echo "    samples in installers/proxy/ (Caddyfile, nginx.conf); then set trusted_proxy: true."

@@ -83,14 +83,115 @@ pub fn which(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// `tesseract` доступен: путь из `index.ocr_tesseract_cmd` или `PATH` (как `_tesseract_ready`).
-pub fn tesseract_ready(cfg: &Config) -> bool {
-    if let Some(cmd) = dig(cfg, "index.ocr_tesseract_cmd").and_then(|v| v.as_str()) {
-        if !cmd.trim().is_empty() && Path::new(cmd.trim()).is_file() {
-            return true;
+/// Стандартные каталоги установки `tesseract` (кроме `PATH`).
+///
+/// Нужны потому, что службы (`LocalSystem`/LaunchDaemon) стартуют с минимальным
+/// `PATH`: `tesseract.exe` из `C:\Program Files\Tesseract-OCR` (машинная
+/// установка `UB-Mannheim.TesseractOCR`) в нём отсутствует, и проверка ложно
+/// сообщала «не найден» (живой инцидент 15.10.2026, релиз 0.20.1).
+#[cfg(windows)]
+fn standard_tesseract_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    for key in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(pf) = std::env::var_os(key) {
+            v.push(
+                PathBuf::from(pf)
+                    .join("Tesseract-OCR")
+                    .join("tesseract.exe"),
+            );
         }
     }
-    which("tesseract.exe").is_some() || which("tesseract").is_some()
+    if let Some(la) = std::env::var_os("LOCALAPPDATA") {
+        v.push(
+            PathBuf::from(&la)
+                .join("Programs")
+                .join("Tesseract-OCR")
+                .join("tesseract.exe"),
+        );
+        v.push(
+            PathBuf::from(&la)
+                .join("Tesseract-OCR")
+                .join("tesseract.exe"),
+        );
+    }
+    v
+}
+
+#[cfg(not(windows))]
+fn standard_tesseract_paths() -> Vec<PathBuf> {
+    [
+        "/opt/homebrew/bin/tesseract",
+        "/usr/local/bin/tesseract",
+        "/usr/bin/tesseract",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// Путь к `tesseract`: `index.ocr_tesseract_cmd` → `PATH` → стандартные каталоги.
+pub fn tesseract_exe(cfg: &Config) -> Option<PathBuf> {
+    if let Some(cmd) = dig(cfg, "index.ocr_tesseract_cmd").and_then(|v| v.as_str()) {
+        let p = Path::new(cmd.trim());
+        if !cmd.trim().is_empty() && p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    if let Some(p) = which("tesseract.exe").or_else(|| which("tesseract")) {
+        return Some(p);
+    }
+    standard_tesseract_paths().into_iter().find(|p| p.is_file())
+}
+
+/// `tesseract` доступен (бинарь найден — путь из конфига, `PATH` или стандартный каталог).
+pub fn tesseract_ready(cfg: &Config) -> bool {
+    tesseract_exe(cfg).is_some()
+}
+
+/// Языки OCR из `index.ocr_lang` (`"rus+eng"` → `["rus", "eng"]`).
+pub fn ocr_langs(cfg: &Config) -> Vec<String> {
+    dig(cfg, "index.ocr_lang")
+        .and_then(|v| v.as_str())
+        .unwrap_or("rus+eng")
+        .split('+')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Каталоги `tessdata` в порядке поиска: `index.ocr_tessdata` → рядом с бинарём
+/// → пользовательский (как `hds/extractors.py`).
+pub fn tessdata_dirs(cfg: &Config, tess: &Path) -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(d) = dig(cfg, "index.ocr_tessdata").and_then(|x| x.as_str()) {
+        if !d.trim().is_empty() {
+            v.push(PathBuf::from(d.trim()));
+        }
+    }
+    if let Some(dir) = tess.parent() {
+        v.push(dir.join("tessdata"));
+        // macOS (Homebrew): bin/../share/tessdata
+        if let Some(prefix) = dir.parent() {
+            v.push(prefix.join("share").join("tessdata"));
+        }
+    }
+    if let Some(la) = std::env::var_os("LOCALAPPDATA") {
+        v.push(PathBuf::from(la).join("Tesseract-OCR").join("tessdata"));
+    }
+    v
+}
+
+/// Языковые пакеты из `langs`, отсутствующие во **всех** каталогах `tessdata`.
+pub fn missing_langs(cfg: &Config, tess: &Path) -> Vec<String> {
+    let dirs = tessdata_dirs(cfg, tess);
+    ocr_langs(cfg)
+        .into_iter()
+        .filter(|lang| {
+            !dirs
+                .iter()
+                .any(|d| d.join(format!("{lang}.traineddata")).is_file())
+        })
+        .collect()
 }
 
 /// Нормализация пути для сравнения (`normcase(normpath())`: общий разделитель + нижний регистр).
@@ -500,32 +601,201 @@ fn emb_ctx_check(probe: &Probe) -> Option<Check> {
     }
 }
 
-/// Пункт 5: Tesseract OCR.
+/// Пункт 5: Tesseract OCR — бинарь (конфиг / `PATH` / стандартные каталоги) и
+/// языковые пакеты `index.ocr_lang`.
 fn check_ocr(cfg: &Config) -> Check {
-    if tesseract_ready(cfg) {
-        Check::new("ocr", "ok", "Tesseract OCR найден")
-    } else {
-        Check::new(
+    let Some(tess) = tesseract_exe(cfg) else {
+        return Check::new(
             "ocr",
             "warn",
             "Tesseract OCR не найден — картинки и сканы без текстового слоя не индексируются",
         )
-        .fix("Установите Tesseract (с языком 'rus') и укажите index.ocr_tesseract_cmd.")
+        .fix(
+            "Установите Tesseract с языком 'rus' и укажите index.ocr_tesseract_cmd: \
+             winget install --scope machine -e --id UB-Mannheim.TesseractOCR",
+        );
+    };
+    let missing = missing_langs(cfg, &tess);
+    if missing.is_empty() {
+        return Check::new("ocr", "ok", "Tesseract OCR найден").msg(format!(
+            "{}; языки {} ({})",
+            tess.display(),
+            ocr_langs(cfg).join("+"),
+            tessdata_dirs(cfg, &tess)
+                .first()
+                .map(|d| d.display().to_string())
+                .unwrap_or_else(|| "tessdata не найден".to_string()),
+        ));
     }
+    Check::new(
+        "ocr",
+        "warn",
+        "Tesseract OCR найден, но нет языковых пакетов",
+    )
+    .msg(format!(
+        "нет: {}; искать в: {}",
+        missing.join(", "),
+        tessdata_dirs(cfg, &tess)
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect::<Vec<_>>()
+            .join("; "),
+    ))
+    .fix(
+        "Положите <lang>.traineddata в каталог tessdata рядом с tesseract(.exe) \
+             или укажите index.ocr_tessdata (файлы: github.com/tesseract-ocr/tessdata).",
+    )
 }
 
-/// Пункт 6: ffmpeg.
-fn check_ffmpeg() -> Check {
-    if which("ffmpeg.exe").is_some() || which("ffmpeg").is_some() {
-        Check::new("ffmpeg", "ok", "ffmpeg найден")
-    } else {
-        Check::new(
-            "ffmpeg",
-            "warn",
-            "ffmpeg не найден — видео без транскрипции",
-        )
-        .fix("Установите Gyan.FFmpeg и перезапустите watcher/индексацию.")
+/// Каталоги установки CLI `ffmpeg` (кроме `PATH`): службы стартуют с минимальным
+/// `PATH`, поэтому машинная установка (Program Files, chocolatey, winget) иначе
+/// выглядит как «ffmpeg не найден».
+#[cfg(windows)]
+fn standard_ffmpeg_paths() -> Vec<PathBuf> {
+    let mut v = Vec::new();
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        v.push(
+            PathBuf::from(&pf)
+                .join("ffmpeg")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
     }
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        v.push(
+            PathBuf::from(pd)
+                .join("chocolatey")
+                .join("bin")
+                .join("ffmpeg.exe"),
+        );
+    }
+    // winget: пользовательская (%LOCALAPPDATA%\Microsoft\WinGet\Packages) и
+    // машинная (%ProgramFiles%\WinGet\Packages) области — `Gyan.FFmpeg*\<ver>\bin`.
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(la) = std::env::var_os("LOCALAPPDATA") {
+        roots.push(
+            PathBuf::from(la)
+                .join("Microsoft")
+                .join("WinGet")
+                .join("Packages"),
+        );
+    }
+    if let Some(pf) = std::env::var_os("ProgramFiles") {
+        roots.push(PathBuf::from(pf).join("WinGet").join("Packages"));
+    }
+    for root in roots {
+        let Ok(pkgs) = std::fs::read_dir(&root) else {
+            continue;
+        };
+        for pkg in pkgs.flatten() {
+            if !pkg
+                .file_name()
+                .to_string_lossy()
+                .to_lowercase()
+                .starts_with("gyan.ffmpeg")
+            {
+                continue;
+            }
+            let Ok(vers) = std::fs::read_dir(pkg.path()) else {
+                continue;
+            };
+            for ver in vers.flatten() {
+                v.push(ver.path().join("bin").join("ffmpeg.exe"));
+            }
+        }
+    }
+    v
+}
+
+#[cfg(not(windows))]
+fn standard_ffmpeg_paths() -> Vec<PathBuf> {
+    [
+        "/opt/homebrew/bin/ffmpeg",
+        "/usr/local/bin/ffmpeg",
+        "/usr/bin/ffmpeg",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect()
+}
+
+/// Путь к CLI `ffmpeg`: `index.ffmpeg_cmd` → `PATH` → стандартные каталоги.
+pub fn ffmpeg_exe(cfg: &Config) -> Option<PathBuf> {
+    if let Some(cmd) = dig(cfg, "index.ffmpeg_cmd").and_then(|v| v.as_str()) {
+        let p = Path::new(cmd.trim());
+        if !cmd.trim().is_empty() && p.is_file() {
+            return Some(p.to_path_buf());
+        }
+    }
+    if let Some(p) = which("ffmpeg.exe").or_else(|| which("ffmpeg")) {
+        return Some(p);
+    }
+    standard_ffmpeg_paths().into_iter().find(|p| p.is_file())
+}
+
+/// Каталог движка: `index.whisper_engine_dir` → `HDS_ENGINE_DIR` (machine env,
+/// её ставит серверный установщик) → `%APPDATA%\OpenResearchTools\
+/// TranscribeOffline\Engine`, если он существует.
+pub fn engine_dir(cfg: &Config) -> Option<PathBuf> {
+    if let Some(s) = dig(cfg, "index.whisper_engine_dir").and_then(|v| v.as_str()) {
+        let p = PathBuf::from(s.trim());
+        if !s.trim().is_empty() && p.is_dir() {
+            return Some(p);
+        }
+    }
+    if let Ok(env) = std::env::var("HDS_ENGINE_DIR") {
+        let p = PathBuf::from(env.trim());
+        if !env.trim().is_empty() && p.is_dir() {
+            return Some(p);
+        }
+    }
+    let base = directories::BaseDirs::new()?;
+    let p = base
+        .config_dir()
+        .join("OpenResearchTools")
+        .join("TranscribeOffline")
+        .join("Engine");
+    p.is_dir().then_some(p)
+}
+
+/// Вердикт по ffmpeg — **чистая** функция (тестируется без ФС).
+///
+/// В Rust-конвейере CLI `ffmpeg` не вызывается вовсе: медиа не индексируется, а
+/// ASR идёт через `llm-host` (`/internal/transcribe`), где декодирование делает
+/// движок своими библиотеками (`Engine\vendor\ffmpeg`). Поэтому при живом
+/// движке отсутствие CLI — не предупреждение, а справка (инцидент 15.10.2026:
+/// сервер показывал warn про ffmpeg, хотя транскрибация работает).
+pub fn ffmpeg_verdict(cli: Option<&Path>, engine_ok: bool) -> Check {
+    if let Some(p) = cli {
+        return Check::new("ffmpeg", "ok", "ffmpeg найден").msg(p.display().to_string());
+    }
+    if engine_ok {
+        return Check::new(
+            "ffmpeg",
+            "ok",
+            "ffmpeg CLI не требуется: медиа декодирует движок",
+        )
+        .msg(
+            "ASR идёт через llm-host (/internal/transcribe); движок несёт свои \
+                 библиотеки декодирования (Engine\\vendor\\ffmpeg). CLI нужен только \
+                 Python-путям (hds/extract_av.py) и спайкам.",
+        );
+    }
+    Check::new(
+        "ffmpeg",
+        "warn",
+        "ffmpeg не найден — видео без транскрипции",
+    )
+    .fix(
+        "Установите Gyan.FFmpeg машинно (winget install --scope machine -e --id Gyan.FFmpeg) \
+         или укажите index.ffmpeg_cmd.",
+    )
+}
+
+/// Пункт 6: ffmpeg — путь из конфига / `PATH` / стандартных каталогов + наличие
+/// движка (см. [`ffmpeg_verdict`]).
+fn check_ffmpeg(cfg: &Config) -> Check {
+    ffmpeg_verdict(ffmpeg_exe(cfg).as_deref(), engine_dir(cfg).is_some())
 }
 
 /// Возможности воркера одним запуском: `(normalize, mpp)` (пункты 7c и 8 `diag.run_checks`).
@@ -1572,6 +1842,64 @@ pub fn check_transcribe_daemon() -> Check {
     }
 }
 
+/// Пункт «тень конфига»: действующий `config.yaml` лежит в корне поставки, а в
+/// каталоге состояния есть свой — то есть серверный конфиг **не читается**
+/// (`config_path()` отдаёт приоритет корню проекта).
+///
+/// Живой инцидент 15.10.2026 (релиз 0.20.1): в корне поставки остался
+/// desktop-образец `config.yaml` (его создал `setup.ps1`), и серверная установка
+/// работала в desktop-режиме — UI без токена, чужая БД, heartbeat «не найден».
+/// Тихая деградация — обязан быть `warn`.
+pub fn check_config_shadow(cfg: &Config) -> Option<Check> {
+    let sys_cfg = config::system_state_dir()?.join("config.yaml");
+    if !sys_cfg.is_file() {
+        return None;
+    }
+    let effective = config::config_path();
+    if same_path(&effective, &sys_cfg) {
+        return None; // действует конфиг каталога состояния — «тени» нет
+    }
+    let root_cfg = config::project_root().join("config.yaml");
+    if !same_path(&effective, &root_cfg) {
+        return None; // HDS_CONFIG указывает на третий файл — осознанный выбор
+    }
+    let sys_server = config::load_from(&sys_cfg)
+        .ok()
+        .map(|c| config::profile(&c).is_server())
+        .unwrap_or(false);
+    Some(
+        Check::new(
+            "config-shadow",
+            "warn",
+            "Корневой config.yaml перекрывает конфиг каталога состояния",
+        )
+        .msg(format!(
+            "действует {} (profile: {}), а {} ({}) не читается",
+            effective.display(),
+            if config::profile(cfg).is_server() {
+                "server"
+            } else {
+                "desktop"
+            },
+            sys_cfg.display(),
+            if sys_server { "server" } else { "desktop" },
+        ))
+        .fix(
+            "Удалите/переименуйте корневой config.yaml либо закрепите конфиг явно: \
+             HDS_CONFIG=<каталог состояния>\\config.yaml (это делает \
+             installers\\install_server.ps1 — для служб и для машины).",
+        ),
+    )
+}
+
+/// Один и тот же файл (по каноническому пути, иначе — по строке).
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -1592,7 +1920,10 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     }
 
     checks.push(check_ocr(cfg));
-    checks.push(check_ffmpeg());
+    checks.push(check_ffmpeg(cfg));
+    if let Some(c) = check_config_shadow(cfg) {
+        checks.push(c);
+    }
     match worker_caps() {
         Ok((norm, mpp)) => {
             checks.push(check_lemmatizer(norm));
@@ -1948,5 +2279,65 @@ mod tests {
         // server-профиль → rate_limit включён в состоянии.
         let c = check_perimeter(&cfg("profile: server\nui:\n  host: 127.0.0.1\n"));
         assert!(c.msg.contains("rate_limit=включён"), "msg={}", c.msg);
+    }
+    /// Инцидент 15.10.2026 (релиз 0.20.1): OCR/ffmpeg не должны выглядеть
+    /// «не найденными» из-за минимального `PATH` службы — проверяем разбор языков
+    /// и вердикт ffmpeg (чистые функции, без ФС и без реального окружения).
+    #[test]
+    fn ocr_langs_split_and_ffmpeg_verdict() {
+        use super::{ffmpeg_verdict, ocr_langs};
+
+        assert_eq!(
+            ocr_langs(&cfg("index:\n  ocr_lang: \"rus+eng\"")),
+            vec!["rus", "eng"]
+        );
+        assert_eq!(ocr_langs(&cfg("index:\n  ocr_lang: eng")), vec!["eng"]);
+        // Ключа нет — прежний продуктовый дефолт.
+        assert_eq!(ocr_langs(&cfg("index:\n  roots: []")), vec!["rus", "eng"]);
+
+        // CLI найден → ok независимо от движка (путь виден в msg).
+        let p = std::path::Path::new("C:/tools/ffmpeg.exe");
+        let c = ffmpeg_verdict(Some(p), false);
+        assert_eq!(c.status, "ok");
+        assert!(c.msg.contains("ffmpeg.exe"), "msg={}", c.msg);
+
+        // CLI нет, но движок на месте → не warn, а справка (декодирует движок).
+        let c = ffmpeg_verdict(None, true);
+        assert_eq!(c.status, "ok", "msg={}", c.msg);
+        assert!(c.msg.contains("llm-host"), "msg={}", c.msg);
+
+        // Ни CLI, ни движка → warn с подсказкой про машинную установку.
+        let c = ffmpeg_verdict(None, false);
+        assert_eq!(c.status, "warn");
+        assert!(c.fix.contains("winget"), "fix={}", c.fix);
+    }
+
+    /// Tesseract: отсутствующие языковые пакеты ищутся в `index.ocr_tessdata`
+    /// (не только рядом с бинарём и не только в пользовательском каталоге).
+    #[test]
+    fn missing_ocr_langs_reads_tessdata_dir() {
+        use super::missing_langs;
+
+        let dir = std::env::temp_dir().join(format!("hds-diag-ocr-{}", std::process::id()));
+        let td = dir.join("tessdata");
+        std::fs::create_dir_all(&td).unwrap();
+        std::fs::write(td.join("rus.traineddata"), b"x").unwrap();
+        let tess = dir.join("tesseract.exe");
+        std::fs::write(&tess, b"x").unwrap();
+
+        let c = cfg(&format!(
+            "index:\n  ocr_lang: \"rus+zzz\"\n  ocr_tessdata: '{}'",
+            td.display()
+        ));
+        assert_eq!(
+            missing_langs(&c, &tess),
+            vec!["zzz"],
+            "rus на месте, zzz нет"
+        );
+
+        std::fs::write(td.join("zzz.traineddata"), b"x").unwrap();
+        assert!(missing_langs(&c, &tess).is_empty());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
