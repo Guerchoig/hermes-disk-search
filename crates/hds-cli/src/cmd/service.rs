@@ -28,7 +28,7 @@ use hds_core::config::{ensure_state_dir, load};
 /// `hds-cli::cmd::service::{ROLES, service_name, …}` работали как раньше.
 pub use hds_core::service::{daemon_label, daemon_plist, parse_role, service_name, ROLES};
 
-/// `hds service <sub> [role]`; `sub` — run|install|uninstall|start|stop|status.
+/// `hds service <sub> [role]`; `sub` — run|install|uninstall|start|stop|status|root.
 pub fn cmd_service(sub: &str, args: &[String]) -> i32 {
     let role = args.first().map(|s| s.trim());
     match sub {
@@ -36,13 +36,36 @@ pub fn cmd_service(sub: &str, args: &[String]) -> i32 {
             Some(r) => service_run(r),
             None => usage(&format!("service run: нужна роль ({})", ROLES.join("|"))),
         },
+        // `root` — не управление службой, а «где стоит поставка»: корень берётся из
+        // binPath самой службы, чтобы обёртки обновления (`update.cmd`/`.command`)
+        // не требовали пути руками (RELEASING.md §6).
+        "root" => print_installed_root(),
         "install" | "uninstall" | "start" | "stop" | "status" => match role.and_then(parse_role) {
             Some(r) => service_control(sub, r),
             None => usage(&format!("service {sub}: нужна роль ({})", ROLES.join("|"))),
         },
         other => usage(&format!(
-            "service: неизвестная подкоманда '{other}' (run|install|uninstall|start|stop|status)"
+            "service: неизвестная подкоманда '{other}' \
+             (run|install|uninstall|start|stop|status|root)"
         )),
+    }
+}
+
+/// `hds service root` — корень установки зарегистрированных ролей (стандартный
+/// выход, путь на stdout; `1` — служб нет: dev-запуск/ручные бинарники).
+fn print_installed_root() -> i32 {
+    match hds_core::service::installed_root() {
+        Some(root) => {
+            println!("{}", root.display());
+            0
+        }
+        None => {
+            eprintln!("service root: ни одна роль не зарегистрирована — корень неизвестен");
+            eprintln!(
+                "             (службы не стоят или поставка распакована вручную: укажите путь сами)"
+            );
+            1
+        }
     }
 }
 

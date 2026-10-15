@@ -50,7 +50,9 @@ done
 # every platform): force it in the staged tree.
 for f in "shortcuts/macos/Hermes Disk Search.command" \
          "shortcuts/macos/Индексация дисков.command" \
-         "shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index"; do
+         "shortcuts/macos/HermesDiskSearchIndex.app/Contents/MacOS/run_index" \
+         "installers/install_server.command" \
+         "installers/update.command"; do
     [ -f "$STAGE/$f" ] && chmod +x "$STAGE/$f"
 done
 find "$STAGE" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true

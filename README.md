@@ -611,6 +611,13 @@ hds cline-sync --server-url http://127.0.0.1:8787 --token <T>   # локальн
 * `install_app_version.ps1` — `data\`/`models\` общие (junctions), `-Force` переустанавливает версию.
 * `update.ps1` — останов → подмена версии → старт (`-Profile server` для служб, `desktop` — задачи
   Планировщика); `-ListVersions`, `-RollbackTo <ver>`, `-WhatIf`.
+* `update.cmd` (Windows) / `installers/update.command` (macOS) — обёртки релизного архива вокруг
+  `update.ps1`: сами снимают метку «скачано из интернета» (`Unblock-File` / `xattr -dr`), сами
+  находят корень установки (`bin\hds.exe service root` — из `binPath` службы) и берут версию из
+  `version.txt`, поэтому запуск обновления сервера — один файл от администратора:
+  `update.cmd [-WhatIf]`. Первичная установка сервера — `install-server.cmd` (обёртка
+  `install_server.ps1`). `.cmd` не подпадает под execution policy, политика применяется
+  только к `.ps1` (см. также `setup.cmd`).
 * `fetch_*.ps1` — идемпотентны: проверяют sha256/размер и без `-Force` ничего не качают.
   `fetch_engine_runtime.ps1 [-Backend auto|cuda|vulkan|metal|cpu] [-PatchEngine|-RollbackEnginePatch]`;
   `fetch_llm_models.ps1 [-Models chat,embedding,rerank] [-RuntimeDir DIR] [-Force]`;
@@ -621,6 +628,12 @@ hds cline-sync --server-url http://127.0.0.1:8787 --token <T>   # локальн
 powershell -File <install>\app\current\installers\update.ps1 -Root <install> -Profile server -From dist\hds-1.1.0-windows-x64.zip -Version 1.1.0
 powershell -File <install>\app\current\installers\update.ps1 -Root <install> -ListVersions
 powershell -File <install>\app\current\installers\update.ps1 -Root <install> -Profile server -RollbackTo 1.0.1
+
+# то же обёрткой из распакованного архива: -Root и -Version она берёт сама
+<распаковано>\update.cmd -WhatIf           # Windows: предпросмотр, без изменений
+<распаковано>\update.cmd                   # Windows: выполнить (от администратора)
+sudo bash installers/update.command        # macOS (нужен pwsh)
+<распаковано>\install-server.cmd -WhatIf   # первичная установка сервера (install_server.ps1)
 ```
 
 ```powershell

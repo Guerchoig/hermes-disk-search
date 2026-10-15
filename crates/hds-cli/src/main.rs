@@ -34,8 +34,8 @@ fn usage() -> String {
      \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
      \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
      \x20 login        --login L --password P [--url http://host:port] (токен на stdout)\n\
-      \x20 service      run|install|uninstall|start|stop|status [role] (M2 T4; роли\n\
-      \x20              watch|mcp-http|ui|llm-host; Windows — SCM, macOS — LaunchDaemon)"
+      \x20 service      run|install|uninstall|start|stop|status|root [role] (M2 T4; роли\n\
+      \x20              watch|mcp-http|ui|llm-host|transcribe; Windows — SCM, macOS — LaunchDaemon)"
         .to_string()
 }
 
@@ -160,7 +160,9 @@ fn run(args: &[String]) -> i32 {
         "service" => match rest.first() {
             Some(s) if !s.starts_with("--") => cmd::service::cmd_service(s, &rest[1..]),
             _ => {
-                eprintln!("service: нужна подкоманда (run|install|uninstall|start|stop|status)");
+                eprintln!(
+                    "service: нужна подкоманда (run|install|uninstall|start|stop|status|root)"
+                );
                 2
             }
         },

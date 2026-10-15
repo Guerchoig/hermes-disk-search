@@ -40,7 +40,7 @@
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
@@ -174,6 +174,13 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
   `<корень>/client/` (раздача сервером по `<mcp-path>/client-package.zip`), туда же кладутся
   скрипты `client-install.ps1|sh` (публичная раздача). Версию задаёт `-Version`/тег —
   держите её равной `__version__` (джоба `check-version`).
+- **Обёртки серверной установки/обновления обязательны в архиве** (`install-server.cmd`,
+  `update.cmd` — корень репозитория рядом с `setup.cmd`; macOS — `installers/update.command`).
+  Они снимают MotW/карантин, находят корень установки через `bin\hds.exe service root`
+  (корень читается из `binPath` SCM-службы / плейста LaunchDaemon; чистая логика —
+  `hds_core::service::install_root_*` с тестами) и передают версию из `version.txt`, чтобы
+  обновление было «распаковал → запустил один файл» (иначе `.ps1` из интернета блокируется
+  политикой `RemoteSigned`). `build_rust_release.ps1` **падает**, если их нет в стейджинге.
 - **Локальная сборка кладёт клиентский пакет только своей платформы** (Windows-сборка —
   `*-windows-x64.zip`). Оба пакета в серверном архиве появляются на релизе: шаг
   «Cross-embed both client packages» в `release.yml` докладывает недостающий и пересчитывает

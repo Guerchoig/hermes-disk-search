@@ -45,10 +45,17 @@ foreach ($b in @("hds", "hds_mcp", "llm_host")) {
 }
 
 # installation scripts at the archive root (setup.ps1 resolves paths relative to itself)
-foreach ($f in @("setup.cmd", "setup.ps1", "install_hermes.ps1", "install_cline.ps1",
+foreach ($f in @("setup.cmd", "setup.ps1", "install-server.cmd", "update.cmd",
+                 "install_hermes.ps1", "install_cline.ps1",
                  "install_autostart.ps1", "run_ui.ps1", "run_index.ps1", "hds_bin.ps1")) {
     $src = Join-Path $root $f
     if (Test-Path $src) { Copy-Item $src (Join-Path $stage $f) -Force }
+}
+
+# RELEASING.md section 1: a silently missing release file breaks the release -
+# the server install/update wrappers must be in the archive.
+foreach ($f in @("install-server.cmd", "update.cmd")) {
+    if (-not (Test-Path (Join-Path $stage $f))) { throw "missing $f in $stage (repo root)" }
 }
 
 # directories copied as a whole (sidecar is handled separately below)

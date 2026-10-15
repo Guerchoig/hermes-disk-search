@@ -17,9 +17,7 @@
 //! **вызывающего** (UI), а не на `hds`, — поэтому [`sc_args`] принимает путь
 //! параметром.
 
-use std::path::Path;
-#[cfg(target_os = "macos")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
@@ -486,9 +484,132 @@ pub fn status(role: &str) -> ServiceStatus {
     )
 }
 
+// --- Корень установки по записи службы (обёртки обновления, RELEASING.md) -----
+//
+// Зачем: обновление серверной поставки — это подмена каталога версии за
+// junction `app\current`, и запускающему апдейтер нужно знать **корень
+// установки** (`<install>\app\current` → `<install>`). Спрашивать путь руками не
+// надо: раскладку уже знает сама служба — её `binPath` (Windows) / первый
+// `<string>` в `ProgramArguments` плейста (macOS) указывают на
+// `<install>\…\bin\hds.exe`. Обёртки `update.cmd` / `update.command` берут корень
+// отсюда (`bin\hds.exe service root`), поэтому парсеры — чистые функции с тестами.
+
+/// Корень установки по записи `binPath` службы (чистая функция — есть тест).
+///
+/// Принимает и голое значение (`"<путь>" service run <role>`), и целую строку
+/// вывода `sc qc`: путь берётся из первых кавычек, а если их нет — до `.exe`.
+/// Раскладки поставки:
+/// * versioned: `<install>\app\current\bin\hds.exe` → `<install>` (владелец `app\`);
+/// * плоская:   `<install>\bin\hds.exe`             → `<install>`.
+pub fn install_root_from_binpath(binpath: &str) -> Option<PathBuf> {
+    let exe = exe_path_in(binpath)?;
+    install_root_from_exe(Path::new(&exe))
+}
+
+/// Корень установки по тексту вывода `sc qc` (чистая функция — есть тест).
+///
+/// Метки `sc qc` локализованы (`BIN_PATH` / `ПУТЬ_К_ДВОИЧНОМУ_ФАЙЛУ`), поэтому
+/// опираемся не на метку, а на то, что путь ведёт к **нашему** `hds.exe`.
+pub fn install_root_from_sc_qc(text: &str) -> Option<PathBuf> {
+    text.lines().find_map(|line| {
+        let ours = exe_path_in(line)
+            .map(|e| e.to_ascii_lowercase().ends_with("hds.exe"))
+            .unwrap_or(false);
+        ours.then(|| install_root_from_binpath(line)).flatten()
+    })
+}
+
+/// Корень установки по тексту LaunchDaemon-плейста macOS (чистая функция — есть тест):
+/// первый `<string>` внутри `ProgramArguments` — это `<install>/…/bin/hds`.
+pub fn install_root_from_plist(text: &str) -> Option<PathBuf> {
+    let after = text.split("ProgramArguments").nth(1)?;
+    let start = after.find("<string>")? + "<string>".len();
+    let rest = &after[start..];
+    let end = rest.find("</string>")?;
+    install_root_from_exe(Path::new(rest[..end].trim()))
+}
+
+/// Путь к exe из строки записи службы: между первыми кавычками, иначе — до `.exe`
+/// (у строки `sc qc` перед путём стоит локализованная метка с `:`; последний
+/// пробел перед `.exe` отделяет её от пути).
+fn exe_path_in(s: &str) -> Option<String> {
+    let s = s.trim();
+    if let Some(i) = s.find('"') {
+        let rest = &s[i + 1..];
+        let j = rest.find('"')?;
+        let path = rest[..j].trim();
+        return (!path.is_empty()).then(|| path.to_string());
+    }
+    let low = s.to_ascii_lowercase();
+    let end = low.find(".exe")? + ".exe".len();
+    let start = low[..end].rfind([' ', '\t']).map(|p| p + 1).unwrap_or(0);
+    let path = s[start..end].trim();
+    (!path.is_empty()).then(|| path.to_string())
+}
+
+/// Общий шаг: путь к exe → корень установки (см. [`install_root_from_binpath`]).
+fn install_root_from_exe(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    if dir.as_os_str().is_empty() {
+        return None;
+    }
+    let base = if dir.file_name().map(|n| n == "bin").unwrap_or(false) {
+        dir.parent()?
+    } else {
+        dir
+    };
+    // versioned-раскладка: `<install>\app\current` → корень — владелец `app\`.
+    if base.file_name().map(|n| n == "current").unwrap_or(false) {
+        if let Some(app) = base.parent() {
+            if app.file_name().map(|n| n == "app").unwrap_or(false) {
+                if let Some(root) = app.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    return Some(root.to_path_buf());
+                }
+            }
+        }
+    }
+    Some(base.to_path_buf())
+}
+
+/// Корень установки зарегистрированных ролей (`None` — ни одна не стоит:
+/// dev-запуск из репозитория или службы ставились не из поставки).
+pub fn installed_root() -> Option<PathBuf> {
+    ROLES.iter().find_map(|role| installed_root_for(role))
+}
+
+/// Корень установки по SCM-записи роли (Windows: `sc qc`).
+#[cfg(windows)]
+fn installed_root_for(role: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("sc.exe")
+        .args(["qc", &service_name(role)])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    install_root_from_sc_qc(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Корень установки по плейсту LaunchDaemon роли (`/Library/LaunchDaemons`).
+#[cfg(target_os = "macos")]
+fn installed_root_for(role: &str) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(plist_path(&daemon_label(role))).ok()?;
+    install_root_from_plist(&text)
+}
+
+/// На прочих платформах служб нет — корня тоже.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn installed_root_for(_role: &str) -> Option<PathBuf> {
+    None
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{daemon_label, daemon_plist, parse_role, service_name, ControlResult, ROLES};
+    use super::{
+        daemon_label, daemon_plist, install_root_from_binpath, install_root_from_plist,
+        install_root_from_sc_qc, parse_role, service_name, ControlResult, ROLES,
+    };
+    use std::path::PathBuf;
 
     /// M2 T4 / PLAN_TRANSCRIBE_SERVICE R3.1: роли — пять (добавлена `transcribe`);
     /// имена служб/лейблы однозначно выводятся.
@@ -659,5 +780,76 @@ mod tests {
         ] {
             assert!(!super::parse_sc_autostart(demand), "{demand:?}");
         }
+    }
+    /// Обёртки обновления (`update.cmd`/`update.command`) берут корень установки
+    /// из `bin\hds.exe service root`: обе раскладки поставки и мусор.
+    #[test]
+    fn install_root_from_binpath_layouts() {
+        // versioned-поставка: <install>\app\current\bin\hds.exe
+        assert_eq!(
+            install_root_from_binpath(
+                r#""C:\Users\Sasha\hds-server\app\current\bin\hds.exe" service run llm-host"#
+            ),
+            Some(PathBuf::from(r"C:\Users\Sasha\hds-server")),
+            "versioned: корень — владелец app\\"
+        );
+        // плоская раскладка: <install>\bin\hds.exe
+        assert_eq!(
+            install_root_from_binpath(r#""D:\hds\bin\hds.exe" service run ui"#),
+            Some(PathBuf::from(r"D:\hds"))
+        );
+        // macOS-подобный путь (из плейста)
+        assert_eq!(
+            install_root_from_binpath(r#""/opt/hds/app/current/bin/hds" service run watch"#),
+            Some(PathBuf::from("/opt/hds"))
+        );
+        // без кавычек: путь отделяется от локализованной метки последним пробелом
+        assert_eq!(
+            install_root_from_binpath(
+                "ПУТЬ_К_ДВОИЧНОМУ_ФАЙЛУ : C:\\hds\\bin\\hds.exe service run ui"
+            ),
+            Some(PathBuf::from("C:\\hds"))
+        );
+        for junk in ["", "   ", "BIN_PATH       : (null)", "не путь"] {
+            assert_eq!(install_root_from_binpath(junk), None, "{junk:?}");
+        }
+    }
+
+    /// `sc qc` фильтрует «наши» службы (путь кончается на `hds.exe`) и не
+    /// опирается на локализованную метку (`BIN_PATH` / `ПУТЬ_К_ДВОИЧНОМУ_ФАЙЛУ`).
+    #[test]
+    fn install_root_from_sc_qc_picks_our_hds() {
+        let localized = "SERVICE_NAME: hermes-disk-search-llm-host\r\n\
+             \x20       TYPE                  : 10  WIN32_OWN_PROCESS\r\n\
+             \x20       ПУТЬ_К_ДВОИЧНОМУ_ФАЙЛУ : \"C:\\Users\\Sasha\\hds-server\\app\\current\\bin\\hds.exe\" service run llm-host\r\n";
+        assert_eq!(
+            install_root_from_sc_qc(localized),
+            Some(PathBuf::from(r"C:\Users\Sasha\hds-server")),
+            "локализованная метка не мешает"
+        );
+        let foreign = "BIN_PATH       : \"C:\\other\\agent.exe\" service run llm-host\r\n";
+        assert_eq!(
+            install_root_from_sc_qc(foreign),
+            None,
+            "чужой exe — не наш корень"
+        );
+        assert_eq!(install_root_from_sc_qc(""), None);
+    }
+
+    /// Корень из плейста LaunchDaemon (macOS): первый `<string>` в `ProgramArguments`.
+    #[test]
+    fn install_root_from_plist_macos() {
+        let p = daemon_plist(
+            "/opt/hds/app/current/bin/hds",
+            "ui",
+            "com.hermes-disk-search.ui",
+            "/Library/Application Support/hermes-disk-search/data/logs",
+        );
+        assert_eq!(
+            install_root_from_plist(&p),
+            Some(PathBuf::from("/opt/hds")),
+            "плейст указывает на <install>/app/current/bin/hds"
+        );
+        assert_eq!(install_root_from_plist("no plist here"), None);
     }
 }

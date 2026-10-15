@@ -33,6 +33,17 @@ jobs:
       - name: clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Shell wrappers syntax (bash -n)
+        run: |
+          # RELEASING.md section 7: the shipped .sh/.command wrappers are only
+          # exercised on macOS (a Windows dev machine has no bash) - a syntax
+          # error must fail this blocking job, not the user's machine.
+          for f in installers/*.sh installers/*.command; do
+            [ -f "$f" ] || continue
+            bash -n "$f" || { echo "syntax error: $f"; exit 1; }
+            echo "ok: $f"
+          done
+
       - name: Rust tests
         run: cargo test --workspace
 
