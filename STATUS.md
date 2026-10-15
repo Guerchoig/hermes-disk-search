@@ -35,6 +35,12 @@
 > подкоманды `hds service root` (корень читается из `binPath` SCM-службы / плейста LaunchDaemon:
 > `hds_core::service::install_root_{binpath,sc_qc,plist}` + 3 теста) и версию из `version.txt`,
 > затем зовут `update.ps1 -Profile server`; первичная установка — `install-server.cmd`.
+> **Релиз 0.20.1 выпущен (15.10.2026, тег `v0.20.1`, `RELEASE_NOTES_v0.20.1.md`):** PATCH только
+> логистики установки — обёртки в архиве (`update.cmd`, `install-server.cmd`, `installers/update.command`),
+> подкоманда `hds service root`, `bash -n` в блокирующей CI-джобе, README/RELEASING по установке и
+> обновлению. Поведение поиска/транскрибации и схема данных не менялись; живьём проверено: обёртка
+> `update.cmd -WhatIf` сама находит корень и версию, `bin\hds.exe service root` из опубликованного
+> архива отвечает `C:\Users\Sasha\hds-server`.
 > ⚠ Приёмка SCM-службы (`sc query …transcribe → RUNNING` после перезагрузки) требует
 > админской сессии и на dev-машине из неадминской сессии не выполнялась.
 >
