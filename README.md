@@ -82,7 +82,7 @@
 
 | Файл                                                           | Нужен?             | Что это                                                                                                                                                                                                                                          |
 | ------------------------------------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `hds-<версия>-windows-x64.zip` (~210 МБ)                 | **да**          | само приложение:`bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
+| `hds-<версия>-windows-x64.zip` (~210 МБ)                 | **да**          | само приложение:`bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), установщик `setup.cmd`, обёртки серверной установки/обновления `install-server.cmd` и `update.cmd`, воркер извлечения `sidecar\`, манифесты, скрипты, ярлыки, `config.example.yaml` |
 | `hds-<версия>-windows-x64.zip.sha256.txt`                  | по желанию     | контрольная сумма архива (шаг 2)                                                                                                                                                                                              |
 | `hds-engine-runtime-windows-x64-cuda.zip` (~570 МБ)             | нет\*                | рантайм движка (LLM + ASR) под **NVIDIA/CUDA**; для машин без NVIDIA есть `hds-engine-runtime-windows-x64-vulkan.zip` (~90 МБ, тот же рантайм под Vulkan).\*Установщик качает рантайм сам по манифесту из upstream; ассеты нужны только для установки **без интернета** (шаг 5′)   |
 | `hds-<версия>-macos-arm64.zip`                             | только для Mac | версия для Apple Silicon (см. «Установка — macOS»)                                                                                                                                                                              |
@@ -110,8 +110,9 @@ Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемы
 
 Например `D:\hds` (ПКМ по zip → «Извлечь всё…»). Подойдёт любая папка на диске; правами
 администратора ничего устанавливать не нужно. **Не распаковывайте поверх уже работающей
-установки** — Windows не даёт заменить запущенный `hds.exe`; для обновления есть `update.ps1`
-(см. «Установка с версионированием»).
+установки** — Windows не даёт заменить запущенный `hds.exe`; для обновления есть `update.cmd`
+(обёртка: сама найдёт корень установки и подставит версию) или `installers\update.ps1`
+напрямую (см. «Установка с версионированием»).
 
 ### Шаг 4. Запустите `setup.cmd` (двойной щелчок)
 
@@ -225,9 +226,14 @@ cd D:\hds
 
 ### Шаг 10. Обновление и удаление
 
-* **Обновление** — только отдельным процессом: `installers\update.ps1`
-  (см. «Установка с версионированием» ниже). Он сам остановит задачи и резидента, поставит новую
-  версию и запустит всё обратно; прежние версии сохраняются.
+* **Обновление** — отдельным процессом, не «поверх запущенного»: распакуйте новый архив в любую
+  папку и запустите **`update.cmd`** (двойной щелчок; для серверных служб — от администратора).
+  Обёртка сама снимет метку «скачано из интернета», найдёт корень установки (`bin\hds.exe service
+  root` — из `binPath` службы) и версию из `version.txt`, затем вызовет `installers\update.ps1`:
+  он остановит задачи/резидента (или службы в `-Profile server`), поставит новую версию, переключит
+  `app\current` и запустит всё обратно. Откат — `update.cmd -RollbackTo <версия>`; эквивалент
+  «руками» — `update.ps1` с явными `-Root`/`-From`/`-Version` (см. «Установка с версионированием» и
+  §8 «Установка и обслуживание сервера»). Прежние версии сохраняются.
 * **Удаление** — удалите папку с программой и, при желании, данные:
   `%LOCALAPPDATA%\llama-runtime` (модели ≈9 ГБ), `%APPDATA%\OpenResearchTools` (движок),
   файл индекса `index.db`, задачи Планировщика `HermesDiskSearch*` (или ярлыки в
@@ -238,7 +244,7 @@ cd D:\hds
 | Симптом                                                                                                 | Причина и решение                                                                                                                                             |
 | -------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | SmartScreen: «Windows protected your PC» при запуске`hds.exe`                                    | сборка не подписана: «More info» → «Run anyway»                                                                                                        |
-| PowerShell: «выполнение сценариев отключено / требуется подпись» | запускайте через`setup.cmd`, либо `powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1`                                                     |
+| PowerShell: «выполнение сценариев отключено / требуется подпись» | запускайте через`setup.cmd` (для сервера — `install-server.cmd`, для обновления — `update.cmd`), либо `powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1`                                                     |
 | `hds check`: чат/эмбеддинги недоступны                                                | не запущен резидент:`.\bin\llm_host.exe run` (шаг 6)                                                                                                   |
 | Индексация стоит на месте                                                                | стоит`index.pause` (кнопка «Продолжить» в UI) или `index.stop`; проверьте «Состояние»                                     |
 | В UI «Tesseract OCR не найден»                                                                      | включите OCR и запустите`installers\configure_ocr.py` (нужен Python воркера), либо переустановите установщиком |
@@ -293,17 +299,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
     -From hds-<новая>-windows-x64.zip -Version <новая> -Root D:\hds
+# то же обёрткой из распакованного архива (корень и версия — сама, без execution policy):
+#   <распаковано>\update.cmd [-WhatIf] [-Force] [-RollbackTo <версия>]
 ```
 
 `update.ps1` останавливает задачи/резидента → ставит новую версию → переключает `app\current` →
 запускает задачи. Прошлые версии сохраняются — откат = вернуть `current` на прежнюю.
 
+`update.cmd` (Windows) и `installers/update.command` (macOS, нужен `pwsh`) — обёртки релизного
+архива вокруг `update.ps1`: снимают MotW/карантин, берут корень установки из `bin\hds.exe service
+root` и версию из `version.txt`, поэтому достаточно распаковать архив и запустить один файл.
+
 ### Блокировки «скачано из интернета» и подпись
 
 Бинарники не подписаны (подпись кода в бюджет не входит). Поэтому:
 
-* `setup.cmd`/`setup.ps1` снимают MotW (`Unblock-File`) — иначе политика `RemoteSigned`
-  потребует цифровую подпись для `.ps1`;
+* `setup.cmd`, `update.cmd`, `install-server.cmd` снимают MotW (`Unblock-File`) — иначе политика
+  `RemoteSigned` потребует цифровую подпись для `.ps1`. Сама политика применяется только к `.ps1`
+  (и `.psm1`), поэтому `.cmd`-обёртки запускаются всегда; при прямом запуске `.ps1` добавьте
+  `-ExecutionPolicy Bypass` (или, если политику задал домен, см. «Если что-то не получилось»);
 * SmartScreen может показать «Windows protected your PC» для `hds.exe` — «More info → Run anyway».
 
 ## Установка — macOS (Apple Silicon, best-effort)
@@ -318,6 +332,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 4. Дальше — как на Windows: модели докачиваются установщиком, затем `~/.local/bin/hds check`,
    ярлыки на рабочем столе («Hermes Disk Search» — UI, «Индексация дисков» — индекс),
    корни задаются в UI `http://127.0.0.1:8765`.
+5. **Обновление** — распакуйте новый архив и запустите `sudo bash installers/update.command`
+   (нужен `pwsh`): обёртка снимет карантин, найдёт корень установки по плейсту LaunchDaemon
+   (серверный профиль; для десктопной установки добавьте `-Root <папка>`) и подставит версию из
+   `version.txt`; откат — `sudo bash installers/update.command -RollbackTo <версия>`.
 
 `install_macos.command` (ASCII-only) делает по шагам:
 
@@ -346,7 +364,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\update.ps1 `
 
 | Ассет                                                         | Нужен?                     | Содержимое                                                                                                                                                                                                                                                                              |
 | ------------------------------------------------------------------ | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`)         | **да (Windows)**        | основной архив:`bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки, `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<версия>-windows-x64.zip` (+ `.sha256.txt`)         | **да (Windows)**        | основной архив:`bin\{hds,hds_mcp,llm_host}.exe`, `installers\`, `runtime-manifests\`, `sidecar\`, `assets\`, `shortcuts\`, `hermes-skill\`, `cline-rules\`, скрипты установки/обновления (`setup.cmd`, `install-server.cmd`, `update.cmd`, …), `config.example.yaml`, `README.md`, `NOTICE.md`, `sha256.txt` |
 | `hds-<версия>-macos-arm64.zip` (+ `.sha256.txt`)         | **да (macOS)**          | то же для Apple Silicon —**best-effort**                                                                                                                                                                                                                                            |
 | `hds-engine-runtime-windows-x64-cuda.zip`                        | офлайн-установка | рантайм движка (LLM + ASR), скопированный из апстрима (NVIDIA/CUDA; есть и Vulkan-вариант для AMD/Intel) по`runtime-manifests\engine-manifest.json`; установщик скачивает его сам                                                                                                   |
 | `hds-engine-runtime-macos-arm64-metal.zip`                       | офлайн-установка | то же для macOS (Metal) —**best-effort**                                                                                                                                                                                                                                            |
@@ -425,8 +443,9 @@ hds mcp-http check|start|stop|status|restart|run
 ### 1. Службы (Windows SCM; только профиль `server`)
 
 ```powershell
-# состояние и управление (роль: watch | mcp-http | ui | llm-host)
-hds service status                  # все 4 роли (kind/state/autostart/detail)
+# состояние и управление (роль: watch | mcp-http | ui | llm-host | transcribe)
+hds service status                  # все роли (kind/state/autostart/detail)
+hds service root                    # корень установки служб (его берут обёртки update.cmd/update.command)
 hds service status <role>
 hds service start   <role>          # sc.exe start hermes-disk-search-<role>
 hds service stop    <role>
@@ -591,6 +610,7 @@ powershell -File installers\install_app_version.ps1 -From dist\hds-1.0.1-windows
 #    %ProgramData%\hermes-disk-search\config.yaml  (profile: server, access.enabled: true, mcp_http/ui.host)
 
 # 4) установка служб (админ; -WhatIf — план без изменений и без прав администратора)
+#    то же обёрткой из распакованного архива:  <распаковано>\install-server.cmd [-WhatIf]
 powershell -File <install>\app\current\installers\install_server.ps1 -WhatIf -StateDir "%ProgramData%\hermes-disk-search" -McpHost 0.0.0.0 -McpPort 8787 -UiHost 0.0.0.0 -UiPort 8765 -Parallel 1 -GpuDevice 1 -Roots "D:\" -EnableAccess -AdminLogin admin -AdminPassword "<secret>" -NoFetch [-KeepAtLogOn] [-Roles "watch,mcp-http,ui,llm-host"]
 
 # 5) старт (порядок: резидент → обход → MCP → UI)
@@ -647,7 +667,7 @@ cmd /c mklink /J "%windir%\System32\config\systemprofile\AppData\Roaming\OpenRes
 
 Прочие установщики: `setup.cmd` → `setup.ps1 [-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SmokeTest]`
 (desktop); `install_autostart.ps1 [-StartupFolder]`; `installers\install_llm_host_task.ps1 [-Exe -Config -Start -Status -Remove -Force -StartupFolder]`; `installers\install_ui_task.ps1 [-Port -Status -Remove]`; `install_hermes.ps1 [-HermesDir]`; `install_cline.ps1`;
-macOS: `installers\install_macos.command`, `installers\install_server.command`, `installers\install_client.command`.
+macOS: в корне распакованного архива — `install_macos.command`; в каталоге `installers\` — `install_server.command` (установка сервера) и `update.command` (обновление сервера, нужен `pwsh`); в клиентском пакете — `install_client.command`.
 
 ### 9. Клиент (ноутбук): подключение к серверу
 
@@ -1167,7 +1187,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 | **M2** | серверный профиль, каталог состояния, OS-службы, headless-UI                                                                                                                                                                                                            | `profile: desktop\|server`; `ui: { host, port }`; `hds service <role>` (`watch, mcp-http, ui, llm-host`)                                                                                     | §2a                    |
 | **M3** | сетевой периметр: наружу только`/mcp` и `/ui` через TLS-прокси; аудит, rate-limit, hardening                                                                                                                                                                  | `trusted_proxy`; `audit.{enabled, max_mb}`; `rate_limit.{enabled, requests_per_min, burst, login_per_min, max_inflight, max_inflight_per_user, per_token}`; `http.{max_body_kb, max_conns}` | §11                    |
 | **M7** | управление службами и выдача токенов из веб-UI (права админа)                                                                                                                                                                                                 | `GET/POST /api/services`; `hds token new --user <login> [--ttl-days N]`                                                                                                                         | §8c                    |
-| **M8** | серверный пакет: установка одной (unattended) командой, обновление и откат                                                                                                                                                                                | `installers\install_server.ps1` (`-WhatIf`, `-Roles`, `-EnableAccess`, …) / `install_server.command`; `installers\update.ps1 -Profile server [-RollbackTo <ver>]`                      | §8d                    |
+| **M8** | серверный пакет: установка одной (unattended) командой, обновление и откат                                                                                                                                                                                | `installers\install_server.ps1` (`-WhatIf`, `-Roles`, `-EnableAccess`, …) / `install_server.command`; `installers\update.ps1 -Profile server [-RollbackTo <ver>]`; обёртки архива — `install-server.cmd`, `update.cmd` (macOS — `installers\update.command`)                      | §8d                    |
 | **M9** | тонкий клиент: Cline к удалённому серверу, без движка/моделей/индекса                                                                                                                                                                                    | `hds cline-sync --server-url <url> --token <bearer> [--mcp-path /mcp]`; `setup-client.ps1`; `installers/build_client_release.ps1`                                                             | §8e                    |
 
 ⚠️ После M1 **переиндексация обязательна** (схема БД изменилась — см. «Индексная БД и

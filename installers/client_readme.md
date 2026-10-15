@@ -55,7 +55,7 @@ Cline. Права администратора не нужны.
 
 ## Установка (macOS)
 ```bash
-bash installers/install_client.command --server-url https://host/ --token <bearer>
+bash install_client.command --server-url https://host/ --token <bearer>
 ```
 (`--dry-run`, `--skip-health`, `--mcp-path /mcp` — при необходимости.)
 

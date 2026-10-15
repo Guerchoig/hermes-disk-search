@@ -138,8 +138,10 @@ UI открывается только с админ-токеном (не-адм
   (Планировщик `AtLogOn`) не меняется.
 * **Headless-UI (server):** `run_ui.ps1` в server-профиле не открывает браузер и не создаёт ярлыки;
   вход — строго по админ-токену (§6).
-* **Установка** — одной командой: `installers/install_server.ps1` (Windows) /
-  `installers/install_server.command` (macOS) — см. §8d. Управление службами из UI — §8c.
+* **Установка** — одной командой: `install-server.cmd` (Windows, из корня распакованного архива) /
+  `installers/install_server.ps1` / `installers/install_server.command` (macOS) — см. §8d.
+  **Обновление** — `update.cmd` (Windows) / `installers/update.command` (macOS); они сами находят
+  корень установки и версию, ручные `-Root/-Version` не нужны. Управление службами из UI — §8c.
 
 ## 3. Сценарий B — подключение нового пользователя (админ → пользователь)
 
@@ -412,6 +414,9 @@ plain-токена. Практические находки: `sc.exe create` п�
 **Windows** (из-под администратора):
 
 ```powershell
+# Обёртка из корня распакованного архива (снимает MotW и зовёт install_server.ps1):
+install-server.cmd -WhatIf
+
 # План + тело конфига — без изменений и без админа:
 installers\install_server.ps1 -WhatIf -StateDir C:\ProgramData\hermes-disk-search `
   -McpPort 8787 -UiPort 8765 -Parallel 5 -GpuDevice 1 -Roots "D:\;E:\Archive" `
@@ -442,10 +447,17 @@ sudo bash installers/install_server.command \
 * `-Fetch` вызывает `fetch_engine_runtime.ps1`/`fetch_llm_models.ps1`/`fetch_whisper_model.ps1`/
   `fetch_clip_models.ps1` (они unattended, без `Read-Host`; на macOS — через `pwsh`).
 * **Обновление/откат** (`installers\update.ps1`): `-Profile server -From <stage> -Version <ver>`
-  останавливает 4 службы (`ui→mcp-http→watch→llm-host`, ожидание `STOPPED`), подменяет
-  `app\current`, стартует (`llm-host→watch→mcp-http→ui`) и проверяет `/health`; `-RollbackTo <ver>`
-  возвращает прошлую версию; `-ListVersions` — список. **desktop**-профиль — прежний путь
-  (задачи Планировщика + резидент).
+  останавливает службы (`ui→mcp-http→watch→transcribe→llm-host`, ожидание `STOPPED`), подменяет
+  `app\current`, стартует (`llm-host→transcribe→watch→mcp-http→ui`) и проверяет `/health`;
+  `-RollbackTo <ver>` возвращает прошлую версию; `-ListVersions` — список. **desktop**-профиль —
+  прежний путь (задачи Планировщика + резидент).
+* **Обёртки релизного архива** (0.20.1) — то же без ручных `-Root/-From/-Version` и без борьбы с
+  execution policy: `install-server.cmd` (первичная установка), `update.cmd` (обновление) на
+  Windows, `installers/update.command` на macOS (нужен `pwsh`). Они снимают MotW/карантин, берут
+  корень установки из `bin\hds.exe service root` (читается из `binPath` SCM-службы или из плейста
+  LaunchDaemon) и версию из `version.txt`; политика выполнения применяется только к `.ps1`, поэтому
+  `.cmd`-обёртка запускается всегда. Явные `-Root`/`-WhatIf`/`-Force`/`-RollbackTo` пробрасываются
+  в `update.ps1` как есть.
 * **TLS reverse-proxy** — вручную: образцы `installers/proxy/{Caddyfile,nginx.conf}` (наружу
   только `/mcp` и `/ui`), затем `trusted_proxy: true`. Автоустановка Caddy/nginx не входит.
 * **Проверено на живом стенде (10.10.2026):** `install_server.ps1` ставит 4 службы SCM
@@ -517,7 +529,7 @@ Windows:
 ```
 macOS:
 ```bash
-bash installers/install_client.command --server-url https://host/ --token <bearer>
+bash install_client.command --server-url https://host/ --token <bearer>
 ```
 
 Мастер: проверяет `GET <ServerUrl>/health` (200) → `hds cline-sync --server-url --token` →
@@ -594,6 +606,9 @@ hds token revoke --sha <префикс> | --user alice                        # 
 
 # ── службы (server-профиль, админ) ─────────────────────
 hds service install|start|stop|status|uninstall <role>                 # role: watch|mcp-http|ui|llm-host|transcribe
+hds service root                                                      # корень установки служб (binPath/плейст)
+# из корня распакованного архива: install-server.cmd [-WhatIf]        # первичная установка сервера
+#                                 update.cmd [-WhatIf|-RollbackTo <ver>] # обновление (macOS: installers/update.command)
 
 # ── пользователь ───────────────────────────────────────
 hds login --login alice --password "..." --url http://127.0.0.1:8787   # → токен (JSON)
