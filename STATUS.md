@@ -2,6 +2,40 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
+> **Релиз 0.20.2 выпущен (15.10.2026, ветка `server-multiuser`, тег `v0.20.2`,
+> `RELEASE_NOTES_v0.20.2.md`):** PATCH серверной ветки. **Закрыт корень инцидента 15.10.2026**
+> (служба «переключалась» на посторонний `config.yaml` в корне поставки: UI без токена, чужая БД,
+> «llm-host не найден»): кэш конфига на процесс `hds_core::config::load_cached` (путь + mtime +
+> размер), фиксация пути конфига при старте UI (`gate_config_path`), `install_server.ps1`/`.command`
+> переименовывают «тень» (`<корень>\config.yaml` и `<корень>\app\current\config.yaml` → `*.bak`)
+> и закрепляют `HDS_CONFIG` + машинные `LLAMA_RUNTIME_DIR`/`HDS_ENGINE_DIR`/`HDS_EXTRACT_PYTHON`
+> в per-service `Environment` (`-NoConfigPin`/`--no-config-pin` отключает),
+> `install_app_version.ps1` больше не копирует `config.example.yaml` в каталог версии,
+> `hds check` — пункт `config-shadow`. Далее: идемпотентная установка служб (`sc config` вместо
+> `sc create`; принимается и версионная раскладка `app\current\bin`), машинные зависимости служб
+> (tesseract/ffmpeg `--scope machine`, пути в server-конфиге: `index.ocr_tesseract_cmd`,
+> `index.ocr_tessdata`, `index.ffmpeg_cmd`; пропуск — `-SkipDeps`), настольный `setup.ps1` без
+> вопросов (отказ — явными ключами `-SkipOcr`, `-SkipWhisper`, `-SkipClip`, `-SkipDiarization`,
+> `-SkipTranscribe`, `-NoAutostart`, `-NonInteractive`; отсутствующие диски заменяются
+> автоматически), новый сценарий `installers\migrate_to_machine_root.ps1` (перенос серверной
+> установки из профиля в машинный каталог: останов ролей, `robocopy /XJ`, junction'ы, перенос
+> моделей и движка со ссылкой обратно, закрепление переменных, перерегистрация служб и приёмка;
+> идемпотентен, при сбое возвращает роли), уточнённая диагностика (стандартные каталоги
+> tesseract/ffmpeg, вердикт по ffmpeg с учётом декодирования движком, каталоги автотранскрибации,
+> состояние демона `transcribe`), **разделённые руководства** — `README.md` (настольное, 19 глав)
+> и `README_SERVER_MULTIUSER.md` (серверное, 21 глава), оба читаются независимо; серверное
+> руководство **обязательно в поставке** (сборщики падают без него, `RELEASING.md` §2 обновлён);
+> устранено мигание теста `queue::tests::fifo_policy_is_strict_order` (красный CI на macOS
+> 15.10.2026: порядок прихода задавался `sleep`; теперь заявки ставятся в очередь по одной —
+> двадцать прогонов подряд зелёные). **Проверено:** `cargo fmt --check`, `clippy -D warnings`,
+> `cargo test --workspace` — зелёные локально и в CI (все джобы `rust.yml`, включая macOS);
+> `hds check` на живой машине — 0 критических («основные компоненты готовы»); `ask` по файлам —
+> ответ со ссылками `[N]`, путями и таймкодами за 14 с. **Ассеты:** Windows x64 235 МБ (+ sha256),
+> оба рантайма движка (CUDA 566 МБ / Vulkan 86 МБ), macOS 271 МБ и Metal 52 МБ (best-effort),
+> клиентские пакеты 11/12 МБ и `client-install.ps1|sh`, архивы исходников. **Живьём не
+> проверено:** несколько дискретных карт и Apple Silicon; HTTPS через TLS-прокси.
+>
+
 > **Ветка `server-multiuser`, этап «Автотранскрибация как служба пакета» закрыт (14.10.2026,
 > план `PLAN_TRANSCRIBE_SERVICE.md`, R0–R5):** транскрибация+диаризация стала полноправной
 > **службой пакета** — 5-я роль `transcribe` (`hermes-disk-search-transcribe`, SCM
