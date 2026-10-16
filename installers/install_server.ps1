@@ -52,18 +52,47 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# --- Locate the installation root (bin\hds.exe next to this script). ---
-if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
-# A versioned install (MIGRATION_PLAN 10.6 / update.ps1) keeps the binaries under
-# <root>\app\current (junction), not <root>\bin: accept both layouts so that
-# install-server.cmd can re-register services of an already versioned server.
-if (-not (Test-Path (Join-Path $Root "bin\hds.exe")) -and (Test-Path (Join-Path $Root "app\current\bin\hds.exe"))) {
-    Write-Host "[..] versioned install detected - using $Root\app\current"
-    $Root = Join-Path $Root "app\current"
+# --- Locate the SOURCE (the unpacked archive: bin\hds.exe next to this script)
+# and the install root (TARGET). `-Root` defaults to the source folder, which is
+# the "unpack into the machine folder" flow; passing `-Root` explicitly is the
+# "unpack anywhere + point at the machine folder" flow (README_SERVER_MULTIUSER,
+# chapter "Installing the server on Windows").
+$source = Split-Path -Parent $PSScriptRoot
+if (-not $Root) { $Root = $source }
+$installTarget = $Root                       # where app\, data\ and models\ live
+
+# --- 0.20.3: register the roles against a VERSION, not against the unpacked tree.
+# Why: launch points (SCM binPath, logon tasks, the desktop shortcut) keep an
+# ABSOLUTE path to hds.exe. When they point at <root>\bin\hds.exe (what a plain
+# "unpack into the install folder + install-server.cmd" produces), update.ps1
+# cannot replace that file: it installs the new version into app\<ver> and switches
+# app\current, so the roles would keep running the OLD binaries and -RollbackTo
+# would switch a pointer nothing reads (incident 16.10.2026). Therefore, when the
+# target is a machine folder DIFFERENT from the unpacked archive, the version is
+# laid out first (install_app_version.ps1 - the very same step update.ps1 uses) and
+# the roles are registered against app\current\bin\hds.exe.
+$versioned = Test-Path (Join-Path $installTarget "app\current\bin\hds.exe")
+$planLayout = $false                         # fresh version layout to install
+$layoutVer = ""
+$layoutNote = ""
+if ($versioned) {
+    $layoutNote = "versioned install detected: roles run from $installTarget\app\current\bin"
+} elseif (($installTarget -ne $source) -and (Test-Path (Join-Path $source "bin\hds.exe"))) {
+    foreach ($vf in @((Join-Path $source "version.txt"), (Join-Path $installTarget "version.txt"))) {
+        if (Test-Path $vf) { $layoutVer = (Get-Content $vf -TotalCount 1).Trim(); if ($layoutVer) { break } }
+    }
+    if ($layoutVer) {
+        $planLayout = $true
+        $layoutNote = "version $layoutVer will be laid out under $installTarget\app\$layoutVer; roles run from app\current\bin (updates and -RollbackTo switch app\current)"
+    } else {
+        $layoutNote = "no version.txt in the archive: flat layout (no versions kept; update.cmd re-points the roles itself)"
+    }
+} else {
+    $layoutNote = "flat layout (the archive IS the install root): unpack the archive elsewhere and pass -Root <machine folder> to get the version layout; update.cmd re-points the roles either way"
 }
+if ($versioned) { $Root = Join-Path $installTarget "app\current" }
 $bin = Join-Path $Root "bin"
 $hds = Join-Path $bin "hds.exe"
-if (-not (Test-Path $hds)) { Write-Host "[!!] hds.exe not found at $hds" -ForegroundColor Red; exit 1 }
 
 # --- State dir (server profile; %ProgramData% by default). ---
 if (-not $StateDir) { $StateDir = Join-Path $env:ProgramData "hermes-disk-search" }
@@ -166,6 +195,7 @@ $cfgBody = New-ServerConfig
 if ($WhatIf) {
     Write-Host "=== install_server.ps1 (WhatIf, no changes) ==="
     Write-Host "Root:      $Root"
+    Write-Host "Layout:    $layoutNote"
     Write-Host "StateDir:  $state"
     if (Test-Path $cfg) { Write-Host "Config:    $cfg (exists - will NOT be overwritten)" } else { Write-Host "Config:    $cfg (will be created)" }
     Write-Host "Roles:     $Roles"
@@ -194,7 +224,27 @@ if ($Roles.Trim() -and -not (Test-IsAdmin)) {
     exit 1
 }
 
+# --- 0.20.3: lay the version out BEFORE the roles are registered, so that their
+# binPath (and the logon tasks of a desktop install) point at app\current\bin and
+# an update/rollback really replaces the running binaries.
+if ($planLayout) {
+    Write-Host "[..] laying out version ${layoutVer}: ${source} -> ${installTarget}\app\${layoutVer}"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $source "installers\install_app_version.ps1") `
+        -From $source -Version $layoutVer -Root $installTarget -SetCurrent
+    if ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $installTarget "app\current\bin\hds.exe"))) {
+        $Root = Join-Path $installTarget "app\current"
+        $bin = Join-Path $Root "bin"
+        $hds = Join-Path $bin "hds.exe"
+        Write-Host "[ok] version layout: roles run from $bin"
+    } else {
+        Write-Host "[!!] version layout failed (exit $LASTEXITCODE) - nothing was registered" -ForegroundColor Red
+        exit 1
+    }
+}
+if (-not (Test-Path $hds)) { Write-Host "[!!] hds.exe not found at $hds" -ForegroundColor Red; exit 1 }
+
 $summary = @()
+$summary += "[ok] layout: $layoutNote"
 
 # --- State dir + data\. ---
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
@@ -216,7 +266,11 @@ if (-not $NoConfigPin) {
     # Two places to look for: <root>\config.yaml (no-version install) and
     # <root>\app\current\config.yaml (versioned install: project_root resolves to
     # the `current` junction, so THAT file is the effective one).
-    $cands = @((Join-Path $Root "config.yaml"), (Join-Path $Root "app\current\config.yaml"))
+    $cands = @(
+        (Join-Path $Root "config.yaml"),                     # flat root / app\current
+        (Join-Path $installTarget "config.yaml"),            # unpacked tree left in the machine folder
+        (Join-Path $installTarget "app\current\config.yaml") # versioned install (project_root = the junction)
+    )
     foreach ($rootCfg in $cands) {
         if (-not (Test-Path $rootCfg)) { continue }
         $same = $false
@@ -370,13 +424,13 @@ $summary | ForEach-Object { Write-Host $_ }
 Write-Host ""
 Write-Host "Next steps:"
 if ($EnableAccess -and $AdminLogin) {
-    Write-Host "  - Issue an admin token:  bin\hds.exe token new --user $AdminLogin"
+    Write-Host "  - Issue an admin token:  `"$hds`" token new --user $AdminLogin"
 }
-Write-Host "  - Start services now:    bin\hds.exe service start <role>"
+Write-Host "  - Start services now:    `"$hds`" service start <role>"
 Write-Host "  - After this install the roles read the state config (HDS_CONFIG is pinned per"
 Write-Host "    service); restart a role if it was started earlier: hds service restart <role>"
-Write-Host "  - Diagnostics flag a shadowing config root: bin\hds.exe check (item config-shadow)"
-Write-Host "  - Status:                bin\hds.exe service status <role>"
+Write-Host "  - Diagnostics flag a shadowing config root: `"$hds`" check (items config-shadow, layout)"
+Write-Host "  - Status:                `"$hds`" service status <role>"
 Write-Host "  - Put a TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"
 Write-Host "    samples in installers\proxy\ (Caddyfile, nginx.conf); then set trusted_proxy: true."
 

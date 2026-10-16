@@ -1892,6 +1892,124 @@ pub fn check_config_shadow(cfg: &Config) -> Option<Check> {
     )
 }
 
+/// Пункт «раскладка установки»: из какой копии запускаются **службы** (сервер) и
+/// **задания автозапуска** (настольная установка).
+///
+/// Зачем (инцидент 16.10.2026): и `binPath` служб, и задания Планировщика хранят
+/// **абсолютный** путь к программе. Плоская установка (`<корень>\bin\hds.exe`)
+/// после `update.cmd` оставалась на прежних файлах: обновление кладёт новую версию в
+/// `app\<ver>` и переключает указатель `app\current`, а пути запуска не менялись.
+/// Тихая деградация — обязан быть `warn`.
+///
+/// `None` — ни служб, ни заданий нет (dev-запуск из репозитория): пункт не печатается.
+pub fn check_install_layout() -> Option<Check> {
+    let mut roles: Vec<RoleBin> = Vec::new();
+    for role in hds_core::service::ROLES {
+        if let (Some(root), Some(exe)) = (
+            hds_core::service::installed_root_of(role),
+            hds_core::service::installed_exe(role),
+        ) {
+            roles.push(RoleBin {
+                role: role.to_string(),
+                root,
+                exe,
+            });
+        }
+    }
+    for (task, exe) in hds_core::service::logon_task_exes() {
+        if let Some(root) = hds_core::service::install_root_from_binpath(&exe.display().to_string())
+        {
+            roles.push(RoleBin {
+                role: task,
+                root,
+                exe,
+            });
+        }
+    }
+    layout_check(&roles, &|p| p.is_file())
+}
+
+/// Бинарь, записанный за ролью службы: роль, корень установки и путь к бинарю.
+struct RoleBin {
+    role: String,
+    root: PathBuf,
+    exe: PathBuf,
+}
+
+/// Имя бинаря в поставке (`hds.exe` на Windows, `hds` на остальных платформах).
+#[cfg(windows)]
+const EXE_NAME: &str = "hds.exe";
+#[cfg(not(windows))]
+const EXE_NAME: &str = "hds";
+
+/// Решение по раскладке — чистая функция: проверка наличия файла передаётся
+/// параметром, поэтому тест не трогает ни SCM, ни файловую систему.
+fn layout_check(bins: &[RoleBin], exists: &dyn Fn(&Path) -> bool) -> Option<Check> {
+    let first = bins.first()?;
+    let expected = first
+        .root
+        .join("app")
+        .join("current")
+        .join("bin")
+        .join(EXE_NAME);
+    let versioned_ready = exists(&expected);
+    let foreign: Vec<&RoleBin> = bins
+        .iter()
+        .filter(|b| !same_path(&b.exe, &expected))
+        .collect();
+    if versioned_ready && !foreign.is_empty() {
+        let list = foreign
+            .iter()
+            .map(|b| format!("{} -> {}", b.role, b.exe.display()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Some(
+            Check::new(
+                "layout",
+                "warn",
+                "Раскладка по версиям есть, но службы/задания запускаются не из неё",
+            )
+            .msg(format!(
+                "ожидается {} (указатель app\\current), а записано: {}",
+                expected.display(),
+                list
+            ))
+            .fix(
+                "Перерегистрируйте роли на активную версию: \
+                 `<app\\current>\\bin\\hds.exe` service install <роль> для каждой (сервер) и \
+                 повторный запуск `install-server.cmd` из каталога app\\current; задания \
+                 автозапуска и ярлык на рабочем столе пересоздайте из app\\current. \
+                 Обновление 0.20.3 и новее делает это само (update.cmd).",
+            ),
+        );
+    }
+    if versioned_ready {
+        return Some(
+            Check::new(
+                "layout",
+                "ok",
+                "Раскладка по версиям: запуск из app\\current\\bin",
+            )
+            .msg(format!(
+                "активная версия: {} (обновление и откат подменяют указатель app\\current)",
+                expected.display()
+            )),
+        );
+    }
+    Some(
+        Check::new("layout", "ok", "Простая раскладка: версии ещё не выделены")
+            .msg(format!(
+                "запуск из {}; каталога app\\current пока нет",
+                first.exe.display()
+            ))
+            .fix(
+                "Рабочее состояние: первое обновление создаст app\\<версия>, переведёт на него \
+                 службы/задания и оставит прежнюю версию рядом (0.20.3 и новее). Чтобы держать \
+                 версии сразу — установка сервера с корнем: `install-server.cmd -Root <машинная папка>`.",
+            ),
+    )
+}
+
 /// Один и тот же файл (по каноническому пути, иначе — по строке).
 fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
@@ -1922,6 +2040,9 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_ocr(cfg));
     checks.push(check_ffmpeg(cfg));
     if let Some(c) = check_config_shadow(cfg) {
+        checks.push(c);
+    }
+    if let Some(c) = check_install_layout() {
         checks.push(c);
     }
     match worker_caps() {
@@ -1957,8 +2078,9 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_perimeter, check_profile};
+    use super::{check_perimeter, check_profile, layout_check, RoleBin};
     use serde_yaml::Value;
+    use std::path::PathBuf;
 
     fn cfg(text: &str) -> Value {
         serde_yaml::from_str(text).unwrap()
@@ -2339,5 +2461,45 @@ mod tests {
         assert!(missing_langs(&c, &tess).is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 0.20.3: пункт `layout` — раскладка, из которой запускаются роли служб.
+    ///
+    /// Живой инцидент 16.10.2026: плоская установка (`<root>\bin\hds.exe`) осталась
+    /// зарегистрированной на `bin\`, а обновление подменяло только `app\<ver>` за
+    /// указателем `app\current` — роли продолжали работать прежними файлами, и откат
+    /// указателя ни на что не влиял. Пункт обязан это показывать.
+    #[test]
+    fn layout_check_flags_flat_roles_next_to_a_versioned_tree() {
+        let root = PathBuf::from(r"C:\hds");
+        let flat = vec![RoleBin {
+            role: "ui".into(),
+            root: root.clone(),
+            exe: root.join("bin").join("hds.exe"),
+        }];
+
+        // Версии ещё нет: простая раскладка — рабочее состояние, не warn.
+        let before = layout_check(&flat, &|_| false).expect("службы есть — пункт печатается");
+        assert_eq!(before.status, "ok", "{}", before.msg);
+        assert!(before.title.contains("Простая"), "{}", before.title);
+
+        // Версия есть, а роль работает из плоского bin\ — сам инцидент.
+        let bad = layout_check(&flat, &|_| true).expect("службы есть");
+        assert_eq!(bad.status, "warn", "{}", bad.msg);
+        assert!(bad.msg.contains("hds.exe"), "{}", bad.msg);
+        assert!(bad.fix.contains("service install"), "{}", bad.fix);
+
+        // Роли переведены на активную версию — снимаем предупреждение.
+        let versioned = vec![RoleBin {
+            role: "ui".into(),
+            root: root.clone(),
+            exe: root.join("app").join("current").join("bin").join("hds.exe"),
+        }];
+        let good = layout_check(&versioned, &|_| true).expect("службы есть");
+        assert_eq!(good.status, "ok", "{}", good.msg);
+        assert!(good.title.contains(r"app\current"), "{}", good.title);
+
+        // Служб нет (настольная установка) — пункта нет вовсе.
+        assert!(layout_check(&[], &|_| true).is_none());
     }
 }

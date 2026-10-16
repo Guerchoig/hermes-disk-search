@@ -134,3 +134,55 @@ fn update_ps1_is_server_profile_aware() {
         assert!(s.contains(needle), "в update.ps1 нет '{needle}'");
     }
 }
+
+/// 0.20.3: после подмены версии update.ps1 перерегистрирует **точки запуска**.
+///
+/// Инцидент 16.10.2026: и службы (`binPath`), и задания Планировщика, и ярлык на
+/// рабочем столе хранят **абсолютный** путь к бинарю. Плоская установка
+/// (`<корень>\bin\hds.exe`) после `update.cmd` оставалась на прежних файлах, потому
+/// что обновление подменяет только каталог версии за указателем `app\current`.
+#[test]
+fn update_ps1_repoints_launch_points() {
+    let s = read("installers/update.ps1");
+    for needle in [
+        "Repoint-Layout",
+        "function Get-ScBinPath",
+        "function Pin-ServiceEnv",
+        "service install $role",
+        "install_ui_task.ps1",
+        "install_llm_host_task.ps1",
+        "install_autostart.ps1",
+        "create_shortcut.ps1",
+        "LaunchDaemons/com.hermes-disk-search.",
+    ] {
+        assert!(s.contains(needle), "в update.ps1 нет '{needle}'");
+    }
+}
+
+/// 0.20.3: установщик сервера раскладывает поставку по версиям, когда корень
+/// отличается от распакованного архива (иначе обновление/откат не меняли бы то, что
+/// запускают роли). macOS-скрипт держит ту же логику.
+#[test]
+fn installers_lay_out_the_version() {
+    let ps1 = read("installers/install_server.ps1");
+    for needle in [
+        "install_app_version.ps1",
+        "app\\current\\bin\\hds.exe",
+        "$installTarget",
+        "flat layout",
+    ] {
+        assert!(ps1.contains(needle), "в install_server.ps1 нет '{needle}'");
+    }
+    let sh = read("installers/install_server.command");
+    for needle in [
+        "install_app_version.ps1",
+        "app/current/bin/hds",
+        "INSTALL_TARGET",
+        "PLAN_LAYOUT",
+    ] {
+        assert!(
+            sh.contains(needle),
+            "в install_server.command нет '{needle}'"
+        );
+    }
+}

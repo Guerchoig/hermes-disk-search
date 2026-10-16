@@ -40,7 +40,7 @@
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `README_SERVER_MULTIUSER.md`, `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
@@ -53,11 +53,12 @@
 Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ) и исходники sidecar в архив
 **не входят**: sidecar собирается в CI и кладётся внутрь, модели установщик качает сам.
 
-**Серверный документ обязателен в поставке.** `README_SERVER_MULTIUSER.md` — то, по чему
-администратор сервера ставит систему, ведёт её и делает короткую памятку пользователям. Сборщики
+**Документы пользователей обязательны в поставке.** `README_SERVER_MULTIUSER.md` — то, по чему
+администратор сервера ставит систему и ведёт её; `installers/client_readme.md` — **памятка
+пользователя** (подключение клиентского ПК, кабинет и повседневная работа): в клиентском архиве тот
+же файл лежит как `README.md`, в серверном — внутри `installers\`. Сборщики
 (`installers/build_rust_release.ps1`, `installers/build_rust_release_macos.sh`) **падают**, если
-документа нет в стейдже: релиз без него не выходит. Клиентские пакеты несут свою короткую памятку
-(`installers/client_readme.md` → `README.md` внутри клиентского архива).
+любого из этих документов нет в стейдже: релиз без них не выходит.
 
 Отдельные теги (не часть версии продукта):
 
@@ -187,6 +188,21 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
   `hds_core::service::install_root_*` с тестами) и передают версию из `version.txt`, чтобы
   обновление было «распаковал → запустил один файл» (иначе `.ps1` из интернета блокируется
   политикой `RemoteSigned`). `build_rust_release.ps1` **падает**, если их нет в стейджинге.
+- **Установка обязана оставаться пригодной к обновлению и откату.** Точки запуска (SCM
+  `binPath`, задания Планировщика, ярлык на рабочем столе) хранят **абсолютный** путь, а
+  обновление подменяет только каталог версии за указателем `app\current`. Поэтому:
+  * `installers/install_server.ps1`/`.command` при установке в корень, отличный от распакованного
+    архива, укладывают поставку по версиям (`app\<ver>` + `app\current`) и регистрируют роли
+    на `app\current\bin` (иначе первое обновление не сменило бы работающие файлы — инцидент
+    16.10.2026, релиз 0.20.3);
+  * `installers/update.ps1` перед запуском служб **перерегистрирует** точки запуска: службы —
+    `sc config` через `<app\current>\bin\hds.exe service install` (+ повторный пин `HDS_CONFIG`),
+    задания автозапуска и ярлык — пересоздаёт из `app\current`.
+  Приёмка релиза: `hds check` — пункт `layout` без `warn`; `sc.exe qc hermes-disk-search-ui`
+  показывает `app\current\bin\hds.exe`; статические тесты
+  `crates/hds-cli/tests/install_server_parity.rs` (`update_ps1_repoints_launch_points`,
+  `installers_lay_out_the_version`) и юниты `hds_core::service` (`exe_path_parsers…`,
+  `task_xml_command_is_parsed`), `hds_index::diag::layout_check…`.
 - **Локальная сборка кладёт клиентский пакет только своей платформы** (Windows-сборка —
   `*-windows-x64.zip`). Оба пакета в серверном архиве появляются на релизе: шаг
   «Cross-embed both client packages» в `release.yml` докладывает недостающий и пересчитывает

@@ -5,6 +5,21 @@
 # switch app\current -> restart. Previous versions are kept under app\<ver>
 # (rollback: point app\current back to the older directory with -RollbackTo).
 #
+# 0.20.3: after the switch the LAUNCH POINTS are re-registered. They can hold an
+# ABSOLUTE path into the old layout: a flat install (`<root>\bin\hds.exe` - what a
+# plain "unpack + install-server.cmd" produces) registered its SCM services there,
+# and the desktop tasks/shortcut point at the folder they were created from. With-
+# out this step the update would put the new version into app\<ver>, switch
+# app\current and restart services that still run the OLD files, while -RollbackTo
+# would switch a pointer nothing reads (incident 16.10.2026).
+#   * server  - `sc config` per role via `<app\current>\bin\hds.exe service install`
+#               (idempotent, also refreshes auto-restart) + re-pin the per-service
+#               Environment (HDS_CONFIG and the machine paths);
+#   * desktop - the logon tasks are recreated from app\current (they keep absolute
+#               paths) and the desktop shortcut is refreshed from app\current.
+# Already versioned installs point at app\current\bin and need nothing: the switch
+# moves the junction.
+#
 # Two profiles (M8 T4):
 #   -Profile desktop  (default) - stop the AtLogOn Scheduled Tasks + the resident,
 #                                 then restart the tasks (previous behaviour).
@@ -123,10 +138,117 @@ function Switch-Current([string]$target) {
     Write-Host "[ok] current -> $target"
 }
 
+# --- 0.20.3: launch-point re-registration (see the header) ------------------
+
+# exe path from the service registration (`sc qc`); '' when the role is absent.
+function Get-ScBinPath([string]$name) {
+    $o = (& sc.exe qc $name 2>&1 | Out-String)
+    if ($o -match '1060') { return '' }
+    $m = [regex]::Match($o, '"([^"]*[hH][dD][sS]\.exe)"')
+    if ($m.Success) { return $m.Groups[1].Value }
+    return ''
+}
+
+# Per-service Environment: HDS_CONFIG + the machine paths (same set as
+# install_server.ps1 pins; a freshly started service must not pick up a stale
+# machine env cached by the SCM at boot).
+function Pin-ServiceEnv([string]$role, [string]$cfg) {
+    $svc = "$SvcPrefix$role"
+    $pairs = @("HDS_CONFIG=$cfg")
+    foreach ($v in @("LLAMA_RUNTIME_DIR", "HDS_ENGINE_DIR", "HDS_EXTRACT_PYTHON", "HDS_MODELS_DIR")) {
+        $val = [Environment]::GetEnvironmentVariable($v, "Machine")
+        if ($val) { $pairs += "$v=$val" }
+    }
+    reg.exe add "HKLM\SYSTEM\CurrentControlSet\Services\$svc" /v Environment /t REG_MULTI_SZ /d ($pairs -join '\0') /f *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+# Re-register the launch points on the NEW version (called after Switch-Current).
+function Repoint-Layout {
+    $isWin = ($env:OS -eq 'Windows_NT')
+    $newExe = if ($isWin) { Join-Path $cur "bin\hds.exe" } else { Join-Path $cur "bin/hds" }
+    if (-not (Test-Path $newExe)) {
+        Write-Host "[..] re-point: no binary under $cur (bin) - skipped"
+        return
+    }
+    if ($Profile -eq "server") {
+        if (-not $isWin) {
+            # macOS: the LaunchDaemon plist keeps an absolute path as well.
+            foreach ($role in $ServerStartRoles) {
+                $plist = "/Library/LaunchDaemons/com.hermes-disk-search.$role.plist"
+                if (-not (Test-Path $plist)) { continue }
+                if ((Get-Content $plist -Raw) -like "*$cur*") { Write-Host "[ok] $role already runs $cur"; continue }
+                if ($WhatIf) { Write-Host "[..] (whatif) would re-point $role (launchd) -> $newExe"; continue }
+                & $newExe service install $role *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Host "[ok] re-pointed $role (launchd)" } else { Write-Host "[!!] re-point failed for $role" -ForegroundColor Yellow }
+            }
+            return
+        }
+        $cfg = Join-Path $env:ProgramData "hermes-disk-search\config.yaml"
+        if (-not (Test-Path $cfg)) { $cfg = "" }
+        foreach ($role in $ServerStartRoles) {
+            $n = "$SvcPrefix$role"
+            if ((Get-ScState $n) -eq 'absent') { continue }
+            $bp = Get-ScBinPath $n
+            if (-not $bp) { Write-Host "[..] $n : binPath not parsed - skipped"; continue }
+            if ($bp -eq $newExe) { Write-Host "[ok] $n already runs $newExe"; continue }
+            if ($WhatIf) { Write-Host "[..] (whatif) would re-point $n : $bp -> $newExe"; continue }
+            & $newExe service install $role *> $null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "[!!] re-point failed for $n (exit $LASTEXITCODE)" -ForegroundColor Yellow
+                continue
+            }
+            Write-Host "[ok] re-pointed $n -> $newExe"
+            if ($cfg) {
+                if (Pin-ServiceEnv $role $cfg) { Write-Host "[ok]   env re-pinned for $n" } else { Write-Host "[!!]   could not re-pin env for $n" -ForegroundColor Yellow }
+            }
+        }
+        return
+    }
+    if (-not $isWin) { return }   # desktop = logon tasks + shortcut (Windows only)
+    # desktop: logon tasks and the desktop shortcut hold ABSOLUTE paths
+    $haveTasks = $false
+    foreach ($t in @("HermesDiskSearchUi", "HermesDiskSearchLlmHost", "HermesDiskSearchWatch", "HermesDiskSearchMcp", "HermesDiskSearchTranscribe")) {
+        if (Get-ScheduledTask -TaskName $t -ErrorAction SilentlyContinue) { $haveTasks = $true }
+    }
+    if ($haveTasks) {
+        foreach ($s in @("installers\install_ui_task.ps1", "installers\install_llm_host_task.ps1", "install_autostart.ps1")) {
+            $p = Join-Path $cur $s
+            if (-not (Test-Path $p)) { continue }
+            if ($WhatIf) { Write-Host "[..] (whatif) would re-register the logon tasks: $p"; continue }
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $p *> $null
+            if ($LASTEXITCODE -eq 0) {
+                Write-Host "[ok] logon tasks re-registered: $s"
+            } else {
+                # install_llm_host_task.ps1 refuses while ports 8010-8012 are busy
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $p -Force *> $null
+                if ($LASTEXITCODE -eq 0) { Write-Host "[ok] logon tasks re-registered (-Force): $s" } else { Write-Host "[!!] task re-registration failed: $s" -ForegroundColor Yellow }
+            }
+        }
+    }
+    $lnk = Join-Path ([Environment]::GetFolderPath('Desktop')) "Hermes Disk Search.lnk"
+    $sc = Join-Path $cur "shortcuts\windows\create_shortcut.ps1"
+    if ((Test-Path $lnk) -and (Test-Path $sc)) {
+        if ($WhatIf) {
+            Write-Host "[..] (whatif) would refresh the desktop shortcut from $cur"
+        } else {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $sc *> $null
+            Write-Host "[ok] desktop shortcut refreshed ($cur)"
+        }
+    }
+}
+
 # --- informational mode: list installed versions ---------------------------
 if ($ListVersions) {
     $appDir = Join-Path $Root "app"
-    if (-not (Test-Path $appDir)) { Write-Host "[..] no app\ directory under $Root"; exit 0 }
+    if (-not (Test-Path $appDir)) {
+        Write-Host "[..] no app\ directory under $Root"
+        if (Test-Path (Join-Path $Root "bin\hds.exe")) {
+            Write-Host "[--] flat layout: no version is kept yet. The first update creates app\<ver> and (0.20.3+) re-points the roles to app\current\bin itself." -ForegroundColor Yellow
+            Write-Host "     To keep versions from the start: unpack the archive elsewhere and pass -Root <this folder>."
+        }
+        exit 0
+    }
     $curTarget = ""
     if (Test-Path $cur) { $curTarget = [string](Get-Item $cur).Target }
     foreach ($d in (Get-ChildItem $appDir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -ne 'current' })) {
@@ -153,6 +275,7 @@ if ($doRollback) {
     Write-Host "[..] rollback to $RollbackTo"
     Stop-All
     if ($WhatIf) { Write-Host "[..] (whatif) would switch current -> $target" } else { Switch-Current $target }
+    Repoint-Layout
     Start-All
     Write-Host "[ok] rollback complete: $RollbackTo"
     exit 0
@@ -182,6 +305,7 @@ if ($WhatIf) {
     if ($LASTEXITCODE -ne 0) { throw "install_app_version.ps1 failed (exit $LASTEXITCODE)" }
 }
 
-# --- 3. restart ------------------------------------------------------------
+# --- 3. launch points + restart --------------------------------------------
+Repoint-Layout
 Start-All
 Write-Host "[ok] update complete: $Version"

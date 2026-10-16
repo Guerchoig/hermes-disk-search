@@ -90,14 +90,40 @@ done
 if [ "${#POS[@]}" -ge 1 ] && [ -n "${POS[0]}" ]; then ROOT="${POS[0]}"; fi
 if [ "${#POS[@]}" -ge 2 ] && [ -n "${POS[1]}" ]; then ROLES="${POS[1]}"; fi
 
-if [ -z "$ROOT" ]; then ROOT="$(cd "$(dirname "$0")/.." && pwd)"; fi
+HERE="$(cd "$(dirname "$0")" && pwd)"
+SOURCE="$(cd "$(dirname "$0")/.." && pwd)"
+if [ -z "$ROOT" ]; then ROOT="$SOURCE"; fi
+INSTALL_TARGET="$ROOT"
+
+# --- 0.20.3: register the daemons against a VERSION, not against the unpacked tree.
+# LaunchDaemons keep an ABSOLUTE path to hds; when they point at <root>/bin/hds (a
+# plain "unpack into the install folder" flow), update.command can not replace that
+# file - it installs the new version into app/<ver> and switches app/current, so the
+# daemons would keep running the old binaries (incident 16.10.2026). When the target
+# is a folder DIFFERENT from the unpacked archive, lay the version out first (the
+# same install_app_version.ps1 step update.ps1 uses) and use app/current below.
+VERSIONED="no"; PLAN_LAYOUT="no"; LAYOUT_VER=""; LAYOUT_NOTE=""
+if [ -f "$INSTALL_TARGET/app/current/bin/hds" ]; then
+    VERSIONED="yes"
+    LAYOUT_NOTE="versioned install detected: daemons run from $INSTALL_TARGET/app/current/bin"
+elif [ "$INSTALL_TARGET" != "$SOURCE" ] && [ -f "$SOURCE/bin/hds" ]; then
+    if [ -f "$SOURCE/version.txt" ]; then LAYOUT_VER="$(head -n 1 "$SOURCE/version.txt" | tr -d ' \r')"; fi
+    if [ -z "$LAYOUT_VER" ] && [ -f "$INSTALL_TARGET/version.txt" ]; then LAYOUT_VER="$(head -n 1 "$INSTALL_TARGET/version.txt" | tr -d ' \r')"; fi
+    if [ -n "$LAYOUT_VER" ]; then
+        PLAN_LAYOUT="yes"
+        LAYOUT_NOTE="version $LAYOUT_VER will be laid out under $INSTALL_TARGET/app/$LAYOUT_VER; daemons run from app/current/bin (updates and rollback switch app/current)"
+    else
+        LAYOUT_NOTE="no version.txt in the archive: flat layout (no versions kept; update.command re-points the daemons itself)"
+    fi
+else
+    LAYOUT_NOTE="flat layout (the archive IS the install root): unpack elsewhere and pass <machine folder> to get the version layout; update.command re-points the daemons either way"
+fi
+if [ "$VERSIONED" = "yes" ]; then ROOT="$INSTALL_TARGET/app/current"; fi
 HDS="$ROOT/bin/hds"
-if [ ! -x "$HDS" ]; then echo "[!!] hds binary not found at $HDS"; exit 1; fi
 
 if [ -z "$STATEDIR" ]; then STATEDIR="/Library/Application Support/hermes-disk-search"; fi
 STATE="$STATEDIR"
 CFG="$STATE/config.yaml"
-HERE="$(cd "$(dirname "$0")" && pwd)"
 
 # YAML single-quoted scalar (backslashes stay literal; only ' is doubled).
 yq_single() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
@@ -170,6 +196,7 @@ CFG_BODY="$(gen_config)"
 if [ "$WHATIF" = "yes" ]; then
     echo "=== install_server.command (WhatIf, no changes) ==="
     echo "Root:      $ROOT"
+    echo "Layout:    $LAYOUT_NOTE"
     echo "StateDir:  $STATE"
     if [ -f "$CFG" ]; then echo "Config:    $CFG (exists - will NOT be overwritten)"; else echo "Config:    $CFG (will be created)"; fi
     echo "Roles:     $ROLES"
@@ -198,7 +225,32 @@ if [ -n "$(printf '%s' "$ROLES" | tr -d ' ,')" ] && [ "$(id -u)" -ne 0 ]; then
     exit 1
 fi
 
+# --- 0.20.3: lay the version out BEFORE the daemons are registered. ---
+if [ "$PLAN_LAYOUT" = "yes" ]; then
+    PWSH_LAYOUT="$(command -v pwsh 2>/dev/null || true)"
+    if [ -z "$PWSH_LAYOUT" ]; then
+        echo "[!!] the version layout needs pwsh (install PowerShell) - nothing was registered"
+        exit 1
+    fi
+    echo "[..] laying out version $LAYOUT_VER: $SOURCE -> $INSTALL_TARGET/app/$LAYOUT_VER"
+    if ! "$PWSH_LAYOUT" -NoProfile -ExecutionPolicy Bypass -File "$SOURCE/installers/install_app_version.ps1" \
+            -From "$SOURCE" -Version "$LAYOUT_VER" -Root "$INSTALL_TARGET" -SetCurrent; then
+        echo "[!!] version layout failed - nothing was registered"
+        exit 1
+    fi
+    if [ -x "$INSTALL_TARGET/app/current/bin/hds" ]; then
+        ROOT="$INSTALL_TARGET/app/current"
+        HDS="$ROOT/bin/hds"
+        echo "[ok] version layout: daemons run from $ROOT/bin"
+    else
+        echo "[!!] version layout not created - nothing was registered"
+        exit 1
+    fi
+fi
+if [ ! -x "$HDS" ]; then echo "[!!] hds binary not found at $HDS"; exit 1; fi
+
 summary=()
+summary+=("[ok] layout: $LAYOUT_NOTE")
 
 # --- Gatekeeper quarantine / exec bit on the bundled binaries (best effort). ---
 if command -v xattr >/dev/null 2>&1; then xattr -dr com.apple.quarantine "$ROOT" 2>/dev/null || true; fi

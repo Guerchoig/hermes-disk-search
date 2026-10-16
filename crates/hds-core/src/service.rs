@@ -564,6 +564,58 @@ fn root_of_exe_str(exe: &str) -> Option<String> {
     Some(out)
 }
 
+/// Задания автозапуска настольной установки (их имена; служб у неё нет).
+pub const LOGON_TASKS: [&str; 5] = [
+    "HermesDiskSearchUi",
+    "HermesDiskSearchLlmHost",
+    "HermesDiskSearchWatch",
+    "HermesDiskSearchMcp",
+    "HermesDiskSearchTranscribe",
+];
+
+/// Путь к бинарю из XML задания Планировщика (`<Command>`).
+/// Чистая функция — тестируется без Планировщика.
+pub fn command_from_task_xml(text: &str) -> Option<String> {
+    let start = text.find("<Command>")? + "<Command>".len();
+    let rest = &text[start..];
+    let end = rest.find("</Command>")?;
+    let cmd = rest[..end].trim();
+    (!cmd.is_empty()).then(|| cmd.to_string())
+}
+
+/// Пути к бинарю, записанные в заданиях автозапуска (`имя задания` → exe).
+///
+/// Задания хранят **абсолютный** путь, поэтому обновление обязано их пересоздавать
+/// (0.20.3): иначе после подмены каталога версии запускались бы прежние файлы.
+/// Нужно диагностике `hds check` (пункт `layout`) для настольной установки.
+#[cfg(windows)]
+pub fn logon_task_exes() -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    for task in LOGON_TASKS {
+        let o = match std::process::Command::new("schtasks.exe")
+            .args(["/query", "/tn", task, "/xml", "ONE"])
+            .output()
+        {
+            Ok(o) => o,
+            Err(_) => continue,
+        };
+        if !o.status.success() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&o.stdout);
+        if let Some(cmd) = command_from_task_xml(&text) {
+            out.push((task.to_string(), PathBuf::from(cmd)));
+        }
+    }
+    out
+}
+
+/// На других платформах заданий Планировщика нет.
+#[cfg(not(windows))]
+pub fn logon_task_exes() -> Vec<(String, PathBuf)> {
+    Vec::new()
+}
+
 /// Корень установки по записи `binPath` службы (чистая функция — есть тест).
 ///
 /// Принимает и голое значение (`"<путь>" service run <role>`), и целую строку
@@ -571,6 +623,66 @@ fn root_of_exe_str(exe: &str) -> Option<String> {
 pub fn install_root_from_binpath(binpath: &str) -> Option<PathBuf> {
     let exe = exe_path_in(binpath)?;
     root_of_exe_str(&exe).map(PathBuf::from)
+}
+
+/// Путь к `hds[.exe]` из текста `sc qc` — первая строка, чей путь ведёт к **нашему**
+/// бинарю (метки `sc qc` локализованы, поэтому опираемся на сам путь).
+/// Чистая функция — тестируется без SCM.
+pub fn exe_path_from_sc_qc(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let e = exe_path_in(line)?;
+        e.to_ascii_lowercase().ends_with("hds.exe").then_some(e)
+    })
+}
+
+/// Путь к бинарю из плейста LaunchDaemon — первый `<string>` в `ProgramArguments`.
+/// Чистая функция — тестируется без launchd.
+pub fn exe_path_from_plist(text: &str) -> Option<String> {
+    let after = text.split("ProgramArguments").nth(1)?;
+    let start = after.find("<string>")? + "<string>".len();
+    let rest = &after[start..];
+    let end = rest.find("</string>")?;
+    Some(rest[..end].trim().to_string())
+}
+
+/// Путь к бинарю, записанному за ролью (`binPath` SCM / плейст LaunchDaemon).
+/// `None` — роль не зарегистрирована (или платформа не поддерживает службы).
+///
+/// Нужен диагностике `hds check` (пункт `layout`, 0.20.3): обновление подменяет
+/// каталог версии за указателем `app\current`, поэтому важно видеть, **из чего**
+/// запускаются роли (инцидент 16.10.2026: плоская установка оставляла их на `bin\`).
+pub fn installed_exe(role: &str) -> Option<PathBuf> {
+    installed_exe_str(role).map(PathBuf::from)
+}
+
+/// Корень установки по записи роли (Windows — `binPath`, macOS — плейст).
+pub fn installed_root_of(role: &str) -> Option<PathBuf> {
+    installed_exe_str(role)
+        .and_then(|e| root_of_exe_str(&e))
+        .map(PathBuf::from)
+}
+
+#[cfg(windows)]
+fn installed_exe_str(role: &str) -> Option<String> {
+    let out = std::process::Command::new("sc.exe")
+        .args(["qc", &service_name(role)])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    exe_path_from_sc_qc(&String::from_utf8_lossy(&out.stdout))
+}
+
+#[cfg(target_os = "macos")]
+fn installed_exe_str(role: &str) -> Option<String> {
+    let text = std::fs::read_to_string(plist_path(&daemon_label(role))).ok()?;
+    exe_path_from_plist(&text)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn installed_exe_str(_role: &str) -> Option<String> {
+    None
 }
 
 /// Корень установки по тексту вывода `sc qc` (чистая функция — есть тест).
@@ -589,11 +701,7 @@ pub fn install_root_from_sc_qc(text: &str) -> Option<PathBuf> {
 /// Корень установки по тексту LaunchDaemon-плейста macOS (чистая функция — есть тест):
 /// первый `<string>` внутри `ProgramArguments` — это `<install>/…/bin/hds`.
 pub fn install_root_from_plist(text: &str) -> Option<PathBuf> {
-    let after = text.split("ProgramArguments").nth(1)?;
-    let start = after.find("<string>")? + "<string>".len();
-    let rest = &after[start..];
-    let end = rest.find("</string>")?;
-    root_of_exe_str(rest[..end].trim()).map(PathBuf::from)
+    root_of_exe_str(&exe_path_from_plist(text)?).map(PathBuf::from)
 }
 
 /// Путь к exe из строки записи службы: между первыми кавычками, иначе — до `.exe`
@@ -617,39 +725,14 @@ fn exe_path_in(s: &str) -> Option<String> {
 /// Корень установки зарегистрированных ролей (`None` — ни одна не стоит:
 /// dev-запуск из репозитория или службы ставились не из поставки).
 pub fn installed_root() -> Option<PathBuf> {
-    ROLES.iter().find_map(|role| installed_root_for(role))
-}
-
-/// Корень установки по SCM-записи роли (Windows: `sc qc`).
-#[cfg(windows)]
-fn installed_root_for(role: &str) -> Option<PathBuf> {
-    let out = std::process::Command::new("sc.exe")
-        .args(["qc", &service_name(role)])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    install_root_from_sc_qc(&String::from_utf8_lossy(&out.stdout))
-}
-
-/// Корень установки по плейсту LaunchDaemon роли (`/Library/LaunchDaemons`).
-#[cfg(target_os = "macos")]
-fn installed_root_for(role: &str) -> Option<PathBuf> {
-    let text = std::fs::read_to_string(plist_path(&daemon_label(role))).ok()?;
-    install_root_from_plist(&text)
-}
-
-/// На прочих платформах служб нет — корня тоже.
-#[cfg(all(unix, not(target_os = "macos")))]
-fn installed_root_for(_role: &str) -> Option<PathBuf> {
-    None
+    ROLES.iter().find_map(|role| installed_root_of(role))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        daemon_label, daemon_plist, install_root_from_binpath, install_root_from_plist,
+        command_from_task_xml, daemon_label, daemon_plist, exe_path_from_plist,
+        exe_path_from_sc_qc, install_root_from_binpath, install_root_from_plist,
         install_root_from_sc_qc, parse_role, service_name, ControlResult, ROLES,
     };
     use std::path::PathBuf;
@@ -911,5 +994,52 @@ mod tests {
             "плейст указывает на <install>/app/current/bin/hds"
         );
         assert_eq!(install_root_from_plist("no plist here"), None);
+    }
+
+    /// 0.20.3: путь к бинарю, записанному за ролью (`binPath`/плейст) — из него
+    /// диагностика `layout` понимает, ИЗ ЧЕГО запускаются роли (плоская раскладка
+    /// против `app\current\bin`; инцидент 16.10.2026).
+    #[test]
+    fn exe_path_parsers_pick_our_binary() {
+        let flat = "        BIN_PATH       : \"C:\\hds\\bin\\hds.exe\" service run ui\r\n";
+        assert_eq!(
+            exe_path_from_sc_qc(flat).as_deref(),
+            Some(r"C:\hds\bin\hds.exe"),
+            "плоская раскладка: путь внутри корня"
+        );
+        let versioned = "        BINARY_PATH_NAME   : \"C:\\hds\\app\\current\\bin\\hds.exe\" service run ui\r\n";
+        assert_eq!(
+            exe_path_from_sc_qc(versioned).as_deref(),
+            Some(r"C:\hds\app\current\bin\hds.exe"),
+            "раскладка по версиям: путь внутри junction"
+        );
+        assert_eq!(exe_path_from_sc_qc(""), None);
+
+        let p = daemon_plist(
+            "/opt/hds/app/current/bin/hds",
+            "ui",
+            "com.hermes-disk-search.ui",
+            "/Library/Application Support/hermes-disk-search/data/logs",
+        );
+        assert_eq!(
+            exe_path_from_plist(&p).as_deref(),
+            Some("/opt/hds/app/current/bin/hds")
+        );
+        assert_eq!(exe_path_from_plist("no plist here"), None);
+    }
+
+    /// 0.20.3: путь из XML задания Планировщика. Задания настольной установки держат
+    /// в нём **абсолютный** путь — поэтому обновление обязано их пересоздавать, а
+    /// диагностика `layout` должна их видеть наравне со службами.
+    #[test]
+    fn task_xml_command_is_parsed() {
+        let xml = "<?xml version=\"1.0\"?><Task><Actions><Exec>\
+             <Command>C:\\hds\\app\\current\\bin\\hds.exe</Command>\
+             <Arguments>watch</Arguments></Exec></Actions></Task>";
+        assert_eq!(
+            command_from_task_xml(xml).as_deref(),
+            Some(r"C:\hds\app\current\bin\hds.exe")
+        );
+        assert_eq!(command_from_task_xml("<Task/>"), None);
     }
 }
