@@ -181,6 +181,30 @@ fn installers_hint_a_working_restart() {
     }
 }
 
+/// PowerShell 5.1 **не передаёт сторонней программе пустой аргумент**, поэтому запись
+/// `sc.exe failure <имя> reset= 0 actions= ""` прямо в PowerShell падает с «недопустимый
+/// параметр» — пустое значение не доходит до `sc.exe` (живая находка 16.10.2026: читатель
+/// скопировал команду из руководства и получил ошибку). Каждая такая команда в документации
+/// обязана запускаться через `cmd /c` (в той же строке или в следующих двух — шаблон команды
+/// может быть вынесен в переменную).
+#[test]
+fn docs_wrap_the_empty_sc_failure_arg_in_cmd() {
+    let doc = read("README_SERVER_MULTIUSER.md");
+    let lines: Vec<&str> = doc.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        if !(line.contains("sc.exe failure") && line.contains("actions=") && line.contains("\"\""))
+        {
+            continue;
+        }
+        let nearby = lines[i..lines.len().min(i + 3)].join(" ");
+        assert!(
+            nearby.contains("cmd /c"),
+            "README_SERVER_MULTIUSER.md:{} — команда с пустым аргументом должна идти через cmd /c: {line}",
+            i + 1
+        );
+    }
+}
+
 /// 0.20.3: установщик сервера раскладывает поставку по версиям, когда корень
 /// отличается от распакованного архива (иначе обновление/откат не меняли бы то, что
 /// запускают роли). macOS-скрипт держит ту же логику.
