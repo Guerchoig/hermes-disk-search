@@ -58,7 +58,7 @@ foreach ($d in @("cline-rules", "hermes-skill")) {
     Copy-Item (Join-Path $srcD "*") $dstD -Recurse -Force
 }
 
-# short client README
+# the user memo becomes the client README (installers\client_readme.md)
 $readme = Join-Path $root "installers\client_readme.md"
 if (Test-Path $readme) { Copy-Item $readme (Join-Path $stage "README.md") -Force }
 

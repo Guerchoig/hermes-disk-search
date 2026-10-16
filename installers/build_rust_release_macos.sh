@@ -73,12 +73,17 @@ fi
 
 # --- docs ---------------------------------------------------------------------
 # README_SERVER_MULTIUSER.md is required: the server administrator installs the
-# system and writes the short note for end users from it.
+# system from it. installers/client_readme.md is required too: it is the user memo
+# for the people who connect their PCs (checked below).
 for f in config.example.yaml README.md README_SERVER_MULTIUSER.md NOTICE.md; do
     if [ -f "$ROOT/$f" ]; then
         cp "$ROOT/$f" "$STAGE/$f"
     fi
 done
+if [ ! -f "$STAGE/installers/client_readme.md" ]; then
+    echo "missing $STAGE/installers/client_readme.md (user memo)" >&2
+    exit 1
+fi
 
 # --- версия продукта и вложенный клиентский пакет (M9/W7) ----------------------
 # version.txt: версию отсюда отдают /health и мастера тонкого клиента
