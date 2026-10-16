@@ -1944,18 +1944,23 @@ const EXE_NAME: &str = "hds";
 
 /// Решение по раскладке — чистая функция: проверка наличия файла передаётся
 /// параметром, поэтому тест не трогает ни SCM, ни файловую систему.
+///
+/// Сравниваются **каталоги** запуска (`<корень>\app\current\bin`), а не имена файлов:
+/// имя зависит от платформы (`hds` / `hds.exe`), а смысл пункта — из какой копии
+/// работают роли (красный CI 16.10.2026 на ubuntu: сравнение с `EXE_NAME` давало
+/// ложное предупреждение).
 fn layout_check(bins: &[RoleBin], exists: &dyn Fn(&Path) -> bool) -> Option<Check> {
     let first = bins.first()?;
-    let expected = first
-        .root
-        .join("app")
-        .join("current")
-        .join("bin")
-        .join(EXE_NAME);
-    let versioned_ready = exists(&expected);
+    let pointer = first.root.join("app").join("current");
+    let expected_dir = pointer.join("bin");
+    let expected = expected_dir.join(EXE_NAME);
+    let versioned_ready = exists(&expected) || exists(&pointer);
     let foreign: Vec<&RoleBin> = bins
         .iter()
-        .filter(|b| !same_path(&b.exe, &expected))
+        .filter(|b| match b.exe.parent() {
+            Some(dir) => !same_path(dir, &expected_dir),
+            None => true,
+        })
         .collect();
     if versioned_ready && !foreign.is_empty() {
         let list = foreign
