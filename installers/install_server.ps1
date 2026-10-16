@@ -427,8 +427,8 @@ if ($EnableAccess -and $AdminLogin) {
     Write-Host "  - Issue an admin token:  `"$hds`" token new --user $AdminLogin"
 }
 Write-Host "  - Start services now:    `"$hds`" service start <role>"
-Write-Host "  - After this install the roles read the state config (HDS_CONFIG is pinned per"
-Write-Host "    service); restart a role if it was started earlier: hds service restart <role>"
+Write-Host "  - After this install the roles read the state config (HDS_CONFIG is pinned per service)."
+Write-Host "  - Restart a role that was already running:  `"$hds`" service stop <role> + service start <role>"
 Write-Host "  - Diagnostics flag a shadowing config root: `"$hds`" check (items config-shadow, layout)"
 Write-Host "  - Status:                `"$hds`" service status <role>"
 Write-Host "  - Put a TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"

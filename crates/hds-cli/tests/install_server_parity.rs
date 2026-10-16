@@ -159,6 +159,28 @@ fn update_ps1_repoints_launch_points() {
     }
 }
 
+/// Подсказки установщиков не должны ссылаться на несуществующую подкоманду:
+/// `hds service` знает `run|install|uninstall|start|stop|status|root`, а `restart` есть
+/// только у `mcp-http`. Перезапуск роли — это `service stop <role>` + `service start <role>`
+/// (живая находка при правке документации, 16.10.2026).
+#[test]
+fn installers_hint_a_working_restart() {
+    for f in [
+        "installers/install_server.ps1",
+        "installers/install_server.command",
+    ] {
+        let s = read(f);
+        assert!(
+            !s.contains("service restart"),
+            "в {f} подсказка ссылается на несуществующую подкоманду hds service restart"
+        );
+        assert!(
+            s.contains("service stop <role>"),
+            "в {f} нет подсказки, как перезапустить роль (stop + start)"
+        );
+    }
+}
+
 /// 0.20.3: установщик сервера раскладывает поставку по версиям, когда корень
 /// отличается от распакованного архива (иначе обновление/откат не меняли бы то, что
 /// запускают роли). macOS-скрипт держит ту же логику.

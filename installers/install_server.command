@@ -399,8 +399,8 @@ if [ "$ENABLE_ACCESS" = "yes" ] && [ -n "$ADMIN_LOGIN" ]; then
     echo "  - Issue an admin token:  $HDS token new --user $ADMIN_LOGIN"
 fi
 echo "  - Start now: $HDS service start <role>"
-echo "  - The daemons read the state config (HDS_CONFIG is pinned in the plist);"
-echo "    restart a role if it was started earlier: $HDS service restart <role>"
+echo "  - The daemons read the state config (HDS_CONFIG is pinned in the plist)."
+echo "  - Restart a role that was already running: $HDS service stop <role> + service start <role>"
 echo "  - Status:    $HDS service status <role>"
 echo "  - Put TLS reverse proxy in front of /mcp and /ui (facade 8010-8012 stays local):"
 echo "    samples in installers/proxy/ (Caddyfile, nginx.conf); then set trusted_proxy: true."
