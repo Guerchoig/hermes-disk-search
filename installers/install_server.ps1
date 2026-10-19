@@ -334,9 +334,30 @@ if ($SkipDeps) {
 
 # --- Desktop AtLogOn tasks (roles) are superseded by services. ---
 if (-not $KeepAtLogOn) {
-    foreach ($task in "HermesDiskSearchWatch", "HermesDiskSearchMcp", "HermesDiskSearchTranscribe", "HermesDiskSearchLlmHost", "HermesDiskSearchUi") {
-        schtasks /delete /tn $task /f *> $null
-        if ($LASTEXITCODE -eq 0) { Write-Host "[ok] removed AtLogOn task: $task" }
+    $taskNames = @("HermesDiskSearchWatch", "HermesDiskSearchMcp", "HermesDiskSearchTranscribe", "HermesDiskSearchLlmHost", "HermesDiskSearchUi")
+    $haveSchedModule = [bool](Get-Command Get-ScheduledTask -ErrorAction SilentlyContinue) -and [bool](Get-Command Unregister-ScheduledTask -ErrorAction SilentlyContinue)
+    foreach ($task in $taskNames) {
+        try {
+            if ($haveSchedModule) {
+                $existing = Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue
+                if ($existing) {
+                    Unregister-ScheduledTask -TaskName $task -Confirm:$false -ErrorAction Stop
+                    Write-Host "[ok] removed AtLogOn task: $task"
+                }
+            } else {
+                # Windows PowerShell 5.1: stderr of a native command becomes a
+                # NativeCommandError, and this script runs with ErrorActionPreference=Stop.
+                # A missing task must never abort the server install.
+                $prevEap = $ErrorActionPreference
+                $ErrorActionPreference = 'Continue'
+                & schtasks /delete /tn $task /f 2>$null | Out-Null
+                $code = $LASTEXITCODE
+                $ErrorActionPreference = $prevEap
+                if ($code -eq 0) { Write-Host "[ok] removed AtLogOn task: $task" }
+            }
+        } catch {
+            Write-Host "[..] AtLogOn task ${task}: $($_.Exception.Message)"
+        }
     }
 }
 
@@ -356,11 +377,41 @@ foreach ($px in @("caddy", "nginx")) {
 
 # --- Unattended fetch of runtime/models (idempotent; skip with -NoFetch). ---
 if ($Fetch -and -not $NoFetch) {
-    foreach ($name in @('fetch_engine_runtime.ps1', 'fetch_llm_models.ps1', 'fetch_whisper_model.ps1', 'fetch_diarization_model.ps1', 'fetch_clip_models.ps1')) {
+    # The roles run as LocalSystem, whose %APPDATA%/%LOCALAPPDATA% is the SYSTEM
+    # profile. Fetching into the installing administrator's profile would leave the
+    # services without models. Use MACHINE directories (an explicit machine value is
+    # honoured) and persist them, so the per-service env pin below sees them.
+    function Get-OrSetMachineDir([string]$Name, [string]$DefaultPath) {
+        $p = [Environment]::GetEnvironmentVariable($Name, "Machine")
+        if (-not $p) { $p = $DefaultPath }
+        if (-not (Test-Path $p)) { New-Item -ItemType Directory -Force -Path $p | Out-Null }
+        if (Test-IsAdmin) {
+            [Environment]::SetEnvironmentVariable($Name, $p, "Machine")
+        } else {
+            Write-Host "[..] not elevated: $Name is used for this run only"
+        }
+        return $p
+    }
+    $modelsDir = Get-OrSetMachineDir "HDS_MODELS_DIR" (Join-Path $state "models")
+    $engineDir = Get-OrSetMachineDir "HDS_ENGINE_DIR" (Join-Path $state "engine")
+    $llamaDir = Get-OrSetMachineDir "LLAMA_RUNTIME_DIR" (Join-Path $state "llama-runtime")
+    $clipDir = Join-Path $installTarget "models\clip_onnx"
+    New-Item -ItemType Directory -Force -Path $clipDir | Out-Null
+    $summary += "[ok] model dirs: HDS_MODELS_DIR=$modelsDir, HDS_ENGINE_DIR=$engineDir, LLAMA_RUNTIME_DIR=$llamaDir"
+    $fetches = @(
+        @{ name = 'fetch_engine_runtime.ps1'; args = @('-EngineDir', $engineDir) },
+        @{ name = 'fetch_llm_models.ps1'; args = @('-RuntimeDir', $llamaDir) },
+        @{ name = 'fetch_whisper_model.ps1'; args = @('-ModelsDir', $modelsDir) },
+        @{ name = 'fetch_diarization_model.ps1'; args = @('-ModelsDir', $modelsDir) },
+        @{ name = 'fetch_clip_models.ps1'; args = @('-ModelsDir', $clipDir) }
+    )
+    foreach ($f in $fetches) {
+        $name = $f.name
         $fs = Join-Path $PSScriptRoot $name
         if (-not (Test-Path $fs)) { $summary += "[..] fetch skipped (not found): $name"; continue }
+        $fargs = @($f.args)
         try {
-            & $fs
+            & $fs @fargs
             if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -eq 0) { $summary += "[ok] fetched: $name" } else { $summary += "[!!] fetch failed ($LASTEXITCODE): $name" }
         } catch {
             $summary += "[!!] fetch error: $name - $($_.Exception.Message)"

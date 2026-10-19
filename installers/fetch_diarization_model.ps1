@@ -24,7 +24,11 @@ param(
 $ErrorActionPreference = "Continue"
 
 if (-not $ModelsDir) {
-    if ($env:OS -eq "Windows_NT") {
+    # Server deployments pin the machine-wide models dir; honour it for manual runs
+    # too (the roles run as LocalSystem and do not see the admin profile).
+    if ($env:HDS_MODELS_DIR) {
+        $ModelsDir = $env:HDS_MODELS_DIR
+    } elseif ($env:OS -eq "Windows_NT") {
         $ModelsDir = Join-Path $env:APPDATA "OpenResearchTools\models"
     } else {
         $ModelsDir = Join-Path $HOME "Library/Application Support/OpenResearchTools/models"

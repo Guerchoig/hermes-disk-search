@@ -124,6 +124,12 @@ HDS="$ROOT/bin/hds"
 if [ -z "$STATEDIR" ]; then STATEDIR="/Library/Application Support/hermes-disk-search"; fi
 STATE="$STATEDIR"
 CFG="$STATE/config.yaml"
+# Machine-wide asset dirs: LaunchDaemons run as root, so models must live in the
+# state dir, not in the invoking admin's profile. Same layout as on Windows.
+MODELS_DIR="$STATE/models"
+ENGINE_DIR="$STATE/engine"
+LLAMA_DIR="$STATE/llama-runtime"
+CLIP_DIR="$INSTALL_TARGET/models/clip_onnx"
 
 # YAML single-quoted scalar (backslashes stay literal; only ' is doubled).
 yq_single() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/''/g")"; }
@@ -333,11 +339,22 @@ fi
 if [ "$FETCH" = "yes" ] && [ "$NOFETCH" != "yes" ]; then
     PWSH="$(command -v pwsh || true)"
     if [ -n "$PWSH" ]; then
-        for f in fetch_engine_runtime.ps1 fetch_llm_models.ps1 fetch_whisper_model.ps1 fetch_diarization_model.ps1 fetch_clip_models.ps1; do
+        mkdir -p "$MODELS_DIR" "$ENGINE_DIR" "$LLAMA_DIR" "$CLIP_DIR"
+        fetch_one() {
+            f="$1"; shift
             s="$HERE/$f"
-            if [ ! -f "$s" ]; then summary+=("[..] fetch skipped (not found): $f"); continue; fi
-            if "$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$s"; then summary+=("[ok] fetched: $f"); else summary+=("[!!] fetch failed: $f"); fi
-        done
+            if [ ! -f "$s" ]; then summary+=("[..] fetch skipped (not found): $f"); return 0; fi
+            if "$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$s" "$@"; then
+                summary+=("[ok] fetched: $f")
+            else
+                summary+=("[!!] fetch failed: $f")
+            fi
+        }
+        fetch_one fetch_engine_runtime.ps1 -EngineDir "$ENGINE_DIR"
+        fetch_one fetch_llm_models.ps1 -RuntimeDir "$LLAMA_DIR"
+        fetch_one fetch_whisper_model.ps1 -ModelsDir "$MODELS_DIR"
+        fetch_one fetch_diarization_model.ps1 -ModelsDir "$MODELS_DIR"
+        fetch_one fetch_clip_models.ps1 -ModelsDir "$CLIP_DIR"
     else
         summary+=("[..] fetch skipped - pwsh (PowerShell) not found on macOS")
     fi
@@ -379,7 +396,13 @@ IFS=',' ; for role in $ROLES; do
                 /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:HDS_CONFIG $CFG" "$PLIST" 2>/dev/null \
                     || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:HDS_CONFIG string $CFG" "$PLIST" 2>/dev/null \
                     || true
-                summary+=("[ok]   HDS_CONFIG pinned in $PLIST (restart the daemon to apply)")
+                for pair in "HDS_MODELS_DIR=$MODELS_DIR" "HDS_ENGINE_DIR=$ENGINE_DIR" "LLAMA_RUNTIME_DIR=$LLAMA_DIR"; do
+                    k="${pair%%=*}"; v="${pair#*=}"
+                    /usr/libexec/PlistBuddy -c "Set :EnvironmentVariables:$k $v" "$PLIST" 2>/dev/null \
+                        || /usr/libexec/PlistBuddy -c "Add :EnvironmentVariables:$k string $v" "$PLIST" 2>/dev/null \
+                        || true
+                done
+                summary+=("[ok]   config + model dirs pinned in $PLIST (restart the daemon to apply)")
             fi
         fi
     else

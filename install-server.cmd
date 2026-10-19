@@ -47,5 +47,6 @@ echo     prints "[!!] Run as Administrator").
 echo  2. Execution policy set by Group Policy (AllSigned): ask IT, or run
 echo     install_server.ps1 manually from an elevated PowerShell.
 echo.
-pause
+rem Keep unattended/CI runs from hanging on the error path.
+if not defined HDS_NONINTERACTIVE pause
 exit /b 1

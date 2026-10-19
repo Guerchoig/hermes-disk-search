@@ -232,3 +232,118 @@ fn installers_lay_out_the_version() {
         );
     }
 }
+
+/// Находка при установке 0.20.5: `schtasks /delete` для отсутствующей задачи пишет
+/// в stderr, а установщик идёт с `$ErrorActionPreference='Stop'` — PowerShell 5.1
+/// превращает это в `NativeCommandError` и установка падает. Снятие задач должно
+/// быть best-effort: командлеты Планировщика либо защищённый fallback.
+#[test]
+fn install_server_clears_tasks_without_native_stderr_abort() {
+    let s = read("installers/install_server.ps1");
+    assert!(
+        s.contains("Get-ScheduledTask") && s.contains("Unregister-ScheduledTask"),
+        "install_server.ps1 должен снимать AtLogOn-задачи через Get-ScheduledTask/Unregister-ScheduledTask"
+    );
+    assert!(
+        !s.contains("schtasks /delete /tn $task /f *> $null"),
+        "небезопасный schtasks /delete вернулся: EAP=Stop + stderr снова уронят установку"
+    );
+    assert!(
+        s.contains("$ErrorActionPreference = 'Continue'"),
+        "fallback schtasks должен временно переключать ErrorActionPreference на Continue"
+    );
+}
+
+/// Службы работают как LocalSystem: `-Fetch` обязан класть модели/движок в машинные
+/// каталоги и закреплять те же пути в machine env, иначе на чистой машине сервер
+/// поднимется без моделей (они окажутся в профиле установившего администратора).
+#[test]
+fn install_server_fetches_models_into_machine_dirs() {
+    let s = read("installers/install_server.ps1");
+    for needle in [
+        "HDS_MODELS_DIR",
+        "HDS_ENGINE_DIR",
+        "LLAMA_RUNTIME_DIR",
+        "SetEnvironmentVariable($Name, $p, \"Machine\")",
+        "-ModelsDir",
+        "-EngineDir",
+        "-RuntimeDir",
+        "fetch_whisper_model.ps1",
+        "fetch_diarization_model.ps1",
+        "fetch_clip_models.ps1",
+        "clip_onnx",
+    ] {
+        assert!(
+            s.contains(needle),
+            "в install_server.ps1 нет '{needle}' — модели снова уйдут в профиль админа"
+        );
+    }
+}
+
+/// macOS: те же машинные каталоги внутри state dir + закрепление в LaunchDaemon.
+#[test]
+fn mac_installer_fetches_into_state_dirs() {
+    let s = read("installers/install_server.command");
+    for needle in [
+        "MODELS_DIR=\"$STATE/models\"",
+        "ENGINE_DIR=\"$STATE/engine\"",
+        "LLAMA_DIR=\"$STATE/llama-runtime\"",
+        "-ModelsDir",
+        "-EngineDir",
+        "-RuntimeDir",
+        "HDS_MODELS_DIR",
+        "HDS_ENGINE_DIR",
+        "LLAMA_RUNTIME_DIR",
+        "clip_onnx",
+    ] {
+        assert!(
+            s.contains(needle),
+            "в install_server.command нет '{needle}'"
+        );
+    }
+}
+
+/// Ошибка установки не должна вешать автоматизированный запуск на `pause`.
+#[test]
+fn install_server_cmd_pauses_only_interactively() {
+    let s = read("install-server.cmd");
+    assert!(
+        s.contains("if not defined HDS_NONINTERACTIVE pause"),
+        "install-server.cmd: pause должен быть условным (HDS_NONINTERACTIVE)"
+    );
+    assert!(
+        !s.lines().any(|l| l.trim().eq_ignore_ascii_case("pause")),
+        "install-server.cmd: безусловный pause снова появился"
+    );
+}
+
+/// Корень-диск вида `D:\` в `-Roots "D:\"` PowerShell 5.1 разбирает как `D:\" …`.
+/// Руководство обязано предупреждать (находка при установке 0.20.5).
+#[test]
+fn server_readme_documents_drive_root_quoting() {
+    let s = read("README_SERVER_MULTIUSER.md");
+    assert!(
+        s.contains("обратный слэш"),
+        "README_SERVER_MULTIUSER.md: нет предупреждения про `-Roots \"D:\\\"`"
+    );
+    assert!(
+        s.contains("-Roots D:\\"),
+        "README_SERVER_MULTIUSER.md: нет рабочего примера `-Roots D:\\`"
+    );
+}
+
+/// Ручной запуск fetch-скриптов на сервере тоже обязан уважать машинный каталог:
+/// иначе модели уйдут в профиль администратора и службы их не увидят.
+#[test]
+fn fetch_scripts_honour_hds_models_dir() {
+    for f in [
+        "installers/fetch_whisper_model.ps1",
+        "installers/fetch_diarization_model.ps1",
+    ] {
+        let s = read(f);
+        assert!(
+            s.contains("$env:HDS_MODELS_DIR"),
+            "в {f} нет fallback на HDS_MODELS_DIR"
+        );
+    }
+}

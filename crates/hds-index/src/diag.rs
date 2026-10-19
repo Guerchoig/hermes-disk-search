@@ -233,11 +233,15 @@ pub fn runtime_dir() -> PathBuf {
 
 /// Порт `llama_runtime.resolve_model` + `llama_server._abs_model`: путь GGUF роли.
 pub fn resolve_model(cfg: &Config, role: &str) -> PathBuf {
+    // Рантайм (`hds-llama`) при отсутствии ключа берёт `shared:<role>`; диагностика
+    // обязана разрешать так же. Иначе минимальный server-конфиг установщика (без
+    // `llm_server.<role>.model`) даёт путь `<state>/<role>` и ложный fail в `hds check`.
     let spec = dig(cfg, &format!("llm_server.{role}.model"))
         .and_then(|v| v.as_str())
-        .unwrap_or(role)
-        .trim()
-        .to_string();
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("shared:{role}"));
     if let Some(rest) = spec.strip_prefix("shared:") {
         let r = if rest.trim().is_empty() {
             role
@@ -2506,5 +2510,46 @@ mod tests {
 
         // Служб нет (настольная установка) — пункта нет вовсе.
         assert!(layout_check(&[], &|_| true).is_none());
+    }
+
+    /// Установщик сервера генерирует минимальный конфиг без `llm_server.<role>.model`.
+    /// Диагностика обязана подставлять `shared:<role>` — как рантайм, иначе `hds check`
+    /// ищет GGUF в `<state>/<role>` и ложно падает (находка при установке 0.20.5).
+    #[test]
+    fn resolve_model_defaults_to_shared_role() {
+        use super::resolve_model;
+        use std::sync::Mutex;
+
+        // `LLAMA_RUNTIME_DIR` — глобальная переменная процесса; сериализуем тест.
+        static ENV: Mutex<()> = Mutex::new(());
+        let _guard = ENV.lock().unwrap_or_else(|e| e.into_inner());
+
+        let td = std::env::temp_dir().join(format!("hds-diag-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        let runtime = td.join("runtime");
+        let emb = runtime.join("models").join("embedding");
+        std::fs::create_dir_all(&emb).unwrap();
+        let gguf = emb.join("bge-m3-Q8_0.gguf");
+        std::fs::write(&gguf, b"x").unwrap();
+        std::env::set_var("LLAMA_RUNTIME_DIR", &runtime);
+
+        // Минимальный server-конфиг установщика: роль не задана.
+        let c = cfg("profile: server\nllm_server:\n  parallel: 1");
+        assert_eq!(resolve_model(&c, "embedding"), gguf);
+
+        // Пустое значение — тоже дефолт, а не путь от корня проекта.
+        let c = cfg("llm_server:\n  embedding:\n    model: ''");
+        assert_eq!(resolve_model(&c, "embedding"), gguf);
+
+        // Явный путь по-прежнему сильнее дефолта.
+        let explicit = td.join("explicit.gguf");
+        let c = cfg(&format!(
+            "llm_server:\n  embedding:\n    model: '{}'",
+            explicit.display()
+        ));
+        assert_eq!(resolve_model(&c, "embedding"), explicit);
+
+        std::env::remove_var("LLAMA_RUNTIME_DIR");
+        let _ = std::fs::remove_dir_all(&td);
     }
 }
