@@ -138,6 +138,29 @@ pub struct Worker {
     started: Instant,
 }
 
+/// Чем кончилась попытка запроса (`call_once`) — от этого зависит, поднимать ли
+/// процесс заново и повторять ли запрос.
+enum CallFail {
+    /// Канал мёртв: запись в закрытый stdin, EOF на stdout или stdin уже снят
+    /// (процесс убит/упал). Запрос с большой вероятностью **не** обработан —
+    /// после перезапуска его можно повторить.
+    Dead(CoreError),
+    /// Таймаут запроса: процесс уже убит, файл получает `error` (повтор удвоил бы
+    /// ожидание); следующий запрос поднимет воркер заново.
+    Timeout(CoreError),
+    /// Ошибка протокола/запуска: процесс жив или поднять его не удалось — повтор
+    /// бессмыслен.
+    Other(CoreError),
+}
+
+impl CallFail {
+    fn into_error(self) -> CoreError {
+        match self {
+            CallFail::Dead(e) | CallFail::Timeout(e) | CallFail::Other(e) => e,
+        }
+    }
+}
+
 impl Worker {
     /// Запуск воркера + рукопожатие `hello`.
     pub fn spawn(cfg: WorkerConfig) -> Result<Worker> {
@@ -225,36 +248,65 @@ impl Worker {
         let _ = self.child.wait();
     }
 
-    /// Один запрос: NDJSON → строка → разбор (таймаут → ошибка, процесс убит).
+    /// Один запрос: NDJSON → строка → разбор. Упавший воркер поднимается заново
+    /// и запрос повторяется **один** раз ([`CallFail::Dead`]).
+    ///
+    /// Зачем: раньше запись в закрытый канал (воркер упал) возвращала ошибку
+    /// навсегда — `stdin` оставался мёртвым, и **каждый** следующий файл падал с
+    /// «воркер: запись: Идёт закрытие канала» (релиз 0.20.5: один `FileNotFoundError`
+    /// конфига в Python-воркере → 43 537 «error» в БД за один прогон). Таймаут
+    /// по-прежнему отдаёт ошибку файла без повтора (повтор удвоил бы ожидание).
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
-        self.maybe_restart()?;
+        match self.call_once(method, &params) {
+            Ok(v) => Ok(v),
+            Err(CallFail::Dead(_)) => {
+                self.restart()?;
+                self.call_once(method, &params)
+                    .map_err(CallFail::into_error)
+            }
+            Err(f) => Err(f.into_error()),
+        }
+    }
+
+    /// Попытка запроса без перезапуска: чем именно всё кончилось.
+    fn call_once(&mut self, method: &str, params: &Value) -> std::result::Result<Value, CallFail> {
+        if let Err(e) = self.maybe_restart() {
+            return Err(CallFail::Other(e));
+        }
         let id = self.next_id;
         self.next_id += 1;
-        let line = protocol::request(id, method, params);
+        let line = protocol::request(id, method, params.clone());
+        let stdin = match self.stdin.as_mut() {
+            // stdin снят (kill после таймаута/остановки) — процесс мёртв.
+            None => {
+                return Err(CallFail::Dead(CoreError::Other(
+                    "воркер: stdin закрыт".into(),
+                )))
+            }
+            Some(s) => s,
+        };
+        if let Err(e) = stdin
+            .write_all(line.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
         {
-            let stdin = self
-                .stdin
-                .as_mut()
-                .ok_or_else(|| CoreError::Other("воркер: stdin закрыт".into()))?;
-            stdin
-                .write_all(line.as_bytes())
-                .and_then(|_| stdin.write_all(b"\n"))
-                .and_then(|_| stdin.flush())
-                .map_err(|e| CoreError::Other(format!("воркер: запись: {e}")))?;
+            return Err(CallFail::Dead(CoreError::Other(format!(
+                "воркер: запись: {e}"
+            ))));
         }
         self.requests += 1;
         match self.rx.recv_timeout(self.cfg.request_timeout) {
-            Ok(resp) => protocol::parse_response(&resp, id),
+            Ok(resp) => protocol::parse_response(&resp, id).map_err(CallFail::Other),
             Err(RecvTimeoutError::Timeout) => {
                 self.kill();
-                Err(CoreError::Other(format!(
+                Err(CallFail::Timeout(CoreError::Other(format!(
                     "воркер: таймаут {method} ({:?}) — процесс перезапущен",
                     self.cfg.request_timeout
-                )))
+                ))))
             }
-            Err(RecvTimeoutError::Disconnected) => Err(CoreError::Other(
+            Err(RecvTimeoutError::Disconnected) => Err(CallFail::Dead(CoreError::Other(
                 "воркер: поток вывода закрыт (процесс упал?)".into(),
-            )),
+            ))),
         }
     }
 

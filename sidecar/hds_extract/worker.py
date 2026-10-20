@@ -77,6 +77,48 @@ if ROOT not in sys.path:
 
 _cfg = None
 
+# Имя системного каталога состояния (M2 §3.2): там server-поставка держит `config.yaml`.
+STATE_DIR_NAME = "hermes-disk-search"
+
+
+def _state_dir():
+    """Системный каталог состояния: Windows — `%ProgramData%\\hermes-disk-search`,
+    macOS — `/Library/Application Support/hermes-disk-search`; иначе None."""
+    if os.name == "nt":
+        pd = os.environ.get("ProgramData")
+        return os.path.join(pd, STATE_DIR_NAME) if pd else None
+    if sys.platform == "darwin":
+        return os.path.join("/Library", "Application Support", STATE_DIR_NAME)
+    return None
+
+
+def _config_path():
+    """Путь `config.yaml` — тем же порядком, что `hds_core::config::config_path`.
+
+    `HDS_CONFIG` → `<ROOT>/config.yaml` (desktop-раскладка) → системный каталог
+    состояния (server-раскладка: `app\\<версия>` только для чтения, конфиг
+    лежит в `%ProgramData%\\hermes-disk-search`, M2 T2) → `<ROOT>/config.yaml`
+    (для внятного сообщения об ошибке).
+
+    РЕГРЕССИЯ (20.10.2026, релиз 0.20.5): раньше читался **только**
+    `<ROOT>/config.yaml`, а у служб `HDS_CONFIG` указывал на ProgramData —
+    воркер падал с `FileNotFoundError` на первом же `extract`, процесс умирал,
+    и все следующие файлы получали «воркер: запись: Идёт закрытие канала»
+    (43 537 ошибок в БД за один прогон).
+    """
+    env = (os.environ.get("HDS_CONFIG") or "").strip()
+    if env:
+        return env
+    root_cfg = os.path.join(ROOT, "config.yaml")
+    if os.path.exists(root_cfg):
+        return root_cfg
+    state = _state_dir()
+    if state:
+        sys_cfg = os.path.join(state, "config.yaml")
+        if os.path.exists(sys_cfg):
+            return sys_cfg
+    return root_cfg
+
 
 def _config(parity):
     """Конфиг извлечения; при parity=True — правила golden.py (изоляция)."""
@@ -84,7 +126,7 @@ def _config(parity):
     if _cfg is None:
         from hds.config import load
 
-        _cfg = load(os.path.join(ROOT, "config.yaml"))
+        _cfg = load(_config_path())
     import copy
 
     cfg = copy.deepcopy(_cfg)
@@ -252,7 +294,14 @@ def main():
         except Exception as e:  # noqa: BLE001
             _err(None, -32700, "bad json: %s" % e)
             continue
-        _handle(req)
+        try:
+            _handle(req)
+        except Exception as e:  # noqa: BLE001
+            # Одна неожиданная ошибка (нечитаемый конфиг, сбой библиотеки) не должна
+            # убивать процесс: иначе клиент пишет в закрытый канал и **каждый**
+            # следующий файл падает (регрессия 0.20.5: 43 537 файлов «закрытие
+            # канала» после одного падения). Отвечаем структурной ошибкой.
+            _err(req.get("id"), -32603, "internal error: %s: %s" % (type(e).__name__, e))
         if req.get("method") == "shutdown":
             break
     return 0
