@@ -2,38 +2,38 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
-> **Готовится 0.20.6 (правки в рабочей копии, релиз ещё не выпущен):** PATCH по двум дефектам,
-> найденным при разборе «индексация на серверном стенде стоит».
+> **Релиз 0.20.6 выпущен (20.10.2026, тег `v0.20.6`, `RELEASE_NOTES_v0.20.6.md`):** PATCH по двум
+> дефектам, найденным при разборе «индексация на серверном стенде стоит»; схема БД, формат настроек и
+> поиск не менялись — переиндексация не требуется.
 > **(1) Наполнение базы на серверном стенде не работало (0.20.5).** Python-воркер извлечения
 > (`sidecar/hds_extract/worker.py`) читал конфиг **только** из `<папка установки>\config.yaml`, которого
 > в server-раскладке нет (конфиг — в `%ProgramData%\hermes-disk-search`, у служб он закреплён
 > `HDS_CONFIG`). Первый же `extract` падал с `FileNotFoundError`, процесс умирал, и **все** следующие
 > файлы получали «воркер: запись: Идёт закрытие канала (os error 232)» — на стенде 43 537 записей
 > `error` за один прогон, `last_indexed_at` замер на 15.10. Исправлено: воркер ищет конфиг как ядро
-> (`HDS_CONFIG` → `<root>/config.yaml` → системный каталог состояния), а одна неожиданная ошибка больше
-> не убивает процесс (ответ `-32603`). Плюс клиент `hds-extract` поднимает упавший/убитый воркер и
-> повторяет запрос один раз (раньше мёртвый `stdin` отравлял весь прогон; таймаут по-прежнему отдаёт
-> ошибку файла). Тесты: `crates/hds-extract/tests/worker_autorestart.rs` (+ mock-воркер, падающий на
-> первом `extract`), `worker_live`, `mock_worker`.
-> **(2) Серверный конфиг собирали два разошедшихся генератора.** `install_server.ps1::New-ServerConfig`
-> и `install_server.command::gen_config` строили YAML независимо, и в серверном конфиге не оказалось
-> `index.exclude_dirs` (он есть только в desktop-шаблоне, а сервер его намеренно не наследует) — обход
-> лез в `D:\$RECYCLE.BIN` / `System Volume Information`. Сделано: шаблон `server_config.example.yaml`
-> (вход рендера и документация) + подкоманда `hds config init` (`crates/hds-cli/src/cmd/config.rs`):
-> рендер `${…}` с удалением пустых строк/секций, **проверка YAML до записи**, атомарная запись,
-> существующий конфиг не перезаписывается, `--merge-defaults` дописывает недостающие значения (сейчас
-> `index.exclude_dirs`; строчно, идемпотентно, CRLF и комментарии сохраняются), `--print` — режим
-> `-WhatIf`. Оба установщика только вызывают генератор (YAML руками не строят),
-> `installers/server_exclude_dirs.txt` удалён, `server_config.example.yaml` добавлен в поставку
-> (`build_rust_release*.ps1|sh`; `install_app_version.ps1` копирует stage целиком). Тесты:
+> (`HDS_CONFIG` → `<root>/config.yaml` → системный каталог состояния), одна неожиданная ошибка больше
+> не убивает процесс (ответ `-32603`), а клиент `hds-extract` поднимает упавший/убитый воркер и
+> повторяет запрос один раз (таймаут по-прежнему отдаёт ошибку файла). Тесты:
+> `crates/hds-extract/tests/worker_autorestart.rs` (+ mock-воркер, падающий на первом `extract`).
+> **(2) Серверный конфиг собирали два разошедшихся генератора** (`install_server.ps1::New-ServerConfig`
+> и `install_server.command::gen_config`), и в нём не оказалось `index.exclude_dirs` (ключ есть только
+> в desktop-шаблоне, а сервер его намеренно не наследует) — обход лез в `D:\$RECYCLE.BIN` /
+> `System Volume Information`. Сделано: шаблон `server_config.example.yaml` (вход рендера, лежит в
+> корне поставки) + подкоманда `hds config init` (`crates/hds-cli/src/cmd/config.rs`): рендер `${…}`
+> с удалением пустых строк/секций, **проверка YAML до записи**, атомарная запись, существующий конфиг
+> не перезаписывается, `--merge-defaults` дописывает недостающие значения (строчно, идемпотентно,
+> CRLF и комментарии сохраняются), `--print` — режим `-WhatIf`. Оба установщика только вызывают
+> генератор (YAML руками не строят), `installers/server_exclude_dirs.txt` удалён. Тесты:
 > `crates/hds-cli/tests/config_init.rs` (9) и переписанный `install_server_parity.rs`
-> (`server_config_is_generated_by_one_rust_code_path`).
-> Документация: `README_SERVER_MULTIUSER.md` (главы 5/6/14/15/16/19/20), `README.md` (главы 12/15),
-> `RELEASING.md` (состав поставки), `RELEASE_NOTES_v0.20.6.md`. **Проверено:** `cargo test -p hds-cli` и
-> `cargo test -p hds-extract -p hds-mcp` — зелёные, `fmt`/`clippy -D warnings` чисто; живьём —
-> воспроизведение дефекта воркера (до/после), макет server-раскладки (три режима конфига),
-> `install_server.ps1 -WhatIf` и config-only прогон на копии боевого конфига (diff = 1 строка),
-> `install_server.command --whatif` и полный прогон в Git Bash (diff = 1 строка, YAML валиден).
+> (`server_config_is_generated_by_one_rust_code_path`). Документация: `README_SERVER_MULTIUSER.md`
+> (главы 5/6/14/15/16/19/20), `README.md` (главы 12/15), `RELEASING.md` (состав поставки).
+> **Проверено:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
+> `cargo test --workspace` — зелёные локально и в CI (`rust.yml`); релизный прогон `release.yml` — все
+> джобы success. В скачанном архиве: `server_config.example.yaml` в корне, `_config_path` и `-32603`
+> в воркере, `hds.exe --help` печатает `config init`, `hds.exe config init --print --roots "D:\"` даёт
+> валидный YAML с `index.exclude_dirs` (20 имён), sha256 совпадает. **Ассеты:** Windows x64 235,2 МБ
+> (+ sha256), рантаймы движка CUDA 566,3 МБ / Vulkan 85,7 МБ, macOS 271,2 МБ и Metal 52,2 МБ
+> (best-effort), клиентские пакеты 11,4/12,2 МБ и `client-install.ps1|sh`, архивы исходников.
 > ⚠ Установленный стенд 0.20.5 **не чинился** (решение владельца — переустановка из нового релиза);
 > приёмка на живых службах ещё не выполнялась.
 >
