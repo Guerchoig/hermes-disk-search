@@ -35,7 +35,14 @@ fn usage() -> String {
      \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
      \x20 login        --login L --password P [--url http://host:port] (токен на stdout)\n\
       \x20 service      run|install|uninstall|start|stop|status|root [role] (M2 T4; роли\n\
-      \x20              watch|mcp-http|ui|llm-host|transcribe; Windows — SCM, macOS — LaunchDaemon)"
+      \x20              watch|mcp-http|ui|llm-host|transcribe; Windows — SCM, macOS — LaunchDaemon)\n\
+      \x20 config init  [--profile server] [--roots a;b] [--exclude-paths p1;p2]\n\
+      \x20              [--parallel N] [--gpu-device N | --gpu-preset NAME]\n\
+      \x20              [--mcp-host H --mcp-port N] [--ui-host H --ui-port N]\n\
+      \x20              [--access-enabled true|false] [--enable-transcribe]\n\
+      \x20              [--media-inbox DIR --media-out DIR --source-disposal delete|keep|move]\n\
+      \x20              [--path config.yaml] [--template FILE] [--force] [--print] [--merge-defaults]\n\
+      \x20              (рендер server_config.example.yaml; вызывают установщики)"
         .to_string()
 }
 
@@ -170,6 +177,40 @@ fn run(args: &[String]) -> i32 {
             flag_val(rest, "--host"),
             flag_u64(rest, "--port").map(|v| v as u16),
         ),
+        // `config init` — единственный генератор серверного config.yaml: рендер
+        // шаблона `server_config.example.yaml` + проверка YAML + merge дефолтов.
+        // Вызывается установщиками (Windows/macOS), YAML руками они не строят.
+        "config" => match rest.first() {
+            Some(s) if !s.starts_with("--") => cmd::config::cmd_config(
+                s,
+                cmd::config::InitOpts {
+                    profile: flag_val(rest, "--profile"),
+                    template: flag_val(rest, "--template"),
+                    roots: flag_val(rest, "--roots"),
+                    exclude_paths: flag_val(rest, "--exclude-paths"),
+                    parallel: flag_i64(rest, "--parallel"),
+                    gpu_device: flag_val(rest, "--gpu-device"),
+                    gpu_preset: flag_val(rest, "--gpu-preset"),
+                    mcp_host: flag_val(rest, "--mcp-host"),
+                    mcp_port: flag_u64(rest, "--mcp-port").map(|v| v as u16),
+                    ui_host: flag_val(rest, "--ui-host"),
+                    ui_port: flag_u64(rest, "--ui-port").map(|v| v as u16),
+                    access_enabled: flag_bool(rest, "--access-enabled"),
+                    enable_transcribe: has(rest, "--enable-transcribe"),
+                    media_inbox: flag_val(rest, "--media-inbox"),
+                    media_out: flag_val(rest, "--media-out"),
+                    source_disposal: flag_val(rest, "--source-disposal"),
+                    path: flag_val(rest, "--path"),
+                    force: has(rest, "--force"),
+                    print: has(rest, "--print"),
+                    merge_defaults: has(rest, "--merge-defaults"),
+                },
+            ),
+            _ => {
+                eprintln!("config: нужна подкоманда (init)");
+                2
+            }
+        },
         "mcp-http" => match rest.first() {
             Some(s) if !s.starts_with("--") => cmd::mcp_http::cmd_mcp_http(
                 s,
@@ -218,4 +259,19 @@ fn flag_val(args: &[String], name: &str) -> Option<String> {
 /// Числовое значение флага.
 fn flag_u64(args: &[String], name: &str) -> Option<u64> {
     flag_val(args, name).and_then(|v| v.trim().parse().ok())
+}
+
+/// Знаковое числовое значение флага (`--parallel 0` — «не задано»).
+fn flag_i64(args: &[String], name: &str) -> Option<i64> {
+    flag_val(args, name).and_then(|v| v.trim().parse().ok())
+}
+
+/// Булево значение флага: `true|false|1|0|yes|no` (`None` — флага нет/не разобрать).
+fn flag_bool(args: &[String], name: &str) -> Option<bool> {
+    let v = flag_val(args, name)?;
+    match v.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }

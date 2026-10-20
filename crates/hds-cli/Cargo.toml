@@ -20,12 +20,18 @@ hds-mcp = { path = "../hds-mcp" }
 hds-ui = { path = "../hds-ui" }
 rusqlite.workspace = true
 serde_json.workspace = true
+# `hds config init`: разбор/валидация отрендеренного серверного конфига
+serde_yaml.workspace = true
 
 # M2 T4: службы Windows — SCM-протокол для `hds service run <role>`
 # (спайк 07.10.2026: crates.io доступен, windows-service 0.8.1 скачивается;
 # скачается в кэш при первой сборке — далее работает офлайн).
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.8"
+
+[dev-dependencies]
+# тест `config_init.rs` разбирает отрендеренный конфиг как YAML
+serde_yaml.workspace = true
 
 [[bin]]
 name = "hds"

@@ -757,6 +757,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 (**Настройки** → списки папок и исключений, закладка **«Транскрибация»** → папки обработки) или в
 текстовом редакторе — тогда программу нужно перезапустить.
 
+На серверном стенде файл настроек собирается из отдельного серверного шаблона
+(`server_config.example.yaml`) командой `hds config init`; подробности — `README_SERVER_MULTIUSER.md`,
+глава «Настройки сервера».
+
 Ниже — разделы и ключи, которые меняют чаще всего.
 
 | Раздел и ключ | Что делает |
@@ -971,6 +975,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | `installers\update.ps1 -Root <папка> [-Profile server] [-From <архив>] [-Version <версия>] [-ListVersions] [-RollbackTo <версия>] [-WhatIf]` | обновление с явными аргументами команды: корень установки, архив, версия |
 | `installers/update.command` | то же на Mac (нужен `pwsh`) |
 | `installers\install_app_version.ps1 -From <архив> -Version <версия> -Root <папка> -SetCurrent` | поставить конкретную версию рядом с другими (раскладка `app\<версия>`) |
+| `hds config init --path <файл настроек> [--print] [--merge-defaults] [--force]` | собрать (серверный профиль) или дополнить файл настроек из шаблона `server_config.example.yaml`; `--print` — только показать, `--merge-defaults` — дописать недостающие значения по умолчанию |
 | `installers/install_llm_host_task.ps1 -Start` | автозапуск службы моделей (Windows) |
 | `install_autostart.ps1` | автозапуск службы слежения за файлами |
 | `install_hermes.ps1`, `install_cline.ps1` | подключение ассистентов Hermes Desktop и Cline |

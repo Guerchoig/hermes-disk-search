@@ -2,6 +2,41 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
+> **Готовится 0.20.6 (правки в рабочей копии, релиз ещё не выпущен):** PATCH по двум дефектам,
+> найденным при разборе «индексация на серверном стенде стоит».
+> **(1) Наполнение базы на серверном стенде не работало (0.20.5).** Python-воркер извлечения
+> (`sidecar/hds_extract/worker.py`) читал конфиг **только** из `<папка установки>\config.yaml`, которого
+> в server-раскладке нет (конфиг — в `%ProgramData%\hermes-disk-search`, у служб он закреплён
+> `HDS_CONFIG`). Первый же `extract` падал с `FileNotFoundError`, процесс умирал, и **все** следующие
+> файлы получали «воркер: запись: Идёт закрытие канала (os error 232)» — на стенде 43 537 записей
+> `error` за один прогон, `last_indexed_at` замер на 15.10. Исправлено: воркер ищет конфиг как ядро
+> (`HDS_CONFIG` → `<root>/config.yaml` → системный каталог состояния), а одна неожиданная ошибка больше
+> не убивает процесс (ответ `-32603`). Плюс клиент `hds-extract` поднимает упавший/убитый воркер и
+> повторяет запрос один раз (раньше мёртвый `stdin` отравлял весь прогон; таймаут по-прежнему отдаёт
+> ошибку файла). Тесты: `crates/hds-extract/tests/worker_autorestart.rs` (+ mock-воркер, падающий на
+> первом `extract`), `worker_live`, `mock_worker`.
+> **(2) Серверный конфиг собирали два разошедшихся генератора.** `install_server.ps1::New-ServerConfig`
+> и `install_server.command::gen_config` строили YAML независимо, и в серверном конфиге не оказалось
+> `index.exclude_dirs` (он есть только в desktop-шаблоне, а сервер его намеренно не наследует) — обход
+> лез в `D:\$RECYCLE.BIN` / `System Volume Information`. Сделано: шаблон `server_config.example.yaml`
+> (вход рендера и документация) + подкоманда `hds config init` (`crates/hds-cli/src/cmd/config.rs`):
+> рендер `${…}` с удалением пустых строк/секций, **проверка YAML до записи**, атомарная запись,
+> существующий конфиг не перезаписывается, `--merge-defaults` дописывает недостающие значения (сейчас
+> `index.exclude_dirs`; строчно, идемпотентно, CRLF и комментарии сохраняются), `--print` — режим
+> `-WhatIf`. Оба установщика только вызывают генератор (YAML руками не строят),
+> `installers/server_exclude_dirs.txt` удалён, `server_config.example.yaml` добавлен в поставку
+> (`build_rust_release*.ps1|sh`; `install_app_version.ps1` копирует stage целиком). Тесты:
+> `crates/hds-cli/tests/config_init.rs` (9) и переписанный `install_server_parity.rs`
+> (`server_config_is_generated_by_one_rust_code_path`).
+> Документация: `README_SERVER_MULTIUSER.md` (главы 5/6/14/15/16/19/20), `README.md` (главы 12/15),
+> `RELEASING.md` (состав поставки), `RELEASE_NOTES_v0.20.6.md`. **Проверено:** `cargo test -p hds-cli` и
+> `cargo test -p hds-extract -p hds-mcp` — зелёные, `fmt`/`clippy -D warnings` чисто; живьём —
+> воспроизведение дефекта воркера (до/после), макет server-раскладки (три режима конфига),
+> `install_server.ps1 -WhatIf` и config-only прогон на копии боевого конфига (diff = 1 строка),
+> `install_server.command --whatif` и полный прогон в Git Bash (diff = 1 строка, YAML валиден).
+> ⚠ Установленный стенд 0.20.5 **не чинился** (решение владельца — переустановка из нового релиза);
+> приёмка на живых службах ещё не выполнялась.
+>
 > **Релиз 0.20.5 выпущен (16.10.2026, тег `v0.20.5`, `RELEASE_NOTES_v0.20.5.md`):** PATCH «только
 > документация». Исправлен дефект руководства, выпущенного в 0.20.4: команда снятия авто-перезапуска
 > служб была приведена «как есть» для PowerShell, но PowerShell 5.1 **не передаёт сторонней программе

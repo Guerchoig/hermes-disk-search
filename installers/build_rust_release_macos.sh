@@ -75,7 +75,7 @@ fi
 # README_SERVER_MULTIUSER.md is required: the server administrator installs the
 # system from it. installers/client_readme.md is required too: it is the user memo
 # for the people who connect their PCs (checked below).
-for f in config.example.yaml README.md README_SERVER_MULTIUSER.md NOTICE.md; do
+for f in config.example.yaml server_config.example.yaml README.md README_SERVER_MULTIUSER.md NOTICE.md; do
     if [ -f "$ROOT/$f" ]; then
         cp "$ROOT/$f" "$STAGE/$f"
     fi

@@ -1,0 +1,62 @@
+# hermes-disk-search - server-profile config TEMPLATE (rendered by `hds config init`)
+#
+# Both server installers call `hds config init` instead of building YAML by hand:
+#   installers/install_server.ps1      (Windows)
+#   installers/install_server.command  (macOS)
+#
+# Render rules (implemented once, in Rust - crates/hds-cli/src/cmd/config.rs):
+#   * a line containing ${NAME} gets the value of that parameter;
+#   * when the parameter is EMPTY, THE WHOLE LINE IS DROPPED (and a section header
+#     left without children is dropped too);
+#   * the result is parsed as YAML before anything is written - a broken template
+#     or a broken value aborts the install instead of leaving a half-valid config.
+#
+# Placeholders: ${ACCESS_ENABLED} ${PARALLEL} ${GPU_PRESET} ${GPU_DEVICE}
+#   ${ROOTS} ${EXCLUDE_PATHS} ${TRANSCRIBE_ENABLED} ${MEDIA_INBOX} ${MEDIA_OUT}
+#   ${SOURCE_DISPOSAL} ${MCP_HOST} ${MCP_PORT} ${UI_HOST} ${UI_PORT}
+#
+# NOTE: this file is a SERVER template. The desktop install uses config.example.yaml
+# (it is copied to config.yaml by setup.ps1 / install_macos.command); a server install
+# never inherits it (see installers/install_app_version.ps1).
+profile: server
+
+# Authorization is controlled by access.enabled only (profile does NOT enable it).
+access:
+  enabled: ${ACCESS_ENABLED}
+  token_ttl_days: 90
+
+# Slots of the shared engine; the facade :8010-8012 stays local.
+llm_server:
+  parallel: ${PARALLEL}
+
+# Pin the engine to a card: a preset (whole role layout) or a single device index.
+gpu:
+  preset: '${GPU_PRESET}'
+  device_index: ${GPU_DEVICE}
+
+index:
+  # System/junk directories: never walked, never indexed. Keep this list in sync
+  # with config.example.yaml (desktop template) - both stands must skip the same.
+  exclude_dirs: ["$RECYCLE.BIN", "System Volume Information", "node_modules", ".git", ".venv", "venv", "__pycache__", "AppData", "Windows", "Windows.old", "Recovery", ".cache", ".npm", ".nuget", "packages", "hermes-disk-search-db", "WindowsApps", ".Trash", ".Trashes", "models"]
+  # Directories to index (a whole drive is fine: 'D:\').
+  roots: ${ROOTS}
+  # Prefixes excluded as a whole; the auto-transcription folders land here too.
+  exclude_paths: ${EXCLUDE_PATHS}
+
+# Auto-transcription service (hds transcribe-watch): inbox -> out_dir.
+auto_transcribe:
+  enabled: ${TRANSCRIBE_ENABLED}
+  inbox_dir: '${MEDIA_INBOX}'
+  out_dir: '${MEDIA_OUT}'
+  diarization: true
+  diarization_required: true
+  source_disposal: ${SOURCE_DISPOSAL}
+  pause_indexing: true
+
+# Publish /mcp and /ui only through a reverse proxy with TLS.
+mcp_http:
+  host: '${MCP_HOST}'
+  port: ${MCP_PORT}
+ui:
+  host: '${UI_HOST}'
+  port: ${UI_PORT}

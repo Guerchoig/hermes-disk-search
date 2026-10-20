@@ -6,6 +6,7 @@ pub mod auth;
 pub mod check;
 pub mod cline_sync;
 pub mod clip_index;
+pub mod config;
 pub mod db_move;
 pub mod forget;
 pub mod index;

@@ -40,17 +40,89 @@ const PARAMS: &[(&str, &str)] = &[
     ("WhatIf", "--whatif"),
 ];
 
-/// Маркеры сгенерированного server-конфига и сопутствующих шагов (в обоих установщиках).
-const CONFIG_NEEDLES: &[&str] = &[
-    "profile: server",
-    "enabled: true",
-    "llm_server:",
-    "  parallel:",
-    "device_index:",
-    "roots:",
-    "fetch_engine_runtime.ps1",
-    "token new --user",
-];
+/// Маркеры шагов установки, общие для обоих установщиков. YAML-детали сюда больше
+/// не входят: server-конфиг рендерит `hds config init` из шаблона.
+const CONFIG_NEEDLES: &[&str] = &["fetch_engine_runtime.ps1", "token new --user"];
+
+/// Server-конфиг генерируется **одним** кодом, а не двумя скриптами.
+///
+/// Регрессия 0.20.5: `install_server.ps1::New-ServerConfig` и
+/// `install_server.command::gen_config` собирали конфиг строчками независимо
+/// друг от друга и разъехались — в серверном конфиге не оказалось
+/// `index.exclude_dirs`, и стенд индексировал `D:\$RECYCLE.BIN`
+/// (`D:\$RECYCLE.BIN\S-1-5-18\desktop.ini` попал в БД) и `System Volume Information`.
+///
+/// Теперь: шаблон `server_config.example.yaml` (вход рендера, он же документация) +
+/// `hds config init` (рендер, проверка YAML, merge дефолтов в существующий конфиг).
+/// Установщики YAML не строят — только передают параметры.
+#[test]
+fn server_config_is_generated_by_one_rust_code_path() {
+    // 1) Шаблон с серверными исключениями на месте.
+    let tpl = read("server_config.example.yaml");
+    assert!(
+        tpl.contains("exclude_dirs:"),
+        "в server_config.example.yaml нет index.exclude_dirs"
+    );
+    for must in [
+        "$RECYCLE.BIN",
+        "System Volume Information",
+        "WindowsApps",
+        "node_modules",
+    ] {
+        assert!(
+            tpl.contains(must),
+            "в server_config.example.yaml нет '{must}'"
+        );
+    }
+
+    // 2) Генератор живёт в Rust: рендер шаблона и merge дефолтов.
+    let rust = read("crates/hds-cli/src/cmd/config.rs");
+    for needle in [
+        "render_server_config",
+        "merge_defaults_into",
+        "default_exclude_dirs",
+        "TEMPLATE_NAME",
+    ] {
+        assert!(
+            rust.contains(needle),
+            "в cmd/config.rs нет '{needle}' — серверный генератор потерян"
+        );
+    }
+
+    // 3) Windows-установщик только вызывает генератор и не строит YAML сам.
+    let ps1 = read("installers/install_server.ps1");
+    for needle in ["\"config\", \"init\"", "--merge-defaults", "--print"] {
+        assert!(
+            ps1.contains(needle),
+            "в install_server.ps1 нет '{needle}' — конфиг не будет отрендерен/смержен"
+        );
+    }
+    for stale in ["New-ServerConfig", "server_exclude_dirs.txt", "cfgBody"] {
+        assert!(
+            !ps1.contains(stale),
+            "install_server.ps1 всё ещё строит YAML сам ('{stale}')"
+        );
+    }
+
+    // 4) macOS-установщик — то же самое.
+    let sh = read("installers/install_server.command");
+    for needle in [
+        "config init --profile server",
+        "--merge-defaults",
+        "--print",
+    ] {
+        assert!(
+            sh.contains(needle),
+            "в install_server.command нет '{needle}' — конфиг не будет отрендерен/смержен"
+        );
+    }
+    for stale in ["gen_config", "server_exclude_dirs.txt", "CFG_BODY"] {
+        assert!(
+            !sh.contains(stale),
+            "install_server.command всё ещё строит YAML сам ('{stale}')"
+        );
+    }
+}
 
 /// `install_server.ps1`: unattended-параметры, server-конфиг, fetch-хуки, хинт токена.
 #[test]
