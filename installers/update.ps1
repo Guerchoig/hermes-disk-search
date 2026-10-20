@@ -20,6 +20,15 @@
 # Already versioned installs point at app\current\bin and need nothing: the switch
 # moves the junction.
 #
+# 0.20.7 (incident 20.10.2026): the SCM FAILURE ACTIONS are suspended before the
+# roles are stopped and restored after the pointer switch (also on error - the
+# finally block). A stopped role otherwise comes back in ~5 s, and while the new
+# version is being copied that resurrected role re-creates app\current as a REAL
+# directory (the heartbeat writer), so install_app_version.ps1 fails with
+# "directory is not empty" and the update leaves the stand without services and
+# the pointer on the old version. `install_server.ps1` never hits this: it does
+# not stop anything (README_SERVER_MULTIUSER, "if the server is already running").
+#
 # Two profiles (M8 T4):
 #   -Profile desktop  (default) - stop the AtLogOn Scheduled Tasks + the resident,
 #                                 then restart the tasks (previous behaviour).
@@ -81,11 +90,46 @@ function Wait-ScState([string]$name, [string]$want, [int]$timeoutSec) {
     return ((Get-ScState $name) -eq $want)
 }
 
+# --- auto-restart guard (incident 20.10.2026) --------------------------------
+# Roles carry failure actions (restart in 5 s/5 s/30 s). They must be cleared
+# BEFORE `sc.exe stop`: otherwise a role comes back during the copy window,
+# re-creates app\current as a real directory and install_app_version.ps1 dies
+# with "directory is not empty". Restore-Restart is idempotent and is called
+# both on the happy path and from `finally`.
+$script:RestartPaused = @()
+
+function Suspend-Restart([string]$name) {
+    # SCM failure actions are Windows-only; macOS launchd is a different mechanism.
+    if ($env:OS -ne 'Windows_NT') { return }
+    if ($WhatIf) { Write-Host "[..] (whatif) would suspend auto-restart of $name"; return }
+    # The empty `actions= ""` argument must go through cmd.exe: PowerShell 5.1
+    # does not pass an empty argument to a native program (README 5B).
+    cmd /c ('sc.exe failure ' + $name + ' reset= 0 actions= ""') *> $null
+    if ($LASTEXITCODE -eq 0) {
+        if ($script:RestartPaused -notcontains $name) { $script:RestartPaused += $name }
+        Write-Host "[ok] auto-restart suspended: $name"
+    } else {
+        Write-Host "[!!] could not suspend auto-restart: $name" -ForegroundColor Yellow
+    }
+}
+
+function Restore-Restart {
+    if ($env:OS -ne 'Windows_NT') { return }
+    if ($WhatIf -or $script:RestartPaused.Count -eq 0) { return }
+    foreach ($name in $script:RestartPaused) {
+        & sc.exe failure $name reset= 86400 "actions= restart/5000/restart/5000/restart/30000" *> $null
+        if ($LASTEXITCODE -eq 0) { Write-Host "[ok] auto-restart restored: $name" }
+        else { Write-Host "[!!] could not restore auto-restart: $name" -ForegroundColor Yellow }
+    }
+    $script:RestartPaused = @()
+}
+
 function Stop-All {
     if ($Profile -eq "server") {
         foreach ($role in $ServerStopRoles) {
             $n = "$SvcPrefix$role"
             if ((Get-ScState $n) -eq 'absent') { Write-Host "[..] service not installed: $n"; continue }
+            Suspend-Restart $n
             if ($WhatIf) { Write-Host "[..] (whatif) would stop $n"; continue }
             & sc.exe stop $n *> $null
             if (Wait-ScState $n 'stopped' 30) { Write-Host "[ok] stopped $n" } else { Write-Host "[!!] $n did not stop in 30s" -ForegroundColor Yellow }
@@ -273,39 +317,50 @@ if ($doRollback) {
     $target = Join-Path $Root "app\$RollbackTo"
     if (-not (Test-Path $target)) { throw "rollback target not found: $target" }
     Write-Host "[..] rollback to $RollbackTo"
-    Stop-All
-    if ($WhatIf) { Write-Host "[..] (whatif) would switch current -> $target" } else { Switch-Current $target }
-    Repoint-Layout
-    Start-All
-    Write-Host "[ok] rollback complete: $RollbackTo"
+    try {
+        Stop-All
+        if ($WhatIf) { Write-Host "[..] (whatif) would switch current -> $target" } else { Switch-Current $target }
+        Repoint-Layout
+        Restore-Restart
+        Start-All
+        Write-Host "[ok] rollback complete: $RollbackTo"
+    } finally {
+        Restore-Restart
+    }
     exit 0
 }
 
 # --- 1. stop everything that may hold the binaries -------------------------
-Stop-All
-$llmHost = Join-Path $cur "bin\llm_host.exe"
-if ((Test-Path $llmHost) -and -not $WhatIf) {
-    Write-Host "[..] graceful stop of the resident"
-    try { & $llmHost stop *> $null } catch { }
-    Start-Sleep -Seconds 2
-}
+try {
+    Stop-All
+    $llmHost = Join-Path $cur "bin\llm_host.exe"
+    if ((Test-Path $llmHost) -and -not $WhatIf) {
+        Write-Host "[..] graceful stop of the resident"
+        try { & $llmHost stop *> $null } catch { }
+        Start-Sleep -Seconds 2
+    }
 
-# --- 2. install the new version and switch the pointer (separate process) ---
-if ($WhatIf) {
-    Write-Host "[..] (whatif) would run: install_app_version.ps1 -From $From -Version $Version -SetCurrent"
-} else {
-    # Build the argument list explicitly: `-Force:$Force` would be passed to the
-    # external powershell.exe as a STRING ("-Force:False") and fail to bind to the
-    # [switch] parameter (pre-existing bug fixed in M8 T4).
-    $iaArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass",
-        "-File", (Join-Path $here "install_app_version.ps1"),
-        "-From", $From, "-Version", $Version, "-Root", $Root, "-SetCurrent")
-    if ($Force) { $iaArgs += "-Force" }
-    & powershell @iaArgs
-    if ($LASTEXITCODE -ne 0) { throw "install_app_version.ps1 failed (exit $LASTEXITCODE)" }
-}
+    # --- 2. install the new version and switch the pointer (separate process) ---
+    if ($WhatIf) {
+        Write-Host "[..] (whatif) would run: install_app_version.ps1 -From $From -Version $Version -SetCurrent"
+    } else {
+        # Build the argument list explicitly: `-Force:$Force` would be passed to the
+        # external powershell.exe as a STRING ("-Force:False") and fail to bind to the
+        # [switch] parameter (pre-existing bug fixed in M8 T4).
+        $iaArgs = @("-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $here "install_app_version.ps1"),
+            "-From", $From, "-Version", $Version, "-Root", $Root, "-SetCurrent")
+        if ($Force) { $iaArgs += "-Force" }
+        & powershell @iaArgs
+        if ($LASTEXITCODE -ne 0) { throw "install_app_version.ps1 failed (exit $LASTEXITCODE)" }
+    }
 
-# --- 3. launch points + restart --------------------------------------------
-Repoint-Layout
-Start-All
-Write-Host "[ok] update complete: $Version"
+    # --- 3. launch points + restart -----------------------------------------
+    Repoint-Layout
+    Restore-Restart
+    Start-All
+    Write-Host "[ok] update complete: $Version"
+} finally {
+    # An aborted update must not leave the roles without auto-restart.
+    Restore-Restart
+}

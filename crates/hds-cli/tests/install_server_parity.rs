@@ -231,6 +231,55 @@ fn update_ps1_repoints_launch_points() {
     }
 }
 
+/// 0.20.7 (инцидент 20.10.2026): `update.ps1` снимает **авто-перезапуск** служб на
+/// время окна обновления.
+///
+/// SCM-действия «при сбое» поднимают роль через ~5 с. Пока копируется новая
+/// версия, поднявшаяся роль снова создаёт `app\current` **реальным** каталогом
+/// (писатель heartbeat), и `install_app_version.ps1` падает с «Папка не пуста»:
+/// стенд остаётся без служб, указатель — на старой версии (живой прогон
+/// 20.10.2026 при установке 0.20.6). Поэтому:
+/// * снять авто-перезапуск **до** `sc.exe stop` (иначе роль вернётся в окно копирования);
+/// * вернуть его после переключения указателя **и** в `finally` — прерванное
+///   обновление не должно оставить роли без автоматического перезапуска;
+/// * пустой аргумент `actions= ""` идёт через `cmd /c` (PowerShell 5.1 его не передаёт).
+#[test]
+fn update_ps1_suspends_auto_restart_while_switching() {
+    let s = read("installers/update.ps1");
+    for needle in [
+        "function Suspend-Restart",
+        "function Restore-Restart",
+        "reset= 0 actions= \"\"",
+        "cmd /c",
+        "reset= 86400",
+        "restart/5000/restart/5000/restart/30000",
+        // SCM-действия есть только в Windows: на macOS скрипт не должен их трогать.
+        "$env:OS -ne 'Windows_NT'",
+    ] {
+        assert!(s.contains(needle), "в update.ps1 нет '{needle}'");
+    }
+    // Порядок обязателен: авто-перезапуск снимается ДО остановки службы.
+    let suspend = s
+        .find("Suspend-Restart $n")
+        .expect("update.ps1 не снимает авто-перезапуск перед остановкой роли");
+    let stop = s
+        .find("sc.exe stop $n")
+        .expect("в update.ps1 нет остановки службы");
+    assert!(
+        suspend < stop,
+        "авто-перезапуск снимается после sc.exe stop — роль успеет подняться"
+    );
+    // Восстановление: happy path + finally (и откат).
+    assert!(
+        s.matches("Restore-Restart").count() >= 4,
+        "Restore-Restart вызывается меньше 4 раз: нет восстановления в finally/откате"
+    );
+    assert!(
+        s.contains("} finally {"),
+        "нет finally: прерванное обновление оставит роли без авто-перезапуска"
+    );
+}
+
 /// Подсказки установщиков не должны ссылаться на несуществующую подкоманду:
 /// `hds service` знает `run|install|uninstall|start|stop|status|root`, а `restart` есть
 /// только у `mcp-http`. Перезапуск роли — это `service stop <role>` + `service start <role>`
