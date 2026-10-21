@@ -9,6 +9,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+hds-diarize = { path = "../hds-diarize" }
 libloading.workspace = true
 directories.workspace = true
 serde.workspace = true

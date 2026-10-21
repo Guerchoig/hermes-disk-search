@@ -661,6 +661,7 @@ name = "hds-llama"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "hds-diarize",
  "libloading",
  "nvml-wrapper",
  "serde",

@@ -97,6 +97,10 @@ pub struct TranscribeConfig {
     pub mode: String,
     /// Окно субтитров `custom` (`default`/`auto`/число-строкой), секунды.
     pub custom: String,
+    /// Язык ASR (`index.whisper_language`, W1): `None` — ключа нет (хост возьмёт
+    /// дефолт продукта `ru`), `Some("")` — явная авто-детекция, `Some("ru")` —
+    /// фиксированный язык. Уходит в тело `/internal/transcribe` как `language`.
+    pub language: Option<String>,
     /// Индекс GPU (или `-1` — CPU).
     pub gpu: i32,
     /// `index.transcribe` — включена ли транскрипция.
@@ -122,6 +126,7 @@ impl Default for TranscribeConfig {
             model: None,
             mode: DEFAULT_MODE.to_string(),
             custom: DEFAULT_CUSTOM.to_string(),
+            language: None,
             gpu: 0,
             enabled: true,
             out_dir: None,
@@ -159,6 +164,11 @@ impl TranscribeConfig {
             model,
             mode,
             custom,
+            // W1: ключ читается здесь, а не в движке. Нет ключа → None (хост даст
+            // `ru`), явная пустая строка → Some("") = авто-детекция.
+            language: dig(cfg, "index.whisper_language")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string()),
             gpu,
             enabled,
             ..TranscribeConfig::default()
@@ -205,6 +215,10 @@ impl TranscribeConfig {
                 .or_else(|| resolve_whisper_model(cfg)),
             mode: dig_str(cfg, "auto_transcribe.mode").unwrap_or_else(|| AUTO_MODE.to_string()),
             custom: dig_scalar(cfg, "auto_transcribe.custom").unwrap_or_else(|| "auto".to_string()),
+            // W1: язык из `index.whisper_language` (только строка; пусто = авто).
+            language: dig(cfg, "index.whisper_language")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string()),
             gpu,
             enabled: true, // признак ветки индексации; конвейер автотранскрибации им не гейтится
             out_dir: dig_str(cfg, "auto_transcribe.out_dir").map(PathBuf::from),
@@ -394,6 +408,10 @@ impl TranscribeClient {
         if let Some(m) = &self.cfg.model {
             body["model"] = json!(m.to_string_lossy());
         }
+        // W1: язык ASR. `Some("")` — явная авто-детекция, поэтому передаём как есть.
+        if let Some(lang) = &self.cfg.language {
+            body["language"] = json!(lang);
+        }
         let resp = http::request(
             &host,
             port,
@@ -441,6 +459,10 @@ impl TranscribeClient {
         });
         if let Some(m) = &self.cfg.model {
             body["model"] = json!(m.to_string_lossy());
+        }
+        // W1: язык ASR — и на пути автотранскрибации (тот же контракт).
+        if let Some(lang) = &self.cfg.language {
+            body["language"] = json!(lang);
         }
         let d = &self.cfg.diarization;
         if d.enabled {
@@ -784,6 +806,36 @@ mod tests {
         let direct: hds_core::config::Config =
             serde_yaml::from_str("index:\n  whisper_gpu: 2\ngpu:\n  device_index: 1\n").unwrap();
         assert_eq!(TranscribeConfig::from_config(&direct).gpu, 2);
+    }
+
+    /// W1: `index.whisper_language` читается обоими конструкторами; пустая строка
+    /// сохраняется как «явная авто-детекция» (`Some("")`), отсутствие ключа — `None`.
+    #[test]
+    fn whisper_language_is_read_from_config() {
+        let absent: Config = serde_yaml::from_str("index:\n  whisper_mode: subtitle\n").unwrap();
+        assert_eq!(TranscribeConfig::from_config(&absent).language, None);
+        assert_eq!(
+            TranscribeConfig::from_auto_transcribe(&absent).language,
+            None
+        );
+
+        let auto: Config = serde_yaml::from_str("index:\n  whisper_language: ''\n").unwrap();
+        assert_eq!(
+            TranscribeConfig::from_config(&auto).language.as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            TranscribeConfig::from_auto_transcribe(&auto)
+                .language
+                .as_deref(),
+            Some("")
+        );
+
+        let ru: Config = serde_yaml::from_str("index:\n  whisper_language: ' ru '\n").unwrap();
+        assert_eq!(
+            TranscribeConfig::from_config(&ru).language.as_deref(),
+            Some("ru")
+        );
     }
 
     /// Сканер: заголовки `### SPEAKER_NN`/`### UNASSIGNED`, порядок первого появления,

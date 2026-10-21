@@ -26,6 +26,7 @@
 //! Запуск (из корня репозитория): `cargo run -p hds-llama --release --bin llm_host -- run`
 //! (подробности — `tools/parity/W2_REPORT.md` §9.10).
 
+pub mod asr_filter;
 pub mod bridge_audio;
 pub mod budget;
 pub mod cluster;
@@ -50,6 +51,7 @@ pub mod status;
 pub mod vram;
 pub mod whisper;
 
+pub use asr_filter::{drop_silent_segments, FilterConfig, FilterOutcome};
 pub use bridge_audio::{BridgeAudio, BridgeOutcome};
 pub use budget::{check_fit, estimate_need_mib, kv_cache_mib, Fit};
 pub use cluster::{ChatOutcome, Cluster, Device, Instance, InstanceSpec, JsonOutcome, Metrics};

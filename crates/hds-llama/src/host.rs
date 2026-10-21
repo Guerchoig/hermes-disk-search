@@ -45,7 +45,7 @@ use crate::resident::{self, Log, PidFile};
 use crate::runtime::RuntimePaths;
 use crate::status::{device_line, StatusInput, StatusReport};
 use crate::vram::{open_vram_probe, VramProbe};
-use crate::whisper::DiarizationParams;
+use crate::whisper::{language_from_body, DiarizationParams};
 use crate::{engine::EngineCwd, Engine};
 
 /// Корень репозитория (относительно крейта: `crates/hds-llama/../..`).
@@ -2271,6 +2271,10 @@ impl Backend for ClusterBackend {
             .get("return_text")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        // W1: язык ASR. Тело `language` ("" = авто) → дефолт продукта `ru`.
+        // Без фиксации языка whisper выдаёт английские галлюцинации на тишине
+        // (`DIARIZATION_NEMOTRON_HANDOFF.md` п. 5, спайк §8).
+        let language = language_from_body(body);
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
@@ -2384,8 +2388,18 @@ impl Backend for ClusterBackend {
             self.gpu.priority_of(config::TRANSCRIBE_ROLE)
         ));
 
+        self.log.line(&format!(
+            "[transcribe] язык ASR: {}",
+            language.as_deref().unwrap_or("авто")
+        ));
         let w = cell.0.lock().unwrap();
-        let tr = w.transcribe_file(Path::new(path), mode, &custom, diar.as_ref())?;
+        let tr = w.transcribe_file(
+            Path::new(path),
+            mode,
+            &custom,
+            diar.as_ref(),
+            language.as_deref(),
+        )?;
         drop(w);
         // активность роли whisper — для вытеснения по простою (ARB-5, W3)
         self.note_used("whisper");

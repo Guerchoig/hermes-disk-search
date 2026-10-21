@@ -36,7 +36,9 @@ index:
   whisper_device: auto      # auto | cuda | vulkan | cpu | metal
   whisper_load_timeout: 180 # сек; зависание CUDA-загрузки — fallback на CPU
   whisper_batch: 8          # батчевая транскрипция (0 = отключить)
-  whisper_language: ""      # "" = авто-детекция; "ru" — фиксировать русский
+  whisper_language: "ru"    # "ru" — фиксировать русский (по умолчанию продукта:
+                            # без фиксации whisper на тишине/интро выдаёт английские
+                            # галлюцинации «Thank you.»/«Obrigado.»); "" = авто-детекция
   # W3: медиа-ветка ядра на Rust (ASR-движок openresearchtools; владелец GPU — llm-host)
   whisper_mode: subtitle    # subtitle (таймкоды, .srt) | speech (сплошной текст)
   whisper_custom: "4.5"     # окно субтитров, сек (subtitle); "default"/"auto"/число

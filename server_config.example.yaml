@@ -42,6 +42,9 @@ index:
   roots: ${ROOTS}
   # Prefixes excluded as a whole; the auto-transcription folders land here too.
   exclude_paths: ${EXCLUDE_PATHS}
+  # ASR language: 'ru' fixes Russian (without it whisper hallucinates English on silence);
+  # '' means auto-detect (deliberate opt-out).
+  whisper_language: 'ru'
 
 # Auto-transcription service (hds transcribe-watch): inbox -> out_dir.
 auto_transcribe:

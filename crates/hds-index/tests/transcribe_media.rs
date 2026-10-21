@@ -57,6 +57,64 @@ fn stub_server(body: String) -> (String, std::thread::JoinHandle<()>) {
     (format!("http://127.0.0.1:{port}"), h)
 }
 
+/// Заглушка с захватом запроса: возвращает (url, handle → текст запроса).
+fn stub_server_capture(body: String) -> (String, std::thread::JoinHandle<String>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let h = std::thread::spawn(move || {
+        let mut captured = String::new();
+        if let Ok((mut s, _)) = listener.accept() {
+            let mut buf = [0u8; 16384];
+            if let Ok(n) = s.read(&mut buf) {
+                captured = String::from_utf8_lossy(&buf[..n]).to_string();
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = s.write_all(resp.as_bytes());
+            let _ = s.flush();
+        }
+        captured
+    });
+    (format!("http://127.0.0.1:{port}"), h)
+}
+
+/// W1: язык ASR уходит в тело `/internal/transcribe`; `None` — поля нет,
+/// `Some("")` — явная авто-детекция (хост отличит от «не задано»).
+#[test]
+fn whisper_language_is_sent_in_request_body() {
+    for (language, expected) in [
+        (Some("ru"), r#""language":"ru""#),
+        (Some(""), r#""language":"""#),
+    ] {
+        let (url, h) = stub_server_capture(r#"{"segments":[]}"#.to_string());
+        let tc = TranscribeConfig {
+            url,
+            language: language.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        let c = TranscribeClient::new(tc);
+        let p = temp_file("lang", "клип.wav");
+        let _ = c.transcribe(&p);
+        let req = h.join().unwrap();
+        assert!(req.contains(expected), "тело запроса: {req}");
+    }
+
+    // Ключа нет в конфиге → поля в теле нет (хост подставит дефолт продукта).
+    let (url, h) = stub_server_capture(r#"{"segments":[]}"#.to_string());
+    let c = TranscribeClient::new(TranscribeConfig {
+        url,
+        ..Default::default()
+    });
+    let p = temp_file("lang-none", "клип.wav");
+    let _ = c.transcribe(&p);
+    let req = h.join().unwrap();
+    assert!(!req.contains("\"language\""), "тело запроса: {req}");
+}
+
 fn client(url: &str, enabled: bool) -> TranscribeClient {
     TranscribeClient::new(TranscribeConfig {
         url: url.into(),

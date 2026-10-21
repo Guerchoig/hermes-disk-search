@@ -67,7 +67,10 @@ fn main() -> Result<()> {
 
     let t0 = std::time::Instant::now();
     // Диаризация — отдельная проба `diar_probe` (здесь путь индексации: без неё).
-    let tr = whisper.transcribe_file(&audio, &mode, &custom, None)?;
+    // Язык (W1): `HDS_WHISPER_LANGUAGE` — пусто/не задано ⇒ авто-детекция.
+    let language = std::env::var("HDS_WHISPER_LANGUAGE").unwrap_or_default();
+    let language = (!language.trim().is_empty()).then_some(language.as_str());
+    let tr = whisper.transcribe_file(&audio, &mode, &custom, None, language)?;
     println!(
         "whisper: mode={mode} custom={custom} ({:.1} с)",
         t0.elapsed().as_secs_f64()

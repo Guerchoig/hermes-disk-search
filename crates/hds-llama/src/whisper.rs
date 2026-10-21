@@ -12,6 +12,35 @@ use serde_json::{json, Value};
 use crate::bridge_audio::{Bridge, BridgeAudio};
 use crate::error::{EngineError, Result};
 
+/// Язык ASR по умолчанию, если ни тело запроса, ни конфиг его не задали.
+///
+/// Продукт русскоязычный: без фиксации языка whisper-large-v3-turbo на тишине и
+/// интро выдаёт английские галлюцинации («Thank you.», «Obrigado.»), а после
+/// фиксации — русский текст (спайк `REPORT.md` §8, `DIARIZATION_NEMOTRON_HANDOFF.md`
+/// п. 5). Пустая строка в теле/конфиге = осознанная авто-детекция.
+pub const DEFAULT_WHISPER_LANGUAGE: &str = "ru";
+
+/// Язык ASR из тела `/internal/transcribe` (W1).
+///
+/// * поля нет (или оно не строка) ⇒ [`DEFAULT_WHISPER_LANGUAGE`];
+/// * поле есть, но пустое/из пробелов ⇒ `None` — авто-детекция;
+/// * иначе — заданный язык.
+///
+/// Так «не трогали настройку» и «явно попросили авто» — разные состояния.
+pub fn language_from_body(body: &Value) -> Option<String> {
+    match body.get("language").and_then(|v| v.as_str()) {
+        Some(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        None => Some(DEFAULT_WHISPER_LANGUAGE.to_string()),
+    }
+}
+
 /// Сегмент транскрипта с таймкодами (секунды).
 #[derive(Debug, Clone, PartialEq)]
 pub struct WhisperSegment {
@@ -182,6 +211,7 @@ impl Whisper {
         mode: &str,
         custom: &str,
         diar: Option<&DiarizationParams>,
+        language: Option<&str>,
     ) -> Result<Transcript> {
         let ascii_dir = std::env::temp_dir().join("hds_whisper");
         let staged = stage_ascii(src, &ascii_dir)?;
@@ -200,6 +230,7 @@ impl Whisper {
             &ascii_dir,
             &staged,
             diar,
+            language,
         );
         let out = self
             .bridge
@@ -257,6 +288,9 @@ impl Whisper {
 /// Ключи диаризации кладём **только** при `Some(diar)`: их наличие само по себе
 /// ничего не включает (режим задаётся `mode`), но при `mode: transcript` без
 /// модели движок ответит `400` — это и есть «жёсткий отказ» из §0 п.6.
+// 8 параметров — плоский список ключей metadata движка (W1 добавил `language`);
+// сворачивать в структуру ради одного вызова смысла нет (стиль проекта: allow осознанный).
+#[allow(clippy::too_many_arguments)]
 fn build_metadata(
     model: &Path,
     gpu: i32,
@@ -265,6 +299,7 @@ fn build_metadata(
     output_dir: &Path,
     staged: &Path,
     diar: Option<&DiarizationParams>,
+    language: Option<&str>,
 ) -> Value {
     let mut meta = json!({
         "mode": mode,
@@ -278,6 +313,11 @@ fn build_metadata(
         meta["whisper_gpu_device"] = json!(gpu);
     } else {
         meta["whisper_no_gpu"] = json!(true);
+    }
+    // W1: ключ ровно один — `whisper_language` (`language`/`whisper_lang` движок
+    // игнорирует, спайк §8). Пустое значение = авто-детекция ⇒ ключ не ставим.
+    if let Some(lang) = language.map(str::trim).filter(|l| !l.is_empty()) {
+        meta["whisper_language"] = json!(lang);
     }
     if let Some(d) = diar {
         meta["diarization_model_path"] = json!(d.model_path.to_string_lossy());
@@ -306,6 +346,7 @@ mod tests {
             Path::new("/tmp/out"),
             Path::new("/tmp/out/input.wav"),
             None,
+            None,
         );
         assert_eq!(meta["mode"], "subtitle");
         assert_eq!(meta["whisper_gpu_device"], 0);
@@ -315,9 +356,72 @@ mod tests {
             "diarization_backend",
             "diarization_feed_ms",
             "diarization_device",
+            "whisper_language",
         ] {
             assert!(meta.get(key).is_none(), "лишний ключ {key}: {meta}");
         }
+    }
+
+    /// W1: язык уходит в metadata ключом `whisper_language` — и только им.
+    #[test]
+    fn metadata_carries_whisper_language_only() {
+        let meta = build_metadata(
+            Path::new("w.bin"),
+            -1,
+            "subtitle",
+            "4.5",
+            Path::new("/tmp/out"),
+            Path::new("/tmp/out/input.wav"),
+            None,
+            Some("ru"),
+        );
+        assert_eq!(meta["whisper_language"], "ru");
+        assert!(
+            meta.get("language").is_none(),
+            "движок этот ключ игнорирует"
+        );
+        assert!(
+            meta.get("whisper_lang").is_none(),
+            "движок этот ключ игнорирует"
+        );
+
+        // Пустая строка/пробелы = авто-детекция: ключа нет.
+        for lang in ["", "   "] {
+            let meta = build_metadata(
+                Path::new("w.bin"),
+                0,
+                "subtitle",
+                "4.5",
+                Path::new("/tmp/out"),
+                Path::new("/tmp/out/input.wav"),
+                None,
+                Some(lang),
+            );
+            assert!(
+                meta.get("whisper_language").is_none(),
+                "пустой язык не должен попадать в metadata: {meta}"
+            );
+        }
+    }
+
+    /// Тело запроса: нет поля — дефолт продукта; пусто — авто; иначе значение.
+    #[test]
+    fn language_from_body_semantics() {
+        assert_eq!(
+            language_from_body(&json!({"path": "a.wav"})).as_deref(),
+            Some(DEFAULT_WHISPER_LANGUAGE)
+        );
+        assert_eq!(language_from_body(&json!({"language": ""})), None);
+        assert_eq!(language_from_body(&json!({"language": "  "})), None);
+        assert_eq!(
+            language_from_body(&json!({"language": " en "})).as_deref(),
+            Some("en")
+        );
+        // Не строка — как «поле не задано».
+        assert_eq!(
+            language_from_body(&json!({"language": 7})).as_deref(),
+            Some(DEFAULT_WHISPER_LANGUAGE)
+        );
     }
 
     /// С `DiarizationParams` появляются ровно четыре ключа движка (референс),
@@ -333,6 +437,7 @@ mod tests {
             Path::new("/tmp/out"),
             Path::new("/tmp/out/input.wav"),
             Some(&diar),
+            None,
         );
         assert_eq!(meta["mode"], "transcript");
         assert_eq!(meta["custom"], "auto");
@@ -362,6 +467,7 @@ mod tests {
             Path::new("/tmp/out"),
             Path::new("/tmp/out/input.wav"),
             Some(&diar),
+            None,
         );
         assert_eq!(meta["whisper_no_gpu"], true);
         assert!(meta.get("whisper_gpu_device").is_none());
