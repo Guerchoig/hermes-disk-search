@@ -51,10 +51,14 @@ pub const DEFAULT_DIARIZATION_FEED_MS: f64 = 10_800_001.0;
 /// Дефолт `auto_transcribe.diarization_backend` — `nemotron3`
 /// (`PLAN_DIARIZATION_NEMOTRON.md` §7 п. 5, решение владельца №13 от 21.10.2026).
 ///
-/// Почему именно здесь: клиент **всегда** кладёт `diarization_backend` в тело
-/// `/internal/transcribe`, а тело сильнее конфига хоста. Пока дефолтом был
-/// `sortformer`, установка без ключа в конфиге оставалась на legacy-пути даже с
-/// секцией `diarization.backend: nemotron3` (§5 п. 6 handoff W4).
+/// F2 (`DIARIZATION_NEMOTRON_CODE_REVIEW.md` B2): это **только значение по
+/// умолчанию для диагностики** ([`DiarizationSettings::backend`]): в тело
+/// `/internal/transcribe` backend уходит, лишь когда ключ
+/// `auto_transcribe.diarization_backend` задан явно
+/// ([`DiarizationSettings::backend_explicit`]). Иначе решает хост: конфиг
+/// `diarization.backend` → авто (решение №3: `nemotron3` при валидной модели,
+/// иначе `sortformer`). Раньше клиент клал `nemotron3` в тело **всегда**, и тело
+/// (сильнее конфига) отменяло и решение №3, и переключение на sortformer.
 pub const DEFAULT_DIARIZATION_BACKEND: &str = "nemotron3";
 /// Таймаут запроса: длинные медиа транскрибируются минутами.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -72,7 +76,13 @@ pub struct DiarizationSettings {
     pub model: Option<PathBuf>,
     /// `auto_transcribe.diarization_backend` — что попросить у хоста
     /// (дефолт [`DEFAULT_DIARIZATION_BACKEND`] = `nemotron3`, решение №13).
+    ///
+    /// В тело запроса уходит **только** при `backend_explicit`: иначе backend
+    /// выбирает хост (`diarization.backend` → авто, решения №3/№10).
     pub backend: String,
+    /// Ключ `auto_transcribe.diarization_backend` был задан явно (а не взят из
+    /// дефолта). F2 (B2): при `false` поле `diarization_backend` не отправляется.
+    pub backend_explicit: bool,
     /// `auto_transcribe.diarization_feed_ms`.
     pub feed_ms: f64,
     /// `auto_transcribe.diarization_required` — нет модели ⇒ отказ задания.
@@ -85,6 +95,7 @@ impl Default for DiarizationSettings {
             enabled: true,
             model: None,
             backend: DEFAULT_DIARIZATION_BACKEND.to_string(),
+            backend_explicit: false,
             feed_ms: DEFAULT_DIARIZATION_FEED_MS,
             required: true,
         }
@@ -216,6 +227,8 @@ impl TranscribeConfig {
         } else {
             project_root().join(state)
         });
+        // F2: отдельно запоминаем, был ли ключ задан (см. `backend_explicit`).
+        let backend_raw = dig_str(cfg, "auto_transcribe.diarization_backend");
         TranscribeConfig {
             url: dig_str(cfg, "index.transcribe_url")
                 .unwrap_or_else(|| DEFAULT_TRANSCRIBE_URL.to_string())
@@ -242,11 +255,11 @@ impl TranscribeConfig {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true),
                 model: dig_str(cfg, "auto_transcribe.diarization_model").map(PathBuf::from),
-                // W5: ключа нет ⇒ `nemotron3` (решение №13). Тело запроса сильнее
-                // конфига хоста, поэтому дефолт `sortformer` держал установки на
-                // legacy-пути; явные значения в конфиге по-прежнему главнее.
-                backend: dig_str(cfg, "auto_transcribe.diarization_backend")
-                    .unwrap_or_else(|| DEFAULT_DIARIZATION_BACKEND.to_string()),
+                // F2 (B2): ключа нет ⇒ поле `diarization_backend` в тело **не**
+                // уходит, и backend выбирает хост: `diarization.backend` → авто
+                // (решения №3/№13). `backend` остаётся дефолтом для диагностики.
+                backend_explicit: backend_raw.is_some(),
+                backend: backend_raw.unwrap_or_else(|| DEFAULT_DIARIZATION_BACKEND.to_string()),
                 feed_ms: dig(cfg, "auto_transcribe.diarization_feed_ms")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(DEFAULT_DIARIZATION_FEED_MS),
@@ -255,6 +268,21 @@ impl TranscribeConfig {
                     .unwrap_or(true),
             },
             service_dir,
+        }
+    }
+
+    /// Backend, который **клиент** пишет в тело `/internal/transcribe` (F2).
+    ///
+    /// `Some(..)` — ключ `auto_transcribe.diarization_backend` задан явно;
+    /// `None` — ключа нет, поле не отправляется и backend выбирает хост
+    /// (`diarization.backend` → авто, решения №3/№10). Диагностика
+    /// (`hds check`, `hds whisper-check`, `transcribe-watch --dry-run`) показывает
+    /// именно это значение — чтобы `[ok] sortformer` не расходился с заданием.
+    pub fn requested_backend(&self) -> Option<&str> {
+        if self.diarization.enabled && self.diarization.backend_explicit {
+            Some(self.diarization.backend.as_str())
+        } else {
+            None
         }
     }
 }
@@ -481,7 +509,16 @@ impl TranscribeClient {
         let d = &self.cfg.diarization;
         if d.enabled {
             body["diarization"] = json!(true);
-            body["diarization_backend"] = json!(d.backend);
+            // F9 (ревью M6): ключ доходит до хоста и перекрывает его
+            // `diarization.required` (для nemotron3; legacy sortformer при сбое
+            // модели всё равно отказывает — движок не умеет деградировать).
+            body["diarization_required"] = json!(d.required);
+            // F2 (B2): тело сильнее конфига хоста, поэтому backend уходит только
+            // по явному ключу `auto_transcribe.diarization_backend`; иначе хост
+            // применит `diarization.backend` → авто (решения №3/№10).
+            if d.backend_explicit {
+                body["diarization_backend"] = json!(d.backend);
+            }
             body["diarization_feed_ms"] = json!(d.feed_ms);
             if let Some(m) = &d.model {
                 body["diarization_model"] = json!(m.to_string_lossy());
@@ -923,8 +960,10 @@ mod tests {
         assert_eq!(tc.out_dir.as_deref(), Some(Path::new("D:\\out")));
     }
 
-    /// W5 (решение №13): без ключа `diarization_backend` клиент просит `nemotron3`,
-    /// а не `sortformer` — иначе тело запроса держит установки на legacy-пути.
+    /// W5 (решение №13) + F2 (B2): без ключа `diarization_backend` клиент
+    /// **не отправляет** backend в тело — backend выбирает хост
+    /// (`diarization.backend` → авто). Значение по умолчанию нужно только
+    /// диагностике (`requested_backend()` = `None`).
     #[test]
     fn auto_transcribe_defaults_to_nemotron3() {
         let cfg: Config =
@@ -933,18 +972,43 @@ mod tests {
         let tc = TranscribeConfig::from_auto_transcribe(&cfg);
         assert_eq!(tc.diarization.backend, DEFAULT_DIARIZATION_BACKEND);
         assert_eq!(tc.diarization.backend, "nemotron3");
+        assert!(
+            !tc.diarization.backend_explicit,
+            "ключа нет ⇒ поле diarization_backend в тело не уходит"
+        );
+        assert_eq!(tc.requested_backend(), None);
         assert_eq!(
             DiarizationSettings::default().backend,
             DEFAULT_DIARIZATION_BACKEND
         );
+        assert!(!DiarizationSettings::default().backend_explicit);
         // Явное значение остаётся сильнее дефолта (регресс sortformer).
         let cfg: Config =
             serde_yaml::from_str("auto_transcribe:\n  diarization_backend: sortformer\n").unwrap();
+        let tc = TranscribeConfig::from_auto_transcribe(&cfg);
+        assert_eq!(tc.diarization.backend, "sortformer");
+        assert!(tc.diarization.backend_explicit);
+    }
+
+    /// F2: явный `auto_transcribe.diarization_backend` — это и есть запрос
+    /// конвейера (`requested_backend`); без ключа или с выключенной диаризацией
+    /// поля в теле нет.
+    #[test]
+    fn explicit_sortformer_is_requested() {
+        let cfg: Config = serde_yaml::from_str(
+            "auto_transcribe:\n  mode: transcript\n  diarization_backend: sortformer\n",
+        )
+        .unwrap();
+        let tc = TranscribeConfig::from_auto_transcribe(&cfg);
+        assert!(tc.diarization.backend_explicit);
+        assert_eq!(tc.requested_backend(), Some("sortformer"));
+        let cfg: Config = serde_yaml::from_str(
+            "auto_transcribe:\n  diarization: false\n  diarization_backend: nemotron3\n",
+        )
+        .unwrap();
         assert_eq!(
-            TranscribeConfig::from_auto_transcribe(&cfg)
-                .diarization
-                .backend,
-            "sortformer"
+            TranscribeConfig::from_auto_transcribe(&cfg).requested_backend(),
+            None
         );
     }
 

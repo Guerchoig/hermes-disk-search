@@ -52,8 +52,12 @@ auto_transcribe:
   inbox_dir: '${MEDIA_INBOX}'
   out_dir: '${MEDIA_OUT}'
   diarization: true
-  # тело запроса сильнее секции diarization (решение владельца №13)
+  # An EXPLICIT backend is sent in the request body and overrides the diarization
+  # section; when the key is absent (or '') the field is not sent and the host
+  # picks diarization.backend -> auto (nemotron3 with a valid model, else sortformer).
   diarization_backend: 'nemotron3'
+  # The key is sent in the request body and overrides the host's
+  # `diarization.required` (nemotron3; the legacy sortformer path always fails hard).
   diarization_required: true
   source_disposal: ${SOURCE_DISPOSAL}
   pause_indexing: true

@@ -33,14 +33,25 @@ pub use merge::{
 };
 pub use ort_env::{ort_env, ort_env_clone};
 pub use sortformer::{
-    default_model_path, models_roots, sha256_file, verify_model, Device, Diarizer, NemotronConfig,
-    Turn, NEMOTRON_FILE, NEMOTRON_SHA256, NEMOTRON_SIZE,
+    default_model_path, models_roots, sha256_file, verify_against, verify_model, Device, Diarizer,
+    NemotronConfig, Turn, NEMOTRON_FILE, NEMOTRON_SHA256, NEMOTRON_SIZE,
 };
 pub use vad::{leading_silence_samples, speech_stats, SpeechStats, TrimConfig};
-pub use wav::{read_wav, write_wav, Wav};
+pub use wav::{
+    encode_wav, encode_wav_checked, parse_wav, read_wav, write_wav, Wav, MAX_RIFF_SAMPLES,
+};
 
 /// Частота дискретизации аудио-ветки (как у `ffmpeg -ar 16000`).
 pub const SAMPLE_RATE: u32 = 16_000;
+
+/// Предел длительности одной записи для диаризации — **6 ч** (F8, решение
+/// владельца Q4).
+///
+/// Почему предел вообще нужен: WAV на этом пути — RIFF/PCM 16-bit с размерами
+/// `u32` (предел ≈37 ч при 16 кГц mono), а `ffmpeg` для > 4 ГиБ пишет RF64,
+/// который `parse_wav` не читает. Вместо невнятной ошибки после часа обработки
+/// задание раньше (до ASR) получает понятный текст. RF64 — отдельная задача.
+pub const MAX_DIAR_SEC: f64 = 6.0 * 3600.0;
 
 /// Ошибки крейта: ошибки ввода-вывода, разбора контейнера и внешних CLI.
 #[derive(Debug, thiserror::Error)]

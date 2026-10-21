@@ -14,6 +14,9 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# F7 (ревью M4): общее ONNX-окружение процесса (`hds_ort`), чтобы `hds` с CLIP и
+# диаризацией не создавал два окружения ORT.
+hds-ort = { path = "../hds-ort" }
 # Проверка sha256 модели Nemotron-3 (W3): хешер уже в воркспейсе.
 sha2.workspace = true
 # Каталог моделей (`%APPDATA%\OpenResearchTools\models`, как у движка).

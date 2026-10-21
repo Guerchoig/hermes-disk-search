@@ -79,6 +79,8 @@ fn speaker_at(turns: &[Turn], t: f64) -> Option<u32> {
 /// Разделить текст по словам пропорционально длительностям частей.
 ///
 /// Возвращает по строке на часть; сумма слов исходного текста сохраняется.
+/// Часть может получить 0 слов, если слов меньше, чем частей (например, одно
+/// «Да-а-а.» на четыре реплики) — такие блоки вызывающий отбрасывает.
 fn split_text(text: &str, durations: &[f64]) -> Vec<String> {
     let words: Vec<&str> = text.split_whitespace().collect();
     let n = words.len();
@@ -98,7 +100,11 @@ fn split_text(text: &str, durations: &[f64]) -> Vec<String> {
             counts.push(n - used);
         } else {
             let want = ((d / total) * n as f64).round() as usize;
-            let want = want.clamp(1, n.saturating_sub(used));
+            // B1: слова могли закончиться до последней части — тогда `room == 0`
+            // и часть получает 0 слов (её блок отбрасывается ниже). `clamp(1, 0)`
+            // здесь паниковал (`min > max`), `saturating_sub` скрывал бы инвариант.
+            let room = n - used; // инвариант: used <= n
+            let want = if room == 0 { 0 } else { want.max(1).min(room) };
             counts.push(want);
             used += want;
         }
@@ -406,5 +412,65 @@ mod tests {
         assert_eq!(hhmmss(59.999), "00:00:59");
         assert_eq!(hhmmss(3600.5), "01:00:00");
         assert_eq!(srt_time(59.9996), "00:01:00,000");
+    }
+
+    /// B1 (`DIARIZATION_NEMOTRON_CODE_REVIEW.md`, приложение A): 5-секундный
+    /// сегмент ASR с **двумя** словами; turns делят его на четыре части с
+    /// разными спикерами. До фикса `split_text` паниковал (`clamp(1, 0)`):
+    /// слова заканчивались раньше, чем части.
+    #[test]
+    fn few_words_many_speakers_does_not_panic() {
+        let turns = [
+            turn(0.0, 1.5, 0),
+            turn(1.5, 2.5, 1),
+            turn(2.5, 3.5, 2),
+            turn(3.5, 5.0, 3),
+        ];
+        let segs = [AsrSpan::new(0.0, 5.0, "да нет")];
+        let blocks = merge_segments_with_turns(&segs, &turns);
+        let words: usize = blocks
+            .iter()
+            .map(|b| b.text.split_whitespace().count())
+            .sum();
+        assert_eq!(words, 2, "слова не потеряны");
+    }
+
+    /// F1 (B1): одно слово на три части — слово не теряется и не дублируется.
+    #[test]
+    fn one_word_three_parts_keeps_word_once() {
+        let parts = split_text("Секундочку", &[1.0, 1.0, 1.0]);
+        assert_eq!(parts.len(), 3);
+        let words: usize = parts.iter().map(|p| p.split_whitespace().count()).sum();
+        assert_eq!(words, 1, "слово ровно один раз: {parts:?}");
+        assert_eq!(parts.iter().filter(|p| !p.is_empty()).count(), 1);
+        assert_eq!(parts[0], "Секундочку");
+    }
+
+    /// F1 (B1): сумма слов сохраняется для любого соотношения «слов × частей»,
+    /// паники нет (до фикса `2..6` слов × `3..6` частей падали).
+    #[test]
+    fn split_text_preserves_words() {
+        for parts in 2..=6usize {
+            for words in 1..=6usize {
+                let text = (1..=words)
+                    .map(|i| format!("w{i}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let durations = vec![1.0; parts];
+                let out = split_text(&text, &durations);
+                assert_eq!(out.len(), parts, "{words} слов / {parts} частей");
+                let got: usize = out.iter().map(|p| p.split_whitespace().count()).sum();
+                assert_eq!(got, words, "{words} слов / {parts} частей: {out:?}");
+            }
+        }
+    }
+
+    /// F1: нулевая суммарная длительность — текст не теряется (вся в первой части).
+    #[test]
+    fn split_text_zero_total_duration() {
+        let out = split_text("да нет", &[0.0, 0.0, 0.0]);
+        assert_eq!(out.len(), 3);
+        assert_eq!(out[0], "да нет");
+        assert!(out[1].is_empty() && out[2].is_empty());
     }
 }

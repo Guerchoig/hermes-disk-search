@@ -207,10 +207,26 @@ impl DiarSettings {
             }
         }
         if let Some(v) = crate::host::dig_f64(sec, "nemotron3.onset") {
-            out.nemotron3.onset = v as f32;
+            // F12 (L3): порог — доля 0..=1; вне диапазона модель ведёт себя
+            // непредсказуемо — оставляем дефолт и предупреждаем.
+            if (0.0..=1.0).contains(&v) {
+                out.nemotron3.onset = v as f32;
+            } else {
+                warnings.push(format!(
+                    "diarization.nemotron3.onset {v} вне 0..=1 — оставляю {}",
+                    out.nemotron3.onset
+                ));
+            }
         }
         if let Some(v) = crate::host::dig_f64(sec, "nemotron3.offset") {
-            out.nemotron3.offset = v as f32;
+            if (0.0..=1.0).contains(&v) {
+                out.nemotron3.offset = v as f32;
+            } else {
+                warnings.push(format!(
+                    "diarization.nemotron3.offset {v} вне 0..=1 — оставляю {}",
+                    out.nemotron3.offset
+                ));
+            }
         }
 
         out.asr.trim_leading_silence =
@@ -587,7 +603,8 @@ mod tests {
     }
 
     /// Неизвестное устройство — `auto` + предупреждение; `chunk_min` вне 2..=30
-    /// не применяется (иначе `NemotronConfig::validate` уронил бы задание).
+    /// не применяется (иначе `NemotronConfig::validate` уронил бы задание);
+    /// `onset/offset` вне 0..=1 (F12) — тоже откат к дефолту с предупреждением.
     #[test]
     fn invalid_values_are_warned_not_fatal() {
         let (s, w) = DiarSettings::from_yaml(&yaml(
@@ -596,6 +613,15 @@ mod tests {
         assert_eq!(s.nemotron3.device, Device::Auto);
         assert_eq!(s.nemotron3.chunk_min, 10.0);
         assert_eq!(w.len(), 2, "{w:?}");
+
+        let (s, w) = DiarSettings::from_yaml(&yaml(
+            "diarization:\n  nemotron3:\n    onset: 5\n    offset: -1\n",
+        ));
+        assert!((s.nemotron3.onset - 0.5).abs() < 1e-6, "дефолт onset");
+        assert!((s.nemotron3.offset - 0.5).abs() < 1e-6, "дефолт offset");
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|x| x.contains("onset")), "{w:?}");
+        assert!(w.iter().any(|x| x.contains("offset")), "{w:?}");
     }
 
     /// Разбор и имена backend.
@@ -666,6 +692,27 @@ mod tests {
         assert_eq!(a, b, "offset применён один раз");
         assert_eq!(a[0].speaker, Some(0), "17.42 с — первый спикер");
         assert_eq!(a[1].speaker, Some(1), "21.98 с — второй спикер");
+    }
+
+    /// F5 (M2): явный `diarization.backend: sortformer` не требует файловой
+    /// системы — backend берётся из конфига, модель Nemotron-3 не проверяется
+    /// (даже если путь указывает в никуда).
+    #[test]
+    fn explicit_sortformer_does_not_touch_model() {
+        let (s, w) = DiarSettings::from_yaml(&serde_yaml::from_str(
+            "diarization:\n  backend: sortformer\n  nemotron3:\n    model: 'D:/нет/модели.onnx'\n",
+        )
+        .unwrap());
+        assert!(w.is_empty(), "предупреждений нет: {w:?}");
+        assert_eq!(s.backend, Some(Backend::Sortformer));
+        assert_eq!(
+            s.nemotron_config().model,
+            PathBuf::from("D:/нет/модели.onnx")
+        );
+        assert_eq!(
+            pick_backend(None, s.backend.expect("backend задан")),
+            Backend::Sortformer
+        );
     }
 
     /// Спикеры считаются по различным id, а не по количеству turns.

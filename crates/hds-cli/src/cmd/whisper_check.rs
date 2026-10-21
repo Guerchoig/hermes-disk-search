@@ -121,6 +121,8 @@ fn report_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>, json
     let diar = hds_index::diarization_model_for(cfg);
     // W5: backend/EP/модель Nemotron-3 — те же числа и тот же выбор, что у хоста.
     let ds = hds_index::diag::diarization_summary(cfg);
+    // F2 (B2): фактический запрос конвейера (None — поля в теле нет).
+    let requested = hds_index::diag::requested_backend_of(cfg);
     if json {
         let out = serde_json::json!({
             "engine": engine.map(|p| p.display().to_string()),
@@ -134,11 +136,16 @@ fn report_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>, json
             "diarization_device_auto": ds.device_auto,
             "nemotron_model": ds.nemotron_model.as_ref().map(|p| p.display().to_string()),
             "nemotron_ok": ds.nemotron_ok(),
+            // F5 (аддитивный ключ): модель вообще проверялась (backend nemotron3).
+            "nemotron_checked": ds.nemotron.checked(),
             "nemotron_error": match &ds.nemotron {
-                Some(Err(e)) => Some(e.clone()),
+                hds_index::diag::NemotronCheck::Failed(e) => Some(e.clone()),
                 _ => None,
             },
             "diarization_warnings": ds.warnings,
+            // F2 (аддитивный ключ): что клиент автотранскрибации пошлёт телом;
+            // `null` — ключа нет, backend выбирает хост.
+            "transcribe_requested_backend": requested,
             "ok": ok,
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -171,6 +178,17 @@ fn print_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>) {
         None => println!("[--] whisper-модель не найдена"),
     }
     print_diarization(&hds_index::diag::diarization_summary(cfg));
+    // F2: что именно запросит конвейер автотранскрибации (тело запроса).
+    match hds_index::diag::requested_backend_of(cfg) {
+        Some(b) => println!(
+            "[..] конвейер автотранскрибации запросит: {b} \
+             (auto_transcribe.diarization_backend)"
+        ),
+        None => println!(
+            "[..] конвейер автотранскрибации: diarization_backend не отправляется — backend \
+             выберет хост (diarization.backend, иначе авто)"
+        ),
+    }
 }
 
 /// W5: backend диаризации, EP, модель Nemotron-3 (путь, размер, sha256) и legacy.
@@ -178,7 +196,7 @@ fn print_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>) {
 /// T5 сохраняется: для `mode: transcript` модель обязательна (жёсткий отказ без
 /// неё), поэтому отсутствие модели — `[--]`/`[!!]`, а не тишина.
 fn print_diarization(s: &hds_index::diag::DiarSummary) {
-    use hds_index::diag::DiarBackend;
+    use hds_index::diag::{DiarBackend, NemotronCheck};
     let device = format!("EP {} (auto → {})", s.device, s.device_auto);
     match s.backend {
         DiarBackend::Off => println!("[--] диаризация: off (выключена в конфиге, {device})"),
@@ -195,14 +213,20 @@ fn print_diarization(s: &hds_index::diag::DiarSummary) {
         DiarBackend::Nemotron3 => {
             println!("[ok] диаризация: nemotron3 (Sortformer v3), {device}");
             match (&s.nemotron_model, &s.nemotron) {
-                (Some(p), Some(Ok(()))) => println!(
-                    "     модель: {} ({:.0} МБ, sha256 ok)",
-                    p.display(),
-                    size_mb(p)
-                ),
-                (Some(p), Some(Err(e))) => {
+                (Some(p), NemotronCheck::Ok) => {
+                    println!(
+                        "     модель: {} ({:.0} МБ, sha256 ok)",
+                        p.display(),
+                        size_mb(p)
+                    )
+                }
+                (Some(p), NemotronCheck::Failed(e)) => {
                     println!("[!!] модель {} не прошла проверку: {e}", p.display());
                 }
+                (Some(p), NemotronCheck::NotChecked) => println!(
+                    "     модель: {} — не проверялась (sha256 не считался)",
+                    p.display()
+                ),
                 _ => println!(
                     "[--] модель Nemotron-3 не найдена — автотранскрибация упадёт \
                      (installers\\fetch_nemotron3_model.ps1)"

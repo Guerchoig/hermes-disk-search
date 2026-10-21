@@ -291,3 +291,103 @@ fn transcribe_to_file_avoids_name_collision() {
     );
     std::fs::remove_dir_all(&out).ok();
 }
+
+/// F9 (ревью M6): `diarization_required` уходит в тело запроса — раньше ключ
+/// читался конфигом и печатался в `--dry-run`, но до хоста не доходил.
+#[test]
+fn transcribe_to_file_sends_diarization_required() {
+    use hds_index::transcribe::DiarizationSettings;
+
+    let body = serde_json::json!({
+        "text": "### SPEAKER_00 [00:00:01 - 00:00:02]\nA\n",
+        "out_ext": "md"
+    })
+    .to_string();
+    let out = std::env::temp_dir().join(format!("hds-auto-required-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let src = temp_file("required", "клип.wav");
+
+    for (required, needle) in [
+        (false, "\"diarization_required\":false"),
+        (true, "\"diarization_required\":true"),
+    ] {
+        let (url, h) = stub_server_capture(body.clone());
+        let tc = TranscribeConfig {
+            url,
+            out_dir: Some(out.clone()),
+            mode: "transcript".into(),
+            diarization: DiarizationSettings {
+                required,
+                ..DiarizationSettings::default()
+            },
+            ..Default::default()
+        };
+        let _ = TranscribeClient::new(tc).transcribe_to_file(&src).unwrap();
+        let req = h.join().unwrap();
+        assert!(req.contains(needle), "тело запроса: {req}");
+    }
+
+    std::fs::remove_dir_all(&out).ok();
+}
+
+/// F2 (B2): тело запроса автотранскрибации содержит `diarization_backend` только
+/// при явном ключе `auto_transcribe.diarization_backend`; без ключа backend
+/// выбирает хост (`diarization.backend` → авто), и `--dry-run` не врёт.
+#[test]
+fn transcribe_to_file_sends_backend_only_when_explicit() {
+    use hds_index::transcribe::DiarizationSettings;
+
+    // Заголовок `.md` содержит `"###` — сырой литерал `r#"…"#` на нём ломается,
+    // поэтому собираем JSON штатно (`serde_json`).
+    let body = serde_json::json!({
+        "text": "### SPEAKER_00 [00:00:01 - 00:00:02]\nA\n",
+        "out_ext": "md"
+    })
+    .to_string();
+    let out = std::env::temp_dir().join(format!("hds-auto-backend-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&out);
+    let svc = out.join("state");
+    let src = temp_file("backend", "клип.wav");
+
+    // Ключа нет — поля в теле нет.
+    let (url, h) = stub_server_capture(body.to_string());
+    let tc = TranscribeConfig {
+        url,
+        out_dir: Some(out.clone()),
+        service_dir: Some(svc.clone()),
+        mode: "transcript".into(),
+        ..Default::default()
+    };
+    assert_eq!(tc.requested_backend(), None);
+    let _ = TranscribeClient::new(tc).transcribe_to_file(&src).unwrap();
+    let req = h.join().unwrap();
+    assert!(
+        !req.contains("\"diarization_backend\""),
+        "тело запроса: {req}"
+    );
+    assert!(req.contains("\"diarization\":true"), "тело запроса: {req}");
+
+    // Явный sortformer — уходит в тело как есть.
+    let (url, h) = stub_server_capture(body.to_string());
+    let tc = TranscribeConfig {
+        url,
+        out_dir: Some(out.clone()),
+        service_dir: Some(svc),
+        mode: "transcript".into(),
+        diarization: DiarizationSettings {
+            backend: "sortformer".into(),
+            backend_explicit: true,
+            ..DiarizationSettings::default()
+        },
+        ..Default::default()
+    };
+    assert_eq!(tc.requested_backend(), Some("sortformer"));
+    let _ = TranscribeClient::new(tc).transcribe_to_file(&src).unwrap();
+    let req = h.join().unwrap();
+    assert!(
+        req.contains("\"diarization_backend\":\"sortformer\""),
+        "тело запроса: {req}"
+    );
+
+    std::fs::remove_dir_all(&out).ok();
+}

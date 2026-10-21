@@ -1139,6 +1139,18 @@ fn transcribe_need_mib(whisper: &Path, diar: Option<&Path>) -> u64 {
     size(whisper) + diar.map(size).unwrap_or(0) + WHISPER_OVERHEAD_MIB
 }
 
+/// F9 (ревью M6): `diarization_required` тела сильнее `diarization.required` хоста.
+///
+/// Ключ аддитивный (старые клиенты его не шлют): нет ключа ⇒ конфиг; `false` ⇒
+/// сбой диаризации не валит задание (для `nemotron3` — `.md` без меток и
+/// `diarization.enabled: false`). Legacy `sortformer` деградации не умеет и при
+/// сбое всё равно отказывает — это пишется в лог.
+fn pick_required(body: &Value, configured: bool) -> bool {
+    body.get("diarization_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(configured)
+}
+
 /// Выбор реплики под запрос (M6 §3.6): **least-busy**, при равенстве —
 /// round-robin. Чистая функция (загрузки передаются аргументом) — тестируется
 /// без движка; порядок реплик — как в конфиге (`chat`, `chat-2`, …).
@@ -2301,6 +2313,9 @@ impl Backend for ClusterBackend {
         // отсутствии секции — авто: nemotron3 при валидной модели, иначе
         // sortformer (решение №10).
         let diar_backend = self.pick_diar_backend(body);
+        // F9 (ревью M6): `diarization_required` тела сильнее `diarization.required`
+        // хоста — клиент (`hds-index`) может попросить деградацию вместо отказа.
+        let diar_required = pick_required(body, self.diar.required);
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
@@ -2441,6 +2456,15 @@ impl Backend for ClusterBackend {
                 &custom,
                 language.as_deref(),
                 return_text,
+                diar_required,
+            );
+        }
+        // F9: legacy sortformer не деградирует (движок отказывает без модели) —
+        // не даём клиенту ложного ожидания от `diarization_required: false`.
+        if diarization && diar_backend == DiarBackend::Sortformer && !diar_required {
+            self.log.note(
+                "[diar] diarization_required: false, но backend=sortformer (legacy): движок \
+                 деградации не умеет — без модели задание всё равно откажет",
             );
         }
         // `off` + `mode: transcript`: движку нельзя отдавать `transcript` (он
@@ -2527,6 +2551,11 @@ impl ClusterBackend {
     fn resolved_diar_backend(&self) -> DiarBackend {
         *self.diar_auto.get_or_init(|| {
             if let Some(b) = self.diar.backend {
+                // F2/F5: видно, что backend взят из конфига хоста (а не из тела).
+                self.log.line(&format!(
+                    "[diar] backend={} (diarization.backend)",
+                    b.as_str()
+                ));
                 return b;
             }
             let cfg = self.diar.nemotron_config();
@@ -2601,6 +2630,7 @@ impl ClusterBackend {
         custom: &str,
         language: Option<&str>,
         return_text: bool,
+        diar_required: bool,
     ) -> Result<Value> {
         let started = Instant::now();
         let ffmpeg = diar::find_ffmpeg(self.ffmpeg.as_deref()).ok_or_else(|| {
@@ -2626,6 +2656,16 @@ impl ClusterBackend {
             wav.samples.len() as f64 / wav.sample_rate as f64,
             ffmpeg.display()
         ));
+        // F8 (ревью M5): предел длительности — понятная ошибка **до** ASR и
+        // диаризации, а не через час работы. Проверка дешёвая (длина сэмплов).
+        if wav.duration_sec() > hds_diarize::MAX_DIAR_SEC {
+            return Err(EngineError::Other(format!(
+                "запись {:.1} ч превышает предел диаризации {:.1} ч (WAV/RIFF на этом пути; \
+                 RF64 пока не поддерживается): разделите файл на части",
+                wav.duration_sec() / 3600.0,
+                hds_diarize::MAX_DIAR_SEC / 3600.0
+            )));
+        }
 
         // [trim] ведущая тишина — только для ASR (диаризация её не видит).
         let t0 = Instant::now();
@@ -2709,12 +2749,12 @@ impl ClusterBackend {
             Ok((turns, device)) => (turns, device, None),
             Err(e) => {
                 let msg = e.to_string();
-                if self.diar.required {
+                if diar_required {
                     return Err(e);
                 }
                 self.log.note(&format!(
                     "диаризация nemotron3 не удалась ({msg}) — пишу .md без меток \
-                     (diarization.required: false)"
+                     (diarization_required: false)"
                 ));
                 (Vec::new(), "нет".to_string(), Some(msg))
             }
@@ -2764,9 +2804,15 @@ impl ClusterBackend {
         if let Some(err) = &diar_error {
             diar_info["error"] = json!(err);
         }
+        let mode_out = effective_mode(mode);
+        if mode_out != mode {
+            self.log.line(&format!(
+                "[diar] mode '{mode}' → '{mode_out}' (диаризация всегда .md)"
+            ));
+        }
         let mut out = json!({
             "path": src,
-            "mode": mode,
+            "mode": mode_out,
             "custom": custom,
             "out_ext": "md",
             "diarization": diar_info,
@@ -2778,6 +2824,16 @@ impl ClusterBackend {
         }
         Ok(out)
     }
+}
+
+/// F10 (ревью L1): фактический режим ответа nemotron-ветки.
+///
+/// Диаризация всегда даёт `.md` с метками (`out_ext: "md"`), поэтому `mode` в
+/// ответе — `transcript`, даже если клиент просил `speech` (раньше в ответе
+/// возвращался запрошенный режим, и потребитель API не мог отличить фактический
+/// формат от запрошенного). Расхождение пишется в лог вызывающим.
+fn effective_mode(_requested: &str) -> &'static str {
+    "transcript"
 }
 
 /// Записать JSON-отчёт (каталог создаётся) — для бинарей `--json`.
@@ -3529,9 +3585,27 @@ impl Host {
             nemotron: Mutex::new(None),
             ffmpeg,
         });
-        // Решение «конфиг или авто» — один раз и в лог (решение владельца №10):
-        // при отсутствии секции модель Nemotron-3 проверяется по sha256 здесь.
-        backend.resolved_diar_backend();
+        // F5 (M2): на старте backend НЕ резолвится — иначе хост читал бы 400 МБ
+        // модели Nemotron-3 при каждом запуске, даже без автотранскрибации.
+        // Решение принимается лениво, при первом задании
+        // (`ClusterBackend::resolved_diar_backend` / `pick_diar_backend`), и
+        // кэшируется в `diar_auto`. Здесь — только дешёвая заметка в лог.
+        match backend.diar.backend {
+            Some(b) => log.line(&format!(
+                "[diar] backend={} (diarization.backend; sha256 модели проверяется при \
+                 первом задании)",
+                b.as_str()
+            )),
+            None => log.line(&format!(
+                "[diar] backend будет выбран при первом задании: diarization.backend не задан, \
+                 модель Nemotron-3 {}",
+                if backend.diar.nemotron_config().model.is_file() {
+                    "на месте (sha256 проверим на задании)"
+                } else {
+                    "не найдена — вероятен sortformer (legacy)"
+                }
+            )),
+        }
 
         let handles = if ports.is_empty() {
             log.note(
@@ -3843,7 +3917,39 @@ mod whisper_device_tests {
     use super::pick_replica;
     use super::strip_index_self_pause;
     use super::whisper_device;
+
+    /// F9 (ревью M6): `diarization_required` тела сильнее `diarization.required`
+    /// конфига; без ключа действует конфиг (аддитивность для старых клиентов).
+    #[test]
+    fn required_from_body_overrides_config() {
+        use super::pick_required;
+        assert!(!pick_required(
+            &serde_json::json!({ "diarization_required": false }),
+            true
+        ));
+        assert!(pick_required(
+            &serde_json::json!({ "diarization_required": true }),
+            false
+        ));
+        assert!(pick_required(&serde_json::json!({}), true));
+        assert!(!pick_required(&serde_json::json!({}), false));
+        // Не булево значение — как «ключа нет».
+        assert!(pick_required(
+            &serde_json::json!({ "diarization_required": "false" }),
+            true
+        ));
+    }
     use crate::dispatch::{Action, Plan};
+
+    /// F10 (ревью L1): `mode` ответа nemotron-ветки — фактический (`transcript`),
+    /// а не запрошенный: диаризация всегда даёт `.md` с метками.
+    #[test]
+    fn effective_mode_is_the_fact() {
+        use super::effective_mode;
+        assert_eq!(effective_mode("speech"), "transcript");
+        assert_eq!(effective_mode("subtitle"), "transcript");
+        assert_eq!(effective_mode("transcript"), "transcript");
+    }
 
     /// Страж брошенных запросов: срабатывает только на «engine» дольше порога —
     /// служебные операции (status/arbiter/dispatcher) и короткие вызовы не трогаем.

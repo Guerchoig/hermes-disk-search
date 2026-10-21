@@ -2,35 +2,20 @@
 //!
 //! `ort 2.0.0-rc.15` разрешает **один** `Environment` на процесс: второй
 //! `ort::init().build()` вернёт `only one environment is allowed per process`.
-//! Поэтому окружение создаётся через [`OnceLock`] и отдаётся клонами (`Environment`
-//! — это `Arc`, клонирование бесплатное): так его получают и `Sortformer`, и
-//! (при необходимости) `hds-clip` через `Clip::load_with_env`.
 //!
-//! Сейчас `hds` (CLIP) и `llm_host` (диаризация) — разные бинари, поэтому
-//! коллизии нет; правило на будущее — если бинарь слинкует оба крейта, передавать
-//! окружение снаружи, а не инициализировать ORT повторно.
-
-use std::sync::OnceLock;
+//! F7 (ревью M4): окружение общее с CLIP и живёт в `hds-ort` (один `OnceLock` на
+//! процесс). Здесь — совместимые обёртки (`ort_env`/`ort_env_clone`), чтобы
+//! внешний код не менялся. **Не создавайте** второе окружение через `ort::init()`
+//! ни в `hds-diarize`, ни в других крейтах продукта — иначе `hds` (CLIP +
+//! диаризация в одном процессе) снова упадёт.
 
 use parakeet_rs::ort::environment::Environment;
 
 use crate::{DiarizeError, Result};
 
-type EnvResult = std::result::Result<Environment, String>;
-
-static ENV: OnceLock<EnvResult> = OnceLock::new();
-
 /// Общее ONNX-окружение процесса (создаётся при первом обращении, ошибка кэшируется).
 pub fn ort_env() -> Result<&'static Environment> {
-    match ENV.get_or_init(|| {
-        parakeet_rs::ort::init()
-            .with_name("hds-diarize")
-            .build()
-            .map_err(|e| format!("ONNX Runtime environment: {e}"))
-    }) {
-        Ok(env) => Ok(env),
-        Err(e) => Err(DiarizeError::Tool(e.clone())),
-    }
+    hds_ort::environment().map_err(DiarizeError::Tool)
 }
 
 /// Клон общего окружения — его принимает `ExecutionConfig::with_environment`.

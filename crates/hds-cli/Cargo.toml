@@ -32,6 +32,9 @@ windows-service = "0.8"
 [dev-dependencies]
 # тест `config_init.rs` разбирает отрендеренный конфиг как YAML
 serde_yaml.workspace = true
+# F7: `ort_env_singleton.rs` проверяет, что CLIP и диаризация в одном процессе
+# (§ревью M4) используют общее ONNX-окружение `hds-ort`.
+hds-diarize = { path = "../hds-diarize" }
 
 [[bin]]
 name = "hds"

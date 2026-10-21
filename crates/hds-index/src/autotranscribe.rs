@@ -28,6 +28,32 @@ use crate::kinds;
 use crate::transcribe::{TranscribeClient, TranscribeConfig, TranscribeOutcome};
 use crate::watch::{self, wait_stable, WatchEvent, WatchLock};
 
+/// Backend, который реально уйдёт в задание (для [`AutoTranscribeConfig::warnings`]).
+///
+/// F4: явный клиентский ключ → `diarization.backend` хоста → авто. Авто решается
+/// **дешёвой** проверкой (`is_file`): sha256 модели Nemotron-3 проверяет хост на
+/// первом задании (`host::resolved_diar_backend`), демону на старте это не нужно.
+fn warning_backend(cfg: &Config, d: &crate::transcribe::DiarizationSettings) -> String {
+    let norm = |s: &str| s.trim().to_ascii_lowercase();
+    if d.backend_explicit {
+        return norm(&d.backend);
+    }
+    if let Some(v) = dig(cfg, "diarization.backend").and_then(|v| v.as_str()) {
+        let v = norm(v);
+        if !v.is_empty() {
+            return v;
+        }
+    }
+    let model_ok = nemotron_model_for(cfg)
+        .map(|p| p.is_file())
+        .unwrap_or(false);
+    if model_ok {
+        "nemotron3".to_string()
+    } else {
+        "sortformer".to_string()
+    }
+}
+
 /// Транзиентные суффиксы имён по умолчанию (§2): файл с таким хвостом ещё
 /// копируется — ставить задание рано.
 pub const DEFAULT_IGNORE_SUFFIXES: &[&str] = &[".part", ".tmp", ".crdownload", ".!qb", ".bak"];
@@ -414,14 +440,62 @@ impl AutoTranscribeConfig {
     }
 
     /// Некритичные замечания — пишутся в лог при старте демона.
-    pub fn warnings(&self) -> Vec<String> {
+    ///
+    /// F4 (ревью M1): текст зависит от backend. Раньше при дефолтном
+    /// `nemotron3` демон на каждом старте ругался на пустой `diarization_model`
+    /// (это legacy-`.gguf` sortformer) и обещал «жёсткий отказ», хотя выбран
+    /// другой путь:
+    /// * `sortformer` — прежняя проверка `auto_transcribe.diarization_model`;
+    /// * `nemotron3` — файл модели (`diarization.nemotron3.model` → автопоиск) и
+    ///   `ffmpeg` (без него WAV для диаризации декодировать нечем);
+    /// * `off` — тишина (диаризация выключена осознанно);
+    /// * неизвестное значение — подсказка со списком допустимых.
+    ///
+    /// Backend берётся тот, что реально уйдёт в задание: явный клиентский ключ →
+    /// `diarization.backend` хоста → авто (модель Nemotron-3 есть / нет).
+    pub fn warnings(&self, cfg: &Config) -> Vec<String> {
         let mut w = Vec::new();
-        if self.transcribe.diarization.enabled && self.transcribe.diarization.model.is_none() {
-            w.push(
-                "diarization_model не задан: владелец ищет sortformer сам; если модели нет — \
-                 задание упадёт (жёсткий отказ, §0 п.6)"
-                    .to_string(),
-            );
+        let d = &self.transcribe.diarization;
+        if d.enabled {
+            match warning_backend(cfg, d).as_str() {
+                "sortformer" => {
+                    if d.model.is_none() {
+                        w.push(
+                            "diarization_backend=sortformer, но diarization_model не задан: \
+                             владелец ищет sortformer сам; если модели нет — задание упадёт \
+                             (жёсткий отказ, §0 п.6); установить: \
+                             installers\\fetch_diarization_model.ps1"
+                                .to_string(),
+                        );
+                    }
+                }
+                "nemotron3" => {
+                    if nemotron_model_for(cfg)
+                        .map(|p| !p.is_file())
+                        .unwrap_or(true)
+                    {
+                        w.push(format!(
+                            "diarization_backend=nemotron3, модель {} не найдена: \
+                             installers\\fetch_nemotron3_model.ps1 (или diarization.nemotron3.model); \
+                             без модели задание упадёт (fallback в speech нет)",
+                            hds_diarize::NEMOTRON_FILE
+                        ));
+                    }
+                    if hds_core::tools::find_ffmpeg(cfg).is_none() {
+                        w.push(
+                            "diarization_backend=nemotron3, ffmpeg не найден: WAV для диаризации \
+                             декодировать нечем (winget install --scope machine -e --id \
+                             Gyan.FFmpeg или index.ffmpeg_cmd)"
+                                .to_string(),
+                        );
+                    }
+                }
+                "off" => {}
+                other => w.push(format!(
+                    "diarization_backend '{other}' неизвестен (nemotron3|sortformer|off) — \
+                     backend выберет хост (diarization.backend → авто)"
+                )),
+            }
         }
         if self.transcribe.mode != crate::transcribe::AUTO_MODE {
             w.push(format!(
@@ -710,13 +784,14 @@ fn wait_for_owner(cfg: &AutoTranscribeConfig) {
     println!("[transcribe] владелец GPU не поднялся за 60 с — продолжаю (задания будут ждать)");
 }
 
-pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig) -> Result<i32> {
+pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig, app: &Config) -> Result<i32> {
     if !cfg.enabled {
         println!("[transcribe] auto_transcribe.enabled: false — конвейер выключен");
         return Ok(0);
     }
     cfg.validate()?;
-    for w in cfg.warnings() {
+    // F4: замечания зависят от backend (`app` — исходный конфиг: `diarization.*`).
+    for w in cfg.warnings(app) {
         println!("[transcribe] внимание: {w}");
     }
     let inbox = cfg.inbox_dir.clone().expect("validate проверил");
@@ -1391,6 +1466,87 @@ mod tests {
             0,
             "done не воскрешаем"
         );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// F4 (ревью M1): замечания демона зависят от backend. При дефолтном
+    /// `nemotron3` не должно быть текста про sortformer/`diarization_model`, а при
+    /// отсутствии модели/`ffmpeg` — должна быть правильная команда.
+    #[test]
+    fn warnings_are_backend_aware() {
+        let root = tmpdir("warn");
+        let model = root.join(hds_diarize::NEMOTRON_FILE);
+        std::fs::write(&model, b"x").unwrap();
+        let ffmpeg = root.join(if cfg!(windows) {
+            "ffmpeg.exe"
+        } else {
+            "ffmpeg"
+        });
+        std::fs::write(&ffmpeg, b"x").unwrap();
+        let yaml_path = |p: &Path| p.display().to_string().replace('\\', "/");
+        let parse = |text: &str| -> Config { serde_yaml::from_str(text).unwrap() };
+
+        // nemotron3 + модель + ffmpeg ⇒ ни sortformer-текста, ни «не найдена».
+        let cfg = parse(&format!(
+            "index:\n  ffmpeg_cmd: '{}'\nauto_transcribe:\n  mode: transcript\n  \
+             diarization_backend: nemotron3\ndiarization:\n  nemotron3:\n    model: '{}'\n",
+            yaml_path(&ffmpeg),
+            yaml_path(&model)
+        ));
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(
+            !w.iter()
+                .any(|s| s.contains("sortformer") || s.contains("diarization_model")),
+            "ложное предупреждение про sortformer: {w:?}"
+        );
+        assert!(
+            !w.iter()
+                .any(|s| s.contains("не найдена") || s.contains("ffmpeg")),
+            "ложное предупреждение про модель/ffmpeg: {w:?}"
+        );
+
+        // nemotron3 без модели ⇒ команда установки Nemotron-3 (а не sortformer).
+        let missing = root.join("нет-такой-модели.onnx");
+        let cfg = parse(&format!(
+            "index:\n  ffmpeg_cmd: '{}'\nauto_transcribe:\n  mode: transcript\n  \
+             diarization_backend: nemotron3\ndiarization:\n  nemotron3:\n    model: '{}'\n",
+            yaml_path(&ffmpeg),
+            yaml_path(&missing)
+        ));
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(
+            w.iter().any(|s| s.contains("fetch_nemotron3_model")),
+            "нет подсказки про установку Nemotron-3: {w:?}"
+        );
+
+        // sortformer без `diarization_model` ⇒ прежняя подсказка про `.gguf`.
+        let cfg =
+            parse("auto_transcribe:\n  mode: transcript\n  diarization_backend: sortformer\n");
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(
+            w.iter().any(|s| s.contains("fetch_diarization_model")),
+            "нет подсказки про sortformer-модель: {w:?}"
+        );
+
+        // off ⇒ про диаризацию ничего.
+        let cfg = parse("auto_transcribe:\n  mode: transcript\n  diarization_backend: off\n");
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(w.is_empty(), "off не должен предупреждать: {w:?}");
+
+        // Нет клиентского ключа, конфиг хоста `off` ⇒ тоже тишина (backend решит хост).
+        let cfg = parse("auto_transcribe:\n  mode: transcript\ndiarization:\n  backend: off\n");
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(w.is_empty(), "diarization.backend: off — тишина: {w:?}");
+
+        // Неизвестное значение — подсказка со списком допустимых.
+        let cfg = parse("auto_transcribe:\n  mode: transcript\n  diarization_backend: bogus\n");
+        let w = AutoTranscribeConfig::from_config(&cfg).warnings(&cfg);
+        assert!(
+            w.iter()
+                .any(|s| s.contains("'bogus'") && s.contains("nemotron3|sortformer|off")),
+            "{w:?}"
+        );
+
         std::fs::remove_dir_all(&root).ok();
     }
 }

@@ -596,6 +596,7 @@ version = "0.1.0"
 dependencies = [
  "hds-clip",
  "hds-core",
+ "hds-diarize",
  "hds-extract",
  "hds-index",
  "hds-mcp",
@@ -612,6 +613,7 @@ name = "hds-clip"
 version = "0.1.0"
 dependencies = [
  "hds-core",
+ "hds-ort",
  "image",
  "ort",
  "serde",
@@ -645,6 +647,7 @@ name = "hds-diarize"
 version = "0.1.0"
 dependencies = [
  "directories",
+ "hds-ort",
  "parakeet-rs",
  "sha2",
  "thiserror 2.0.21",
@@ -703,6 +706,13 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "hds-ort"
+version = "0.1.0"
+dependencies = [
+ "ort",
 ]
 
 [[package]]

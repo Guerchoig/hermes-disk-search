@@ -213,7 +213,14 @@ impl Whisper {
         diar: Option<&DiarizationParams>,
         language: Option<&str>,
     ) -> Result<Transcript> {
-        let ascii_dir = std::env::temp_dir().join("hds_whisper");
+        // F15 (ревью L6, дефект был и раньше): уникальный каталог staging на
+        // запрос. Общий `%TEMP%/hds_whisper/input.*` перезаписывался при
+        // параллельных файлах на разных картах (и nemotron-ветка добавила второго
+        // вызывающего — она всегда стейджит срез WAV). `TempDir` удаляет каталог в
+        // `Drop` — текст к этому моменту уже прочитан в память.
+        let ascii = crate::diar::TempDir::new("hds_whisper")
+            .map_err(|e| EngineError::Other(format!("временный каталог whisper: {e}")))?;
+        let ascii_dir = ascii.path().to_path_buf();
         let staged = stage_ascii(src, &ascii_dir)?;
         let ext = staged
             .extension()
@@ -485,5 +492,28 @@ mod tests {
         assert_eq!(d.feed_ms, 10_800_001.0);
         assert_eq!(d.device, None);
         assert_eq!(d.with_device("CPU").device.as_deref(), Some("CPU"));
+    }
+
+    /// F15 (ревью L6): `stage_ascii` пишет в **переданный** каталог (уникальный на
+    /// запрос), а не в общий `%TEMP%/hds_whisper`, и не переиспользует чужой.
+    #[test]
+    fn stage_ascii_uses_given_dir() {
+        let a = crate::diar::TempDir::new("hds-whisper-a").unwrap();
+        let b = crate::diar::TempDir::new("hds-whisper-b").unwrap();
+        assert_ne!(a.path(), b.path(), "каталоги staging уникальны");
+        let src = std::env::temp_dir().join(format!("hds-stage-{}.WAV", std::process::id()));
+        std::fs::write(&src, b"x").unwrap();
+        let staged = stage_ascii(&src, a.path()).unwrap();
+        assert_eq!(staged.parent(), Some(a.path()), "стемплен в свой каталог");
+        assert_eq!(
+            staged.file_name().and_then(|n| n.to_str()),
+            Some("input.wav"),
+            "ASCII-имя с расширением в нижнем регистре"
+        );
+        assert!(
+            b.path().read_dir().map(|d| d.count()).unwrap_or(0) == 0,
+            "чужой каталог не тронут"
+        );
+        std::fs::remove_file(&src).ok();
     }
 }

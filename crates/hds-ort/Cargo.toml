@@ -1,0 +1,11 @@
+[package]
+name = "hds-ort"
+description = "Единое ONNX-окружение процесса для hds-clip и hds-diarize (F7, ревью M4)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Та же версия, что у `hds-clip` и `parakeet-rs 0.4.2` (пин на воркспейсе): тип
+# `Environment` обязан совпадать, иначе два окружения снова разъедутся.
+ort = "=2.0.0-rc.15"

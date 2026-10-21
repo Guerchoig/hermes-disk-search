@@ -37,6 +37,14 @@
 #                                 (order llm-host -> watch -> mcp-http -> ui) and
 #                                 health-check. Requires Administrator.
 #
+# 0.21.0 (F3, review B3): after the pointer switch this script also TOP-UPS the
+# Nemotron-3 diarization model (400 MB, pinned sha256) via the new version's
+# installers\fetch_nemotron3_model.ps1 into HDS_MODELS_DIR / the machine models
+# dir (server) / the engine models dir (desktop). Idempotent: an existing valid
+# file is skipped. A fetch failure is NOT fatal - the update still succeeds,
+# `hds check` prints the exact command and diarization jobs simply refuse until
+# the model is installed. `-NoModels` skips the step (offline hosts).
+#
 # ASCII-only on purpose (PowerShell 5.1 reads a BOM-less .ps1 as ANSI).
 #
 # Examples:
@@ -44,6 +52,7 @@
 #   installers\update.ps1 -From dist\hds-0.3.0 -Version 0.3.0 -Root D:\hds -Profile server
 #   installers\update.ps1 -Root D:\hds -ListVersions
 #   installers\update.ps1 -Root D:\hds -RollbackTo 0.2.0 -Profile server
+#   installers\update.ps1 -Root D:\hds -From dist\hds-0.21.0 -Version 0.21.0 -NoModels
 param(
     [string]$From = "",
     [string]$Version = "",
@@ -53,7 +62,9 @@ param(
     [string]$RollbackTo = "",
     [switch]$ListVersions,
     [string]$HealthUrl = "",
-    [switch]$WhatIf
+    [switch]$WhatIf,
+    # F3: skip the Nemotron-3 diarization model top-up (offline hosts / manual).
+    [switch]$NoModels
 )
 $ErrorActionPreference = "Continue"
 $here = $PSScriptRoot
@@ -355,7 +366,44 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "install_app_version.ps1 failed (exit $LASTEXITCODE)" }
     }
 
-    # --- 3. launch points + restart -----------------------------------------
+    # --- 3. Nemotron-3 model top-up (F3, B3) --------------------------------
+    # Before: an updated install got `diarization.backend: nemotron3` (product
+    # default) but no model file, so every auto-transcription job failed and was
+    # blacklisted. The fetch runs AFTER the pointer switch (app\current is the new
+    # version) and is NOT fatal: without the model the daemon refuses jobs and
+    # `hds check` prints the exact command, so a manual run fixes it later.
+    if (-not $WhatIf -and -not $NoModels) {
+        $fetch = Join-Path $cur "installers\fetch_nemotron3_model.ps1"
+        if (Test-Path $fetch) {
+            $modelsDir = $env:HDS_MODELS_DIR
+            if (-not $modelsDir) {
+                if ($Profile -eq "server") {
+                    $modelsDir = Join-Path $env:ProgramData "hermes-disk-search\models"
+                } else {
+                    $modelsDir = Join-Path $env:APPDATA "OpenResearchTools\models"
+                }
+            }
+            Write-Host "[..] Nemotron-3 diarization model -> $modelsDir (idempotent)"
+            try {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $fetch -ModelsDir $modelsDir
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Host "[!!] Nemotron-3 model NOT fetched (exit $LASTEXITCODE): diarization jobs fail until it is installed - run: $fetch" -ForegroundColor Yellow
+                } else {
+                    Write-Host "[ok] Nemotron-3 diarization model ready"
+                }
+            } catch {
+                Write-Host "[!!] Nemotron-3 model fetch failed: $_ - run manually: $fetch" -ForegroundColor Yellow
+            }
+        } else {
+            Write-Host "[..] fetch_nemotron3_model.ps1 not found in $cur - model step skipped"
+        }
+    } elseif ($WhatIf -and -not $NoModels) {
+        Write-Host "[..] (whatif) would run: installers\fetch_nemotron3_model.ps1 -ModelsDir <models dir>"
+    } else {
+        Write-Host "[..] -NoModels: Nemotron-3 diarization model step skipped"
+    }
+
+    # --- 4. launch points + restart -----------------------------------------
     Repoint-Layout
     Restore-Restart
     Start-All

@@ -280,6 +280,72 @@ fn update_ps1_suspends_auto_restart_while_switching() {
     );
 }
 
+/// F3 (ревью B3): `update.ps1` докачивает модель Nemotron-3 после переключения
+/// версии — иначе обновлённая установка получает `diarization.backend: nemotron3`
+/// без файла модели и каждое задание автотранскрибации падает и «забраковывается».
+///
+/// Требования: новый ключ `-NoModels`, каталог моделей по профилю
+/// (`HDS_MODELS_DIR` → машинный для server → каталог движка для desktop), вызов
+/// `fetch_nemotron3_model.ps1` из **новой** версии, и сбой загрузки **не** валит
+/// обновление (предупреждение, не `throw`).
+#[test]
+fn update_ps1_fetches_nemotron3_model() {
+    let s = read("installers/update.ps1");
+    assert!(
+        s.is_ascii(),
+        "installers/update.ps1 не ASCII-only: PS 5.1 прочитает его как ANSI"
+    );
+    for needle in [
+        "[switch]$NoModels",
+        "fetch_nemotron3_model.ps1",
+        "-ModelsDir $modelsDir",
+        "$env:HDS_MODELS_DIR",
+        "hermes-disk-search\\models",
+        "OpenResearchTools\\models",
+        "-not $WhatIf -and -not $NoModels",
+        "elseif ($WhatIf -and -not $NoModels)",
+    ] {
+        assert!(
+            s.contains(needle),
+            "в update.ps1 нет '{needle}' — модель не докачается (или шаг не пропускается)"
+        );
+    }
+    // Сбой загрузки — предупреждение, а не падение обновления.
+    let block_start = s
+        .find("Nemotron-3 model top-up")
+        .expect("в update.ps1 нет шага докачки модели");
+    let block = &s[block_start..];
+    let block = &block[..block.find("--- 4.").unwrap_or(block.len())];
+    assert!(block.contains("try {"), "загрузка модели без try/catch");
+    assert!(block.contains("catch"), "загрузка модели без catch");
+    assert!(
+        !block.contains("throw"),
+        "ошибка загрузки модели валит обновление (throw): модель можно докачать вручную"
+    );
+    // Шаг идёт после установки новой версии (указатель уже переключён).
+    let install = s
+        .find("install_app_version.ps1")
+        .expect("update.ps1 не ставит новую версию");
+    assert!(
+        install < block_start,
+        "докачка модели раньше установки новой версии — fetch-скрипта ещё нет"
+    );
+}
+
+/// F3: macOS-обёртка объясняет докачку модели и даёт ручную команду
+/// (`-NoModels` пробрасывается в `update.ps1` через `"$@"`).
+#[test]
+fn update_command_fetches_nemotron3_model() {
+    let s = read("installers/update.command");
+    assert!(s.is_ascii(), "update.command должен быть ASCII-only");
+    for needle in ["fetch_nemotron3_model.ps1", "-NoModels", "\"$@\""] {
+        assert!(
+            s.contains(needle),
+            "в update.command нет '{needle}' — на macOS модель не докачается/не объяснится"
+        );
+    }
+}
+
 /// Подсказки установщиков не должны ссылаться на несуществующую подкоманду:
 /// `hds service` знает `run|install|uninstall|start|stop|status|root`, а `restart` есть
 /// только у `mcp-http`. Перезапуск роли — это `service stop <role>` + `service start <role>`

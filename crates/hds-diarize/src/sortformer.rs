@@ -154,6 +154,15 @@ impl NemotronConfig {
         if self.min_audio_min < 0.0 {
             return Err(DiarizeError::Format("min_audio_min < 0".to_string()));
         }
+        // F12 (L3): пороги постобработки — доли 0..=1; `onset: 5`/`offset: -1`
+        // раньше тихо уходили в модель.
+        for (name, v) in [("onset", self.onset), ("offset", self.offset)] {
+            if !(0.0..=1.0).contains(&v) {
+                return Err(DiarizeError::Format(format!(
+                    "{name} должен быть 0..=1, получено {v}"
+                )));
+            }
+        }
         Ok(())
     }
 }
@@ -203,9 +212,13 @@ pub fn default_model_path() -> Option<PathBuf> {
         .map(|r| r.join("nemotron3").join(NEMOTRON_FILE))
 }
 
-/// Проверенные модели: `(путь, размер, mtime)` — чтобы не хешировать 400 МБ при
-/// каждом старте роли.
-type Verified = Mutex<HashMap<(PathBuf, u64, u64), ()>>;
+/// Результат проверки модели: `(путь, размер, mtime)` → `Ok`/причина отказа.
+///
+/// F6 (ревью M3): кэшируется и **отрицательный** результат. Раньше `Ok` попадал
+/// в кэш только при успехе, поэтому битый файл (обрезанная закачка, подменённый
+/// LICENSE) хешировался заново на **каждом** задании: при `required: false` это
+/// тихая постоянная просадка времени.
+type Verified = Mutex<HashMap<(PathBuf, u64, u64), std::result::Result<(), String>>>;
 static VERIFIED: OnceLock<Verified> = OnceLock::new();
 
 /// sha256 файла (потоково, по 1 МБ — 400 МБ хешируются ~1–2 с).
@@ -227,13 +240,22 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-/// Проверить размер и sha256 модели (результат кэшируется по `(путь, размер, mtime)`).
+/// Проверить размер и sha256 модели Nemotron-3 (константы из W3).
 pub fn verify_model(path: &Path) -> Result<()> {
+    verify_against(path, NEMOTRON_SIZE, NEMOTRON_SHA256)
+}
+
+/// Проверить файл против ожидаемых размера и sha256.
+///
+/// Результат кэшируется по `(путь, размер, mtime)` — и успех, **и** отказ
+/// (F6/M3). Ошибка чтения/metadata не кэшируется: файл могут докачать.
+/// Файл иного размера отсекается **до** хеширования (400 МБ не читаются).
+pub fn verify_against(path: &Path, expected_size: u64, expected_sha: &str) -> Result<()> {
     let meta = std::fs::metadata(path)
         .map_err(|e| DiarizeError::Io(format!("{}: {e}", path.display())))?;
-    if meta.len() != NEMOTRON_SIZE {
+    if meta.len() != expected_size {
         return Err(DiarizeError::Format(format!(
-            "размер модели {}: ожидалось {NEMOTRON_SIZE} байт, получено {} \
+            "размер модели {}: ожидалось {expected_size} байт, получено {} \
              (скачайте заново: installers\\fetch_nemotron3_model.ps1)",
             path.display(),
             meta.len()
@@ -247,20 +269,23 @@ pub fn verify_model(path: &Path) -> Result<()> {
         .unwrap_or(0);
     let key = (path.to_path_buf(), meta.len(), mtime);
     let cache = VERIFIED.get_or_init(|| Mutex::new(HashMap::new()));
-    if cache.lock().map(|c| c.contains_key(&key)).unwrap_or(false) {
-        return Ok(());
+    if let Some(cached) = cache.lock().ok().and_then(|c| c.get(&key).cloned()) {
+        return cached.map_err(DiarizeError::Format);
     }
-    let got = sha256_file(path)?;
-    if got != NEMOTRON_SHA256 {
-        return Err(DiarizeError::Format(format!(
-            "sha256 модели {} не совпал: ожидался {NEMOTRON_SHA256}, получен {got}",
+    // Файл мог исчезнуть между metadata и чтением — фиксируем ошибку строкой,
+    // чтобы она не кэшировала `Io` (докачка должна «оживить» проверку).
+    let result = match sha256_file(path) {
+        Ok(got) if got == expected_sha => Ok(()),
+        Ok(got) => Err(format!(
+            "sha256 модели {} не совпал: ожидался {expected_sha}, получен {got}",
             path.display()
-        )));
-    }
+        )),
+        Err(e) => return Err(e),
+    };
     if let Ok(mut c) = cache.lock() {
-        c.insert(key, ());
+        c.insert(key, result.clone());
     }
-    Ok(())
+    result.map_err(DiarizeError::Format)
 }
 
 /// Диаризатор: модель загружается лениво, при первом прогоне выбирается EP.
@@ -588,6 +613,13 @@ mod tests {
         cfg.chunk_min = 1.0;
         assert!(cfg.validate().is_err(), "chunk_min вне 2..=30");
         cfg.chunk_min = 10.0;
+        // F12 (L3): onset/offset вне 0..=1 не доходят до модели.
+        cfg.onset = 1.5;
+        assert!(cfg.validate().is_err(), "onset вне 0..=1");
+        cfg.onset = 0.5;
+        cfg.offset = -1.0;
+        assert!(cfg.validate().is_err(), "offset вне 0..=1");
+        cfg.offset = 1.0;
         assert!(cfg.validate().is_ok());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -601,6 +633,58 @@ mod tests {
         std::fs::write(&model, b"not a model").unwrap();
         let err = verify_model(&model).unwrap_err();
         assert!(err.to_string().contains("размер модели"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// F6 (ревью M3): отрицательный результат проверки кэшируется — битая модель
+    /// не хешируется на каждом задании. Ключ — `(путь, размер, mtime)`.
+    #[test]
+    fn negative_result_is_cached() {
+        let dir = std::env::temp_dir().join(format!("hds-diar-neg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("m.onnx");
+        std::fs::write(&model, b"abc").unwrap();
+        let mtime = std::fs::metadata(&model).unwrap().modified().unwrap();
+        let wrong = "00".repeat(32);
+
+        // Первая проверка — sha не совпал (размер совпадает с ожидаемым).
+        let err = verify_against(&model, 3, &wrong).unwrap_err();
+        assert!(err.to_string().contains("sha256"), "{err}");
+
+        // Файл подменён (тот же размер, тот же mtime) ⇒ ключ тот же, берётся кэш:
+        // для верного sha результат всё равно прежний отказ.
+        std::fs::write(&model, b"xyz").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&model)
+            .unwrap()
+            .set_modified(mtime)
+            .unwrap();
+        let good = sha256_file(&model).unwrap();
+        let err = verify_against(&model, 3, &good).unwrap_err();
+        assert!(
+            err.to_string().contains("sha256"),
+            "отрицательный результат не закэширован: {err}"
+        );
+
+        // Новый mtime ⇒ ключ другой ⇒ проверка заново: верный sha проходит.
+        std::fs::File::options()
+            .write(true)
+            .open(&model)
+            .unwrap()
+            .set_modified(mtime + std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(
+            verify_against(&model, 3, &good).is_ok(),
+            "после перезаписи файла проверка должна пройти заново"
+        );
+
+        // Удаление файла — понятная ошибка ввода-вывода (и она не кэшируется).
+        std::fs::remove_file(&model).unwrap();
+        let err = verify_against(&model, 3, &good).unwrap_err();
+        assert!(matches!(err, DiarizeError::Io(_)), "{err}");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

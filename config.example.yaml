@@ -364,10 +364,16 @@ auto_transcribe:
   diarization: true
   # Legacy-ветка (sortformer GGUF): действует, только если diarization.backend:
   # sortformer. Новый путь — секция `diarization` ниже (Nemotron-3, 8 спикеров).
-  diarization_model: ''       # .gguf для sortformer; '' → автопоиск %APPDATA%\OpenResearchTools\models\*sortformer*
-  diarization_backend: nemotron3  # nemotron3 (по умолчанию) | sortformer | off; тело запроса сильнее секции diarization
+  diarization_model: ''       # .gguf для sortformer; '' → автопоиск: HDS_MODELS_DIR →
+                              # %ProgramData%\hermes-disk-search\models → %APPDATA%\OpenResearchTools\models
+                              # (каталог *sortformer*) — порядок как у hds_diarize::models_roots
+  diarization_backend: nemotron3  # ЯВНЫЙ backend уходит в тело запроса и сильнее секции
+                                  # diarization; нет строки (или '') ⇒ поле не отправляется,
+                                  # backend выбирает хост по diarization.backend → авто (№3)
   diarization_feed_ms: 10800001
-  diarization_required: true  # нет модели ⇒ ЖЁСТКИЙ отказ задания (без fallback в speech)
+  diarization_required: true  # нет модели ⇒ ЖЁСТКИЙ отказ задания (без fallback в speech);
+                              # ключ уходит в теле и перекрывает diarization.required хоста
+                              # (для nemotron3; legacy sortformer при сбое всё равно падает)
   whisper_model: ''           # '' → index.whisper_model / автопоиск движка
   whisper_gpu: -1             # -1 = как gpu.device_index; иначе индекс GPU движка
   # --- событие «файл помещён во входную папку» (§3 плана) ---

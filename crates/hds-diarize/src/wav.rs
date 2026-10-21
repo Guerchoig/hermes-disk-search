@@ -45,8 +45,18 @@ impl Wav {
     }
 }
 
+/// Максимум сэмплов PCM 16-bit в RIFF/WAV: размеры чанков — `u32`, поэтому для
+/// 16 кГц mono предел ≈37 ч (F8, ревью M5). Сам продуктовый предел короче —
+/// [`crate::MAX_DIAR_SEC`] (6 ч, решение владельца Q4).
+pub const MAX_RIFF_SAMPLES: usize = (u32::MAX as usize - 36) / 2;
+
 /// Разобрать WAV из памяти (без файловой системы — удобно тестировать).
 pub fn parse_wav(buf: &[u8]) -> Result<Wav> {
+    if buf.len() >= 4 && &buf[0..4] == b"RF64" {
+        return Err(DiarizeError::Format(
+            "WAV/RF64 не поддерживается (запись > 4 ГиБ)".to_string(),
+        ));
+    }
     if buf.len() < 44 || &buf[0..4] != b"RIFF" || &buf[8..12] != b"WAVE" {
         return Err(DiarizeError::Format("не RIFF/WAVE".to_string()));
     }
@@ -111,6 +121,29 @@ pub fn parse_wav(buf: &[u8]) -> Result<Wav> {
 
 /// Собрать WAV (PCM 16-bit, mono) в память.
 pub fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
+    encode_wav_with_limit(samples, sample_rate, usize::MAX)
+        .expect("лимит usize::MAX не превышается")
+}
+
+/// Собрать WAV с проверкой предела RIFF (`u32`) — F8 (ревью M5).
+///
+/// Раньше `data_len` усекался до `u32`, и запись длиннее ≈6.7 ч давала **битый**
+/// файл; теперь — понятная ошибка вместо тихой порчи данных.
+pub fn encode_wav_checked(samples: &[i16], sample_rate: u32) -> Result<Vec<u8>> {
+    encode_wav_with_limit(samples, sample_rate, MAX_RIFF_SAMPLES)
+}
+
+/// Общая реализация `encode_wav*`: лимит параметром — чтобы тест проверил
+/// арифметику на маленьком массиве, не выделяя > 4 ГиБ.
+fn encode_wav_with_limit(samples: &[i16], sample_rate: u32, max: usize) -> Result<Vec<u8>> {
+    if samples.len() > max {
+        let hours = samples.len() as f64 / sample_rate.max(1) as f64 / 3600.0;
+        let limit = max as f64 / sample_rate.max(1) as f64 / 3600.0;
+        return Err(DiarizeError::Format(format!(
+            "WAV > 4 ГиБ: RIFF не поддерживается — запись слишком длинная \
+             ({hours:.1} ч при {sample_rate} Гц mono; предел RIFF ≈{limit:.1} ч)"
+        )));
+    }
     let data_len = (samples.len() * 2) as u32;
     let mut out = Vec::with_capacity(44 + data_len as usize);
     out.extend_from_slice(b"RIFF");
@@ -129,22 +162,37 @@ pub fn encode_wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
     for s in samples {
         out.extend_from_slice(&s.to_le_bytes());
     }
-    out
+    Ok(out)
 }
 
 /// Прочитать WAV с диска.
 pub fn read_wav(path: &Path) -> Result<Wav> {
+    // F8: RF64 (запись > 4 ГиБ) не читаем в память — понятная ошибка сразу.
+    {
+        use std::io::Read;
+        let mut head = [0u8; 4];
+        if let Ok(mut f) = fs::File::open(path) {
+            if f.read_exact(&mut head).is_ok() && head == *b"RF64" {
+                return Err(DiarizeError::Format(format!(
+                    "{}: WAV/RF64 не поддерживается (запись > 4 ГиБ)",
+                    path.display()
+                )));
+            }
+        }
+    }
     let buf = fs::read(path).map_err(|e| DiarizeError::Io(format!("{}: {e}", path.display())))?;
     parse_wav(&buf)
 }
 
 /// Записать WAV (PCM 16-bit, mono) на диск.
+///
+/// F8: предел RIFF проверяется **до** записи — файл не создаётся битым.
 pub fn write_wav(path: &Path, samples: &[i16], sample_rate: u32) -> Result<()> {
+    let bytes = encode_wav_checked(samples, sample_rate)?;
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).map_err(|e| DiarizeError::Io(format!("{}: {e}", dir.display())))?;
     }
-    fs::write(path, encode_wav(samples, sample_rate))
-        .map_err(|e| DiarizeError::Io(format!("{}: {e}", path.display())))
+    fs::write(path, bytes).map_err(|e| DiarizeError::Io(format!("{}: {e}", path.display())))
 }
 
 #[cfg(test)]
@@ -205,5 +253,42 @@ mod tests {
         assert_eq!(w.slice_from(2), &[3, 4]);
         assert!(w.slice_from(99).is_empty());
         assert_eq!(w.to_f32()[0], 1.0 / 32768.0);
+    }
+
+    /// F8 (ревью M5): запись длиннее предела RIFF — понятная ошибка, а не битый
+    /// файл. Арифметику проверяем на маленьком лимите (4 ГиБ не выделяем).
+    #[test]
+    fn encode_wav_checked_rejects_overflow() {
+        let samples = [0i16; 10];
+        assert!(encode_wav_with_limit(&samples, 16_000, 10).is_ok());
+        let err = encode_wav_with_limit(&samples, 16_000, 9).unwrap_err();
+        assert!(matches!(err, DiarizeError::Format(_)), "{err}");
+        assert!(err.to_string().contains("RIFF"), "{err}");
+        // Предел RIFF по умолчанию — для 16 кГц mono это ≈37 ч (4 ГиБ / 32 КБ/с).
+        let limit_hours = MAX_RIFF_SAMPLES as f64 / 16_000.0 / 3600.0;
+        assert!(
+            (36.0..38.0).contains(&limit_hours),
+            "предел {limit_hours:.2} ч"
+        );
+        // Продуктовый предел короче (6 ч, решение Q4) и REACHED раньше RIFF.
+        assert!(crate::MAX_DIAR_SEC < limit_hours * 3600.0);
+        assert!(encode_wav_checked(&samples, 16_000).is_ok());
+    }
+
+    /// F8: RF64 (ffmpeg пишет его для > 4 ГиБ) отвергается с подсказкой —
+    /// и через `parse_wav`, и через `read_wav` (без чтения файла целиком).
+    #[test]
+    fn parse_wav_rejects_rf64_with_hint() {
+        let mut buf = vec![0u8; 44];
+        buf[0..4].copy_from_slice(b"RF64");
+        buf[8..12].copy_from_slice(b"WAVE");
+        let err = parse_wav(&buf).unwrap_err();
+        assert!(err.to_string().contains("RF64"), "{err}");
+
+        let p = std::env::temp_dir().join(format!("hds-rf64-{}.wav", std::process::id()));
+        fs::write(&p, &buf).unwrap();
+        let err = read_wav(&p).unwrap_err();
+        assert!(err.to_string().contains("RF64"), "{err}");
+        fs::remove_file(&p).ok();
     }
 }

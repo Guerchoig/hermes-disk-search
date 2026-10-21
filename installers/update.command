@@ -13,7 +13,15 @@
 #   -WhatIf                preview, no changes
 #   -Force                 reinstall the same version
 #   -RollbackTo 0.19.0     roll back to a kept version
+#   -NoModels              skip the Nemotron-3 diarization model top-up
 #   -Root /opt/hds         explicit root (no LaunchDaemon registered)
+#
+# The Nemotron-3 model is fetched by update.ps1 itself (F3): after the pointer
+# switch it runs the NEW version's installers/fetch_nemotron3_model.ps1 into
+# HDS_MODELS_DIR / the machine models dir. If it is skipped (-NoModels) or the
+# download fails, the update still succeeds and `hds check` prints the command;
+# to install the model manually:
+#   sudo pwsh -NoProfile -File "$ROOT/app/current/installers/fetch_nemotron3_model.ps1"
 #
 # NOTE: keep this file ASCII-only (like the other installers).
 set -u
@@ -73,5 +81,9 @@ if [ "$ROOT_SET" = "no" ]; then
 fi
 
 echo "[..] updating to $VER from $ARCH"
+# F3: the Nemotron-3 model is top-up fetched by update.ps1 after the switch
+# (idempotent); -NoModels skips it. Manual path if the download failed:
+echo "[..] Nemotron-3 model: installers/fetch_nemotron3_model.ps1 runs via update.ps1"
+echo "     manual: sudo pwsh -NoProfile -File \"\$ROOT/app/current/installers/fetch_nemotron3_model.ps1\""
 exec "$PWSH" -NoProfile -ExecutionPolicy Bypass -File "$HERE/update.ps1" \
     ${ARG[@]+"${ARG[@]}"} -Profile server -From "$ARCH" -Version "$VER" "$@"

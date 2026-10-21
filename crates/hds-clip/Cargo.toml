@@ -7,6 +7,10 @@ rust-version.workspace = true
 
 [dependencies]
 hds-core = { path = "../hds-core" }
+# F7 (ревью M4): единое ONNX-окружение процесса — `hds_ort`, а не локальный
+# `OnceLock` (иначе `hds`, слинковавший CLIP и диаризацию, получил бы два
+# окружения и «only one environment is allowed per process»).
+hds-ort = { path = "../hds-ort" }
 # ONNX Runtime: одна версия на воркспейс (PLAN_DIARIZATION_NEMOTRON.md W2) — её же
 # требует `parakeet-rs 0.4.2` (`=2.0.0-rc.15`, MSRV 1.92, edition 2024).
 ort = "=2.0.0-rc.15"

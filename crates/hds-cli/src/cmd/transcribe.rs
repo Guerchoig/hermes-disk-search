@@ -12,15 +12,16 @@ use hds_core::config::{load, project_root};
 use hds_index::{run_transcribe_watch, transcribe_once, AutoTranscribeConfig};
 
 /// Конфиг конвейера из `config.yaml` (или сообщение об ошибке загрузки).
-fn load_cfg() -> Result<AutoTranscribeConfig, String> {
+fn load_cfg() -> Result<(hds_core::config::Config, AutoTranscribeConfig), String> {
     let cfg = load().map_err(|e| format!("конфиг: {}", e.message()))?;
-    Ok(AutoTranscribeConfig::from_config(&cfg))
+    let at = AutoTranscribeConfig::from_config(&cfg);
+    Ok((cfg, at))
 }
 
 /// Демон `hds transcribe-watch`: `inbox_dir` → `out_dir` (§4).
 pub fn cmd_transcribe_watch() -> i32 {
-    let at = match load_cfg() {
-        Ok(at) => at,
+    let (cfg, at) = match load_cfg() {
+        Ok(v) => v,
         Err(e) => {
             eprintln!("{e}");
             return 1;
@@ -34,7 +35,7 @@ pub fn cmd_transcribe_watch() -> i32 {
         );
         return 0;
     }
-    match run_transcribe_watch(&at) {
+    match run_transcribe_watch(&at, &cfg) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("Ошибка: {}", e.message());
@@ -91,6 +92,23 @@ fn cmd_transcribe_watch_dry_run() -> i32 {
         }
     }
     let at = AutoTranscribeConfig::from_config(&cfg);
+    // F2 (B2): фактический запрос конвейера. Раньше здесь показывался только
+    // хостовый конфиг, а клиент всегда слал `nemotron3` — `--dry-run` был «зелёным»
+    // на конфиге, который задание гарантированно ломало.
+    let requested = at.transcribe.requested_backend();
+    match hds_index::diag::requested_backend_check(&cfg, requested) {
+        Some(c) => {
+            println!("[{}] {}: {}", c.status, c.title, c.msg);
+            if c.status == "fail" {
+                fail = true;
+            }
+        }
+        None => println!(
+            "[--] конвейер автотранскрибации: diarization_backend не отправляется — \
+             backend выберет хост (diarization.backend, иначе авто: nemotron3 при валидной \
+             модели, иначе sortformer)"
+        ),
+    }
     println!(
         "enabled={} inbox={:?} out={:?} source_disposal={:?} diarization_required={}",
         at.enabled,
@@ -114,7 +132,7 @@ fn cmd_transcribe_watch_dry_run() -> i32 {
 /// Требует заданного `auto_transcribe.out_dir` (куда писать) и владельца GPU —
 /// иначе вернёт понятную ошибку. Очередь и `source_disposal` не участвуют.
 pub fn cmd_transcribe_once(file: &str) -> i32 {
-    let at = match load_cfg() {
+    let (_, at) = match load_cfg() {
         Ok(at) => at,
         Err(e) => {
             eprintln!("{e}");
