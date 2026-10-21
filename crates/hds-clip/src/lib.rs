@@ -12,12 +12,15 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+pub mod env;
 pub mod preprocess;
 pub mod text;
 pub mod vision;
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+use ort::environment::Environment;
 
 pub use config::ClipConfig;
 
@@ -40,12 +43,21 @@ pub struct Clip {
 impl Clip {
     /// Загрузить оба энкодера из конфига; `None` — модели недоступны (деградация).
     pub fn load(cfg: &hds_core::config::Config) -> Option<Clip> {
+        let env = env::environment().ok()?;
+        Self::load_with_env(cfg, env)
+    }
+
+    /// Загрузить оба энкодера в **заданное** ONNX-окружение (одно на процесс).
+    ///
+    /// Нужно бинарям, где ORT уже инициализирован другим крейтом (W2: `hds-diarize`
+    /// в `llm_host`); иначе окружение создаёт [`env::environment`].
+    pub fn load_with_env(cfg: &hds_core::config::Config, env: &Environment) -> Option<Clip> {
         let c = ClipConfig::from_config(cfg);
         if !c.enabled || !c.models_present() {
             return None;
         }
-        let vision = VisionEncoder::load(&c.vision_model).ok()?;
-        let text = TextEncoder::load(&c.text_model, &c.tokenizer).ok()?;
+        let vision = VisionEncoder::load_with_env(&c.vision_model, env).ok()?;
+        let text = TextEncoder::load_with_env(&c.text_model, &c.tokenizer, env).ok()?;
         Some(Clip {
             vision,
             text,

@@ -7,7 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 hds-core = { path = "../hds-core" }
-ort = "2.0.0-rc.10"
+# ONNX Runtime: одна версия на воркспейс (PLAN_DIARIZATION_NEMOTRON.md W2) — её же
+# требует `parakeet-rs 0.4.2` (`=2.0.0-rc.15`, MSRV 1.92, edition 2024).
+ort = "=2.0.0-rc.15"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "bmp", "tiff", "webp", "gif"] }
 tokenizers = { version = "0.21", default-features = false, features = ["fancy-regex"] }
 serde_json.workspace = true

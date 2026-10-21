@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use hds_core::error::{CoreError, Result};
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::Tensor;
 use tokenizers::{Tokenizer, TruncationParams};
@@ -22,9 +23,15 @@ pub struct TextEncoder {
 }
 
 impl TextEncoder {
-    /// Загрузить модель (`clip_text_dense.onnx`) и токенайзер (`tokenizer.json`).
+    /// Загрузить модель (`clip_text_dense.onnx`) и токенайзер (`tokenizer.json`)
+    /// в общее окружение процесса.
     pub fn load(model: &Path, tokenizer_path: &Path) -> Result<Self> {
-        let session = Session::builder()
+        Self::load_with_env(model, tokenizer_path, crate::env::environment()?)
+    }
+
+    /// Загрузить в **заданное** ONNX-окружение (см. [`crate::env`]).
+    pub fn load_with_env(model: &Path, tokenizer_path: &Path, env: &Environment) -> Result<Self> {
+        let session = Session::builder(env)
             .map_err(|e| CoreError::Other(format!("text builder: {e}")))?
             .commit_from_file(model)
             .map_err(|e| CoreError::Other(format!("text ONNX {}: {e}", model.display())))?;

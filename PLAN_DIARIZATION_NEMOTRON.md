@@ -263,36 +263,56 @@ mp4↔mp3 lag **+0 мс**; первая реплика не потеряна п�
 «Ольга,» и «коллеги,» (тихое приветствие, ради которого и выбран порог −50 dBFS) и обрывок
 «планировать их»; фантомов в тишине нет. Время ASR не выросло (44.0 с против 51.5 с без языка).
 
-### W2. ONNX Runtime: одна версия на воркспейс (0.5 дня)
+### W2. ONNX Runtime: одна версия на воркспейс (0.5 дня) — ✅ **выполнено** (21.10.2026)
 
-- [ ] `[workspace.package] rust-version = "1.92"` (локально 1.97.1, CI на `stable`); edition наших
-      крейтов остаётся 2021 (`ort 2.0.0-rc.15` сам собирается с edition 2024).
-- [ ] `hds-clip`: `ort = "2.0.0-rc.15"`, починить API-дельты (`Session::builder`, `Tensor`, `inputs!`,
-      `value()`); юниты + тесты `hds-clip` + живой `hds clip-index` на одной картинке.
-- [ ] `hds-diarize::ort_env()` — **единственная** точка создания `Environment` (`OnceLock`), поверх
-      `parakeet_rs::ort::init().build()`; `hds-clip` принимает `&Environment` (нужно, если один бинарь
-      когда-нибудь слинкует оба; сейчас `hds` и `llm_host` — разные бинари).
-- [ ] `parakeet-rs` фичи: `default-features = false` + `sortformer`; `cpu` везде, `directml` — только
-      Windows, `coreml` — только macOS; **проверить**, что без `ort-defaults` бинарь ORT скачивается
-      (иначе добавить фичу и записать в отчёт).
-- [ ] Контроль: `cargo tree -i ort` — **одна** версия; `cargo tree -i parakeet-rs` — одна.
+- [x] `[workspace.package] rust-version = "1.92"` (локально 1.97.1). MSRV включил новые clippy-линты
+      по всему воркспейсу — исправлено: `hds-core/src/roots.rs` (`map_or` → `is_none_or`),
+      `hds-mcp/tests/client_package.rs` (`repeat().take()` → `repeat_n`).
+- [x] `hds-clip`: `ort = "=2.0.0-rc.15"`. API-дельта оказалась одна: **`Session::builder(&Environment)`**
+      (в rc.13 аргумента не было). Введён `hds_clip::env::environment()` — `OnceLock<Result<Environment>>`
+      на процесс (ошибка кэшируется), и `Clip::load_with_env` / `VisionEncoder::load_with_env` /
+      `TextEncoder::load_with_env` для случая, когда ORT уже инициализирован другим крейтом.
+- [x] `hds-diarize::ort_env()` — `OnceLock` поверх `parakeet_rs::ort::init().build()` + `ort_env_clone()`
+      (`Environment` — `Arc`, клон бесплатный); тест `env_is_singleton` (повторный вызов — тот же
+      указатель). `parakeet-rs = "=0.4.2"`, фичи: дефолтные (`cpu` + `ort-defaults` + `api-28`) +
+      `sortformer`, на Windows ещё `directml`, на macOS — `coreml`.
+      **Уточнение к плану:** `default-features = false` не годится — `ort-defaults` включает
+      `download-binaries`/`copy-dylibs`; без него ORT не подхватывается.
+- [x] `hds-clip` теперь в одном бинаре с `hds-diarize` **уже сейчас**: `hds` → `hds-ui` → `hds-llama`
+      → `hds-diarize` (плюс `hds-clip`). Коллизии нет, потому что CLI не инициализирует диаризацию;
+      правило «один ORT-environment на процесс» зафиксировано в doc-комментариях обоих крейтов,
+      а `Clip::load_with_env` готов принять общий env (W4).
+- [x] Контроль: `cargo tree -i ort` — **одна** версия (`2.0.0-rc.15`); `cargo tree -i parakeet-rs` —
+      одна (`0.4.2`).
 
-**Приёмка W2:** `cargo build --release` целиком; `hds clip-index` работает; `llm_host` стартует;
-`cargo fmt/clippy/test` зелёные.
+**Приёмка W2 — ✅ выполнена:**
+- `cargo build --release` целиком — ок (собран в `target\w2`, потому что службы держат
+  `target\release\*.exe`, а останавливать их без админа нельзя; на артефакт это не влияет).
+- Паритет CLIP на rc.15 (`cargo test -p hds-clip --test clip_parity -- --ignored`): vision
+  **cos 0.999976 / 0.999950**, text **1.000000** — численно то же, что на rc.13.
+- Живой `hds clip-index` на песочнице (`HDS_ROOT`=репо, `HDS_CONFIG`=песочница): `hds index` —
+  `[1] накладная_с_exif.jpg -> indexed(1 чанков)`, `clip-index` — «картинок без векторов: 0»,
+  в БД `images_vec` 1 строка (vision-сессия rc.15 отработала).
+- `llm_host.exe` (пересобранный, ORT-linked) — `status` отвечает, `DirectML.dll` скопирован рядом;
+  `onnxruntime*.dll` рядом нет — ORT линкуется статически (для упаковки: тащить DLL не нужно,
+  `DirectML.dll` — нужен; учесть в W6).
+- `cargo fmt --all -- --check` — 0; `cargo clippy --workspace --all-targets -D warnings` — 0;
+  `cargo test --workspace` — зелёный.
 
 ### W3. Крейт `hds-diarize` (2 дня)
 
 - [ ] `crates/hds-diarize/Cargo.toml`:
       ```toml
       [dependencies]
-      parakeet-rs = { version = "=0.4.2", default-features = false, features = ["sortformer", "cpu"] }
+      parakeet-rs = { version = "=0.4.2", features = ["sortformer"] }
       [target.'cfg(windows)'.dependencies]
-      parakeet-rs = { version = "=0.4.2", default-features = false, features = ["sortformer", "cpu", "directml"] }
+      parakeet-rs = { version = "=0.4.2", features = ["sortformer", "directml"] }
       [target.'cfg(target_os = "macos")'.dependencies]
-      parakeet-rs = { version = "=0.4.2", default-features = false, features = ["sortformer", "cpu", "coreml"] }
+      parakeet-rs = { version = "=0.4.2", features = ["sortformer", "coreml"] }
       ```
-      Версию пиним **точно** (`=0.4.2`), как требует «Грабли» п. 6 handoff; новый крейт пишет русские
-      докстринги, комментов по-английски не добавляем.
+      Версию пиним **точно** (`=0.4.2`), как требует «Грабли» п. 6 handoff; дефолтные фичи
+      **оставляем** (см. W2: `ort-defaults` тянет `download-binaries`/`copy-dylibs`). Уже добавлено
+      в W2, здесь — только использование.
 - [ ] Публичный API (русские докстринги, стиль проекта):
       ```rust
       pub struct Turn { pub start: f64, pub end: f64, pub speaker: u32 }

@@ -99,7 +99,7 @@ pub fn project_for_path<'a>(roots: &'a [Root], path: &str) -> Option<&'a str> {
         if !rc.is_empty()
             && pc.len() >= rc.len()
             && pc[..rc.len()] == rc[..]
-            && best.as_ref().map_or(true, |(n, _)| rc.len() > *n)
+            && best.as_ref().is_none_or(|(n, _)| rc.len() > *n)
         {
             best = Some((rc.len(), r));
         }

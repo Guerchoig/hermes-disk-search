@@ -87,7 +87,7 @@ fn get_raw_ua(
 fn fake_zip() -> Vec<u8> {
     let mut b = b"PK\x03\x04".to_vec();
     b.extend_from_slice(&[0x00, 0xff, 0xfe, 0x80, 0x0a, 0x0d, 0x00, 0x01]);
-    b.extend(std::iter::repeat(b'\xc3').take(512));
+    b.extend(std::iter::repeat_n(b'\xc3', 512));
     b.extend_from_slice(&[0xff, 0xff, 0xfe]);
     b
 }

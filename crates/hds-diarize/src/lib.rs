@@ -9,19 +9,23 @@
 //!   речи в окне сегмента (отбраковка галлюцинаций в паузах);
 //! * [`decode`] — декодирование медиа в WAV одним проходом через CLI `ffmpeg`.
 //!
-//! На шаге **W3** добавится `sortformer` (обёртка `parakeet-rs`: EP по платформе,
-//! чанкинг `feed()`/`flush()`), `merge` (сегменты ASR × turns → блоки) и
-//! `render` (`.md`/`.srt` в текущем формате `### SPEAKER_NN [HH:MM:SS - HH:MM:SS]`).
+//! С W2 в зависимостях `parakeet-rs 0.4.2` (ONNX Runtime `2.0.0-rc.15`) и модуль
+//! [`ort_env`] — единственное окружение ORT на процесс. На шаге **W3** добавится
+//! `sortformer` (обёртка `parakeet-rs`: EP по платформе, чанкинг `feed()`/`flush()`),
+//! `merge` (сегменты ASR × turns → блоки) и `render` (`.md`/`.srt` в текущем формате
+//! `### SPEAKER_NN [HH:MM:SS - HH:MM:SS]`).
 //!
 //! Инварианты таймлайна (`PLAN_DIARIZATION_NEMOTRON.md` §3.4): все времена —
 //! абсолютные, от начала исходного медиа; `trim_offset` из [`vad::TrimConfig`]
 //! прибавляется к таймкодам ASR **ровно один раз**.
 
 pub mod decode;
+pub mod ort_env;
 pub mod vad;
 pub mod wav;
 
 pub use decode::decode_to_wav;
+pub use ort_env::{ort_env, ort_env_clone};
 pub use vad::{leading_silence_samples, speech_stats, SpeechStats, TrimConfig};
 pub use wav::{read_wav, write_wav, Wav};
 

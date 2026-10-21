@@ -11,7 +11,7 @@ exclude = ["tools/parity/spikes"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.92"
 
 [workspace.dependencies]
 blake2 = "0.10"

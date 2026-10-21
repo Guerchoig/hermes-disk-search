@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use hds_core::error::{CoreError, Result};
+use ort::environment::Environment;
 use ort::session::Session;
 use ort::value::Tensor;
 
@@ -16,9 +17,15 @@ pub struct VisionEncoder {
 }
 
 impl VisionEncoder {
-    /// Загрузить модель (`clip_vision.onnx`).
+    /// Загрузить модель (`clip_vision.onnx`) в общее окружение процесса.
     pub fn load(model: &Path) -> Result<Self> {
-        let session = Session::builder()
+        Self::load_with_env(model, crate::env::environment()?)
+    }
+
+    /// Загрузить модель в **заданное** ONNX-окружение (когда в процессе уже есть
+    /// одно: например, `llm_host` с диаризацией — см. `crate::env`).
+    pub fn load_with_env(model: &Path, env: &Environment) -> Result<Self> {
+        let session = Session::builder(env)
             .map_err(|e| CoreError::Other(format!("vision builder: {e}")))?
             .commit_from_file(model)
             .map_err(|e| CoreError::Other(format!("vision ONNX {}: {e}", model.display())))?;

@@ -3,9 +3,8 @@
 # разбор/запись WAV, декодирование медиа через CLI `ffmpeg` (вариант A — один проход),
 # энергетический VAD для обрезки ведущей тишины и отбраковки «реплик из тишины».
 #
-# На шаге W0 крейт **без** зависимости от `parakeet-rs`: появляется в W3, после
-# унификации ORT (W2) — иначе cargo подтянул бы `ort 2.0.0-rc.15` раньше времени
-# и сломал бы сборку `hds-clip`.
+# W0: крейт родился без `parakeet-rs` (WAV/VAD/декодер). W2 добавил ONNX Runtime
+# (`parakeet-rs` + `ort_env`), W3 добавляет сам `Sortformer` и сшивку с ASR.
 [package]
 name = "hds-diarize"
 description = "Диаризация Nemotron-3 (Sortformer v3) + WAV/VAD/декодер (variant A)"
@@ -15,6 +14,18 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# W2/W3: Nemotron-3 (Sortformer v3) через parakeet-rs. Версия пинована точно:
+# крейт молодой (API менялся между 0.3/0.4), а он тянет `ort = "=2.0.0-rc.15"` —
+# ту же версию, что `hds-clip` (одна на воркспейс). Дефолтные фичи parakeet-rs
+# (`cpu`, `ort-defaults`, `api-28`) нужны: `ort-defaults` включает
+# `download-binaries`/`copy-dylibs` — иначе ONNX Runtime не подхватится.
+parakeet-rs = { version = "=0.4.2", features = ["sortformer"] }
+
+[target.'cfg(windows)'.dependencies]
+parakeet-rs = { version = "=0.4.2", features = ["sortformer", "directml"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+parakeet-rs = { version = "=0.4.2", features = ["sortformer", "coreml"] }
 
 [[bin]]
 name = "diar_wav_probe"
