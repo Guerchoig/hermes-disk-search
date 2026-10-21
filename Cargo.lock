@@ -667,6 +667,7 @@ dependencies = [
  "flate2",
  "hds-clip",
  "hds-core",
+ "hds-diarize",
  "hds-extract",
  "hex",
  "rusqlite",

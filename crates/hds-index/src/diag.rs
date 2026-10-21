@@ -877,29 +877,324 @@ pub fn check_gpu_observability(cfg: &Config) -> Check {
     check
 }
 
-/// T5: модель диаризации (sortformer) — без неё автотранскрибация с диаризацией
-/// падает: задание `mode: transcript` требует модель и **не** деградирует в `speech`
-/// (`PLAN_AUTO_TRANSCRIBE` §0 п.6).
-pub fn check_diarization(cfg: &Config) -> Check {
-    match crate::autotranscribe::diarization_model_for(cfg) {
-        Some(p) => Check::new("diarization", "ok", "модель диаризации (sortformer)").msg(format!(
-            "найдена: {} ({:.0} МБ)",
-            p.display(),
-            std::fs::metadata(&p)
-                .map(|m| m.len() as f64 / 1_048_576.0)
-                .unwrap_or(0.0)
-        )),
-        None => Check::new(
-            "diarization",
-            "warn",
-            "модель диаризации (sortformer) не найдена",
-        )
-        .msg(
-            "`hds transcribe-watch` будет падать: задание `mode: transcript` без модели \
-             отказывает (fallback в speech нет)",
-        )
-        .fix("installers\\fetch_diarization_model.ps1 (или auto_transcribe.diarization_model)"),
+/// Backend диаризации, который выберет `llm_host` (`diarization.backend` → авто).
+///
+/// W5: `hds check`/`hds whisper-check` показывают тот же выбор, что сделает хост
+/// (`host::pick_diar_backend`/`resolved_diar_backend`), чтобы расхождение было
+/// видно до первого задания.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiarBackend {
+    /// Nemotron-3 (Sortformer v3, 8 спикеров) через `hds-diarize`.
+    Nemotron3,
+    /// Прежний путь движка (sortformer GGUF) — рабочий fallback.
+    Sortformer,
+    /// Диаризация выключена (как `diarization: false`).
+    Off,
+}
+
+impl DiarBackend {
+    /// Строка как в конфиге (`nemotron3|sortformer|off`).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            DiarBackend::Nemotron3 => "nemotron3",
+            DiarBackend::Sortformer => "sortformer",
+            DiarBackend::Off => "off",
+        }
     }
+}
+
+/// Что означает `device: auto` на этой платформе (`Diarizer::choose_device`).
+fn platform_diar_ep() -> &'static str {
+    if cfg!(windows) {
+        "directml"
+    } else if cfg!(target_os = "macos") {
+        "coreml"
+    } else {
+        "cpu"
+    }
+}
+
+/// Сводка диаризации для `hds check` и `hds whisper-check` (W5).
+///
+/// Собирается из конфига и файловой системы; модель проверяется
+/// `hds_diarize::verify_model` (размер + sha256, результат кэшируется по
+/// `(путь, размер, mtime)` — 400 МБ хешируются не чаще раза за процесс).
+#[derive(Debug, Clone)]
+pub struct DiarSummary {
+    /// `diarization.backend` как в конфиге (`None` — секции/ключа нет).
+    pub configured: Option<String>,
+    /// Backend по правилу хоста: конфиг → авто (решения владельца №10/№13).
+    pub backend: DiarBackend,
+    /// `diarization.nemotron3.device` (по умолчанию `auto`).
+    pub device: String,
+    /// Что означает `auto` на этой платформе.
+    pub device_auto: &'static str,
+    /// `diarization.nemotron3.chunk_min`.
+    pub chunk_min: f64,
+    /// Путь модели Nemotron-3 (явный из конфига или найденный автопоиском).
+    pub nemotron_model: Option<PathBuf>,
+    /// Проверка модели: `None` — файла нет, `Some(Err)` — не прошла размер/sha256.
+    pub nemotron: Option<std::result::Result<(), String>>,
+    /// Sortformer-модель движка (нужна только legacy-ветке).
+    pub sortformer_model: Option<PathBuf>,
+    /// CLI `ffmpeg` найден: для nemotron3 **обязателен** (им декодируется WAV).
+    pub ffmpeg: bool,
+    /// Предупреждения разбора конфига (хост их пишет в лог, но не падает).
+    pub warnings: Vec<String>,
+}
+
+impl DiarSummary {
+    /// Модель Nemotron-3 есть и проходит размер+sha256.
+    pub fn nemotron_ok(&self) -> bool {
+        matches!(self.nemotron, Some(Ok(())))
+    }
+}
+
+/// Собрать сводку по конфигу (`diarization.*`, `auto_transcribe.diarization_model`).
+pub fn diarization_summary(cfg: &Config) -> DiarSummary {
+    let mut warnings: Vec<String> = Vec::new();
+    let configured = dig(cfg, "diarization.backend")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // Список строгий, как `hds_llama::diar::Backend::parse`: неизвестное значение
+    // не роняет хост — backend выбирается автоматически (предупреждение ниже).
+    let parsed = match configured.as_deref() {
+        None => None,
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "nemotron3" => Some(DiarBackend::Nemotron3),
+            "sortformer" => Some(DiarBackend::Sortformer),
+            "off" => Some(DiarBackend::Off),
+            _ => {
+                warnings.push(format!(
+                    "diarization.backend '{raw}' неизвестен (ожидается nemotron3|sortformer|off) \
+                     — хост выберет backend автоматически"
+                ));
+                None
+            }
+        },
+    };
+
+    let nemotron_model = crate::autotranscribe::nemotron_model_for(cfg);
+    let nemotron = nemotron_model
+        .as_ref()
+        .map(|p| hds_diarize::verify_model(p).map_err(|e| e.to_string()));
+
+    // Авто (решение №10): nemotron3, только если файл модели есть **и** sha256 сошёлся.
+    let auto = if matches!(nemotron, Some(Ok(()))) {
+        DiarBackend::Nemotron3
+    } else {
+        DiarBackend::Sortformer
+    };
+    let backend = parsed.unwrap_or(auto);
+
+    let device = dig(cfg, "diarization.nemotron3.device")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "auto".to_string());
+    match hds_diarize::Device::parse(&device) {
+        None => warnings.push(format!(
+            "diarization.nemotron3.device '{device}' неизвестен (auto|cpu|directml|coreml) — \
+             хост возьмёт auto"
+        )),
+        Some(hds_diarize::Device::DirectMl) if !cfg!(windows) => warnings.push(
+            "diarization.nemotron3.device 'directml' доступен только на Windows — \
+             прогон упадёт на этом EP"
+                .to_string(),
+        ),
+        Some(hds_diarize::Device::CoreMl) if !cfg!(target_os = "macos") => warnings.push(
+            "diarization.nemotron3.device 'coreml' доступен только на macOS — \
+             прогон упадёт на этом EP"
+                .to_string(),
+        ),
+        _ => {}
+    }
+    let chunk_min = dig(cfg, "diarization.nemotron3.chunk_min")
+        .and_then(|v| v.as_f64())
+        .unwrap_or(10.0);
+    if !(2.0..=30.0).contains(&chunk_min) {
+        warnings.push(format!(
+            "diarization.nemotron3.chunk_min {chunk_min} вне 2..=30 — хост оставит 10"
+        ));
+    }
+
+    DiarSummary {
+        configured,
+        backend,
+        device,
+        device_auto: platform_diar_ep(),
+        chunk_min,
+        nemotron_model,
+        nemotron,
+        sortformer_model: crate::autotranscribe::diarization_model_for(cfg),
+        ffmpeg: ffmpeg_exe(cfg).is_some(),
+        warnings,
+    }
+}
+
+/// Вердикт пункта `diarization` по готовой сводке (диск не трогает — поэтому
+/// тестируется без 400-МБ модели).
+///
+/// Правила (`DIARIZATION_NEMOTRON_W4_HANDOFF.md` W5):
+/// * `backend: off` — `ok` (диаризация выключена осознанно);
+/// * `nemotron3` (явно или авто) без модели / с несошедшимся sha256 / без `ffmpeg` —
+///   `fail`: задание упадёт, fallback в `speech` нет;
+/// * секции нет и сработал legacy-fallback — `warn` с причиной;
+/// * `sortformer` явно — прежнее поведение (`warn`, если модели нет).
+pub fn diarization_check(s: &DiarSummary) -> Check {
+    let notes = s.warnings.join("; ");
+    let device = format!("EP {} (auto → {})", s.device, s.device_auto);
+    let mut c = match s.backend {
+        DiarBackend::Off => Check::new("diarization", "ok", "диаризация выключена (backend=off)"),
+        DiarBackend::Sortformer => sortformer_legacy_check(s, &device),
+        DiarBackend::Nemotron3 => nemotron3_check(s, &device),
+    };
+    if !notes.is_empty() {
+        c.msg = if c.msg.is_empty() {
+            notes
+        } else {
+            format!("{}; {notes}", c.msg)
+        };
+    }
+    c
+}
+
+/// T5 + W5: пункт `diarization` — backend, модель (путь + sha256), EP, `ffmpeg`.
+///
+/// Без модели автотранскрибация с диаризацией падает: задание `mode: transcript`
+/// требует модель и **не** деградирует в `speech` (`PLAN_AUTO_TRANSCRIBE` §0 п.6).
+pub fn check_diarization(cfg: &Config) -> Check {
+    diarization_check(&diarization_summary(cfg))
+}
+
+/// Пункт для legacy-ветки (sortformer GGUF): регресс не ломаем.
+fn sortformer_legacy_check(s: &DiarSummary, device: &str) -> Check {
+    let legacy = match s.sortformer_model.as_deref() {
+        Some(p) => format!("модель: {} ({:.0} МБ)", p.display(), size_mb(p)),
+        None => "sortformer-модель не найдена".to_string(),
+    };
+    let explicit = s
+        .configured
+        .as_deref()
+        .map(|v| v.trim().eq_ignore_ascii_case("sortformer"))
+        .unwrap_or(false);
+    if explicit {
+        return match s.sortformer_model.as_deref() {
+            Some(p) => Check::new(
+                "diarization",
+                "ok",
+                format!(
+                    "диаризация: sortformer (legacy), {device} — {} ({:.0} МБ)",
+                    p.display(),
+                    size_mb(p)
+                ),
+            )
+            .msg(format!("{legacy}; {device}")),
+            None => Check::new(
+                "diarization",
+                "warn",
+                "модель диаризации (sortformer) не найдена",
+            )
+            .msg(
+                "`hds transcribe-watch` будет падать: задание `mode: transcript` без \
+                         модели отказывает (fallback в speech нет)",
+            )
+            .fix(
+                "installers\\fetch_diarization_model.ps1 \
+                         (или auto_transcribe.diarization_model)",
+            ),
+        };
+    }
+    // Авто: секции нет (или backend неизвестен) и Nemotron-3 недоступен.
+    let reason = match (&s.nemotron_model, &s.nemotron) {
+        (Some(p), Some(Err(e))) => {
+            format!("модель Nemotron-3 {} не прошла проверку: {e}", p.display())
+        }
+        _ => "модель Nemotron-3 не найдена".to_string(),
+    };
+    Check::new(
+        "diarization",
+        "warn",
+        "диаризация: sortformer (legacy) — сработал автоподбор backend",
+    )
+    .msg(format!("{reason}; {legacy}; {device}"))
+    .fix(
+        "W5: `diarization.backend: nemotron3` + installers\\fetch_nemotron3_model.ps1 \
+         (8 спикеров вместо 4); sortformer остаётся fallback.",
+    )
+}
+
+/// Пункт для Nemotron-3: модель обязательна (жёсткий отказ задания) + `ffmpeg`.
+fn nemotron3_check(s: &DiarSummary, device: &str) -> Check {
+    let Some(path) = s.nemotron_model.as_deref() else {
+        return Check::new(
+            "diarization",
+            "fail",
+            "диаризация: модель Nemotron-3 не найдена",
+        )
+        .msg(format!(
+            "backend=nemotron3 ищет {} в каталогах моделей (HDS_MODELS_DIR → \
+             %ProgramData%\\hermes-disk-search\\models → %APPDATA%\\OpenResearchTools\\models); \
+             задание упадёт, fallback в speech нет",
+            hds_diarize::NEMOTRON_FILE
+        ))
+        .fix("installers\\fetch_nemotron3_model.ps1 (или diarization.nemotron3.model)");
+    };
+    if let Some(Err(e)) = &s.nemotron {
+        return Check::new(
+            "diarization",
+            "fail",
+            "диаризация: модель Nemotron-3 не прошла проверку",
+        )
+        .msg(format!(
+            "{e}; ожидалось {} байт, sha256 {}",
+            hds_diarize::NEMOTRON_SIZE,
+            hds_diarize::NEMOTRON_SHA256
+        ))
+        .fix("Перекачайте модель: installers\\fetch_nemotron3_model.ps1 -Force");
+    }
+    let source = match s.configured.as_deref() {
+        Some(v) if v.trim().eq_ignore_ascii_case("nemotron3") => "конфиг".to_string(),
+        Some(v) => format!("авто, diarization.backend '{v}'"),
+        None => "авто: секции diarization нет".to_string(),
+    };
+    // `hds check` печатает у `ok` только заголовок — путь/sha256/EP/ffmpeg должны
+    // быть видны сразу (полные данные остаются и в `msg` для `/api/diagnostics`).
+    let flag = if s.ffmpeg {
+        "ffmpeg найден"
+    } else {
+        "ffmpeg НЕ найден"
+    };
+    let title = format!(
+        "диаризация: nemotron3 (Sortformer v3), {device} — {} ({:.0} МБ, sha256 ok), {flag}",
+        path.display(),
+        size_mb(path)
+    );
+    let msg = format!(
+        "модель: {} ({:.0} МБ, sha256 ok); backend: {source}; {device}; chunk_min {}",
+        path.display(),
+        size_mb(path),
+        s.chunk_min
+    );
+    if s.ffmpeg {
+        return Check::new("diarization", "ok", title).msg(msg);
+    }
+    Check::new("diarization", "fail", title)
+        .msg(format!(
+            "{msg}; ffmpeg не найден — WAV для диаризации декодировать нечем"
+        ))
+        .fix(
+            "Установите Gyan.FFmpeg машинно (winget install --scope machine -e --id Gyan.FFmpeg) \
+             или укажите index.ffmpeg_cmd.",
+        )
+}
+
+/// Размер файла в МБ (0, если не читается).
+fn size_mb(p: &Path) -> f64 {
+    std::fs::metadata(p)
+        .map(|m| m.len() as f64 / 1_048_576.0)
+        .unwrap_or(0.0)
 }
 
 /// M2 T1 (`PLAN_M2_SERVER_PROFILE.md` §3.1): профиль установки + рекомендации
@@ -2465,6 +2760,144 @@ mod tests {
         assert_eq!(resolve_model(&c, "embedding"), explicit);
 
         std::env::remove_var("LLAMA_RUNTIME_DIR");
+        let _ = std::fs::remove_dir_all(&td);
+    }
+
+    /// W5: вердикт пункта `diarization` — off / nemotron3 / legacy-fallback.
+    #[test]
+    fn diarization_verdict_statuses() {
+        use super::{diarization_check, DiarBackend, DiarSummary};
+
+        fn summary(configured: Option<&str>, backend: DiarBackend) -> DiarSummary {
+            DiarSummary {
+                configured: configured.map(|s| s.to_string()),
+                backend,
+                device: "auto".to_string(),
+                device_auto: "cpu",
+                chunk_min: 10.0,
+                nemotron_model: None,
+                nemotron: None,
+                sortformer_model: None,
+                ffmpeg: true,
+                warnings: Vec::new(),
+            }
+        }
+        let model = PathBuf::from("D:\\models\\nemotron3\\nemotron3_diar_v3.onnx");
+
+        // off — диаризация выключена осознанно.
+        let c = diarization_check(&summary(Some("off"), DiarBackend::Off));
+        assert_eq!(c.status, "ok");
+        assert!(c.title.contains("выключена"), "{}", c.title);
+
+        // nemotron3 без модели — fail: задание упадёт, fallback в speech нет.
+        let c = diarization_check(&summary(Some("nemotron3"), DiarBackend::Nemotron3));
+        assert_eq!(c.status, "fail");
+        assert!(c.fix.contains("fetch_nemotron3_model"), "{}", c.fix);
+
+        // Модель есть, но не прошла размер/sha256 — тоже fail.
+        let mut s = summary(Some("nemotron3"), DiarBackend::Nemotron3);
+        s.nemotron_model = Some(model.clone());
+        s.nemotron = Some(Err("размер модели не тот".to_string()));
+        let c = diarization_check(&s);
+        assert_eq!(c.status, "fail");
+        assert!(c.title.contains("не прошла проверку"), "{}", c.title);
+
+        // Модель в порядке — ok; путь/sha256/EP/ffmpeg видны в заголовке
+        // (`hds check` печатает у `ok` только его).
+        s.nemotron = Some(Ok(()));
+        let c = diarization_check(&s);
+        assert_eq!(c.status, "ok");
+        assert!(c.title.contains("sha256 ok"), "{}", c.title);
+        assert!(c.title.contains("ffmpeg найден"), "{}", c.title);
+        assert!(c.title.contains("EP auto"), "{}", c.title);
+        assert!(c.title.contains("nemotron3_diar_v3.onnx"), "{}", c.title);
+
+        // Без ffmpeg nemotron3 работать не может — fail.
+        s.ffmpeg = false;
+        let c = diarization_check(&s);
+        assert_eq!(c.status, "fail");
+        assert!(c.title.contains("ffmpeg"), "{}", c.title);
+
+        // Авто-подбор без Nemotron-3 — warn с причиной (legacy sortformer).
+        let mut s = summary(None, DiarBackend::Sortformer);
+        s.sortformer_model = Some(PathBuf::from("D:\\models\\sf\\model.gguf"));
+        let c = diarization_check(&s);
+        assert_eq!(c.status, "warn");
+        assert!(c.msg.contains("Nemotron-3 не найдена"), "{}", c.msg);
+        assert!(c.fix.contains("nemotron3"), "{}", c.fix);
+
+        // Явный sortformer: с моделью ok (регресс), без модели — warn.
+        let mut s = summary(Some("sortformer"), DiarBackend::Sortformer);
+        s.sortformer_model = Some(PathBuf::from("D:\\models\\sf\\model.gguf"));
+        let c = diarization_check(&s);
+        assert_eq!(c.status, "ok");
+        assert!(c.title.contains("legacy"), "{}", c.title);
+        let c = diarization_check(&summary(Some("sortformer"), DiarBackend::Sortformer));
+        assert_eq!(c.status, "warn");
+
+        // Предупреждения разбора конфига не теряются.
+        let mut s = summary(Some("nemotron3"), DiarBackend::Nemotron3);
+        s.nemotron_model = Some(model);
+        s.nemotron = Some(Ok(()));
+        s.warnings.push("chunk_min 99 вне 2..=30".to_string());
+        assert!(diarization_check(&s).msg.contains("chunk_min 99"));
+    }
+
+    /// W5: `diarization_summary` читает новые ключи и повторяет правило хоста
+    /// «конфиг → авто»; sha256 не считается для файла неверного размера.
+    #[test]
+    fn diarization_summary_reads_config() {
+        use super::{diarization_summary, DiarBackend};
+
+        let td = std::env::temp_dir().join(format!("hds-diar-sum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&td);
+        std::fs::create_dir_all(&td).unwrap();
+        let model = td.join("nemotron3_diar_v3.onnx");
+        std::fs::write(&model, b"x").unwrap();
+        let model_yaml = model.display().to_string().replace('\\', "/");
+
+        let c = cfg(&format!(
+            "diarization:\n  backend: nemotron3\n  nemotron3:\n    model: '{model_yaml}'\n    \
+             device: directml\n    chunk_min: 99\n"
+        ));
+        let s = diarization_summary(&c);
+        assert_eq!(s.backend, DiarBackend::Nemotron3);
+        assert_eq!(s.configured.as_deref(), Some("nemotron3"));
+        assert_eq!(s.nemotron_model.as_deref(), Some(model.as_path()));
+        // Маленький файл не проходит проверку размера — и sha256 не считается.
+        assert!(matches!(s.nemotron, Some(Err(_))));
+        assert!(!s.nemotron_ok());
+        assert!(s.warnings.iter().any(|w| w.contains("chunk_min")));
+
+        // Неизвестный backend — предупреждение, дальше авто (модель не прошла ⇒ sortformer).
+        let c = cfg(&format!(
+            "diarization:\n  backend: bogus\n  nemotron3:\n    model: '{model_yaml}'\n"
+        ));
+        let s = diarization_summary(&c);
+        assert_eq!(s.backend, DiarBackend::Sortformer);
+        assert!(
+            s.warnings.iter().any(|w| w.contains("'bogus'")),
+            "{:?}",
+            s.warnings
+        );
+
+        // off — прямой выбор; неизвестный device — предупреждение.
+        let c = cfg("diarization:\n  backend: off\n  nemotron3:\n    device: gpu\n");
+        let s = diarization_summary(&c);
+        assert_eq!(s.backend, DiarBackend::Off);
+        assert_eq!(s.device, "gpu");
+        assert!(
+            s.warnings.iter().any(|w| w.contains("'gpu'")),
+            "{:?}",
+            s.warnings
+        );
+
+        // Секции нет — `configured` пуст, backend решает модель (здесь её нет).
+        let s = diarization_summary(&cfg("index:\n  roots: []\n"));
+        assert!(s.configured.is_none());
+        assert_eq!(s.backend, DiarBackend::Sortformer);
+        assert_eq!(s.device, "auto");
+
         let _ = std::fs::remove_dir_all(&td);
     }
 }

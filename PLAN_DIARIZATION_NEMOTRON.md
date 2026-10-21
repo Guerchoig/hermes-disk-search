@@ -4,7 +4,7 @@
 > `tools/parity/out/diar_spike/REPORT.md` (числа, §11 — галлюцинации whisper). Дополняет
 > `PLAN_AUTO_TRANSCRIBE.md` §5 (диаризация, формат `.md`, sidecar) и `PLAN_SERVER_MULTIUSER.md`
 > (роль `transcribe`); контракты `PLAN_AUTO_TRANSCRIBE.md` §5 и формат вывода **не меняются**.
-> **Статус:** в работе с 21.10.2026; **W0–W4 выполнены** (ветка `server-multiuser`).
+> **Статус:** в работе с 21.10.2026; **W0–W5 выполнены** (ветка `server-multiuser`).
 > **Уточнение владельца 21.10.2026 (W4):** backend диаризации выбирается телом
 > `diarization_backend` → конфигом `diarization.backend` → авто (модель+sha256 ⇒ `nemotron3`, иначе
 > `sortformer`); `auto_transcribe.diarization_backend` переключаем на `nemotron3` в W5.
@@ -431,22 +431,65 @@ w4_verify.py}` (каталог гитигнорится).
 sidecar и `.orig.md` на месте, формат не менялся (переименование имён — существующий путь UI, покрыт
 `cargo test -p hds-ui`); sortformer-регресс, `fmt`/`clippy -D warnings`/`test` — зелёные.
 
-### W5. Конфиг и диагностика (0.5 дня)
+### W5. Конфиг и диагностика (0.5 дня) — ✅ **выполнено** (21.10.2026)
 
 - [x] Чтение `diarization.*` и авто-выбор backend — сделаны в W4 (`hds-llama::diar`, решение №10).
-- [ ] Переключить дефолт `auto_transcribe.diarization_backend` на `nemotron3`: тело запроса сильнее
-      конфига (решение владельца 21.10.2026), иначе установки остаются на legacy-пути.
-- [ ] Валидация ключей (§3.5) в `hds check` и при старте `llm_host` (понятное сообщение, без паники);
-      парсер W4 уже собирает предупреждения вместо падения.
-- [ ] `hds check`: пункт `diarization` — backend, путь модели + sha256 ok, EP, наличие `ffmpeg`
-      (готовые `diar::DiarSettings` и `diar::find_ffmpeg` из W4).
-- [ ] `hds whisper-check`: печатать `diarization.backend`, EP и число спикеров последнего прогона
-      (из лога/статуса; без запуска модели).
-- [ ] `config.example.yaml`, `server_config.example.yaml`, `hds config init` — секция с комментариями,
-      в серверном шаблоне `backend: nemotron3`.
+- [x] Дефолт `auto_transcribe.diarization_backend` → **`nemotron3`** (`DEFAULT_DIARIZATION_BACKEND`
+      в `hds-index::transcribe`, также `DiarizationSettings::default`); явное значение в конфиге
+      по-прежнему сильнее (регресс sortformer покрыт тестом). Причина: тело запроса сильнее конфига
+      (решение №13), при дефолте `sortformer` установки оставались на legacy-пути.
+- [x] `hds-index` зависит от `hds-diarize` (константы `NEMOTRON_SIZE`/`NEMOTRON_SHA256`/`NEMOTRON_FILE`,
+      `verify_model`) — один источник истины с `llm_host`. **Следствие для W6:** `hds_mcp.exe` и
+      `hds-search` теперь тоже линкуют ORT ⇒ `DirectML.dll` нужен рядом со всеми бинарями пакета
+      (а не только `hds`/`llm_host`).
+- [x] Поиск модели: `hds_diarize::models_roots()` — единый порядок `HDS_MODELS_DIR` →
+      `%ProgramData%\hermes-disk-search\models` → `%APPDATA%\OpenResearchTools\models`; дубль из
+      `hds-index` удалён, **исправлен дефект W4**: `default_model_path` не смотрел `%ProgramData%`,
+      т.е. служба под `LocalSystem` не нашла бы модель, поставленную машинно. Новое:
+      `diarization.nemotron3.model` → автопоиск (`autotranscribe::nemotron_model_for`,
+      явный путь возвращается как есть — диагностика видит «файла нет»).
+- [x] Валидация ключей: `diag::diarization_summary` повторяет правило хоста «конфиг → авто» и собирает
+      предупреждения (неизвестный `backend`/`device`, `chunk_min` вне 2..=30, EP чужой платформы);
+      жёстких падений нет — как и у `DiarSettings::from_yaml` (W4).
+- [x] `hds check` → пункт `diarization`: backend (конфиг/авто), путь модели + **sha256 ok**, EP
+      (`device` + что значит `auto` на платформе), `chunk_min`, наличие `ffmpeg`. `fail` — если
+      `nemotron3` без модели/с несошедшимся sha256/без `ffmpeg`; `warn` — авто-fallback на
+      `sortformer` (причина + команда установщика); `ok` — `off` и рабочий legacy. Данные, которые
+      нужно видеть сразу, вынесены в заголовок (у `ok` `hds check` печатает только его).
+- [x] `hds whisper-check`: backend, EP, путь/размер модели + sha256, для legacy — «sortformer
+      (legacy)»; в `--json` **аддитивные** ключи `diarization_backend`, `diarization_configured`,
+      `diarization_device`, `diarization_device_auto`, `nemotron_model`, `nemotron_ok`,
+      `nemotron_error`, `diarization_warnings` (ключ `diarization_model` = legacy сохранён).
+      Уточнение к плану: «число спикеров последнего прогона» не печатаем — по handoff W4 п. 5 нужны
+      путь/размер модели; спикеры видны в `stats` ответа и логе хоста (`[diar] … N спикеров`).
+- [x] Образцы: `config.example.yaml` (секция `diarization:` с комментариями + `diarization_backend:
+      nemotron3`), `server_config.example.yaml` (его рендерит `hds config init`: `diarization.backend:
+      'nemotron3'`, `auto_transcribe.diarization_backend: 'nemotron3'`), Python-шаблон `hds/config.py`
+      синхронизирован.
 
-**Приёмка W5:** `hds check` на dev-машине показывает все пункты зелёными; при отсутствующей модели —
-понятная ошибка с командой установщика; `config init` даёт валидный YAML (`cargo test` на рендер).
+**Результаты W5 (живой прогон 21.10.2026, `target\w2\release\hds.exe`):**
+
+| Прогон | Конфиг | Пункт `diarization` | Код |
+|---|---|---|---|
+| dev `config.yaml` (секция `diarization` отсутствует, Nemotron-модели нет) | — | `[--] диаризация: sortformer (legacy) — сработал автоподбор backend` + путь sortformer-модели (449 МБ), EP auto → directml | 0 |
+| песочница `w5_check.yaml` (`backend: nemotron3`, модель `D:\diar-spike-models\…`) | явный путь | `[ok] … nemotron3 (Sortformer v3), EP auto (auto → directml) — D:\diar-spike-models\nemotron3_diar_v3.onnx (382 МБ, sha256 ok), ffmpeg найден` | 0 |
+| песочница `w5_check_missing.yaml` (`backend: nemotron3`, модели нет) | автопоиск | `[!!] диаризация: модель Nemotron-3 не найдена` + `installers\fetch_nemotron3_model.ps1` | 1 |
+
+- `hds whisper-check` (песочница с моделью): `[ok] диаризация: nemotron3 (Sortformer v3), EP auto
+  (auto → directml)` + `модель: … (382 МБ, sha256 ok)`; `--json` — новые ключи, `nemotron_ok: true`.
+- `hds config init --profile server --print --template server_config.example.yaml` — валидный YAML:
+  `diarization.backend=nemotron3`, `auto_transcribe.diarization_backend=nemotron3`.
+- Время `hds check` (весь набор): 0.5 с без модели, 0.7–1.5 с с моделью (sha256 400 МБ кэшируется
+  по `(путь, размер, mtime)`).
+- Тесты: +4 (`transcribe::auto_transcribe_defaults_to_nemotron3`, `diag::diarization_verdict_statuses`,
+  `diag::diarization_summary_reads_config`, `config_init::template_renders_nemotron3_diarization`);
+  `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` —
+  зелёные. Артефакты — `tools/parity/out/diar_nemotron/{w5_check.yaml, w5_check_missing.yaml,
+  w5_whisper_check.txt, w5_whisper_check.json, w5_server_config.yaml}`.
+
+**Приёмка W5 — ✅ выполнена:** `hds check` показывает все пункты зелёными на песочнице с моделью; без
+модели — понятная ошибка с командой установщика и код 1; `config init` даёт валидный YAML (тест на
+рендер); дефолт клиента — `nemotron3`.
 
 ### W6. Установка модели и лицензии (1 день)
 
@@ -462,7 +505,8 @@ sidecar и `.orig.md` на месте, формат не менялся (пер�
       службы под LocalSystem) + проверка наличия `ffmpeg` (иначе предупреждение с инструкцией —
       без `ffmpeg` сервер не декодирует медиа, W0).
 - [ ] `installers/build_rust_release.ps1`: включить новый скрипт в серверный пакет; модель в архив
-      **не** кладём.
+      **не** кладём. **W5:** `DirectML.dll` копировать рядом со **всеми** бинарями пакета —
+      ORT в линковке теперь и у `hds_mcp`/`hds-search` (через `hds-index → hds-diarize`).
 - [ ] `NOTICE.md`: блок «Диаризация» — веса **Nemotron-3-Diarization** (OpenMDW 1.1; проверить текст
       лицензии и записать вывод), `parakeet-rs` — MIT OR Apache-2.0, ONNX Runtime — MIT (DirectML —
       Microsoft, поставляется пакетом `ort`), sortformer 4spk-v2.1 (пока остаётся) — NVIDIA Open Model

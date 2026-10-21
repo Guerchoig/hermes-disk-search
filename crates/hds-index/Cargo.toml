@@ -11,6 +11,11 @@ rust-version.workspace = true
 hds-core = { path = "../hds-core" }
 hds-extract = { path = "../hds-extract" }
 hds-clip = { path = "../hds-clip" }
+# W5: константы/проверка модели Nemotron-3 (размер, sha256) и поиск пути по
+# каталогам моделей — один источник истины для `llm_host` и `hds check`.
+# Новых внешних зависимостей не добавляет: `hds-diarize` уже в бинарях `hds`
+# (через `hds-ui → hds-llama`) и `llm_host` (PLAN_DIARIZATION_NEMOTRON.md W5).
+hds-diarize = { path = "../hds-diarize" }
 # каталоги движка/моделей OpenResearchTools (как в hds-llama/hds-ui)
 directories.workspace = true
 rusqlite.workspace = true

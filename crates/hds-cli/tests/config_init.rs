@@ -106,6 +106,38 @@ fn template_renders_valid_config_with_server_defaults() {
     assert_eq!(at(&cfg, "ui.port").and_then(Value::as_i64), Some(8765));
 }
 
+/// W5: серверный шаблон (его рендерит и `hds config init`) несёт новый выбор
+/// диаризации — Nemotron-3 по умолчанию, и в секции, и в теле запроса.
+#[test]
+fn template_renders_nemotron3_diarization() {
+    let cfg = render(&defaults());
+    assert_eq!(
+        at(&cfg, "diarization.backend").and_then(Value::as_str),
+        Some("nemotron3")
+    );
+    assert_eq!(
+        at(&cfg, "diarization.required").and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        at(&cfg, "diarization.nemotron3.device").and_then(Value::as_str),
+        Some("auto")
+    );
+    assert_eq!(
+        at(&cfg, "diarization.nemotron3.chunk_min").and_then(Value::as_f64),
+        Some(10.0)
+    );
+    assert_eq!(
+        at(&cfg, "diarization.asr.trim_leading_silence").and_then(Value::as_bool),
+        Some(true)
+    );
+    // Тело запроса сильнее секции — клиент тоже должен просить nemotron3.
+    assert_eq!(
+        at(&cfg, "auto_transcribe.diarization_backend").and_then(Value::as_str),
+        Some("nemotron3")
+    );
+}
+
 #[test]
 fn template_renders_all_parameters() {
     let o = InitOpts {

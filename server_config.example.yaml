@@ -52,9 +52,30 @@ auto_transcribe:
   inbox_dir: '${MEDIA_INBOX}'
   out_dir: '${MEDIA_OUT}'
   diarization: true
+  # тело запроса сильнее секции diarization (решение владельца №13)
+  diarization_backend: 'nemotron3'
   diarization_required: true
   source_disposal: ${SOURCE_DISPOSAL}
   pause_indexing: true
+
+# Diarization: Nemotron-3 (Sortformer v3, up to 8 speakers) through parakeet-rs +
+# ONNX Runtime. The model (400 MB, sha256 pinned in the binary) is installed by
+# install_server -> installers/fetch_nemotron3_model.ps1 into the machine models
+# dir (HDS_MODELS_DIR or %ProgramData%\hermes-disk-search\models). `sortformer`
+# keeps the legacy engine path and stays a working fallback.
+diarization:
+  backend: 'nemotron3'      # nemotron3 | sortformer (legacy) | off
+  required: true            # no model / failure => the job fails (no speech fallback)
+  nemotron3:
+    model: ''               # '' -> <models>/nemotron3/nemotron3_diar_v3.onnx
+    device: auto            # auto | cpu | directml (Windows) | coreml (macOS)
+    chunk_min: 10           # feed()/flush() block, minutes (2..=30)
+    min_audio_min: 2        # shorter files always run on CPU
+  asr:
+    trim_leading_silence: true
+    silence_threshold_db: -50
+    trim_lead_in_sec: 0.3
+    drop_silent_segments: true
 
 # Publish /mcp and /ui only through a reverse proxy with TLS.
 mcp_http:

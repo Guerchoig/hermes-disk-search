@@ -27,10 +27,10 @@ pub mod walk;
 pub mod watch;
 
 pub use autotranscribe::{
-    default_diarization_model, diarization_model_for, enqueue_reconcile, load_queue,
-    merge_external_jobs, process_job, reconcile_candidates, run_transcribe_watch, should_enqueue,
-    transcribe_once, try_enqueue, AutoTranscribeConfig, Decision, Disposal, FileMeta, Manifest,
-    ManifestEntry, QJob, SkipReason,
+    default_diarization_model, default_nemotron_model, diarization_model_for, enqueue_reconcile,
+    load_queue, merge_external_jobs, nemotron_model_for, process_job, reconcile_candidates,
+    run_transcribe_watch, should_enqueue, transcribe_once, try_enqueue, AutoTranscribeConfig,
+    Decision, Disposal, FileMeta, Manifest, ManifestEntry, QJob, SkipReason,
 };
 pub use chunker::{make_chunks, Chunk, Segment, DEFAULT_OVERLAP, DEFAULT_SIZE};
 pub use embed::{vector_blob, Embedder};
@@ -43,7 +43,7 @@ pub use sidecar::{Extractor, Lemmatizer, Sidecar, TokenLemmatizer};
 pub use transcribe::{
     detect_speaker_slots, is_speaker_token, resolve_whisper_model, DiarizationSettings,
     MediaRouter, TranscribeClient, TranscribeConfig, TranscribeOutcome, AUTO_MODE,
-    DEFAULT_TRANSCRIBE_URL, DEFAULT_UNASSIGNED_LABEL,
+    DEFAULT_DIARIZATION_BACKEND, DEFAULT_TRANSCRIBE_URL, DEFAULT_UNASSIGNED_LABEL,
 };
 pub use walk::{walk_files, Excludes, FileFilter, IndexLimits, PreCheck, WalkEvent, WalkOptions};
 pub use watch::{run_watch, WatchEvent, WatchLock, WatchState};

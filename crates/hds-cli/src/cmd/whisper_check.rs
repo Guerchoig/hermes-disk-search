@@ -119,11 +119,26 @@ pub fn cmd_whisper_check_cfg(cfg: &Config, file: Option<String>, json: bool) -> 
 fn report_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>, json: bool) -> i32 {
     let ok = model.is_some();
     let diar = hds_index::diarization_model_for(cfg);
+    // W5: backend/EP/модель Nemotron-3 — те же числа и тот же выбор, что у хоста.
+    let ds = hds_index::diag::diarization_summary(cfg);
     if json {
         let out = serde_json::json!({
             "engine": engine.map(|p| p.display().to_string()),
             "model": model.map(|p| p.display().to_string()),
+            // legacy sortformer — ключ сохранён для совместимости.
             "diarization_model": diar.as_ref().map(|p| p.display().to_string()),
+            // W5 (аддитивные ключи).
+            "diarization_backend": ds.backend.as_str(),
+            "diarization_configured": ds.configured,
+            "diarization_device": ds.device,
+            "diarization_device_auto": ds.device_auto,
+            "nemotron_model": ds.nemotron_model.as_ref().map(|p| p.display().to_string()),
+            "nemotron_ok": ds.nemotron_ok(),
+            "nemotron_error": match &ds.nemotron {
+                Some(Err(e)) => Some(e.clone()),
+                _ => None,
+            },
+            "diarization_warnings": ds.warnings,
             "ok": ok,
         });
         println!("{}", serde_json::to_string_pretty(&out).unwrap_or_default());
@@ -155,14 +170,59 @@ fn print_static(cfg: &Config, engine: Option<&Path>, model: Option<&Path>) {
         Some(p) => println!("[ok] модель: {}", p.display()),
         None => println!("[--] whisper-модель не найдена"),
     }
-    // T5: диаризация обязательна для `mode: transcript` (жёсткий отказ без модели)
-    match hds_index::diarization_model_for(cfg) {
-        Some(p) => println!("[ok] модель диаризации: {}", p.display()),
-        None => println!(
-            "[--] модель диаризации (sortformer) не найдена — автотранскрибация упадёт \
-             (installers\\fetch_diarization_model.ps1)"
-        ),
+    print_diarization(&hds_index::diag::diarization_summary(cfg));
+}
+
+/// W5: backend диаризации, EP, модель Nemotron-3 (путь, размер, sha256) и legacy.
+///
+/// T5 сохраняется: для `mode: transcript` модель обязательна (жёсткий отказ без
+/// неё), поэтому отсутствие модели — `[--]`/`[!!]`, а не тишина.
+fn print_diarization(s: &hds_index::diag::DiarSummary) {
+    use hds_index::diag::DiarBackend;
+    let device = format!("EP {} (auto → {})", s.device, s.device_auto);
+    match s.backend {
+        DiarBackend::Off => println!("[--] диаризация: off (выключена в конфиге, {device})"),
+        DiarBackend::Sortformer => {
+            println!("[--] диаризация: sortformer (legacy), {device}");
+            match s.sortformer_model.as_deref() {
+                Some(p) => println!("     sortformer-модель: {}", p.display()),
+                None => println!(
+                    "     sortformer-модель не найдена — автотранскрибация упадёт \
+                     (installers\\fetch_diarization_model.ps1)"
+                ),
+            }
+        }
+        DiarBackend::Nemotron3 => {
+            println!("[ok] диаризация: nemotron3 (Sortformer v3), {device}");
+            match (&s.nemotron_model, &s.nemotron) {
+                (Some(p), Some(Ok(()))) => println!(
+                    "     модель: {} ({:.0} МБ, sha256 ok)",
+                    p.display(),
+                    size_mb(p)
+                ),
+                (Some(p), Some(Err(e))) => {
+                    println!("[!!] модель {} не прошла проверку: {e}", p.display());
+                }
+                _ => println!(
+                    "[--] модель Nemotron-3 не найдена — автотранскрибация упадёт \
+                     (installers\\fetch_nemotron3_model.ps1)"
+                ),
+            }
+            if !s.ffmpeg {
+                println!("[--] ffmpeg не найден — WAV для диаризации декодировать нечем");
+            }
+        }
     }
+    for w in &s.warnings {
+        println!("     [!] {w}");
+    }
+}
+
+/// Размер файла в МБ (0, если не читается) — для строки о модели.
+fn size_mb(p: &Path) -> f64 {
+    std::fs::metadata(p)
+        .map(|m| m.len() as f64 / 1_048_576.0)
+        .unwrap_or(0.0)
 }
 
 /// Косметика таймкода: `12.345` → `12.35`; `None` → `?`.

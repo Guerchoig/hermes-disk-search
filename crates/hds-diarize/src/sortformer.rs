@@ -158,22 +158,49 @@ impl NemotronConfig {
     }
 }
 
-/// Каталог моделей Nemotron-3: `HDS_MODELS_DIR` (машинный, для служб) →
-/// `%APPDATA%\OpenResearchTools\models` (desktop) → `~/Library/Application Support`.
-pub fn default_model_path() -> Option<PathBuf> {
-    if let Ok(dir) = std::env::var("HDS_MODELS_DIR") {
-        if !dir.trim().is_empty() {
-            return Some(PathBuf::from(dir).join("nemotron3").join(NEMOTRON_FILE));
+/// Каталоги моделей в порядке приоритета: `HDS_MODELS_DIR` (машинный, для служб под
+/// `LocalSystem`) → `%ProgramData%\hermes-disk-search\models` (машинная установка,
+/// W6: туда пишет `fetch_nemotron3_model.ps1`) → `%APPDATA%\OpenResearchTools\models`
+/// (desktop, общий каталог движка).
+///
+/// Единый порядок для `llm_host` (через [`default_model_path`]) и `hds-index`
+/// (`hds check`, поиск sortformer-модели) — иначе служба не увидит модель,
+/// поставленную машинно (W5).
+pub fn models_roots() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Some(v) = std::env::var_os("HDS_MODELS_DIR") {
+        let p = PathBuf::from(v);
+        if !p.as_os_str().is_empty() {
+            out.push(p);
         }
     }
-    let base = directories::BaseDirs::new()?;
-    Some(
-        base.config_dir()
-            .join("OpenResearchTools")
-            .join("models")
-            .join("nemotron3")
-            .join(NEMOTRON_FILE),
-    )
+    if let Some(pd) = std::env::var_os("ProgramData") {
+        let p = PathBuf::from(pd);
+        if !p.as_os_str().is_empty() {
+            out.push(p.join("hermes-disk-search").join("models"));
+        }
+    }
+    if let Some(base) = directories::BaseDirs::new() {
+        out.push(base.config_dir().join("OpenResearchTools").join("models"));
+    }
+    out
+}
+
+/// Путь к модели Nemotron-3: первый существующий `<root>/nemotron3/{NEMOTRON_FILE}`
+/// по [`models_roots`]; если файла нет нигде — первый каталог-кандидат (чтобы в
+/// ошибке был осмысленный путь).
+pub fn default_model_path() -> Option<PathBuf> {
+    let roots = models_roots();
+    if let Some(p) = roots
+        .iter()
+        .map(|r| r.join("nemotron3").join(NEMOTRON_FILE))
+        .find(|p| p.is_file())
+    {
+        return Some(p);
+    }
+    roots
+        .first()
+        .map(|r| r.join("nemotron3").join(NEMOTRON_FILE))
 }
 
 /// Проверенные модели: `(путь, размер, mtime)` — чтобы не хешировать 400 МБ при

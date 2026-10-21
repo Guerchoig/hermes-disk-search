@@ -33,8 +33,8 @@ pub use merge::{
 };
 pub use ort_env::{ort_env, ort_env_clone};
 pub use sortformer::{
-    default_model_path, sha256_file, verify_model, Device, Diarizer, NemotronConfig, Turn,
-    NEMOTRON_FILE, NEMOTRON_SHA256, NEMOTRON_SIZE,
+    default_model_path, models_roots, sha256_file, verify_model, Device, Diarizer, NemotronConfig,
+    Turn, NEMOTRON_FILE, NEMOTRON_SHA256, NEMOTRON_SIZE,
 };
 pub use vad::{leading_silence_samples, speech_stats, SpeechStats, TrimConfig};
 pub use wav::{read_wav, write_wav, Wav};

@@ -48,6 +48,14 @@ pub const DEFAULT_OUT_FORMAT: &str = "md";
 pub const DEFAULT_UNASSIGNED_LABEL: &str = "UNASSIGNED";
 /// `diarization_feed_ms` референса (спайк T0.1 §1).
 pub const DEFAULT_DIARIZATION_FEED_MS: f64 = 10_800_001.0;
+/// Дефолт `auto_transcribe.diarization_backend` — `nemotron3`
+/// (`PLAN_DIARIZATION_NEMOTRON.md` §7 п. 5, решение владельца №13 от 21.10.2026).
+///
+/// Почему именно здесь: клиент **всегда** кладёт `diarization_backend` в тело
+/// `/internal/transcribe`, а тело сильнее конфига хоста. Пока дефолтом был
+/// `sortformer`, установка без ключа в конфиге оставалась на legacy-пути даже с
+/// секцией `diarization.backend: nemotron3` (§5 п. 6 handoff W4).
+pub const DEFAULT_DIARIZATION_BACKEND: &str = "nemotron3";
 /// Таймаут запроса: длинные медиа транскрибируются минутами.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(3600);
 
@@ -62,7 +70,8 @@ pub struct DiarizationSettings {
     pub enabled: bool,
     /// `auto_transcribe.diarization_model` — `.gguf`; `None`/пусто → владелец ищет сам.
     pub model: Option<PathBuf>,
-    /// `auto_transcribe.diarization_backend` (референс: `sortformer`).
+    /// `auto_transcribe.diarization_backend` — что попросить у хоста
+    /// (дефолт [`DEFAULT_DIARIZATION_BACKEND`] = `nemotron3`, решение №13).
     pub backend: String,
     /// `auto_transcribe.diarization_feed_ms`.
     pub feed_ms: f64,
@@ -75,7 +84,7 @@ impl Default for DiarizationSettings {
         DiarizationSettings {
             enabled: true,
             model: None,
-            backend: "sortformer".to_string(),
+            backend: DEFAULT_DIARIZATION_BACKEND.to_string(),
             feed_ms: DEFAULT_DIARIZATION_FEED_MS,
             required: true,
         }
@@ -176,7 +185,9 @@ impl TranscribeConfig {
     }
 
     /// Настройки конвейера **автотранскрибации** (`auto_transcribe.*`): режим
-    /// `transcript`, диаризация sortformer, каталог вывода, метка `UNASSIGNED`.
+    /// `transcript`, диаризация (backend из `auto_transcribe.diarization_backend`,
+    /// по умолчанию [`DEFAULT_DIARIZATION_BACKEND`]), каталог вывода, метка
+    /// `UNASSIGNED`.
     ///
     /// Отдельно от [`TranscribeConfig::from_config`] намеренно: боевая медиа-ветка
     /// индексации (`hds index`/`watch`) читает только `index.*` и не должна менять
@@ -231,8 +242,11 @@ impl TranscribeConfig {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true),
                 model: dig_str(cfg, "auto_transcribe.diarization_model").map(PathBuf::from),
+                // W5: ключа нет ⇒ `nemotron3` (решение №13). Тело запроса сильнее
+                // конфига хоста, поэтому дефолт `sortformer` держал установки на
+                // legacy-пути; явные значения в конфиге по-прежнему главнее.
                 backend: dig_str(cfg, "auto_transcribe.diarization_backend")
-                    .unwrap_or_else(|| "sortformer".to_string()),
+                    .unwrap_or_else(|| DEFAULT_DIARIZATION_BACKEND.to_string()),
                 feed_ms: dig(cfg, "auto_transcribe.diarization_feed_ms")
                     .and_then(|v| v.as_f64())
                     .unwrap_or(DEFAULT_DIARIZATION_FEED_MS),
@@ -907,6 +921,31 @@ mod tests {
         assert_eq!(tc.diarization.feed_ms, 10_800_001.0);
         assert!(tc.diarization.enabled && tc.diarization.required);
         assert_eq!(tc.out_dir.as_deref(), Some(Path::new("D:\\out")));
+    }
+
+    /// W5 (решение №13): без ключа `diarization_backend` клиент просит `nemotron3`,
+    /// а не `sortformer` — иначе тело запроса держит установки на legacy-пути.
+    #[test]
+    fn auto_transcribe_defaults_to_nemotron3() {
+        let cfg: Config =
+            serde_yaml::from_str("auto_transcribe:\n  mode: transcript\n  out_dir: 'D:\\out'\n")
+                .unwrap();
+        let tc = TranscribeConfig::from_auto_transcribe(&cfg);
+        assert_eq!(tc.diarization.backend, DEFAULT_DIARIZATION_BACKEND);
+        assert_eq!(tc.diarization.backend, "nemotron3");
+        assert_eq!(
+            DiarizationSettings::default().backend,
+            DEFAULT_DIARIZATION_BACKEND
+        );
+        // Явное значение остаётся сильнее дефолта (регресс sortformer).
+        let cfg: Config =
+            serde_yaml::from_str("auto_transcribe:\n  diarization_backend: sortformer\n").unwrap();
+        assert_eq!(
+            TranscribeConfig::from_auto_transcribe(&cfg)
+                .diarization
+                .backend,
+            "sortformer"
+        );
     }
 
     /// Индексная ветка (`index.whisper_gpu: -1`) не включает диаризацию и не читает

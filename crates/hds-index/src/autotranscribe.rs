@@ -575,23 +575,11 @@ pub fn default_diarization_model() -> Option<PathBuf> {
 /// R3.4 (PLAN_TRANSCRIBE_SERVICE): каталоги моделей в приоритете — env `HDS_MODELS_DIR` →
 /// `%ProgramData%\hermes-disk-search\models` (машинный, виден службам под LocalSystem) →
 /// общий каталог движка `%APPDATA%\OpenResearchTools\models`.
+///
+/// W5: порядок живёт в `hds_diarize::models_roots` — там же, где поиск модели
+/// Nemotron-3 для `llm_host`; дубль удалён, чтобы `hds check` и хост не расходились.
 fn models_roots() -> Vec<PathBuf> {
-    let mut out: Vec<PathBuf> = Vec::new();
-    if let Some(v) = std::env::var_os("HDS_MODELS_DIR") {
-        if !v.is_empty() {
-            out.push(PathBuf::from(v));
-        }
-    }
-    if let Some(pd) = std::env::var_os("ProgramData") {
-        let p = PathBuf::from(pd);
-        if !p.as_os_str().is_empty() {
-            out.push(p.join("hermes-disk-search").join("models"));
-        }
-    }
-    if let Some(base) = directories::BaseDirs::new() {
-        out.push(base.config_dir().join("OpenResearchTools").join("models"));
-    }
-    out
+    hds_diarize::models_roots()
 }
 
 /// Поиск sortformer-модели в одном каталоге моделей.
@@ -637,6 +625,33 @@ pub fn diarization_model_for(cfg: &Config) -> Option<PathBuf> {
         .map(PathBuf::from)
         .filter(|p| p.is_file())
         .or_else(default_diarization_model)
+}
+
+/// Модель Nemotron-3 из каталогов моделей (`<root>/nemotron3/nemotron3_diar_v3.onnx`,
+/// см. `hds_diarize::models_roots`), первый найденный файл.
+///
+/// W5: нужна `hds check`/`hds whisper-check`, чтобы показать путь модели и
+/// «sha256 ok» до первого задания.
+pub fn default_nemotron_model() -> Option<PathBuf> {
+    hds_diarize::models_roots()
+        .into_iter()
+        .map(|root| root.join("nemotron3").join(hds_diarize::NEMOTRON_FILE))
+        .find(|p| p.is_file())
+}
+
+/// Модель Nemotron-3 для задачи: `diarization.nemotron3.model` → автопоиск.
+///
+/// Явный путь возвращается **как есть** (без `is_file`), в отличие от
+/// [`diarization_model_for`]: диагностика должна показать «файла нет», а не молча
+/// подставить другую модель (поведение `llm_host`: `DiarSettings::nemotron_config`
+/// тоже берёт явный путь без проверки, проверка — в `Diarizer::load`).
+pub fn nemotron_model_for(cfg: &Config) -> Option<PathBuf> {
+    dig(cfg, "diarization.nemotron3.model")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(default_nemotron_model)
 }
 
 /// Подхватить задания, добавленные в журнал очереди **извне** (§8.3, кнопка

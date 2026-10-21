@@ -360,12 +360,14 @@ auto_transcribe:
   mode: transcript            # transcript = транскрибация + диаризация
   out_format: md              # как отдаёт движок (.md) — без конвертации
   unassigned_label: UNASSIGNED  # метка «спикер не определён» (как отдаёт движок)
-  # --- диаризация (sortformer) ---
+  # --- диаризация ---
   diarization: true
-  diarization_model: ''       # .gguf; '' → автопоиск %APPDATA%\OpenResearchTools\models\*sortformer*
-  diarization_backend: sortformer
+  # Legacy-ветка (sortformer GGUF): действует, только если diarization.backend:
+  # sortformer. Новый путь — секция `diarization` ниже (Nemotron-3, 8 спикеров).
+  diarization_model: ''       # .gguf для sortformer; '' → автопоиск %APPDATA%\OpenResearchTools\models\*sortformer*
+  diarization_backend: nemotron3  # nemotron3 (по умолчанию) | sortformer | off; тело запроса сильнее секции diarization
   diarization_feed_ms: 10800001
-  diarization_required: true  # нет sortformer-модели ⇒ ЖЁСТКИЙ отказ задания (без fallback в speech)
+  diarization_required: true  # нет модели ⇒ ЖЁСТКИЙ отказ задания (без fallback в speech)
   whisper_model: ''           # '' → index.whisper_model / автопоиск движка
   whisper_gpu: -1             # -1 = как gpu.device_index; иначе индекс GPU движка
   # --- событие «файл помещён во входную папку» (§3 плана) ---
@@ -394,6 +396,30 @@ auto_transcribe:
   #          управления (service/task/process) и действия уводит в SCM.
 
 
+
+# --- Диаризация: Nemotron-3 (Sortformer v3, до 8 спикеров) --------------------
+# Новый путь (W4/W5): llm_host декодирует медиа в WAV 16 кГц **один раз**, ASR идёт
+# по срезу ведущей тишины, диаризация — по полному WAV; `.md` получает метки
+# `### SPEAKER_NN [HH:MM:SS - HH:MM:SS]` (время от начала исходного файла).
+# Модель ставит setup.ps1 (installers\fetch_nemotron3_model.ps1: 400 МБ, sha256
+# проверяется установщиком и при загрузке). Формат вывода не меняется.
+# `auto_transcribe.diarization*` выше действуют только для backend: sortformer.
+diarization:
+  backend: nemotron3        # nemotron3 | sortformer (legacy) | off
+  required: true            # нет модели/сбой ⇒ задание падает (fallback в speech нет)
+  nemotron3:
+    model: ''               # '' → автопоиск: HDS_MODELS_DIR → %ProgramData%\hermes-disk-search\models → %APPDATA%\OpenResearchTools\models (\nemotron3\nemotron3_diar_v3.onnx)
+    device: auto            # auto | cpu | directml (Windows) | coreml (macOS);
+                            #   auto — GPU только для файлов ≥ min_audio_min (короткие на CPU быстрее)
+    chunk_min: 10           # блок feed()/flush(), минуты (2..=30); память ~25 МБ/мин аудио
+    min_audio_min: 2        # короче — CPU даже при device: auto
+    onset: 0.5              # порог появления спикера
+    offset: 0.5             # порог завершения реплики
+  asr:                      # вход ASR (диаризация всегда по полному WAV, вариант A)
+    trim_leading_silence: true   # срезать ведущую тишину перед ASR
+    silence_threshold_db: -50    # порог кадра, dBFS
+    trim_lead_in_sec: 0.3        # сколько оставить перед найденной речью
+    drop_silent_segments: true   # энергетический постфильтр «реплик из тишины»
 
 rerank:                     # реранкер ask_my_files (роль rerank; владелец — llm-host)
   enabled: false            # по умолчанию выключен
