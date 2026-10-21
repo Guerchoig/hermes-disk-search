@@ -108,9 +108,12 @@ pub fn parse_wav(buf: &[u8]) -> Result<Wav> {
         )));
     }
     let (start, end) = data.ok_or_else(|| DiarizeError::Format("нет data-чанка".to_string()))?;
-    let mut samples = Vec::with_capacity((end - start) / 2);
-    for c in buf[start..end].chunks_exact(2) {
-        samples.push(i16::from_le_bytes([c[0], c[1]]));
+    // `as_chunks::<2>()` вместо `chunks_exact(2)`: clippy `chunks_exact_to_as_chunks`
+    // (Rust 1.99) считает константный размер ошибкой, а пары байт — это `[u8; 2]`.
+    let bytes = &buf[start..end];
+    let mut samples = Vec::with_capacity(bytes.len() / 2);
+    for c in bytes.as_chunks::<2>().0 {
+        samples.push(i16::from_le_bytes(*c));
     }
     Ok(Wav {
         sample_rate: rate,
