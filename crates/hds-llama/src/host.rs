@@ -2555,7 +2555,11 @@ impl ClusterBackend {
     /// ORT-сессия живёт в хосте (создаётся при первом задании): загрузка модели —
     /// основная цена старта, а задания идут последовательно. `Mutex` держится на
     /// время прогона — параллельные файлы ждут освобождения сессии.
-    fn run_nemotron(&self, full: &Path) -> Result<(Vec<hds_diarize::Turn>, String)> {
+    fn run_nemotron(
+        &self,
+        samples: &[i16],
+        sample_rate: u32,
+    ) -> Result<(Vec<hds_diarize::Turn>, String)> {
         let cfg = self.diar.nemotron_config();
         let mut guard = self.nemotron.lock().unwrap();
         if guard.is_none() {
@@ -2574,7 +2578,7 @@ impl ClusterBackend {
         }
         let d = guard.as_mut().expect("только что создан");
         let turns = d
-            .run_wav(full)
+            .run_i16(samples, sample_rate)
             .map_err(|e| EngineError::Other(format!("диаризация Nemotron-3: {e}")))?;
         Ok((turns, d.device().as_str().to_string()))
     }
@@ -2625,25 +2629,31 @@ impl ClusterBackend {
 
         // [trim] ведущая тишина — только для ASR (диаризация её не видит).
         let t0 = Instant::now();
+        let rate = wav.sample_rate;
+        let total_samples = wav.samples.len();
         let cut = if self.diar.asr.trim_leading_silence {
-            leading_silence_samples(&wav.samples, wav.sample_rate, &self.diar.trim_config())
+            leading_silence_samples(&wav.samples, rate, &self.diar.trim_config())
         } else {
             0
         };
-        let trim_offset = cut as f64 / wav.sample_rate as f64;
+        let trim_offset = cut as f64 / rate as f64;
         let asr_input = if cut == 0 {
             full.clone()
         } else {
             let p = tmp.path().join("asr_trim.wav");
-            write_wav(&p, &wav.samples[cut..], wav.sample_rate)
+            write_wav(&p, &wav.samples[cut..], rate)
                 .map_err(|e| EngineError::Other(format!("срез WAV: {e}")))?;
             p
         };
         self.log.line(&format!(
             "[diar] обрезка ASR: {trim_offset:.3} с ведущей тишины, срез {:.1} с ({:.2} с)",
-            wav.samples.len().saturating_sub(cut) as f64 / wav.sample_rate as f64,
+            total_samples.saturating_sub(cut) as f64 / rate as f64,
             t0.elapsed().as_secs_f64()
         ));
+        // W7 (RSS ≤ 1.5 ГБ на 77 мин): на время ASR полный PCM не держим — его
+        // нагрузка (модель и буферы движка) и так доминирует в пике процесса;
+        // постфильтр и диаризация читают WAV заново (~0.1 с на 77 мин).
+        drop(wav);
 
         // [asr] движку — срез; режим `subtitle` нужен ради таймкодов.
         let t0 = Instant::now();
@@ -2658,6 +2668,14 @@ impl ClusterBackend {
             "[diar] ASR: {} сегментов за {asr_sec:.1} с (язык {})",
             tr.segments.len(),
             language.unwrap_or("авто")
+        ));
+        // W7: полный WAV нужен постфильтру и диаризации — читаем заново.
+        let t0 = Instant::now();
+        let wav =
+            read_wav(&full).map_err(|e| EngineError::Other(format!("{}: {e}", full.display())))?;
+        self.log.line(&format!(
+            "[diar] повторное чтение WAV для постфильтра и диаризации: {:.2} с",
+            t0.elapsed().as_secs_f64()
         ));
         // [filter] «реплики из тишины» — по полному WAV, offset один раз.
         let filtered = if self.diar.asr.drop_silent_segments {
@@ -2687,7 +2705,7 @@ impl ClusterBackend {
         // [diar] Nemotron-3 — по полному WAV; сбой при `required: false` не валит
         // задание (пишем `.md` без меток, `diarization.enabled: false`).
         let t0 = Instant::now();
-        let (turns, device, diar_error) = match self.run_nemotron(&full) {
+        let (turns, device, diar_error) = match self.run_nemotron(&wav.samples, wav.sample_rate) {
             Ok((turns, device)) => (turns, device, None),
             Err(e) => {
                 let msg = e.to_string();
