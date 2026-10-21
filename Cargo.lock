@@ -624,6 +624,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "hds-diarize"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "hds-extract"
 version = "0.1.0"
 dependencies = [

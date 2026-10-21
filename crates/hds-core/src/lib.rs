@@ -35,6 +35,7 @@ pub mod queue;
 pub mod ratelimit;
 pub mod roots;
 pub mod service;
+pub mod tools;
 
 pub use access::{
     access_path, authenticate, hash_password, load as load_access, new_token, resolve_token,
@@ -53,3 +54,4 @@ pub use error::{CoreError, Result};
 pub use net::{real_client_ip, request_scheme, trusted_proxy};
 pub use queue::{HeavyQueue, QueueConfig, QueuePolicy, QueueReject, QueueStats, QueueTicket};
 pub use roots::{default_project, project_for_path, roots_from_cfg, roots_paths, Root};
+pub use tools::{find_ffmpeg, which};

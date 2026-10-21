@@ -15,7 +15,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use hds_core::config::{self, dig, Config};
 use hds_core::error::{CoreError, Result};
 use hds_core::roots::roots_from_cfg;
-use hds_core::{db, http, EMB_CONTEXT};
+use hds_core::{db, http, tools, EMB_CONTEXT};
 use hds_extract::discover_python;
 use serde_json::Value;
 
@@ -69,19 +69,10 @@ fn dim_of(cfg: &Config) -> i64 {
 }
 
 /// Поиск исполняемого файла в `PATH` (порт `shutil.which` для одного имени).
-pub fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        if dir.as_os_str().is_empty() {
-            continue;
-        }
-        let cand = dir.join(name);
-        if cand.is_file() {
-            return Some(cand);
-        }
-    }
-    None
-}
+///
+/// Реализация переехала в `hds_core::tools` (`PLAN_DIARIZATION_NEMOTRON.md` W0):
+/// тот же поиск нужен `hds-diarize`/`llm_host`, которые не зависят от `hds-index`.
+pub use hds_core::tools::which;
 
 /// Стандартные каталоги установки `tesseract` (кроме `PATH`).
 ///
@@ -137,7 +128,8 @@ pub fn tesseract_exe(cfg: &Config) -> Option<PathBuf> {
             return Some(p.to_path_buf());
         }
     }
-    if let Some(p) = which("tesseract.exe").or_else(|| which("tesseract")) {
+    // `hds_core::tools::which` сам пробует `.exe` на Windows.
+    if let Some(p) = which("tesseract") {
         return Some(p);
     }
     standard_tesseract_paths().into_iter().find(|p| p.is_file())
@@ -651,90 +643,13 @@ fn check_ocr(cfg: &Config) -> Check {
     )
 }
 
-/// Каталоги установки CLI `ffmpeg` (кроме `PATH`): службы стартуют с минимальным
-/// `PATH`, поэтому машинная установка (Program Files, chocolatey, winget) иначе
-/// выглядит как «ffmpeg не найден».
-#[cfg(windows)]
-fn standard_ffmpeg_paths() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        v.push(
-            PathBuf::from(&pf)
-                .join("ffmpeg")
-                .join("bin")
-                .join("ffmpeg.exe"),
-        );
-    }
-    if let Some(pd) = std::env::var_os("ProgramData") {
-        v.push(
-            PathBuf::from(pd)
-                .join("chocolatey")
-                .join("bin")
-                .join("ffmpeg.exe"),
-        );
-    }
-    // winget: пользовательская (%LOCALAPPDATA%\Microsoft\WinGet\Packages) и
-    // машинная (%ProgramFiles%\WinGet\Packages) области — `Gyan.FFmpeg*\<ver>\bin`.
-    let mut roots: Vec<PathBuf> = Vec::new();
-    if let Some(la) = std::env::var_os("LOCALAPPDATA") {
-        roots.push(
-            PathBuf::from(la)
-                .join("Microsoft")
-                .join("WinGet")
-                .join("Packages"),
-        );
-    }
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        roots.push(PathBuf::from(pf).join("WinGet").join("Packages"));
-    }
-    for root in roots {
-        let Ok(pkgs) = std::fs::read_dir(&root) else {
-            continue;
-        };
-        for pkg in pkgs.flatten() {
-            if !pkg
-                .file_name()
-                .to_string_lossy()
-                .to_lowercase()
-                .starts_with("gyan.ffmpeg")
-            {
-                continue;
-            }
-            let Ok(vers) = std::fs::read_dir(pkg.path()) else {
-                continue;
-            };
-            for ver in vers.flatten() {
-                v.push(ver.path().join("bin").join("ffmpeg.exe"));
-            }
-        }
-    }
-    v
-}
-
-#[cfg(not(windows))]
-fn standard_ffmpeg_paths() -> Vec<PathBuf> {
-    [
-        "/opt/homebrew/bin/ffmpeg",
-        "/usr/local/bin/ffmpeg",
-        "/usr/bin/ffmpeg",
-    ]
-    .iter()
-    .map(PathBuf::from)
-    .collect()
-}
-
 /// Путь к CLI `ffmpeg`: `index.ffmpeg_cmd` → `PATH` → стандартные каталоги.
+///
+/// Реализация — `hds_core::tools::find_ffmpeg` (W0): тот же поиск использует
+/// новый путь диаризации (`hds-diarize::decode` в `llm_host`), который не может
+/// зависеть от `hds-index`. Поведение и порядок поиска не изменились.
 pub fn ffmpeg_exe(cfg: &Config) -> Option<PathBuf> {
-    if let Some(cmd) = dig(cfg, "index.ffmpeg_cmd").and_then(|v| v.as_str()) {
-        let p = Path::new(cmd.trim());
-        if !cmd.trim().is_empty() && p.is_file() {
-            return Some(p.to_path_buf());
-        }
-    }
-    if let Some(p) = which("ffmpeg.exe").or_else(|| which("ffmpeg")) {
-        return Some(p);
-    }
-    standard_ffmpeg_paths().into_iter().find(|p| p.is_file())
+    tools::find_ffmpeg(cfg)
 }
 
 /// Каталог движка: `index.whisper_engine_dir` → `HDS_ENGINE_DIR` (machine env,

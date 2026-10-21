@@ -1,0 +1,21 @@
+# hds-diarize — диаризация Nemotron-3 (Sortformer v3) через `parakeet-rs`/ONNX Runtime
+# (PLAN_DIARIZATION_NEMOTRON.md W0/W3), плюс PCM-утилиты общего назначения:
+# разбор/запись WAV, декодирование медиа через CLI `ffmpeg` (вариант A — один проход),
+# энергетический VAD для обрезки ведущей тишины и отбраковки «реплик из тишины».
+#
+# На шаге W0 крейт **без** зависимости от `parakeet-rs`: появляется в W3, после
+# унификации ORT (W2) — иначе cargo подтянул бы `ort 2.0.0-rc.15` раньше времени
+# и сломал бы сборку `hds-clip`.
+[package]
+name = "hds-diarize"
+description = "Диаризация Nemotron-3 (Sortformer v3) + WAV/VAD/декодер (variant A)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+
+[[bin]]
+name = "diar_wav_probe"
+path = "src/bin/diar_wav_probe.rs"

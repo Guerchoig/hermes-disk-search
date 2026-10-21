@@ -680,25 +680,9 @@ fn ffprobe_meta(path: &Path) -> Option<String> {
     }
 }
 
-/// Поиск программы в `PATH` (`shutil.which`): с `.exe` на Windows.
-fn which(prog: &str) -> Option<PathBuf> {
-    use std::path::Path as StdPath;
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        let cand = dir.join(prog);
-        if StdPath::new(&cand).is_file() {
-            return Some(cand);
-        }
-        #[cfg(windows)]
-        {
-            let exe = dir.join(format!("{prog}.exe"));
-            if StdPath::new(&exe).is_file() {
-                return Some(exe);
-            }
-        }
-    }
-    None
-}
+/// Поиск программы в `PATH` (`shutil.which`): единая реализация — `hds_core::tools`
+/// (она же ищет `ffmpeg` для диаризации, `PLAN_DIARIZATION_NEMOTRON.md` W0).
+use hds_core::tools::which;
 
 /// Обёртка-`Extractor`: медиа → владелец GPU, всё прочее → Python-воркер.
 pub struct MediaRouter<E: Extractor> {
