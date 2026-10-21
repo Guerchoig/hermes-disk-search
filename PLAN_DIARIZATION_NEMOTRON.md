@@ -4,8 +4,9 @@
 > `tools/parity/out/diar_spike/REPORT.md` (числа, §11 — галлюцинации whisper). Дополняет
 > `PLAN_AUTO_TRANSCRIBE.md` §5 (диаризация, формат `.md`, sidecar) и `PLAN_SERVER_MULTIUSER.md`
 > (роль `transcribe`); контракты `PLAN_AUTO_TRANSCRIBE.md` §5 и формат вывода **не меняются**.
-> **Статус:** в работе с 21.10.2026; **W0–W7 выполнены** (ветка `server-multiuser`; по RSS на 77 мин —
-> оговорка в W7: 1.56 ГБ против порога 1.5 ГБ, пик даёт движок whisper, а не диаризация).
+> **Статус:** в работе с 21.10.2026; **W0–W9 закрыты по коду и документации** (ветка
+> `server-multiuser`; тег `v0.21.0` — после решения владельца по RSS: на 77 мин 1.56 ГБ против
+> порога 1.5 ГБ, пик даёт движок whisper, а не диаризация — см. W7).
 > **Уточнение владельца 21.10.2026 (W4):** backend диаризации выбирается телом
 > `diarization_backend` → конфигом `diarization.backend` → авто (модель+sha256 ⇒ `nemotron3`, иначе
 > `sortformer`); `auto_transcribe.diarization_backend` переключаем на `nemotron3` в W5.
@@ -601,17 +602,30 @@ LICENSE-атрибуция на месте; в пакете `DirectML.dll` и н
 **Приёмка W8 — ⚠️ частично:** гарды и fallback покрыты тестами, установка/поиск модели готовы;
 живой прогон CoreML не выполнялся — так и фиксируем в README/STATUS (W9).
 
-### W9. Документация и релиз (0.5 дня)
+### W9. Документация и релиз (0.5 дня) — 📝 **документация готова**, тег — после решения владельца
 
-- [ ] `README.md`: раздел «Автотранскрибация» — модель Nemotron-3 (размер, лицензия, установщик),
-      требования (`ffmpeg` в PATH/пакете), `diarization.backend`, «8 спикеров вместо 4», язык ASR.
-- [ ] `README_SERVER_MULTIUSER.md`: машинный каталог модели, установка на сервере, `-SkipDiarization`.
-- [ ] `STATUS.md`: блок «Диаризация Nemotron-3» со статусом треков и числами приёмки.
-- [ ] `NOTICE.md` (из W6), `RELEASE_NOTES_v0.21.0.md` (новая минорная версия: новая функциональность,
-      MSRV 1.92, дефолт языка `ru`, sortformer как fallback).
-- [ ] Версия по `RELEASING.md`: поднять до `v0.21.0`, тег после зелёной приёмки.
-- [ ] Обновить статус в этом файле (треки → `[x]`, приёмка → `[x]`) и в `DIARIZATION_NEMOTRON_HANDOFF.md`
-      сослаться на этот план.
+- [x] `README.md`: глава 8 «Расшифровка видео/аудио» — секция `diarization` в примере настроек, один
+      декод/срез тишины/до 8 говорящих, модель Nemotron-3 (400 506 656 байт, OpenMDW 1.1,
+      `installers\fetch_nemotron3_model.ps1`, каталоги моделей), `ffmpeg` (winget/brew), прежний
+      sortformer как fallback, `index.whisper_language` (`ru`), macOS «не проверено»; в главе команд —
+      `fetch_nemotron3_model.ps1`.
+- [x] `README_SERVER_MULTIUSER.md`: машинный каталог модели (`%ProgramData%\hermes-disk-search\models\
+      nemotron3`, на Mac — `/Library/Application Support/...`), `-Fetch`/`--fetch` качает Nemotron-3,
+      `-SkipDiarization`, `ffmpeg` обязателен, секция `diarization` в примере настроек, формат
+      `SPEAKER_00`…`SPEAKER_07`, macOS «не проверено».
+- [x] `STATUS.md`: блок «Диаризация Nemotron-3» (треки W0–W8, числа W7, открытый вопрос по RSS).
+- [x] `NOTICE.md` (W6), `RELEASE_NOTES_v0.21.0.md` — по формату `RELEASING.md` §7 (что скачивать,
+      что нового, требования к обновлению включая модель и `ffmpeg`, «проверено/не проверено»).
+- [x] Версия по `RELEASING.md`: `__version__ = "0.21.0"` (`hds/__init__.py`; джоба `check-version`
+      сверит её с тегом), крейты воркспейса остаются `0.1.0`.
+- [ ] **Тег `v0.21.0` и `release.yml`** — не сделаны осознанно: по `RELEASING.md` тег ставится после
+      зелёной приёмки, а по RSS на 77 мин нужно решение владельца (см. W7: 1.56 ГБ против 1.5 ГБ).
+      Ветка `server-multiuser` локально впереди `origin` — сначала её пуш, затем
+      `git tag v0.21.0 && git push origin v0.21.0` (или `gh workflow run release.yml --ref
+      server-multiuser -f version=v0.21.0`).
+- [x] Обновлён статус в этом файле (W0–W9 отмечены, числа записаны); `DIARIZATION_NEMOTRON_HANDOFF.md`
+      (исходный спайк) остаётся историей, актуальный план — этот файл.
+
 
 ## 5. Приёмка
 
