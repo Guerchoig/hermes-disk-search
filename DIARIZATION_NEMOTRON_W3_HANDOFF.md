@@ -6,6 +6,8 @@
 >
 > Предыдущий handoff: `DIARIZATION_NEMOTRON_HANDOFF.md` (спайк, решения, треки целиком).
 > План: `PLAN_DIARIZATION_NEMOTRON.md` (W0–W3 отмечены ✅ с числами).
+>
+> **Актуальное продолжение (после W4): `DIARIZATION_NEMOTRON_W4_HANDOFF.md`.**
 
 ## 1. Где мы находимся
 
