@@ -604,6 +604,26 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// W8: EP чужой платформы отвергается понятной ошибкой (coreml вне macOS,
+    /// directml вне Windows). Живую машину macOS в W8 нет, но гард проверяется на
+    /// любой платформе: `device: auto` до него не доходит, явный EP — получает текст.
+    #[test]
+    fn foreign_execution_provider_is_rejected() {
+        #[cfg(not(target_os = "macos"))]
+        {
+            let err = Diarizer::check_platform(Device::CoreMl).unwrap_err();
+            assert!(err.to_string().contains("macOS"), "{err}");
+        }
+        #[cfg(not(windows))]
+        {
+            let err = Diarizer::check_platform(Device::DirectMl).unwrap_err();
+            assert!(err.to_string().contains("Windows"), "{err}");
+        }
+        // CPU и `auto` проходят гард на любой платформе.
+        assert!(Diarizer::check_platform(Device::Cpu).is_ok());
+        assert!(Diarizer::check_platform(Device::Auto).is_ok());
+    }
+
     /// sha256 считается верно (контрольное значение для «abc»).
     #[test]
     fn sha256_of_known_bytes() {

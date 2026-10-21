@@ -577,14 +577,29 @@ LICENSE-атрибуция на месте; в пакете `DirectML.dll` и н
       разбором фаз, паритеты, `chunk_min` 5 vs 10, регресс sortformer).
 
 
-### W8. macOS — best-effort (0.5 дня)
+### W8. macOS — best-effort (0.5 дня) — ⚠️ **код готов, вживую НЕ проверено** (машины macOS нет)
 
-- [ ] `parakeet-rs` с фичей `coreml` собирается под `aarch64-apple-darwin` (CI-джоб macOS уже
-      `continue-on-error`); модель та же (sha256 совпадает).
-- [ ] `device: auto` на macOS → CoreML с fallback на CPU (лог причины); при недоступном CoreML
-      диаризация не падает.
-- [ ] Ручная проверка на живой машине (если доступна) — зафиксировать в отчёте; иначе — статус
-      «не проверено» и заметка в `README`.
+- [x] `parakeet-rs` с фичей `coreml` включён для `cfg(target_os = "macos")`
+      (`crates/hds-diarize/Cargo.toml`); CI-джоб `build-macos` (`release.yml`) остаётся
+      `continue-on-error` и соберёт darwin-ветку с этой фичей (как только появится раннер).
+- [x] `device: auto` на macOS → CoreML; если CoreML-сессия не поднялась — `Diarizer::create`
+      пишет `[diar] CoreMl недоступен (…); перехожу на CPU` и работает на CPU (не падает).
+      Явный `device: directml` вне Windows и `coreml` вне macOS отвергаются понятной ошибкой —
+      покрыто тестом `sortformer::tests::foreign_execution_provider_is_rejected` (работает на
+      любой платформе). `hds check` показывает «auto → coreml» на macOS —
+      `diag::tests::platform_auto_ep_matches_platform`.
+- [x] Каталог модели на macOS — `~/Library/Application Support/OpenResearchTools/models/nemotron3/`
+      (`hds_diarize::models_roots`); установщик `installers/install_server.command` качает модель
+      тем же `fetch_nemotron3_model.ps1` через `pwsh` (W6). `ffmpeg` для macOS-installer —
+      `brew install ffmpeg` с `[!!]`-предупреждением, если его нет (W6).
+- [ ] Ручная проверка на живой машине — **не выполнялась**: macOS-машины нет.
+      Кросс-проверка с Windows невозможна: `cargo check --target aarch64-apple-darwin` падает
+      в `onig_sys` (`tokenizers`, зависимость `parakeet-rs`) — нужен macOS SDK/C-компилятор
+      (проверено 21.10.2026, `target\maccheck` удалён, цель rustup снята).
+      **Статус в документации: «macOS: не проверено»** (README — W9).
+
+**Приёмка W8 — ⚠️ частично:** гарды и fallback покрыты тестами, установка/поиск модели готовы;
+живой прогон CoreML не выполнялся — так и фиксируем в README/STATUS (W9).
 
 ### W9. Документация и релиз (0.5 дня)
 

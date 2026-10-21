@@ -2763,6 +2763,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&td);
     }
 
+    /// W8: `device: auto` в диагностике показывает тот EP, который выберет платформа
+    /// (directml — Windows, coreml — macOS, cpu — прочее); macOS вживую не проверен.
+    #[test]
+    fn platform_auto_ep_matches_platform() {
+        let ep = super::platform_diar_ep();
+        let want = if cfg!(windows) {
+            "directml"
+        } else if cfg!(target_os = "macos") {
+            "coreml"
+        } else {
+            "cpu"
+        };
+        assert_eq!(ep, want);
+    }
+
     /// W5: вердикт пункта `diarization` — off / nemotron3 / legacy-fallback.
     #[test]
     fn diarization_verdict_statuses() {
