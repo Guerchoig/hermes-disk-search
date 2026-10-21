@@ -24,15 +24,21 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use hds_diarize::{
+    decode_to_wav, leading_silence_samples, read_wav, render_md, write_wav, Diarizer,
+};
+
+use crate::asr_filter::{drop_silent_segments, FilterOutcome};
 use crate::budget::{compute_buffer_mib, estimate_need_mib};
 use crate::cluster::{Cluster, InstanceSpec};
 use crate::config::{self, GpuConfig, LlmHostConfig, Mode};
 use crate::device::describe_devices;
+use crate::diar::{self, Backend as DiarBackend};
 use crate::dispatch::{
     self, instance_use, plan_query, plan_transcribe, Demand, InstanceUse, Plan, Verdict,
 };
@@ -950,6 +956,15 @@ pub struct ClusterBackend {
     /// Страж брошенных запросов: порог одного вызова движка в секундах
     /// (`gpu.abandoned_request_sec`; 0 — выключен).
     abandoned_request_sec: u64,
+    /// W4: настройки диаризации (`diarization.*`) — backend, модель, EP, вход ASR.
+    diar: diar::DiarSettings,
+    /// Backend по умолчанию (конфиг или авто по решению №10) — кэш решения.
+    diar_auto: OnceLock<DiarBackend>,
+    /// Nemotron-3: проверенная модель и ORT-сессия; переиспользуются между
+    /// заданиями (`run_*` требует `&mut`, поэтому под `Mutex`).
+    nemotron: Mutex<Option<Diarizer>>,
+    /// Явный `index.ffmpeg_cmd` (остальной поиск — `diar::find_ffmpeg`).
+    ffmpeg: Option<PathBuf>,
 }
 
 /// Ленивый транскрибатор whisper под `Mutex` (raw-указатели bridge ⇒ `!Send/!Sync`;
@@ -2229,11 +2244,17 @@ impl Backend for ClusterBackend {
     ///
     /// Для автотранскрибации (§5.1) добавляются `{"diarization": true,
     /// "diarization_model": "...gguf", "diarization_backend": "sortformer",
-    /// "diarization_feed_ms": 10800001, "return_text": true}`. `diarization: true`
-    /// **требует** sortformer-модель — без неё задание падает (жёсткий отказ, §0 п.6),
-    /// деградации в `speech` нет. `return_text: true` добавляет в ответ `text` —
-    /// полный текст вывода движка (для `transcript` это `.md` с метками
-    /// `SPEAKER_NN`/`UNASSIGNED`), см. спайк T0.1.
+    /// "diarization_feed_ms": 10800001, "return_text": true}`.
+    ///
+    /// W4 (`PLAN_DIARIZATION_NEMOTRON.md`): backend выбирается телом
+    /// `diarization_backend` → конфигом `diarization.backend` → авто (решение №10).
+    /// * `nemotron3` — свой путь ([`Self::transcribe_nemotron3`]): ffmpeg → полный WAV →
+    ///   ASR по срезу → диаризация по полному WAV → `.md`; sortformer-модель не нужна;
+    /// * `sortformer` — прежний путь движка без изменений (`mode: transcript`);
+    /// * `off` — обычный ASR без меток (`transcript` превращается в `speech`).
+    ///
+    /// `return_text: true` добавляет в ответ `text` — полный текст вывода (для
+    /// `transcript`/`nemotron3` это `.md` с метками `SPEAKER_NN`/`UNASSIGNED`).
     fn internal_transcribe(&self, body: &Value) -> Result<Value> {
         let engine_dir = self.engine_dir.as_ref().ok_or_else(|| {
             EngineError::Other("движок не загружен — транскрибация недоступна".to_string())
@@ -2275,6 +2296,11 @@ impl Backend for ClusterBackend {
         // Без фиксации языка whisper выдаёт английские галлюцинации на тишине
         // (`DIARIZATION_NEMOTRON_HANDOFF.md` п. 5, спайк §8).
         let language = language_from_body(body);
+        // W4: backend диаризации. Тело `diarization_backend` сильнее конфига
+        // (решение владельца 21.10.2026), иначе — `diarization.backend`, а при
+        // отсутствии секции — авто: nemotron3 при валидной модели, иначе
+        // sortformer (решение №10).
+        let diar_backend = self.pick_diar_backend(body);
 
         // Бюджет VRAM (критерий приёмки W3): не создавать whisper на GPU, если
         // «модель + буфер + резерв» не влезает — тогда CPU-fallback с сообщением.
@@ -2326,7 +2352,20 @@ impl Backend for ClusterBackend {
         };
         // Диаризацию собираем после финального решения об устройстве whisper: по
         // умолчанию отдаём движку имя его устройства (как референс — `CUDA0`).
-        let diar = if diarization {
+        // W4: sortformer — только когда backend выбран явно/авто как sortformer;
+        // Nemotron-3 идёт своим путём (модель движка не нужна, VRAM не занимает).
+        if diarization {
+            match diar_backend {
+                DiarBackend::Sortformer => self
+                    .log
+                    .line("[diar] backend=sortformer (legacy) — путь движка без изменений"),
+                DiarBackend::Off => self
+                    .log
+                    .line("[diar] backend=off — обычный ASR без меток спикеров"),
+                DiarBackend::Nemotron3 => {}
+            }
+        }
+        let diar = if diarization && diar_backend == DiarBackend::Sortformer {
             let diar_model = body
                 .get("diarization_model")
                 .and_then(|v| v.as_str())
@@ -2392,10 +2431,30 @@ impl Backend for ClusterBackend {
             "[transcribe] язык ASR: {}",
             language.as_deref().unwrap_or("авто")
         ));
+        // W4: Nemotron-3 — свой путь (декод один раз, ASR по срезу, диаризация по
+        // полному WAV). Ветка sortformer ниже остаётся нетронутой (регресс).
+        if diarization && diar_backend == DiarBackend::Nemotron3 {
+            return self.transcribe_nemotron3(
+                &cell,
+                path,
+                mode,
+                &custom,
+                language.as_deref(),
+                return_text,
+            );
+        }
+        // `off` + `mode: transcript`: движку нельзя отдавать `transcript` (он
+        // потребует sortformer-модель), поэтому просим сплошной текст.
+        let engine_mode = if diarization && diar_backend == DiarBackend::Off && mode == "transcript"
+        {
+            "speech"
+        } else {
+            mode
+        };
         let w = cell.0.lock().unwrap();
         let tr = w.transcribe_file(
             Path::new(path),
-            mode,
+            engine_mode,
             &custom,
             diar.as_ref(),
             language.as_deref(),
@@ -2408,17 +2467,296 @@ impl Backend for ClusterBackend {
             .iter()
             .map(|s| json!({ "text": s.text, "t_start": s.t_start, "t_end": s.t_end }))
             .collect();
+        // `backend` — аддитивный ключ (старые клиенты его не читают).
+        let mut diar_info = json!({ "enabled": diar.is_some() });
+        if diarization {
+            diar_info["backend"] = json!(diar_backend.as_str());
+        }
         let mut out = json!({
             "path": path,
             "mode": mode,
             "custom": custom,
             "out_ext": tr.out_ext,
-            "diarization": { "enabled": diar.is_some() },
+            "diarization": diar_info,
             "segments": segments,
             "stats": tr.json.get("stats").cloned().unwrap_or(Value::Null),
         });
         if return_text {
             out["text"] = json!(tr.raw_text);
+        }
+        Ok(out)
+    }
+}
+
+/// W4: выбор backend и nemotron3-ветка — это данные **живой машины**
+/// (`ClusterBackend`), а не ответы фасада, поэтому отдельный `impl`.
+impl ClusterBackend {
+    /// Backend диаризации для запроса: тело → конфиг → авто (решение владельца).
+    ///
+    /// Тело `diarization_backend` сильнее конфига — так `hds-index` может просить
+    /// конкретный backend на один запрос, не меняя конфиг. Неизвестное значение
+    /// не ломает задание: предупреждение в лог и решение по умолчанию.
+    fn pick_diar_backend(&self, body: &Value) -> DiarBackend {
+        let raw = body
+            .get("diarization_backend")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match raw {
+            Some(v) => match DiarBackend::parse(v) {
+                Some(b) => b,
+                None => {
+                    let fallback = self.resolved_diar_backend();
+                    self.log.note(&format!(
+                        "[diar] diarization_backend '{v}' неизвестен (nemotron3|sortformer|off) — \
+                         беру {}",
+                        fallback.as_str()
+                    ));
+                    fallback
+                }
+            },
+            None => self.resolved_diar_backend(),
+        }
+    }
+
+    /// Backend по умолчанию: конфиг, а если секции нет — авто (решение №10).
+    ///
+    /// Авто: `nemotron3`, когда файл модели есть **и** проходит sha256; иначе
+    /// `sortformer` + предупреждение в лог. Решение кэшируется (`OnceLock`),
+    /// поэтому 400 МБ хешируются не чаще одного раза за процесс.
+    fn resolved_diar_backend(&self) -> DiarBackend {
+        *self.diar_auto.get_or_init(|| {
+            if let Some(b) = self.diar.backend {
+                return b;
+            }
+            let cfg = self.diar.nemotron_config();
+            let ok = !cfg.model.as_os_str().is_empty()
+                && cfg.model.is_file()
+                && hds_diarize::verify_model(&cfg.model).is_ok();
+            if ok {
+                self.log.line(&format!(
+                    "[diar] секция diarization не задана: backend=nemotron3 (модель {} проходит \
+                     sha256)",
+                    cfg.model.display()
+                ));
+                DiarBackend::Nemotron3
+            } else {
+                self.log.note(
+                    "[diar] секция diarization не задана, модель Nemotron-3 не найдена или не \
+                     прошла sha256 — backend=sortformer (legacy)",
+                );
+                DiarBackend::Sortformer
+            }
+        })
+    }
+
+    /// Диаризация полного WAV моделью Nemotron-3 → turns + имя устройства.
+    ///
+    /// ORT-сессия живёт в хосте (создаётся при первом задании): загрузка модели —
+    /// основная цена старта, а задания идут последовательно. `Mutex` держится на
+    /// время прогона — параллельные файлы ждут освобождения сессии.
+    fn run_nemotron(&self, full: &Path) -> Result<(Vec<hds_diarize::Turn>, String)> {
+        let cfg = self.diar.nemotron_config();
+        let mut guard = self.nemotron.lock().unwrap();
+        if guard.is_none() {
+            self.log.line(&format!(
+                "[diar] nemotron3: модель {}, EP {}, блок {:.0} мин, порог {:.2}/{:.2}",
+                cfg.model.display(),
+                cfg.device.as_str(),
+                cfg.chunk_min,
+                cfg.onset,
+                cfg.offset
+            ));
+            let d = Diarizer::load(&cfg).map_err(|e| {
+                EngineError::Other(format!("модель Nemotron-3 ({}): {e}", cfg.model.display()))
+            })?;
+            *guard = Some(d);
+        }
+        let d = guard.as_mut().expect("только что создан");
+        let turns = d
+            .run_wav(full)
+            .map_err(|e| EngineError::Other(format!("диаризация Nemotron-3: {e}")))?;
+        Ok((turns, d.device().as_str().to_string()))
+    }
+
+    /// Nemotron-3 (W4): ffmpeg → полный WAV → ASR по срезу → диаризация по
+    /// полному WAV → постфильтр → сшивка → `.md`.
+    ///
+    /// Инварианты варианта A (`PLAN_DIARIZATION_NEMOTRON.md` §3.4):
+    /// * декодирование **одно**, этот же WAV идёт в диаризацию;
+    /// * обрезка ведущей тишины — только вход ASR (PCM-срез, без второго декода);
+    /// * `trim_offset` прибавляется к таймкодам ASR ровно один раз (в
+    ///   [`diar::merge_absolute`] и в постфильтре);
+    /// * `turns`, `segments[]` ответа, `.md` и `.srt` — сразу в абсолютной шкале.
+    #[allow(clippy::too_many_arguments)]
+    fn transcribe_nemotron3(
+        &self,
+        cell: &Arc<WhisperCell>,
+        src: &str,
+        mode: &str,
+        custom: &str,
+        language: Option<&str>,
+        return_text: bool,
+    ) -> Result<Value> {
+        let started = Instant::now();
+        let ffmpeg = diar::find_ffmpeg(self.ffmpeg.as_deref()).ok_or_else(|| {
+            EngineError::Other(
+                "диаризация nemotron3: не найден ffmpeg (index.ffmpeg_cmd → PATH → стандартные \
+                 каталоги); установите ffmpeg"
+                    .to_string(),
+            )
+        })?;
+        let tmp = diar::TempDir::new("hds_nemotron")
+            .map_err(|e| EngineError::Other(format!("временный каталог задания: {e}")))?;
+        let full = tmp.path().join("full.wav");
+
+        // [decode] один проход: этот WAV — эталон шкалы для ASR и диаризации.
+        let t0 = Instant::now();
+        decode_to_wav(&ffmpeg, Path::new(src), &full)
+            .map_err(|e| EngineError::Other(format!("декодирование {src}: {e}")))?;
+        let decode_sec = t0.elapsed().as_secs_f64();
+        let wav =
+            read_wav(&full).map_err(|e| EngineError::Other(format!("{}: {e}", full.display())))?;
+        self.log.line(&format!(
+            "[diar] декод: {:.1} с аудио за {decode_sec:.2} с ({})",
+            wav.samples.len() as f64 / wav.sample_rate as f64,
+            ffmpeg.display()
+        ));
+
+        // [trim] ведущая тишина — только для ASR (диаризация её не видит).
+        let t0 = Instant::now();
+        let cut = if self.diar.asr.trim_leading_silence {
+            leading_silence_samples(&wav.samples, wav.sample_rate, &self.diar.trim_config())
+        } else {
+            0
+        };
+        let trim_offset = cut as f64 / wav.sample_rate as f64;
+        let asr_input = if cut == 0 {
+            full.clone()
+        } else {
+            let p = tmp.path().join("asr_trim.wav");
+            write_wav(&p, &wav.samples[cut..], wav.sample_rate)
+                .map_err(|e| EngineError::Other(format!("срез WAV: {e}")))?;
+            p
+        };
+        self.log.line(&format!(
+            "[diar] обрезка ASR: {trim_offset:.3} с ведущей тишины, срез {:.1} с ({:.2} с)",
+            wav.samples.len().saturating_sub(cut) as f64 / wav.sample_rate as f64,
+            t0.elapsed().as_secs_f64()
+        ));
+
+        // [asr] движку — срез; режим `subtitle` нужен ради таймкодов.
+        let t0 = Instant::now();
+        let tr = {
+            let w = cell.0.lock().unwrap();
+            w.transcribe_file(&asr_input, diar::ASR_MODE_SUBTITLE, custom, None, language)?
+        };
+        // активность роли whisper — для вытеснения по простою (ARB-5, W3)
+        self.note_used("whisper");
+        let asr_sec = t0.elapsed().as_secs_f64();
+        self.log.line(&format!(
+            "[diar] ASR: {} сегментов за {asr_sec:.1} с (язык {})",
+            tr.segments.len(),
+            language.unwrap_or("авто")
+        ));
+        // [filter] «реплики из тишины» — по полному WAV, offset один раз.
+        let filtered = if self.diar.asr.drop_silent_segments {
+            drop_silent_segments(&tr.segments, &wav, trim_offset, &self.diar.filter_config())
+        } else {
+            FilterOutcome {
+                kept: tr.segments.clone(),
+                dropped: Vec::new(),
+            }
+        };
+        if !filtered.dropped.is_empty() {
+            for s in filtered.dropped.iter().take(5) {
+                self.log.line(&format!(
+                    "[diar] отброшено (тишина): [{:.2}-{:.2}] {}",
+                    s.t_start + trim_offset,
+                    s.t_end + trim_offset,
+                    s.text
+                ));
+            }
+            self.log.line(&format!(
+                "[diar] постфильтр: отброшено {} из {} сегментов",
+                filtered.filtered_count(),
+                tr.segments.len()
+            ));
+        }
+
+        // [diar] Nemotron-3 — по полному WAV; сбой при `required: false` не валит
+        // задание (пишем `.md` без меток, `diarization.enabled: false`).
+        let t0 = Instant::now();
+        let (turns, device, diar_error) = match self.run_nemotron(&full) {
+            Ok((turns, device)) => (turns, device, None),
+            Err(e) => {
+                let msg = e.to_string();
+                if self.diar.required {
+                    return Err(e);
+                }
+                self.log.note(&format!(
+                    "диаризация nemotron3 не удалась ({msg}) — пишу .md без меток \
+                     (diarization.required: false)"
+                ));
+                (Vec::new(), "нет".to_string(), Some(msg))
+            }
+        };
+        let diar_sec = t0.elapsed().as_secs_f64();
+        let num_speakers = diar::speaker_count(&turns);
+        self.log.line(&format!(
+            "[diar] nemotron3: EP={device}, {num_speakers} спикеров, {} turn'ов, {diar_sec:.1} с",
+            turns.len()
+        ));
+
+        // [merge] сегменты (шкала среза) + turns (абсолютная) → блоки `.md`.
+        let blocks = diar::merge_absolute(&filtered.kept, &turns, trim_offset);
+        let text = render_md(&blocks, diar::MD_UNASSIGNED);
+        let total_sec = started.elapsed().as_secs_f64();
+        let stats = diar::NemotronStats {
+            num_speakers,
+            num_turns: turns.len(),
+            filtered_segments: filtered.filtered_count(),
+            timings: diar::NemotronTimings {
+                decode: decode_sec,
+                asr: asr_sec,
+                diar: diar_sec,
+                total: total_sec,
+            },
+        };
+        let segments: Vec<Value> = filtered
+            .kept
+            .iter()
+            .map(|s| {
+                json!({
+                    "text": s.text,
+                    "t_start": s.t_start + trim_offset,
+                    "t_end": s.t_end + trim_offset,
+                })
+            })
+            .collect();
+        self.log.line(&format!(
+            "[diar] итог: {} реплик, {num_speakers} спикеров, {total_sec:.1} с",
+            blocks.len()
+        ));
+        let mut diar_info = json!({
+            "enabled": diar_error.is_none(),
+            "backend": DiarBackend::Nemotron3.as_str(),
+            "num_speakers": num_speakers,
+        });
+        if let Some(err) = &diar_error {
+            diar_info["error"] = json!(err);
+        }
+        let mut out = json!({
+            "path": src,
+            "mode": mode,
+            "custom": custom,
+            "out_ext": "md",
+            "diarization": diar_info,
+            "segments": segments,
+            "stats": stats.to_json(tr.json.get("stats")),
+        });
+        if return_text {
+            out["text"] = json!(text);
         }
         Ok(out)
     }
@@ -2745,6 +3083,21 @@ impl Host {
         for w in &resolved.warnings {
             log.note(&format!("конфиг: {w}"));
         }
+        // W4: секция `diarization` необязательна; опечатка в ней не мешает хосту
+        // подняться (жёсткая проверка значений — `hds check`, W5). Решение об
+        // автовыборе backend принимается лениво (`resolved_diar_backend`), но
+        // логируем его сразу: молчаливый выбор модели — источник сюрпризов.
+        let (diar_settings, diar_warnings) = diar::DiarSettings::from_yaml(&yaml);
+        for w in &diar_warnings {
+            log.note(&format!("диаризация: {w}"));
+        }
+        if let Some(b) = diar_settings.backend {
+            log.line(&format!(
+                "[diar] backend={} (конфиг diarization.backend)",
+                b.as_str()
+            ));
+        }
+        let ffmpeg = diar::configured_ffmpeg(&yaml);
         // M6 T2 §3.5: нарушение контракта раскладки (реплики индексных ролей,
         // дубли портов) — fail-fast с числами, а не «подняли половину ролей».
         if let Some(note) = resolved.contract_note() {
@@ -3153,7 +3506,14 @@ impl Host {
             role_cards,
             transcribe_active: Arc::new(AtomicBool::new(false)),
             abandoned_request_sec: resolved.gpu.abandoned_request_sec,
+            diar: diar_settings,
+            diar_auto: OnceLock::new(),
+            nemotron: Mutex::new(None),
+            ffmpeg,
         });
+        // Решение «конфиг или авто» — один раз и в лог (решение владельца №10):
+        // при отсутствии секции модель Nemotron-3 проверяется по sha256 здесь.
+        backend.resolved_diar_backend();
 
         let handles = if ports.is_empty() {
             log.note(

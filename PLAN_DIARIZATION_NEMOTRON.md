@@ -4,7 +4,10 @@
 > `tools/parity/out/diar_spike/REPORT.md` (числа, §11 — галлюцинации whisper). Дополняет
 > `PLAN_AUTO_TRANSCRIBE.md` §5 (диаризация, формат `.md`, sidecar) и `PLAN_SERVER_MULTIUSER.md`
 > (роль `transcribe`); контракты `PLAN_AUTO_TRANSCRIBE.md` §5 и формат вывода **не меняются**.
-> **Статус:** запланирован 21.10.2026. Ветка **`server-multiuser`**, HEAD `0037f43` (тег `v0.20.6`).
+> **Статус:** в работе с 21.10.2026; **W0–W4 выполнены** (ветка `server-multiuser`).
+> **Уточнение владельца 21.10.2026 (W4):** backend диаризации выбирается телом
+> `diarization_backend` → конфигом `diarization.backend` → авто (модель+sha256 ⇒ `nemotron3`, иначе
+> `sortformer`); `auto_transcribe.diarization_backend` переключаем на `nemotron3` в W5.
 > **Согласовано владельцем 21.10.2026:** ответы на 5 открытых вопросов (§7) и **вариант A**
 > обрезки тишины — диаризация идёт по **полному** WAV (как в спайке), обрезка — только для ASR
 > (§3.4, §6). ASR остаётся прежним (whisper-large-v3-turbo через bridge движка), gigastt **не**
@@ -366,35 +369,77 @@ CPU RTFx 22.7, интеграционный тест `frag60` зелёный, `f
 Замечание: среда ассистента выставляет `HDS_ROOT=<repo>`, из-за чего 2 теста `hds-llama`
 (`host_resident`) падают — тесты прогнаны с очищенной переменной (код не менялся).
 
-### W4. Интеграция в `llm_host` + форматтеры (2 дня)
+### W4. Интеграция в `llm_host` + форматтеры (2 дня) — ✅ **выполнено** (21.10.2026)
 
-- [ ] `host::internal_transcribe`: ветвление по `diarization.backend` (§3.1). Путь `nemotron3`:
-      `[decode]` (W0) → `[asr]` (`mode: subtitle` внутри, язык из §3.2) → `[diar]` (`run_wav` по полному
-      WAV) → `+offset` → постфильтр → `merge` → `render_md`.
-- [ ] `stats`: `num_speakers`, `num_turns`, `filtered_segments`, `timings_sec{decode, asr, diar, total}`;
-      в лог — одна строка на этап (`[diar] nemotron3: EP=DirectML, 5 спикеров, 315 turn'ов, 9.4 с`).
-- [ ] Для `nemotron3` **не** запрашивать VRAM под модель диаризации: `transcribe_need_mib` учитывает
-      только whisper; `prepare_demand(TRANSCRIBE_ROLE)` остаётся (ASR на движке) — «Грабли» п. 12.
-- [ ] Сбой диаризации при `diarization.required: true` → задание падает (жёсткий отказ, как сейчас);
-      при `false` → `.md` без меток + предупреждение в лог (`diarization{enabled:false}` в ответе).
-- [ ] Путь `sortformer` — байт-в-байт прежний код (метка в логе `backend=sortformer (legacy)`).
-- [ ] Живой прогон `hds transcribe-once` на 18-мин файле: `.md` с 5 спикерами, `UNASSIGNED` только вне
-      речей, `<stem>.orig.md` и `<stem>.speakers.json` на месте, UI «Транскрибация» открывает файл и
-      переименовывает `SPEAKER_00 → Иван` (`.bak` создаётся).
-- [ ] Регресс: тот же файл с `diarization.backend: sortformer` → прежние `num_speaker_spans`/спикеры
-      (сравнение с `tools/parity/out/diar_spike/out/baseline_sortformer.json` по числу спанов и
-      набору спикеров).
+- [x] `host::internal_transcribe`: ветвление по backend. Приоритет (решение владельца 21.10.2026):
+      тело `diarization_backend` → конфиг `diarization.backend` → авто (§7 п. 3: модель Nemotron есть
+      и проходит sha256 → `nemotron3`, иначе `sortformer` + предупреждение в лог). Путь `nemotron3`:
+      `[decode]` (ffmpeg, один проход) → обрезка ведущей тишины (PCM-срез только для ASR) → `[asr]`
+      (`mode: subtitle` внутри, язык из §3.2) → `[diar]` (`run_wav` по полному WAV) → `+offset`
+      (один раз) → постфильтр → `merge` → `render_md` (`out_ext: "md"`). Код:
+      `crates/hds-llama/src/diar.rs` (разбор секции, выбор backend, `find_ffmpeg`, временный каталог
+      задания, перевод шкал, `stats`) + ветка в `host.rs`; ORT-сессия живёт в
+      `ClusterBackend::nemotron` и переиспользуется между заданиями.
+- [x] `stats`: `num_speakers`, `num_turns`, `filtered_segments`, `timings_sec{decode, asr, diar, total}`
+      поверх статистики движка (`num_segments`, `num_words`, …); в лог — одна строка на этап.
+- [x] Для `nemotron3` VRAM под модель диаризации не запрашивается: `transcribe_need_mib` видит только
+      whisper (`diar = None`), `prepare_demand(TRANSCRIBE_ROLE)` остаётся (ASR на движке).
+- [x] Сбой диаризации: `required: true` → задание падает; `false` → `.md` без меток +
+      `diarization{enabled:false, error}` и предупреждение в лог.
+- [x] Путь `sortformer` не менялся (в лог — `backend=sortformer (legacy)`); `off` отдаёт обычный ASR
+      (для `mode: transcript` движку передаётся `speech`, иначе он требует sortformer-модель).
+- [x] Юниты +12 (`hds-llama::diar`): разбор секции и предупреждения, `pick_backend` (тело сильнее
+      конфига), инвариант «offset один раз» (`merge_absolute` ≡ сшивка уже сдвинутых сегментов),
+      подсчёт спикеров, `stats` поверх ключей движка, поиск `ffmpeg`, уникальность/уборка `TempDir`.
+- [x] Живой прогон `hds transcribe-once` (18-мин файл, песочница `llm_host` на 8110,
+      `target\w2\release`): **197 реплик, 5 спикеров** (`SPEAKER_00…04`, 34 `UNASSIGNED`),
+      `<stem>.orig.md` и `<stem>.speakers.json` созданы (`w4_out/`, `w4_state/`).
+- [x] Прямой `/internal/transcribe` (точные таймкоды, `w4_resp.json`): `out_ext: "md"`,
+      `diarization{backend: nemotron3, enabled: true, num_speakers: 5}`, 310 сегментов, первый
+      сегмент **17.42 с** (= 16.28 offset + 1.14), последний 1076.57 с.
+- [x] Регресс sortformer тем же файлом (тело переопределило конфиг — проверка приоритета):
+      `backend=sortformer`, `enabled: true`, 4 спикера + `UNASSIGNED`, 0 «Thank you»/«Obrigado»/
+      «Lukoyle», статистика движка (`num_speaker_spans: 629`, `num_speaker_segments: 53`).
 
-**Приёмка W4:** `.md` содержит `### SPEAKER_NN`, 5 спикеров; таймкоды совпадают с ASR-разметкой
-(выборочно 10 реплик вручную); `segments[]` и `.md` согласованы; sidecar/UI работают.
+**Результаты W4 (живой прогон 21.10.2026, 18-мин файл, DirectML):**
+
+| Этап | Время | Факт |
+|---|---|---|
+| декод ffmpeg (один проход) | 0.62–0.76 с | 1076.2 с аудио, `ffmpeg 9.0.1` (winget) |
+| обрезка ASR | 0.07 с | **16.280 с** ведущей тишины (как в W0), срез 1060.0 с |
+| ASR (движок, `whisper_language: ru`) | 43.7–53.2 с | 313 сегментов, **3 отброшено** постфильтром |
+| диаризация Nemotron-3 (DirectML) | 9.8–13.7 с | 326 turns, **5 спикеров** (первый прогон — с сессией) |
+| итого задание | 56.7–67.9 с | RTFx ≈ 15.9–19.0 к длительности файла |
+
+Контроль качества: **0** «Thank you»/«Obrigado»/«Lukoyle»; по **точным** таймкодам сегментов —
+**0** реплик, целиком лежащих в тишине (методика §3.4 п. 5: доля речи < 5 % И речь < 150 мс;
+отброшены «добрый» на 28.6–33.6 с и два сегмента за концом файла). Проверка `.md` по округлённым до
+секунды заголовкам даёт 2 ложных срабатывания (967–968 с и 1007–1008 с): точные сегменты там 56 % и
+70 % речи — учитывать в W7 (`w4_check.py` для `.md` vs `w4_verify.py` для `segments[]`).
+
+Память: прирост RSS `llm_host` за задание — **+780 МБ** (пик на диаризации 18 мин). Полный RSS
+процесса (~8.5 ГБ) включает предзагруженный чат-инстанс движка (`KEEP_LOADED`, прежнее поведение),
+поэтому критерий §7 «≤ 1.5 ГБ на 77 мин» в W7 измеряем **дельтой** на этой же песочнице
+(`llm.chat.retention: load_on_demand` стартовую загрузку чата не отменяет — так устроен хост).
+
+Артефакты: `tools/parity/out/diar_nemotron/{w4_host.yaml, host_w4.log, w4_resp.json,
+w4_resp_sortformer.json, w4_check.json, w4_out/*.md, w4_state/*, w4_post.py, w4_check.py,
+w4_verify.py}` (каталог гитигнорится).
+
+**Приёмка W4 — ✅ выполнена:** `.md` содержит `### SPEAKER_NN` и 5 спикеров; `segments[]` и `.md`
+согласованы (197 блоков сшивки из 310 сегментов); таймкоды абсолютные, offset применён один раз;
+sidecar и `.orig.md` на месте, формат не менялся (переименование имён — существующий путь UI, покрыт
+`cargo test -p hds-ui`); sortformer-регресс, `fmt`/`clippy -D warnings`/`test` — зелёные.
 
 ### W5. Конфиг и диагностика (0.5 дня)
 
-- [ ] `hds-core::config` — чтение `diarization.*` (секция опциональна; нет секции ⇒ авто-выбор по §7 п. 3:
-      модель Nemotron есть → `nemotron3`, иначе `sortformer` + предупреждение в лог).
-- [ ] Валидация ключей (§3.5) в `hds check` и при старте `llm_host` (ошибка конфига — понятное
-      сообщение, без паники).
-- [ ] `hds check`: пункт `diarization` — backend, путь модели + sha256 ok, EP, наличие `ffmpeg`.
+- [x] Чтение `diarization.*` и авто-выбор backend — сделаны в W4 (`hds-llama::diar`, решение №10).
+- [ ] Переключить дефолт `auto_transcribe.diarization_backend` на `nemotron3`: тело запроса сильнее
+      конфига (решение владельца 21.10.2026), иначе установки остаются на legacy-пути.
+- [ ] Валидация ключей (§3.5) в `hds check` и при старте `llm_host` (понятное сообщение, без паники);
+      парсер W4 уже собирает предупреждения вместо падения.
+- [ ] `hds check`: пункт `diarization` — backend, путь модели + sha256 ok, EP, наличие `ffmpeg`
+      (готовые `diar::DiarSettings` и `diar::find_ffmpeg` из W4).
 - [ ] `hds whisper-check`: печатать `diarization.backend`, EP и число спикеров последнего прогона
       (из лога/статуса; без запуска модели).
 - [ ] `config.example.yaml`, `server_config.example.yaml`, `hds config init` — секция с комментариями,
