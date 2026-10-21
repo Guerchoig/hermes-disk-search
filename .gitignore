@@ -18,6 +18,13 @@ index.db*.moved-*
 index.db.moved*
 test_data/
 models/
+# W6: веса моделей (Nemotron-3 .onnx, sortformer .gguf) в репозиторий не входят и в
+# релизный архив не кладутся — их ставит установщик
+# (installers\fetch_nemotron3_model.ps1, fetch_diarization_model.ps1).
+*.onnx
+*.onnx.data
+*.onnx.part
+*.gguf
 
 # llama.cpp: бинарь и runtime llama-server (~0,6-1 ГБ) + PID-файлы/логи менеджера
 tools/llama.cpp/

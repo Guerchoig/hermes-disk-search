@@ -314,7 +314,7 @@ elif command -v brew >/dev/null 2>&1; then
     if command -v ffmpeg >/dev/null 2>&1; then
         summary+=("[ok] ffmpeg: $(command -v ffmpeg)")
     else
-        summary+=("[..] ffmpeg missing (not needed by the Rust pipeline; legacy Python paths only)")
+        summary+=("[!!] ffmpeg missing: diarization (nemotron3) cannot decode audio - brew install ffmpeg, then run 'hds check'")
     fi
 else
     summary+=("[..] deps skipped: Homebrew not found (install tesseract tesseract-lang ffmpeg manually)")
@@ -339,6 +339,9 @@ if [ "$FETCH" = "yes" ] && [ "$NOFETCH" != "yes" ]; then
         fetch_one fetch_llm_models.ps1 -RuntimeDir "$LLAMA_DIR"
         fetch_one fetch_whisper_model.ps1 -ModelsDir "$MODELS_DIR"
         fetch_one fetch_diarization_model.ps1 -ModelsDir "$MODELS_DIR"
+        # W6: Nemotron-3 ONNX — the default diarization backend (works on macOS via
+        # the CoreML/CPU execution providers of ONNX Runtime, W8).
+        fetch_one fetch_nemotron3_model.ps1 -ModelsDir "$MODELS_DIR"
         fetch_one fetch_clip_models.ps1 -ModelsDir "$CLIP_DIR"
     else
         summary+=("[..] fetch skipped - pwsh (PowerShell) not found on macOS")

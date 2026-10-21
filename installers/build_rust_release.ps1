@@ -44,6 +44,24 @@ foreach ($b in @("hds", "hds_mcp", "llm_host")) {
     Copy-Item $src (Join-Path $binDir "$b.exe") -Force
 }
 
+# W6: DirectML.dll ships next to the binaries (ort -> copy-dylibs puts it into
+# target\release on Windows). Without it the DirectML execution provider of the
+# Nemotron-3 diarizer does not load on a machine without the Windows SDK.
+# Since W5 every binary links ONNX Runtime (hds-index -> hds-diarize), so the DLL
+# must be next to all of them: one bin\ folder covers hds/hds_mcp/llm_host.
+$dml = Join-Path $root "target\release\DirectML.dll"
+if (-not (Test-Path $dml)) {
+    $found = Get-ChildItem -Path (Join-Path $root "target\release") -Recurse -Filter "DirectML.dll" -File -ErrorAction SilentlyContinue |
+        Select-Object -First 1
+    if ($found) { $dml = $found.FullName }
+}
+if (Test-Path $dml) {
+    Copy-Item $dml (Join-Path $binDir "DirectML.dll") -Force
+    Write-Host "[diar] DirectML.dll staged from $dml"
+} else {
+    throw "DirectML.dll not found under target\release - build with the 'directml' feature of parakeet-rs (default on Windows), otherwise the Nemotron-3 diarizer falls back to CPU only"
+}
+
 # installation scripts at the archive root (setup.ps1 resolves paths relative to itself)
 foreach ($f in @("setup.cmd", "setup.ps1", "install-server.cmd", "update.cmd",
                  "install_hermes.ps1", "install_cline.ps1",
@@ -145,6 +163,16 @@ foreach ($f in Get-ChildItem -File $clientDst) {
     $lines += ("{0}  client/{1}" -f $h, $f.Name)
 }
 $lines | Set-Content -Encoding ascii (Join-Path $stage "sha256.txt")
+
+# W6: models are never packed. The repository ships no *.onnx/*.gguf and the
+# installers download them separately (fetch_nemotron3_model.ps1, fetch_*_model.ps1),
+# so a stray model file in the tree means the wrong thing was copied (or a local
+# experiment leaked into the release).
+$models = Get-ChildItem -Recurse -File $stage -Include *.onnx, *.gguf, *.onnx.data -ErrorAction SilentlyContinue
+if ($models) {
+    $names = ($models | ForEach-Object { $_.FullName.Replace($root + '\', '') }) -join '; '
+    throw "model weights must not be packed into the release: $names"
+}
 
 Write-Host "[w4] staged: $stage"
 Get-ChildItem -Recurse -File $stage | ForEach-Object { Write-Host ("  " + $_.FullName.Replace($root + '\', '')) }

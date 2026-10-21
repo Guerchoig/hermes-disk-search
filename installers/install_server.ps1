@@ -315,15 +315,16 @@ if ($SkipDeps) {
     } else {
         $summary += "[..] Tesseract missing: OCR of images/scans stays off (winget --scope machine -e --id UB-Mannheim.TesseractOCR)"
     }
-    # ffmpeg: only the legacy Python paths need the CLI (the engine decodes media
-    # itself), but installing it machine-wide keeps `hds check` clean everywhere.
+    # ffmpeg: the Nemotron-3 diarization path (W4) decodes media with the CLI
+    # (`ffmpeg -ac 1 -ar 16000`), so it is REQUIRED for diarization.backend:
+    # nemotron3 (the product default); legacy Python paths also use it.
     if (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
         $summary += "[ok] ffmpeg: already available"
     } elseif ($haveWinget) {
         winget install --scope machine -e --id Gyan.FFmpeg --accept-source-agreements --accept-package-agreements
         $summary += "[ok] ffmpeg: installed (machine scope)"
     } else {
-        $summary += "[..] ffmpeg missing (not needed by the Rust pipeline; legacy Python paths only)"
+        $summary += "[!!] ffmpeg missing: diarization (nemotron3) cannot decode audio - winget install --scope machine -e --id Gyan.FFmpeg, then run 'hds check'"
     }
 }
 
@@ -398,6 +399,8 @@ if ($Fetch -and -not $NoFetch) {
         @{ name = 'fetch_llm_models.ps1'; args = @('-RuntimeDir', $llamaDir) },
         @{ name = 'fetch_whisper_model.ps1'; args = @('-ModelsDir', $modelsDir) },
         @{ name = 'fetch_diarization_model.ps1'; args = @('-ModelsDir', $modelsDir) },
+        # W6: Nemotron-3 ONNX (hds-diarize / llm_host, `diarization.backend: nemotron3`).
+        @{ name = 'fetch_nemotron3_model.ps1'; args = @('-ModelsDir', $modelsDir) },
         @{ name = 'fetch_clip_models.ps1'; args = @('-ModelsDir', $clipDir) }
     )
     foreach ($f in $fetches) {

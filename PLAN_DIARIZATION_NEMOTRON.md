@@ -491,30 +491,57 @@ sidecar и `.orig.md` на месте, формат не менялся (пер�
 модели — понятная ошибка с командой установщика и код 1; `config init` даёт валидный YAML (тест на
 рендер); дефолт клиента — `nemotron3`.
 
-### W6. Установка модели и лицензии (1 день)
+### W6. Установка модели и лицензии (1 день) — ✅ **выполнено** (21.10.2026)
 
-- [ ] `installers/fetch_nemotron3_model.ps1` (**ASCII-only**, PowerShell 5.1): параметры
-      `-ModelsDir`, `-Force`; URL и ревизия — **зафиксировать и записать в шапку скрипта** (источник —
-      `altunenes/parakeet-rs`, файл `nemotron-3-diarization/nemotron3_diar_v3.onnx`); проверки
-      size **400 506 656** и `Get-FileHash -Algorithm SHA256` =
-      **`915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a`**; каталог
-      `<ModelsDir>/nemotron3/`; скачивание в `.part` → проверка → `Move-Item`; идемпотентность (файл с
-      верным хешем — выход `0`), `-Force` — перекачать; `HDS_MODELS_DIR` учитывается (службы).
-- [ ] `setup.ps1`: шаг «Модель диаризации (Nemotron-3)» + флаг `-SkipDiarization` (не качать).
-- [ ] `installers/install_server.ps1` и `install_server.command`: модель в **машинный** каталог (видят
-      службы под LocalSystem) + проверка наличия `ffmpeg` (иначе предупреждение с инструкцией —
-      без `ffmpeg` сервер не декодирует медиа, W0).
-- [ ] `installers/build_rust_release.ps1`: включить новый скрипт в серверный пакет; модель в архив
-      **не** кладём. **W5:** `DirectML.dll` копировать рядом со **всеми** бинарями пакета —
-      ORT в линковке теперь и у `hds_mcp`/`hds-search` (через `hds-index → hds-diarize`).
-- [ ] `NOTICE.md`: блок «Диаризация» — веса **Nemotron-3-Diarization** (OpenMDW 1.1; проверить текст
-      лицензии и записать вывод), `parakeet-rs` — MIT OR Apache-2.0, ONNX Runtime — MIT (DirectML —
-      Microsoft, поставляется пакетом `ort`), sortformer 4spk-v2.1 (пока остаётся) — NVIDIA Open Model
-      License; отдельно: модель не входит в репозиторий.
-- [ ] `.gitignore`/пакет: убедиться, что `*.onnx` не попадёт в git и в релизный zip.
+- [x] `installers/fetch_nemotron3_model.ps1` (**ASCII-only**, PS 5.1): `-ModelsDir`, `-Force`,
+      `-Repo`/`-Revision`/`-File`; ревизия **`4d2a8bc71f5c896ec40faa59732e6716295edaf2`**
+      (`altunenes/parakeet-rs`, `nemotron-3-diarization/nemotron3_diar_v3.onnx`) зафиксирована в
+      шапке и в параметре — `main` не используется; проверки size **400 506 656** и
+      `Get-FileHash -Algorithm SHA256` (совпадает с LFS-oid HF); каталог `<ModelsDir>/nemotron3/`;
+      скачивание в `.part` → проверка → `Move-Item`; идемпотентность (верный файл — выход 0),
+      `-Force` — перекачать; каталоги: `HDS_MODELS_DIR` → `%ProgramData%\hermes-disk-search\models`
+      (если записываем) → `%APPDATA%\OpenResearchTools\models`; macOS — `~/Library/Application Support`.
+      Попутно исправлено: `$File?download` PowerShell разбирал как переменную `$File?download`
+      (URL получался `…/=true`) — теперь `${File}?download=true`.
+- [x] `setup.ps1`: шаг «Diarization models (auto-transcription)» качает **оба** (Nemotron-3 + Sortformer),
+      флаг `-SkipDiarization` пропускает оба, подсказки `-SkipModels` и список моделей автотранскрибации
+      обновлены.
+- [x] `installers/install_server.ps1`: `fetch_nemotron3_model.ps1` в `$fetches` (`-ModelsDir
+      $modelsDir` = машинный `HDS_MODELS_DIR`); текст про `ffmpeg` исправлен — он **обязателен**
+      для `nemotron3` (декод WAV), без него `[!!]` с командой winget.
+      `installers/install_server.command`: тот же fetch через `pwsh` + тот же текст про `ffmpeg`.
+- [x] `installers/build_rust_release.ps1`: `DirectML.dll` копируется в `bin\` (из `target\release`,
+      иначе поиск по дереву; нет DLL — `throw`, а не молчаливый пакет без GPU); перед упаковкой
+      проверка «в stage нет `*.onnx`/`*.gguf`/`*.onnx.data`» (`throw` со списком). Скрипт fetch
+      попадает в архив вместе с каталогом `installers\`.
+- [x] `NOTICE.md`: новый раздел «Диаризация: Nemotron-3 (Sortformer v3), `hds-diarize`» — веса
+      **OpenMDW 1.1** (текст проверен по `nemotron-3-diarization/LICENSE`: сохранение текста и
+      уведомлений о происхождении, на **выходы** ограничений нет), `parakeet-rs` 0.4.2 —
+      MIT OR Apache-2.0, ONNX Runtime 2.0.0-rc.15 — MIT, `DirectML.dll` — лицензия Microsoft
+      «DirectML» (распространение в составе приложения для Windows/Xbox ⇒ только Windows-пакет),
+      sortformer 4spk-v2.1 — NVIDIA Open Model License (fallback); отдельно: модель в репозиторий
+      и архив не входит.
+- [x] `.gitignore`: `*.onnx`, `*.onnx.data`, `*.onnx.part`, `*.gguf` (в git отслеживаемых весов не было
+      и нет: `git ls-files '*.onnx' '*.gguf'` = 0).
 
-**Приёмка W6:** на чистом профиле установщик качает 400.5 МБ, sha256 совпадает, повторный запуск
-пропускает файл, `-Force` перекачивает; `hds check` видит модель; LICENSE-атрибуция на месте.
+**Результаты W6 (живой прогон 21.10.2026):**
+
+| Проверка | Факт |
+|---|---|
+| чистая загрузка (`-ModelsDir D:\diar-spike-models`) | 400 506 656 байт, sha256 совпал, **52.7 с** (382 МБ) |
+| повторный запуск (файл на месте) | `[ok] … already present`, **0.7 с**, выход 0 |
+| `-Force` | перекачал и проверил sha256, **40.3 с**, выход 0 |
+| битый ответ (подставлен LICENSE вместо модели) | `[!!] wrong size: expected 400506656, got 2660`, `.part` удалён, выход 1 |
+| `hds check` c `HDS_MODELS_DIR=D:\diar-spike-models` | `[ok] … nemotron3 … D:\diar-spike-models\nemotron3\nemotron3_diar_v3.onnx (382 МБ, sha256 ok), ffmpeg найден` — канонический путь `<root>/nemotron3/` совпадает с установщиком |
+| `build_rust_release.ps1 -Version 0.21.0-w6test -SkipBuild -SkipZip` | `bin\` = `hds.exe`, `hds_mcp.exe`, `llm_host.exe`, **`DirectML.dll`**; `*.onnx`/`*.gguf` в stage — **0**; `installers\fetch_nemotron3_model.ps1` в архиве |
+
+Тесты: +2 (`install_server_parity::nemotron3_fetch_script_is_pinned_and_verified`,
+`release_package_ships_directml_and_no_weights`; 17 в файле) — зелёные. Артефакты:
+`tools/parity/out/diar_nemotron/w6_package.txt` (состав пакета; `dist/` после проверки удалён).
+
+**Приёмка W6 — ✅ выполнена:** установщик качает 400.5 МБ, sha256 совпадает, повторный запуск
+пропускает файл, `-Force` перекачивает; `hds check` видит модель в каноническом каталоге;
+LICENSE-атрибуция на месте; в пакете `DirectML.dll` и нет весов.
 
 ### W7. Тесты и приёмка (1 день)
 

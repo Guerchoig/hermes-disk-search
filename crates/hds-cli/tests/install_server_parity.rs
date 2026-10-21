@@ -468,3 +468,66 @@ fn fetch_scripts_honour_hds_models_dir() {
         );
     }
 }
+
+/// W6: установщик модели Nemotron-3 — ASCII-only, пин ревизии (не `main`), размер и
+/// sha256 модели, скачивание в `.part` с проверкой перед `Move-Item`.
+#[test]
+fn nemotron3_fetch_script_is_pinned_and_verified() {
+    let s = read("installers/fetch_nemotron3_model.ps1");
+    assert!(
+        s.is_ascii(),
+        "installers/fetch_nemotron3_model.ps1 не ASCII-only: PS 5.1 прочитает его как ANSI"
+    );
+    for needle in [
+        // Ревизия и файл в Hugging Face (пин, не main).
+        "4d2a8bc71f5c896ec40faa59732e6716295edaf2",
+        "nemotron-3-diarization/nemotron3_diar_v3.onnx",
+        // Размер и sha256 из W3 (`hds_diarize::{NEMOTRON_SIZE, NEMOTRON_SHA256}`).
+        "400506656",
+        "915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a",
+        // Скачивание во временный файл, проверка, затем перемещение.
+        ".part",
+        "Get-FileHash",
+        "Move-Item",
+        // Каталоги моделей: службы видят только машинный/`HDS_MODELS_DIR`.
+        "HDS_MODELS_DIR",
+        "ProgramData",
+    ] {
+        assert!(
+            s.contains(needle),
+            "в fetch_nemotron3_model.ps1 нет '{needle}'"
+        );
+    }
+    assert!(
+        !s.contains("/resolve/main/"),
+        "fetch_nemotron3_model.ps1 качает с main — ревизия должна быть пинована"
+    );
+}
+
+/// W6: пакет кладёт `DirectML.dll` рядом с бинарями и не пакует веса моделей;
+/// все три установщика зовут новый fetch-скрипт, `.gitignore` держит `*.onnx`.
+#[test]
+fn release_package_ships_directml_and_no_weights() {
+    let build = read("installers/build_rust_release.ps1");
+    for needle in ["DirectML.dll", "\"$b.exe\"", "*.onnx", "throw"] {
+        assert!(
+            build.contains(needle),
+            "в build_rust_release.ps1 нет '{needle}' — пакет соберётся без DirectML/с весами"
+        );
+    }
+    for f in [
+        "installers/install_server.ps1",
+        "installers/install_server.command",
+        "setup.ps1",
+    ] {
+        assert!(
+            read(f).contains("fetch_nemotron3_model.ps1"),
+            "в {f} нет вызова fetch_nemotron3_model.ps1"
+        );
+    }
+    let ignore = read(".gitignore");
+    assert!(
+        ignore.contains("*.onnx"),
+        ".gitignore: веса Nemotron-3 (.onnx) могут попасть в git"
+    );
+}

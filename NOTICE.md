@@ -63,6 +63,25 @@ V). База — тот же MIT-лицензированный движок; и
   `sentence-transformers/clip-ViT-B-32-multilingual-v1`
   (экспорт — `tools/parity/clip_onnx_w3.py`).
 
+## Диаризация: Nemotron-3 (Sortformer v3), `hds-diarize`
+* **Модель Nemotron-3-Diarization** (`nemotron3_diar_v3.onnx`; Sortformer v3 NVIDIA, до 8
+  спикеров) — сторонний ONNX-экспорт `altunenes/parakeet-rs`, файл
+  `nemotron-3-diarization/nemotron3_diar_v3.onnx`, ревизия `4d2a8bc7…`. Веса — под
+  **OpenMDW 1.1** (`nemotron-3-diarization/LICENSE` того же репозитория): при распространении
+  сохраняются текст соглашения и уведомления о происхождении; к **выходам** модели (тексту
+  транскриптов) соглашение ограничений не добавляет. Модель **не входит** в репозиторий и в
+  релизный архив — её ставит `installers/fetch_nemotron3_model.ps1` (400 506 656 байт,
+  sha256 `915e4fa23b0192ed9fadeb1cdd26847df986d50c92012d177be28d0343bbe03a`).
+* **parakeet-rs** 0.4.2 (Rust-обёртка Sortformer) — `MIT OR Apache-2.0`.
+* **ONNX Runtime** 2.0.0-rc.15 (крейт `ort`, линкуется статически) — `MIT`.
+* **DirectML** — `DirectML.dll` из пакета `Microsoft.AI.DirectML` (его кладёт рядом `ort`);
+  лицензия Microsoft «MICROSOFT DIRECTML» — DLL распространяется в составе приложения для
+  Windows/Xbox, поэтому она входит **только** в Windows-пакет (`bin\DirectML.dll`). На macOS
+  работают CoreML/CPU (best-effort, W8), на прочих платформах — CPU.
+* **sortformer 4spk-v2.1** (`openresearchtools/diar_streaming_sortformer_4spk-v2.1-gguf`) —
+  прежний backend (`diarization.backend: sortformer`), остаётся рабочим fallback; лицензия —
+  NVIDIA Open Model License.
+
 ## macOS: карантин и подпись (эксплуатация, не лицензия)
 Сборка для macOS **не подписана**. `install_macos.command` при установке снимает карантин
 Gatekeeper (`xattr -dr com.apple.quarantine`) с архива и рантайма движка и ставит **ad-hoc**

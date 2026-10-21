@@ -22,7 +22,7 @@ param(
     [switch]$SkipOcr,          # do not install Tesseract OCR
     [switch]$SkipWhisper,      # do not download the whisper (ASR) model
     [switch]$SkipClip,         # do not download the CLIP image models
-    [switch]$SkipDiarization,  # do not download the Sortformer model
+    [switch]$SkipDiarization,  # do not download the diarization models (Nemotron-3 + Sortformer)
     [switch]$SkipTranscribe,   # do not set up the auto-transcription pipeline
     [switch]$NonInteractive    # no final "Press Enter" pause (for unattended runs)
 )
@@ -352,12 +352,16 @@ if (-not $SkipModels) {
         catch { Warn "CLIP models not downloaded: $_" }
     }
 
-    Step "Diarization model (auto-transcription)"
+    Step "Diarization models (auto-transcription)"
     if ($SkipDiarization) {
-        Warn "skipped (-SkipDiarization): auto-transcription needs it (installers\fetch_diarization_model.ps1)."
+        Warn "skipped (-SkipDiarization): auto-transcription needs them (installers\fetch_nemotron3_model.ps1 + fetch_diarization_model.ps1)."
     } else {
-        try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\fetch_diarization_model.ps1") }
-        catch { Warn "diarization model not downloaded: $_" }
+        # W6: Nemotron-3 ONNX is the default backend (8 speakers); the Sortformer GGUF
+        # stays as the legacy fallback, so both are fetched and both are optional.
+        foreach ($s in @("fetch_nemotron3_model.ps1", "fetch_diarization_model.ps1")) {
+            try { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root ("installers\" + $s)) }
+            catch { Warn "$s not downloaded: $_" }
+        }
     }
 } else {
     Step "Models (skipped)"
@@ -371,6 +375,7 @@ if (-not $SkipModels) {
 Step "Automatic transcription (speech-to-text + speaker labels)"
 if ($SkipModels) {
     Warn "models skipped: powershell -File installers\fetch_whisper_model.ps1"
+    Note "                 powershell -File installers\fetch_nemotron3_model.ps1"
     Note "                 powershell -File installers\fetch_diarization_model.ps1"
 } elseif ($SkipTranscribe) {
     Warn "skipped (-SkipTranscribe): automatic transcription stays off"
@@ -385,7 +390,8 @@ if ($SkipModels) {
     if ($env:HDS_MODELS_DIR) { $modelsDir = $env:HDS_MODELS_DIR }
     foreach ($pair in @(
             @{ script = "fetch_whisper_model.ps1"; what = "whisper (ASR)" },
-            @{ script = "fetch_diarization_model.ps1"; what = "Sortformer (diarization)" })) {
+            @{ script = "fetch_nemotron3_model.ps1"; what = "Nemotron-3 (diarization)" },
+            @{ script = "fetch_diarization_model.ps1"; what = "Sortformer (diarization, legacy)" })) {
         $script = Join-Path $root ("installers\" + $pair.script)
         if (-not (Test-Path $script)) { Warn "$($pair.script) not found"; continue }
         $argsTr = @()
