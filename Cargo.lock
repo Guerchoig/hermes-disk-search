@@ -644,7 +644,9 @@ dependencies = [
 name = "hds-diarize"
 version = "0.1.0"
 dependencies = [
+ "directories",
  "parakeet-rs",
+ "sha2",
  "thiserror 2.0.21",
 ]
 

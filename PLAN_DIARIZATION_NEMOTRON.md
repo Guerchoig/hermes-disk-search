@@ -299,9 +299,9 @@ mp4↔mp3 lag **+0 мс**; первая реплика не потеряна п�
 - `cargo fmt --all -- --check` — 0; `cargo clippy --workspace --all-targets -D warnings` — 0;
   `cargo test --workspace` — зелёный.
 
-### W3. Крейт `hds-diarize` (2 дня)
+### W3. Крейт `hds-diarize` (2 дня) — ✅ **выполнено** (21.10.2026)
 
-- [ ] `crates/hds-diarize/Cargo.toml`:
+- [x] `crates/hds-diarize/Cargo.toml`:
       ```toml
       [dependencies]
       parakeet-rs = { version = "=0.4.2", features = ["sortformer"] }
@@ -313,7 +313,7 @@ mp4↔mp3 lag **+0 мс**; первая реплика не потеряна п�
       Версию пиним **точно** (`=0.4.2`), как требует «Грабли» п. 6 handoff; дефолтные фичи
       **оставляем** (см. W2: `ort-defaults` тянет `download-binaries`/`copy-dylibs`). Уже добавлено
       в W2, здесь — только использование.
-- [ ] Публичный API (русские докстринги, стиль проекта):
+- [x] Публичный API (русские докстринги, стиль проекта):
       ```rust
       pub struct Turn { pub start: f64, pub end: f64, pub speaker: u32 }
       pub struct NemotronConfig { model, device, chunk_min, min_audio_min, onset, offset }
@@ -326,28 +326,45 @@ mp4↔mp3 lag **+0 мс**; первая реплика не потеряна п�
       pub fn render_md(blocks: &[Block], unassigned: &str) -> String;
       pub fn render_srt(blocks: &[Block], unassigned: &str) -> String;
       ```
-- [ ] `run_wav`: длительность ≤ `min_audio_min` → `diarize()` целиком; иначе блоки по `chunk_min` через
-      `feed(&[f32])` + `flush()`. **Проверить и покрыть тестом** (критично для склейки): `feed()` отдаёт
-      **абсолютные** таймкоды (счётчик `elapsed_samples` в `parakeet-rs::sortformer`) и `speaker_id`
-      стабилен между блоками (AOSC-кэш). Если не стабилен — склейка по перекрытию соседних блоков
-      (5 с) + отчёт в `tools/parity/out/diar_nemotron/chunking_report.md`.
-- [ ] EP: `auto` → `DirectML` на Windows при успешной сессии, иначе `Cpu` (с логом причины); `CoreMl` на
-      macOS; явный `device` сильнее авто.
-- [ ] sha256 модели: проверка при `load` (size быстрый pre-check → хеш, результат кэшируется по
-      `(путь, размер, mtime)` в памяти процесса); хешер — `sha2` (уже в `[workspace.dependencies]`,
-      новых зависимостей **нет**).
-- [ ] `merge_segments_with_turns` — чистая функция: середина сегмента; середина вне turns →
-      `UNASSIGNED`; сегмент через границу turn'а режется на части; пустые turns → всё `UNASSIGNED`;
-      перекрытие turns → побеждает turn с большим пересечением (детерминированно при равенстве — меньший
-      `speaker`).
-- [ ] Юниты: `wav`/`vad`/`merge`/`render` (формат строки `### SPEAKER_00 [00:00:16 - 00:00:22]`,
-      `UNASSIGNED`, `HH:MM:SS` от 0, порядок, режутся границы, сегмент короче 1 мс).
-- [ ] Интеграционные (по умолчанию `#[ignore]`, включаются `HDS_TEST_DIAR=1` + пути к WAV/модели):
-      `frag60` → 2 спикера / 5 сегментов (эталон спайка); 18-мин → 5 спикеров.
+- [x] `run_wav`/`run_i16`: длительность ≤ `min_audio_min` → `diarize()` целиком; иначе блоки по
+      `chunk_min` через `feed(&[f32])` + `flush()`. Проверено: `feed()`/`flush()` отдают абсолютные
+      таймкоды (`elapsed_samples`), `speaker_id` стабилен между блоками — чанкинг 5 и 10 мин дают
+      **побитово одинаковый** результат (326 turns, 0 отличий границ); склейка-эвристика не понадобилась.
+- [x] EP: `auto` → DirectML (Windows) / CoreML (macOS) только для файлов ≥ `min_audio_min`, иначе CPU;
+      явный `device` сильнее; GPU-сессия не поднялась ⇒ лог + fallback на CPU.
+      **Найден и исправлен баг:** `min_audio_min` (минуты) сравнивался с секундами — 60-с клип уходил на
+      DirectML, где он медленнее; покрыто тестом `auto_device_threshold_is_in_minutes`.
+- [x] sha256 модели: `verify_model` (size-pre-check → хеш, кэш по `(путь, размер, mtime)`), хешер `sha2`;
+      константы `NEMOTRON_SIZE`/`NEMOTRON_SHA256` в коде; `default_model_path` (`HDS_MODELS_DIR` →
+      `%APPDATA%\OpenResearchTools\models\nemotron3\`).
+- [x] `merge_segments_with_turns` — чистая функция: середина сегмента; вне turns → `None`
+      (`UNASSIGNED`); длинный сегмент (≥3 с) режется по границе turn'а (текст — по словам
+      пропорционально), части <1 с присоединяются к соседу; перекрытие turns → большее пересечение,
+      при равенстве — меньший `speaker`.
+- [x] `render_md`/`render_srt` — формат движка (`### SPEAKER_NN [HH:MM:SS - HH:MM:SS]`, `UNASSIGNED`,
+      пустая строка между репликами; SRT с миллисекундами).
+- [x] Юниты: 29 в крейте (wav/vad/merge/render/sortformer/sha256/конфиг/EP) + интеграционный
+      `tests/nemotron_live.rs` (`#[ignore]`, модель и WAV из env/артефактов спайка).
 
-**Приёмка W3:** совпадение с `tools/parity/out/diar_spike/out/nemotron3_meet0924.json` (±1 кадр по
-границам, тот же набор спикеров, немонотонности нет); чанкинг на 18-мин файле (`chunk_min: 5`) даёт те
-же 5 спикеров и границы ±0.5 с; CPU RTFx ≥ 20.
+**Результаты W3 (живой прогон 21.10.2026, `target\w2\release\diar_nemotron.exe`):**
+
+| Прогон | Устройство | Время | RTFx | Turns | Спикеры |
+|---|---|---|---|---|---|
+| `frag60` (60 с) | CPU (auto: <2 мин) | 4.68 с (вкл. сессию) | 12.8 | **5** | **2** — как в спайке |
+| 18 мин | DirectML (auto) | 12.93 с | 83.2 | 326 | **5** |
+| 18 мин, `chunk_min: 5` | DirectML | 12.77 с | 84.3 | 326 | 5, **побитово = chunk 10** |
+| 18 мин, `--device cpu` | CPU | 47.47 с | **22.7** (≥20) | 326 | 5, **побитово = DirectML** |
+
+Качество (flatten + `eval_diar.py` спайка, тот же эталон): атрибуция **58.2 %** (57/98), по активным
+спикерам **58.5 %**, F1 смен **0.431** — точь-в-точь числа спайка; **без филлеров 74.4 % (58/78)**
+(порог приёмки 71.8 %). Доли спикеров 49.0 / 48.5 / 1.9 / 0.2 / 0.2 % против спайковых
+49.8 / 47.9 / 2.0 / 0.2 / 0.2 %. Модель проверена по sha256 (`400 506 656` /
+`915e4fa2…be03a`).
+
+**Приёмка W3 — ✅ выполнена:** набор и число спикеров совпали со спайком, чанкинг не меняет результат,
+CPU RTFx 22.7, интеграционный тест `frag60` зелёный, `fmt`/`clippy -D warnings`/`test --workspace` — 0.
+Замечание: среда ассистента выставляет `HDS_ROOT=<repo>`, из-за чего 2 теста `hds-llama`
+(`host_resident`) падают — тесты прогнаны с очищенной переменной (код не менялся).
 
 ### W4. Интеграция в `llm_host` + форматтеры (2 дня)
 

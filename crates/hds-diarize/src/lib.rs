@@ -20,12 +20,22 @@
 //! прибавляется к таймкодам ASR **ровно один раз**.
 
 pub mod decode;
+pub mod merge;
 pub mod ort_env;
+pub mod sortformer;
 pub mod vad;
 pub mod wav;
 
 pub use decode::decode_to_wav;
+pub use merge::{
+    hhmmss, merge_segments_with_turns, render_md, render_srt, srt_time, AsrSpan, Block,
+    MIN_PART_SEC, SPLIT_MIN_SEC,
+};
 pub use ort_env::{ort_env, ort_env_clone};
+pub use sortformer::{
+    default_model_path, sha256_file, verify_model, Device, Diarizer, NemotronConfig, Turn,
+    NEMOTRON_FILE, NEMOTRON_SHA256, NEMOTRON_SIZE,
+};
 pub use vad::{leading_silence_samples, speech_stats, SpeechStats, TrimConfig};
 pub use wav::{read_wav, write_wav, Wav};
 

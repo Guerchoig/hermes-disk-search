@@ -14,6 +14,10 @@ rust-version.workspace = true
 
 [dependencies]
 thiserror.workspace = true
+# Проверка sha256 модели Nemotron-3 (W3): хешер уже в воркспейсе.
+sha2.workspace = true
+# Каталог моделей (`%APPDATA%\OpenResearchTools\models`, как у движка).
+directories.workspace = true
 # W2/W3: Nemotron-3 (Sortformer v3) через parakeet-rs. Версия пинована точно:
 # крейт молодой (API менялся между 0.3/0.4), а он тянет `ort = "=2.0.0-rc.15"` —
 # ту же версию, что `hds-clip` (одна на воркспейс). Дефолтные фичи parakeet-rs
