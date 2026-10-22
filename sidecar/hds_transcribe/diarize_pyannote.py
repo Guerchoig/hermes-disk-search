@@ -173,62 +173,6 @@ def plan_blocks(duration: float, block_sec: float, overlap_sec: float) -> List[T
     return blocks
 
 
-def _intersection(a_start, a_end, b_start, b_end) -> float:
-    return max(0.0, min(a_end, b_end) - max(a_start, b_start))
-
-
-def map_labels(local_turns, canonical_turns, region_start: float, region_end: float) -> Dict[str, str]:
-    """Сопоставить локальные метки каноническим по перекрытию в зоне стыка."""
-    local_speakers = sorted({t["speaker"] for t in local_turns})
-    canonical_speakers = sorted({t["speaker"] for t in canonical_turns})
-    scores: List[Tuple[float, str, str]] = []
-    for local in local_speakers:
-        for canon in canonical_speakers:
-            total = 0.0
-            for lt in local_turns:
-                if lt["speaker"] != local:
-                    continue
-                for ct in canonical_turns:
-                    if ct["speaker"] != canon:
-                        continue
-                    total += _intersection(
-                        max(lt["start"], region_start), min(lt["end"], region_end),
-                        max(ct["start"], region_start), min(ct["end"], region_end),
-                    )
-            if total > 0.05:
-                scores.append((total, local, canon))
-    scores.sort(key=lambda item: (-item[0], item[1], item[2]))
-    mapping: Dict[str, str] = {}
-    used = set()
-    for _score, local, canon in scores:
-        if local in mapping or canon in used:
-            continue
-        mapping[local] = canon
-        used.add(canon)
-    return mapping
-
-
-def _clip_turns(turns, keep_from: float, block_end: float,
-                mapping: Dict[str, str]) -> List[dict]:
-    """Обрезать turns блока и переименовать в канонические метки (mapping готов)."""
-    out = []
-    for turn in turns:
-        start = max(float(turn["start"]), keep_from)
-        end = min(float(turn["end"]), block_end)
-        if end - start <= 0.05:
-            continue
-        out.append(
-            {
-                "start": round(start, 3),
-                "end": round(end, 3),
-                "speaker": mapping.get(turn["speaker"], turn["speaker"]),
-            }
-        )
-    return out
-
-
-#: Порог косинуса для «тот же голос» между блоками (pyannote-эмбеддинги).
-EMBED_MATCH_MIN = 0.75
 #: Порог глобальной кластеризации голосов блоков (union-find по косинусу).
 EMBED_CLUSTER_MIN = 0.60
 #: Сколько самых длинных turn'ов спикера идёт в центроид блока.
@@ -317,6 +261,14 @@ def speaker_embeddings(model, samples: np.ndarray, turns, sample_rate: int = SAM
                 import traceback
 
                 traceback.print_exc()
+            # Тихая деградация опасна: без эмбеддингов блоки вводят «новых»
+            # спикеров (на 77 мин было 16 вместо 9) — сообщаем в журнал.
+            try:
+                from hds_sidecar import progress as prog
+
+                prog.warn("диаризация: эмбеддинги недоступны — сшивка только по перекрытию")
+            except Exception:  # noqa: BLE001
+                pass
             return {}
     arr = np.concatenate(vectors_all, axis=0)
     arr /= np.linalg.norm(arr, axis=1, keepdims=True) + 1e-9
@@ -328,37 +280,6 @@ def speaker_embeddings(model, samples: np.ndarray, turns, sample_rate: int = SAM
         vec = np.mean(vectors, axis=0)
         out[label] = vec / (np.linalg.norm(vec) + 1e-9)
     return out
-
-
-def match_embeddings(local: Dict[str, np.ndarray], centroids: Dict[str, np.ndarray],
-                     threshold: float = EMBED_MATCH_MIN) -> Dict[str, str]:
-    """Сопоставить локальные метки каноническим по косинусу центроидов."""
-    mapping: Dict[str, str] = {}
-    used = set()
-    pairs = []
-    for label, vec in local.items():
-        for canon, centroid in centroids.items():
-            pairs.append((float(np.dot(vec, centroid)), label, canon))
-    pairs.sort(key=lambda item: (-item[0], item[1], item[2]))
-    for score, label, canon in pairs:
-        if score < threshold or label in mapping or canon in used:
-            continue
-        mapping[label] = canon
-        used.add(canon)
-    return mapping
-
-
-def _renumber(turns) -> List[dict]:
-    """Стабильная нумерация `SPEAKER_NN` по первому появлению."""
-    order: List[str] = []
-    for turn in sorted(turns, key=lambda t: (t["start"], t["end"])):
-        if turn["speaker"] not in order:
-            order.append(turn["speaker"])
-    rename = {label: "SPEAKER_%02d" % idx for idx, label in enumerate(order)}
-    for turn in turns:
-        turn["speaker"] = rename.get(turn["speaker"], turn["speaker"])
-    turns.sort(key=lambda t: (t["start"], t["end"]))
-    return turns
 
 
 def _renumber_shared(exclusive: List[dict], regular: List[dict]) -> List[str]:

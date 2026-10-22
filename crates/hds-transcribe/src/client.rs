@@ -26,6 +26,8 @@ pub struct ClientConfig {
     pub request_timeout: Duration,
     pub max_requests: u64,
     pub stderr_log: Option<PathBuf>,
+    /// Дополнительные переменные окружения воркера (`HDS_MODELS_DIR`, `HF_HOME`).
+    pub env: Vec<(String, String)>,
 }
 
 impl ClientConfig {
@@ -38,6 +40,7 @@ impl ClientConfig {
             request_timeout: Duration::from_secs(25_200),
             max_requests: 20,
             stderr_log: None,
+            env: Vec::new(),
         }
     }
 
@@ -46,6 +49,7 @@ impl ClientConfig {
         cfg.idle_timeout = Duration::from_secs(settings.idle_unload_sec.max(1));
         cfg.request_timeout = Duration::from_secs(settings.request_timeout_sec.max(60));
         cfg.max_requests = settings.max_requests;
+        cfg.env = settings.worker_env();
         cfg
     }
 }
@@ -80,6 +84,7 @@ impl Client {
         wcfg.max_requests = cfg.max_requests;
         wcfg.stderr_log = cfg.stderr_log.clone();
         wcfg.extra_args = vec!["--profile".to_string(), cfg.profile.clone()];
+        wcfg.env = cfg.env.clone();
         let worker =
             Worker::spawn(wcfg).map_err(|e| TranscribeError::from_transport(&e, None, None))?;
         if !worker.capabilities().has("transcribe") {

@@ -98,12 +98,9 @@ def _onnx_providers() -> list:
 
 
 def gigastt_path() -> str:
-    """Путь к gigastt CLI (P3): env `HDS_GIGASTT_CLI` → известная установка P0."""
+    """Путь к gigastt CLI (P3): только env `HDS_GIGASTT_CLI` (без путей разработчика)."""
     env = (os.environ.get("HDS_GIGASTT_CLI") or "").strip()
-    if env:
-        return env if os.path.isfile(env) else ""
-    default = r"D:\hds-py-transcribe\gigastt-cli\bin\gigastt.exe"
-    return default if os.path.isfile(default) else ""
+    return env if env and os.path.isfile(env) else ""
 
 
 def _hotwords_backend(params: dict) -> str:
@@ -481,8 +478,8 @@ def transcribe(raw: dict) -> dict:
 
         stem = cache_mod.stem_of(params.path)
         transcript_path = cache_mod.transcript_path(params, stem)
-        diar_path = cache_mod.diarization_path(params, stem)
         key = cache_mod.diarization_key(params.path, params.diarization)
+        diar_path = cache_mod.diarization_path(params, stem, key)
         plan = decode.plan_channels(params.path, info, params.decode)
         prog.stage("decode", 0.0, mode=plan.mode, channels=len(plan.channels), reason=plan.reason)
 
@@ -555,11 +552,14 @@ def transcribe(raw: dict) -> dict:
                 if os.environ.get("HDS_TRANSCRIBE_DEBUG"):
                     prog.stage("mem", 0, {"after": "diar", "peak_mb": _cuda_peak_mb()})
                 if diar_result.get("status") == "ok":
-                    blocks, _stats = merge_mod.merge_transcript(
-                        words,
-                        diar_result.get("exclusive") or [],
-                        diar_result.get("regular") or [],
-                    )
+                    exclusive = diar_result.get("exclusive") or []
+                    regular = diar_result.get("regular") or []
+                    if params.diarization.use_exclusive:
+                        blocks, _stats = merge_mod.merge_transcript(words, exclusive, regular)
+                    else:
+                        # Явный отказ от exclusive: обычная разметка (с
+                        # перекрытиями) как основная.
+                        blocks, _stats = merge_mod.merge_transcript(words, regular, [])
                 else:
                     blocks = _single_block(words)
                     error = (diar_result.get("error") or {}).get("message", "")
@@ -867,6 +867,20 @@ RPC_BY_KIND = {
 }
 
 
+def _control(req: dict) -> None:
+    """Управляющие запросы в потоке-читателе (отмена во время `transcribe`).
+
+    Главный цикл занят долгой стадией, поэтому `cancel` из очереди дошёл бы
+    только после её завершения. Здесь только ставим флаг; ответ отправит
+    `_handle`, когда освободится.
+    """
+    if req.get("method") != "cancel":
+        return
+    job_id = (req.get("params") or {}).get("job_id")
+    if job_id is not None and _active_job.get("id") == job_id:
+        _cancel_event.set()
+
+
 def _handle(req: dict) -> bool:
     mid = req.get("id")
     method = req.get("method")
@@ -917,7 +931,7 @@ def main() -> int:
         except ValueError:
             pass
     prog.log("hds_transcribe: profile=%s python=%s" % (PROFILE, sys.version.split()[0]))
-    return runtime.serve(_handle, idle)
+    return runtime.serve(_handle, idle, control=_control)
 
 
 if __name__ == "__main__":

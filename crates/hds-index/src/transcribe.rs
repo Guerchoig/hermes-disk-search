@@ -141,6 +141,10 @@ pub struct TranscribeConfig {
     pub engine: String,
     /// Настройки python-воркера (`transcribe.*`, с маппингом старых ключей).
     pub settings: Option<hds_transcribe::Settings>,
+    /// Файл-сигнал отмены для python-воркера. `None` — не передавать
+    /// (`transcribe-once`/индексация): иначе старый `transcribe.stop` мгновенно
+    /// отменял бы одиночное задание. Демон задаёт его явно.
+    pub stop_file: Option<PathBuf>,
 }
 
 impl Default for TranscribeConfig {
@@ -160,6 +164,7 @@ impl Default for TranscribeConfig {
             service_dir: None,
             engine: "legacy".to_string(),
             settings: None,
+            stop_file: None,
         }
     }
 }
@@ -283,7 +288,14 @@ impl TranscribeConfig {
             service_dir,
             engine: settings.engine.clone(),
             settings: Some(settings),
+            // Демон: отмена файлом `transcribe.stop` (как legacy-поведение).
+            stop_file: Some(project_root().join("transcribe.stop")),
         }
+    }
+
+    /// Включён ли новый python-путь (`transcribe.engine: python`).
+    pub fn is_python(&self) -> bool {
+        self.engine.eq_ignore_ascii_case("python")
     }
 
     /// Backend, который **клиент** пишет в тело `/internal/transcribe` (F2).
@@ -432,16 +444,25 @@ pub fn resolve_whisper_model(cfg: &Config) -> Option<PathBuf> {
     engine_whisper_model()
 }
 
-/// Клиент внутренней транскрибации (`POST /internal/transcribe`).
-#[derive(Debug, Clone)]
+/// Клиент транскрибации: legacy — HTTP к владельцу GPU, python — sidecar-воркер.
+///
+/// Python-воркер **долгоживущий**: запускается лениво на первом задании и
+/// переиспользуется (модели грузятся по стадиям и выгружаются, процесс остаётся).
+/// `idle_unload_sec`/`max_requests` действуют на уровне `Worker`, а не на каждый
+/// файл — иначе GigaAM/pyannote перезагружались бы для каждой записи (§5.3).
+#[derive(Clone)]
 pub struct TranscribeClient {
     cfg: TranscribeConfig,
+    worker: std::sync::Arc<std::sync::Mutex<Option<hds_transcribe::Client>>>,
 }
 
 impl TranscribeClient {
     /// Новый клиент с явными настройками (для тестов и `whisper-check`).
     pub fn new(cfg: TranscribeConfig) -> Self {
-        TranscribeClient { cfg }
+        TranscribeClient {
+            cfg,
+            worker: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
     }
 
     /// Настройки (адрес/модель/режим) — для сообщений и проверок.
@@ -451,7 +472,7 @@ impl TranscribeClient {
 
     /// Включён ли новый python-путь (`transcribe.engine: python`).
     pub fn is_python(&self) -> bool {
-        self.cfg.engine == "python"
+        self.cfg.is_python()
     }
 
     /// Настройки `transcribe.*` (если конфиг их не собрал — дефолты P0).
@@ -462,14 +483,30 @@ impl TranscribeClient {
             .unwrap_or_else(|| hds_transcribe::Settings::from_config(&serde_yaml::Value::Null))
     }
 
-    /// Запустить воркер и собрать параметры задания.
-    fn python_client(
+    /// Параметры задания и настройки (без запуска воркера).
+    fn python_params(
         &self,
         path: &Path,
         with_diarization: bool,
-    ) -> Result<(hds_transcribe::Client, hds_transcribe::TranscribeParams)> {
-        let root = project_root();
+    ) -> (hds_transcribe::Settings, hds_transcribe::TranscribeParams) {
         let settings = self.python_settings();
+        let job_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("job")
+            .to_string();
+        let params = settings.params(
+            path,
+            &job_id,
+            with_diarization,
+            self.cfg.stop_file.as_deref(),
+        );
+        (settings, params)
+    }
+
+    /// Запустить python-воркер (лениво, один раз на клиент).
+    fn spawn_python(&self, settings: &hds_transcribe::Settings) -> Result<hds_transcribe::Client> {
+        let root = project_root();
         let python = settings.python(&root).ok_or_else(|| {
             CoreError::Other(format!(
                 "не найден интерпретатор воркера транскрибации \
@@ -477,18 +514,16 @@ impl TranscribeClient {
                 root.display()
             ))
         })?;
-        let mut ccfg = hds_transcribe::ClientConfig::from_settings(&python, &root, &settings);
+        let mut ccfg = hds_transcribe::ClientConfig::from_settings(&python, &root, settings);
         let _ = std::fs::create_dir_all(&settings.state_dir);
         // stderr воркера — в журнал задания рядом с артефактами (прогресс/ошибки).
         ccfg.stderr_log = Some(settings.state_dir.join("transcribe-worker.log"));
         let client = hds_transcribe::Client::spawn(ccfg).map_err(|e| e.to_core())?;
-        let job_id = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("job")
-            .to_string();
-        let params = settings.params(path, &job_id, with_diarization);
-        Ok((client, params))
+        // Игнорируемые/подменённые ключи — в журнал один раз на процесс (§5.4).
+        for notice in &settings.notices {
+            eprintln!("транскрибация: {notice}");
+        }
+        Ok(client)
     }
 
     /// Python-путь одного задания: воркер → (warnings в журнал) → результат.
@@ -497,9 +532,20 @@ impl TranscribeClient {
         path: &Path,
         with_diarization: bool,
     ) -> Result<hds_transcribe::TranscribeResult> {
-        let (mut client, params) = self.python_client(path, with_diarization)?;
+        let (settings, params) = self.python_params(path, with_diarization);
+        let mut guard = self
+            .worker
+            .lock()
+            .map_err(|_| CoreError::Other("воркер транскрибации: mutex отравлен".to_string()))?;
+        if guard.is_none() {
+            *guard = Some(self.spawn_python(&settings)?);
+        }
+        let client = guard.as_mut().expect("воркер только что создан");
         let result = client.transcribe(&params);
-        client.shutdown();
+        if result.is_err() {
+            // Процесс мог умереть — следующий вызов поднимет новый.
+            *guard = None;
+        }
         let result = result.map_err(|e| e.to_core())?;
         for warning in &result.warnings {
             eprintln!("транскрибация: {warning}");
@@ -518,12 +564,26 @@ impl TranscribeClient {
             .out_dir
             .clone()
             .ok_or_else(|| CoreError::Other("не задан auto_transcribe.out_dir".to_string()))?;
-        let (mut client, params) = self.python_client(path, self.cfg.diarization.enabled)?;
+        // P3.1: включённость диаризации — из `transcribe.diarization.enabled`
+        // (новый ключ, с маппингом legacy), а не из `auto_transcribe.diarization`:
+        // иначе документированный ключ не действовал, а рассинхрон давал
+        // «всё в UNASSIGNED» или заголовки при выключенной диаризации (§4.5 п. 7).
+        let settings = self.python_settings();
+        let diarization_enabled = settings.diarization.enabled;
+        let (_, params) = self.python_params(path, diarization_enabled);
+        let mut guard = self
+            .worker
+            .lock()
+            .map_err(|_| CoreError::Other("воркер транскрибации: mutex отравлен".to_string()))?;
+        if guard.is_none() {
+            *guard = Some(self.spawn_python(&settings)?);
+        }
+        let client = guard.as_mut().expect("воркер только что создан");
         let result = client.transcribe(&params);
         let result = match result {
             Ok(r) => r,
             Err(e) => {
-                client.shutdown();
+                *guard = None;
                 return Err(e.to_core());
             }
         };
@@ -533,7 +593,6 @@ impl TranscribeClient {
         // Отдельный вызов postprocess (P3): глоссарий меняет `words[].text` и
         // пересобирает `block.text`; ASR не пересчитывается (§5.2), правки —
         // `<stem>.edits.json` в state_dir. LLM-патчи подключатся в P4.
-        let settings = self.python_settings();
         let pp = hds_transcribe::PostprocessParams {
             job_id: result.job_id.clone(),
             transcript_path: result.transcript_path.clone(),
@@ -542,7 +601,7 @@ impl TranscribeClient {
             llm: settings.llm.clone(),
         };
         let post = client.postprocess(&pp);
-        client.shutdown();
+        drop(guard);
         let blocks = match post {
             Ok(p) => p.blocks,
             Err(e) => {
@@ -550,7 +609,10 @@ impl TranscribeClient {
                 result.blocks.clone()
             }
         };
-        let text = render_markdown(&blocks, self.cfg.diarization.enabled);
+        // Заголовки рисуем только если воркер реально присвоил спикеров.
+        // `required: false` + сбой диаризации → воркер отдаёт блок без спикера,
+        // и `.md` должен быть без меток, а не «### UNASSIGNED» на весь файл (§4.4).
+        let text = render_markdown(&blocks, worker_diarized(&result));
         if text.trim().is_empty() {
             return Err(CoreError::Other(format!(
                 "воркер вернул пустой текст (файл {})",
@@ -927,6 +989,26 @@ pub fn format_timestamp(seconds: f64) -> String {
         (total % 3600) / 60,
         total % 60
     )
+}
+
+/// Реально ли воркер присвоил спикеров (решение о заголовках `.md`).
+///
+/// Источник — `diarization.status` из результата: `ok` (pyannote) и `split`
+/// (каналы = спикеры). `disabled`/`failed` → `.md` без заголовков даже при
+/// включённом ключе: иначе сбой `required: false` дал бы «### UNASSIGNED» на
+/// весь файл, что запрещено §4.5 п. 7. Если статуса нет (старый воркер) —
+/// смотрим, есть ли у блоков непустой спикер.
+pub fn worker_diarized(result: &hds_transcribe::TranscribeResult) -> bool {
+    match result.diarization.get("status").and_then(|v| v.as_str()) {
+        Some("ok") | Some("split") => true,
+        Some(_) => false,
+        None => result.blocks.iter().any(|b| {
+            b.speaker
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        }),
+    }
 }
 
 /// Рендер `.md` из блоков (контракт §8: формат живёт в Rust, не в Python).

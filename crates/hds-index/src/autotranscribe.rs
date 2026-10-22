@@ -750,7 +750,11 @@ pub fn merge_external_jobs(queue_file: &Path, queue: &mut Vec<QJob>) -> usize {
 pub fn transcribe_once(cfg: &AutoTranscribeConfig, path: &Path) -> Result<TranscribeOutcome> {
     cfg.validate()?;
     let _pause = PauseGate::acquire(cfg.pause_indexing);
-    TranscribeClient::new(cfg.transcribe.clone()).transcribe_to_file(path)
+    // Одиночный запуск не слушает `transcribe.stop`: файл мог остаться от
+    // предыдущей остановки демона и мгновенно отменил бы задание.
+    let mut client_cfg = cfg.transcribe.clone();
+    client_cfg.stop_file = None;
+    TranscribeClient::new(client_cfg).transcribe_to_file(path)
 }
 
 /// Демон `hds transcribe-watch` (вариант A, §4): единственный исполнитель заданий.
@@ -805,7 +809,13 @@ pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig, app: &Config) -> Result<
     };
     let stop_file = root.join("transcribe.stop");
     let _ = std::fs::remove_file(&stop_file);
-    wait_for_owner(cfg);
+    if cfg.transcribe.is_python() {
+        // Python-sidecar не ходит в llm_host за ASR: ждать владельца GPU
+        // (до 60 с) бессмысленно; LLM-роль подключается только в P4.
+        println!("[transcribe] python-sidecar: llm_host для ASR не требуется");
+    } else {
+        wait_for_owner(cfg);
+    }
 
     let mut manifest = Manifest::load(&cfg.state_dir);
     let mut queue = load_queue(&cfg.queue_file);
@@ -814,13 +824,21 @@ pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig, app: &Config) -> Result<
         inbox.display(),
         out.display()
     );
+    let diar_enabled = cfg
+        .transcribe
+        .settings
+        .as_ref()
+        .map(|s| s.diarization.enabled)
+        .unwrap_or(cfg.transcribe.diarization.enabled);
     println!(
         "[transcribe] режим '{}', диаризация: {}",
         cfg.transcribe.mode,
-        if cfg.transcribe.diarization.enabled {
-            "вкл (sortformer)"
-        } else {
+        if !diar_enabled {
             "выкл"
+        } else if cfg.transcribe.is_python() {
+            "вкл (pyannote community-1)"
+        } else {
+            "вкл (sortformer)"
         }
     );
     println!(
@@ -836,6 +854,10 @@ pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig, app: &Config) -> Result<
 
     let poll = Duration::from_secs(cfg.poll_seconds.max(1));
     let mut last_poll = std::time::Instant::now();
+    // Один воркер на демон: модели грузятся по стадиям и выгружаются, процесс
+    // переиспользуется (idle_unload_sec/max_requests), а не перезапускается
+    // на каждый файл (§5.3).
+    let client = TranscribeClient::new(cfg.transcribe.clone());
     println!("[transcribe] готово. Остановка: Ctrl+C или файл transcribe.stop");
 
     while !stop_file.exists() {
@@ -854,7 +876,7 @@ pub fn run_transcribe_watch(cfg: &AutoTranscribeConfig, app: &Config) -> Result<
                 continue;
             }
             let attempts = manifest.attempts(&job.path);
-            let ok = process_job(cfg, &mut manifest, &path, attempts)?;
+            let ok = process_job(cfg, &mut manifest, &path, attempts, &client)?;
             close_queue(cfg, &job, ok);
             continue;
         }
@@ -925,6 +947,7 @@ pub fn process_job(
     manifest: &mut Manifest,
     path: &Path,
     attempts: u32,
+    client: &TranscribeClient,
 ) -> Result<bool> {
     let key = path.to_string_lossy().to_string();
     let meta = FileMeta::of(path).unwrap_or(FileMeta {
@@ -932,7 +955,6 @@ pub fn process_job(
         mtime_ms: 0,
     });
     let _pause = PauseGate::acquire(cfg.pause_indexing);
-    let client = TranscribeClient::new(cfg.transcribe.clone());
     match client.transcribe_to_file(path) {
         Ok(out) => {
             let (disposed, warn) = dispose_source(cfg, path);

@@ -443,8 +443,13 @@ def _resolve(candidates) -> List[Tuple[int, int, GlossaryTerm, bool]]:
                 _PRIORITY_RANK.get(other[2].priority, 0)
                 == _PRIORITY_RANK.get(term.priority, 0)
             )
-            if same_span and same_rank and other[2].canonical != term.canonical:
+            if same_rank and other[2].canonical != term.canonical:
+                # Конкурирующие термины одного приоритета: замену не применяем,
+                # оба кандидата уходят в `needs_review` (§4.2). При совпадении
+                # span достаточно одной записи, иначе показываем обе границы.
                 chosen[chosen.index(other)] = (other[0], other[1], other[2], True)
+                if not same_span:
+                    chosen.append((start, end, term, True))
             continue
         chosen.append((start, end, term, False))
     return sorted(chosen, key=lambda c: c[0])

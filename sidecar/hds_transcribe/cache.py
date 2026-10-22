@@ -71,13 +71,30 @@ def stem_of(path: str) -> str:
 
 
 def transcript_path(params: TranscribeParams, stem: str) -> str:
-    return os.path.join(state_root(params), "%s.transcript.json" % stem)
+    directory = state_root(params)
+
+    def same_media(path: str) -> bool:
+        data = read_json(path) or {}
+        media = data.get("media")
+        return not media or os.path.abspath(media) == os.path.abspath(params.path)
+
+    base = os.path.join(directory, "%s.transcript.json" % stem)
+    if not os.path.exists(base) or same_media(base):
+        return base
+    digest = file_fingerprint(params.path)[:8]
+    return os.path.join(directory, "%s-%s.transcript.json" % (stem, digest))
 
 
-def diarization_path(params: TranscribeParams, stem: str) -> str:
+def diarization_path(params: TranscribeParams, stem: str, key: Optional[str] = None) -> str:
     directory = params.diarization.cache_dir or state_root(params)
     ensure_dir(directory)
-    return os.path.join(directory, "%s.diarization.json" % stem)
+    base = os.path.join(directory, "%s.diarization.json" % stem)
+    if not os.path.exists(base) or key is None:
+        return base
+    data = read_json(base) or {}
+    if data.get("key") in (None, key):
+        return base
+    return os.path.join(directory, "%s-%s.diarization.json" % (stem, key[:8]))
 
 
 def load_json(path: str) -> Optional[dict]:

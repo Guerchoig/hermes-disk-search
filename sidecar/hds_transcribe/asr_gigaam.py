@@ -130,13 +130,14 @@ def load_model(asr: AsrParams, device: Optional[str] = None):
             "пакет gigaam недоступен: %s: %s" % (type(e).__name__, e),
             "Соберите venv транскрибации (sidecar/hds_transcribe/requirements.lock).",
         )
-    from .models import gigaam_cache_dir
+    from .models import gigaam_cache_dir, resolve_gigaam_source
 
     cache = gigaam_cache_dir(asr)
+    source = resolve_gigaam_source(asr)
     fp16 = bool(asr.fp16 and device == "cuda")
     try:
         return gigaam.load_model(
-            asr.variant,
+            source,
             fp16_encoder=fp16,
             device=device,
             download_root=cache,

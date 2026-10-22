@@ -421,14 +421,20 @@ transcribe:
   fallback_cpu: true            # cuda_oom/dml_oom/onnx_error → одна попытка на CPU
   max_duration_hours: 6
   state_dir: data/auto-transcribe  # transcript.json/diarization.json (не в out_dir)
+  models_dir: ""                # "" → HDS_MODELS_DIR → installer-путь (ProgramData)
+                                # база моделей и HF-кэша (<models_dir>/hf-home)
+  hf_token_env: HF_TOKEN        # имя переменной с токеном gated-моделей
   asr:
     model: ai-sage/GigaAM-v3
     variant: e2e_rnnt           # e2e_rnnt | rnnt | e2e_ctc (последние — контроль)
-    revision: ""                # "" = variant
+    revision: ""                # "" = вариант; иначе локальный .ckpt/каталог со snapshot
+                                # (HF-revision не применим: gigaam качает веса с CDN)
     language: ru                # "" = автоопределение
     device: auto                # auto | cuda | cpu
     backend: auto               # auto | torch | onnx (dml ⇒ onnx)
     provider: auto              # auto | cuda | dml | cpu (ORT EP при backend: onnx)
+    device_id: 0                # DXGI-адаптер для DirectML (пин, §4.7)
+    intra_threads: 0            # ONNX: 0 = авто (1 на GPU, 6 на CPU)
     batch_size: 8
     longform: off               # P1: transcribe_longform не используется
     vad: silero                 # silero | off
@@ -440,7 +446,7 @@ transcribe:
     channels: auto              # auto (корреляция L/R) | downmix | split
     ffmpeg: ""                  # "" → HDS_FFMPEG → PATH
     ffprobe: ""
-    sample_rate: 16000
+    sample_rate: 16000          # фиксировано: другое значение не поддерживается
   align:
     mode: native                # native (default) | whisperx | hybrid (P2, только CUDA-venv)
     model: jonatasgrosman/wav2vec2-large-xlsr-53-russian  # WhisperX-модель для ru

@@ -19,7 +19,7 @@ import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -223,24 +223,6 @@ def plan_channels(path: str, info: AudioInfo, params: DecodeParams) -> ChannelPl
     if auto["dual_mono"]:
         return ChannelPlan("downmix", [0], "auto: дубль-стерео (r>%.1f)" % DUAL_MONO_CORR, auto)
     return ChannelPlan("split", list(range(info.channels)), "auto: каналы различаются", auto)
-
-
-def load_sources(path: str, params: DecodeParams, info: AudioInfo = None):
-    """Декодировать аудио по плану каналов.
-
-    Возвращает `(plan, sources)`, где `sources` — `[(channel|None, samples)]`:
-    `None` — downmix, номер — конкретный канал (режим `split`).
-
-    Память: для 6 ч 16 кГц float32 это ~1,4 ГБ на дорожку; при `split`
-    держим только текущий канал (см. worker: он проходит каналы по одному).
-    """
-    info = info or probe(path, params)
-    plan = plan_channels(path, info, params)
-    sources: List[Tuple[Optional[int], np.ndarray]] = []
-    for channel in plan.channels:
-        label = None if plan.mode == "downmix" else channel
-        sources.append((label, decode(path, params, channel=label)))
-    return plan, sources
 
 
 def check_duration(info: AudioInfo, max_duration_hours: float) -> None:

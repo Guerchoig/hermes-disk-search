@@ -73,6 +73,36 @@ class ProtocolTest(unittest.TestCase):
                 proc.kill()
                 proc.wait()
 
+    def test_cancel_is_processed_while_request_runs(self):
+        """`control` в reader-потоке: отмена не ждёт конца долгого запроса."""
+        proc = subprocess.Popen(
+            [sys.executable, WORKER, "--idle-timeout", "10"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            proc.stdin.write((request(1, "sleep", {"seconds": 10}) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            time.sleep(0.2)
+            started = time.time()
+            proc.stdin.write((request(2, "cancel", {"job_id": "x"}) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+            first = json.loads(proc.stdout.readline().decode("utf-8"))
+            elapsed = time.time() - started
+            second = json.loads(proc.stdout.readline().decode("utf-8"))
+            self.assertEqual(first["id"], 1)
+            self.assertTrue(first["result"]["cancelled"])
+            self.assertLess(elapsed, 5.0, "отмена должна сработать до таймаута sleep")
+            self.assertEqual(second["id"], 2)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait()
+            proc.stdin.close()
+            proc.stdout.close()
+            proc.stderr.close()
+
     def test_error_has_kind_for_structured_codes(self):
         """`err(..., kind=...)` попадает в ответ (Rust читает машинный код)."""
         code = (

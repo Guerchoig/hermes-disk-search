@@ -104,6 +104,8 @@ class AsrParams:
         raw.batch_size = max(1, _as_int(raw.batch_size, 8))
         raw.fp16 = _as_bool(raw.fp16, True)
         raw.vad = _as_str(raw.vad, "silero").strip().lower() or "silero"
+        if raw.vad not in ("silero", "off"):
+            raw.vad = "silero"
         raw.longform = _as_str(raw.longform, "off").strip().lower() or "off"
         raw.max_chunk_sec = min(30.0, max(5.0, _as_float(raw.max_chunk_sec, 25.0)))
         raw.intra_threads = _as_int(raw.intra_threads, 0)
@@ -154,7 +156,9 @@ class DecodeParams:
         out = _from_dict(cls, data)
         channels = _as_str(out.channels, "auto").strip().lower()
         out.channels = channels if channels in ("auto", "downmix", "split") else "auto"
-        out.sample_rate = _as_int(out.sample_rate, 16000) or 16000
+        # ASR/VAD/диаризация жёстко работают на 16 кГц; другое значение молча
+        # сдвигало бы все таймкоды, поэтому фиксируем частоту здесь.
+        out.sample_rate = 16000
         return out
 
 

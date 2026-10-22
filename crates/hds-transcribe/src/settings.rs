@@ -44,6 +44,34 @@ fn env_path(name: &str) -> String {
     std::env::var(name).unwrap_or_default()
 }
 
+/// Нормализовать явный профиль (`cuda|cpu|dml`); `None` — `auto`/неизвестно.
+fn normalize_profile(value: &str) -> Option<String> {
+    match value.trim().to_lowercase().as_str() {
+        "cuda" | "gpu" => Some("cuda".to_string()),
+        "cpu" => Some("cpu".to_string()),
+        "dml" | "directml" => Some("dml".to_string()),
+        _ => None,
+    }
+}
+
+/// Разрешить `transcribe.profile`, включая `auto` (§4.7).
+///
+/// `auto` выбирает профиль по **фактически собранным** venv: если есть только
+/// `venv-transcribe-dml` — это AMD/Intel-машина; если оба — CUDA (основной).
+/// Без venv остаётся `cuda` (P5-установщик всё равно кладёт ровно один профиль).
+/// `HDS_TRANSCRIBE_PROFILE` имеет приоритет над конфигом и резолвится здесь же.
+pub fn resolve_profile(raw: &str, root: &Path) -> String {
+    if let Some(profile) = normalize_profile(raw) {
+        return profile;
+    }
+    let has = |name: &str| root.join("sidecar").join(name).join("pyvenv.cfg").exists();
+    match (has("venv-transcribe"), has("venv-transcribe-dml")) {
+        (true, _) => "cuda".to_string(),
+        (false, true) => "dml".to_string(),
+        _ => "cuda".to_string(),
+    }
+}
+
 /// Настройки транскрибации, собранные из конфига.
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -63,7 +91,10 @@ pub struct Settings {
     pub align: AlignParams,
     pub decode: DecodeParams,
     pub diarization: DiarizationParams,
-    pub cache_diarization: bool,
+    /// `transcribe.models_dir` (`HDS_MODELS_DIR`): база для HF-кэша и ONNX.
+    pub models_dir: PathBuf,
+    /// `transcribe.hf_token_env`: имя переменной с HF-токеном.
+    pub hf_token_env: String,
     /// `transcribe.glossary.*` (P3): путь к `glossary.yaml` и явные термины.
     pub glossary: GlossaryParams,
     /// `transcribe.hotwords.*` (P3.6): лимиты 64×64; biasing — только после ворот.
@@ -141,17 +172,15 @@ impl Settings {
     pub fn from_config(cfg: &Config) -> Self {
         let mut notices = Vec::new();
         let root = project_root();
-        let profile_raw = text(
-            cfg,
-            "transcribe.profile",
-            &env_path("HDS_TRANSCRIBE_PROFILE"),
-        );
-        let profile = match profile_raw.trim().to_lowercase().as_str() {
-            "cpu" => "cpu".to_string(),
-            "dml" | "directml" => "dml".to_string(),
-            "cuda" | "gpu" => "cuda".to_string(),
-            _ => "cuda".to_string(),
+        let profile_raw = {
+            let env = env_path("HDS_TRANSCRIBE_PROFILE");
+            if env.trim().is_empty() {
+                text(cfg, "transcribe.profile", "auto")
+            } else {
+                env
+            }
         };
+        let profile = resolve_profile(&profile_raw, &root);
 
         let state_rel = text(
             cfg,
@@ -211,8 +240,19 @@ impl Settings {
             }
         };
         asr.provider = text(cfg, "transcribe.asr.provider", "auto").to_lowercase();
+        asr.device_id = integer(cfg, "transcribe.asr.device_id", 0).max(0) as i32;
+        asr.intra_threads = integer(cfg, "transcribe.asr.intra_threads", 0).max(0) as u32;
         asr.fp16 = flag(cfg, "transcribe.asr.fp16", profile == "cuda") && asr.device != "cpu";
-        asr.vad = text(cfg, "transcribe.asr.vad", "silero").to_lowercase();
+        let vad = text(cfg, "transcribe.asr.vad", "silero").to_lowercase();
+        asr.vad = match vad.as_str() {
+            "silero" | "off" => vad,
+            other => {
+                notices.push(format!(
+                    "transcribe.asr.vad={other} неизвестен (silero|off) — используется silero"
+                ));
+                "silero".to_string()
+            }
+        };
         asr.longform = "off".to_string();
         if let Some(v) = dig(cfg, "transcribe.asr.longform").and_then(|v| v.as_str()) {
             if v.trim() != "off" {
@@ -318,6 +358,13 @@ impl Settings {
             },
         };
 
+        let requested_rate = integer(cfg, "transcribe.decode.sample_rate", 16000);
+        if requested_rate != 16000 {
+            notices.push(format!(
+                "transcribe.decode.sample_rate={requested_rate} не поддерживается: \
+                 ASR/VAD/диаризация работают на 16000 Гц — используется 16000"
+            ));
+        }
         let decode = DecodeParams {
             channels: text(cfg, "transcribe.decode.channels", "auto").to_lowercase(),
             ffmpeg: text(
@@ -326,7 +373,7 @@ impl Settings {
                 &text(cfg, "index.ffmpeg", &env_path("HDS_FFMPEG")),
             ),
             ffprobe: text(cfg, "transcribe.decode.ffprobe", &env_path("HDS_FFPROBE")),
-            sample_rate: integer(cfg, "transcribe.decode.sample_rate", 16000) as u32,
+            sample_rate: 16000,
         };
 
         // --- диаризация: новые ключи → старые (legacy) ---
@@ -375,8 +422,22 @@ impl Settings {
             block_minutes: number(cfg, "transcribe.diarization.block_minutes", 20.0),
             cache: flag(cfg, "transcribe.cache.diarization", true),
             cache_dir: state_dir.to_string_lossy().to_string(),
+            hf_token_env: text(cfg, "transcribe.hf_token_env", "HF_TOKEN"),
             ..DiarizationParams::default()
         };
+
+        let models_raw = text(cfg, "transcribe.models_dir", &env_path("HDS_MODELS_DIR"));
+        let models_dir = {
+            let raw = PathBuf::from(&models_raw);
+            if raw.as_os_str().is_empty() {
+                PathBuf::new()
+            } else if raw.is_absolute() {
+                raw
+            } else {
+                root.join(raw)
+            }
+        };
+        let hf_token_env = text(cfg, "transcribe.hf_token_env", "HF_TOKEN");
 
         let language = dig(cfg, "transcribe.asr.language")
             .and_then(|v| v.as_str())
@@ -403,7 +464,8 @@ impl Settings {
             align,
             decode,
             diarization,
-            cache_diarization: flag(cfg, "transcribe.cache.diarization", true),
+            models_dir,
+            hf_token_env,
             glossary,
             hotwords,
             llm: LlmParams::default(),
@@ -413,11 +475,21 @@ impl Settings {
 
     /// Включён ли новый python-путь (`transcribe.engine: python`).
     pub fn is_python(&self) -> bool {
-        self.engine == "python"
+        self.engine.eq_ignore_ascii_case("python")
     }
 
     /// Параметры одного задания (`transcribe`).
-    pub fn params(&self, media: &Path, job_id: &str, diarization: bool) -> TranscribeParams {
+    ///
+    /// `stop_file = Some(..)` — только демон `transcribe-watch` (долгоживущий
+    /// процесс, отмена файлом). `transcribe-once` передаёт `None`, иначе
+    /// оставшийся после `transcribe-stop` файл мгновенно отменял бы задание.
+    pub fn params(
+        &self,
+        media: &Path,
+        job_id: &str,
+        diarization: bool,
+        stop_file: Option<&Path>,
+    ) -> TranscribeParams {
         let mut diar = self.diarization.clone();
         diar.enabled = diar.enabled && diarization;
         TranscribeParams {
@@ -429,18 +501,39 @@ impl Settings {
             asr: self.asr.clone(),
             diarization: diar,
             state_dir: self.state_dir.to_string_lossy().to_string(),
-            stop_file: self.stop_file().to_string_lossy().to_string(),
+            stop_file: stop_file
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
             max_duration_hours: self.max_duration_hours,
             fallback_cpu: self.fallback_cpu,
         }
     }
 
-    /// Файл-сигнал остановки — тот же, что у демона и `hds transcribe-stop`
-    /// (`<корень проекта>/transcribe.stop`, см. `autotranscribe::run_transcribe_watch`).
-    pub fn stop_file(&self) -> PathBuf {
-        project_root().join("transcribe.stop")
+    /// Переменные окружения воркера: модели/HF-кэш из `transcribe.models_dir`.
+    pub fn worker_env(&self) -> Vec<(String, String)> {
+        let mut env = Vec::new();
+        if self.models_dir.as_os_str().is_empty() {
+            return env;
+        }
+        let models = self.models_dir.to_string_lossy().to_string();
+        env.push(("HDS_MODELS_DIR".to_string(), models.clone()));
+        if std::env::var("HF_HOME")
+            .map(|v| v.trim().is_empty())
+            .unwrap_or(true)
+        {
+            env.push((
+                "HF_HOME".to_string(),
+                self.models_dir
+                    .join("hf-home")
+                    .to_string_lossy()
+                    .to_string(),
+            ));
+        }
+        env
     }
 
+    /// Файл-сигнал остановки — тот же, что у демона и `hds transcribe-stop`
+    /// (`<корень проекта>/transcribe.stop`, см. `autotranscribe::run_transcribe_watch`).
     /// Интерпретатор воркера: env → `sidecar/venv-transcribe[-dml]` → `sidecar/python`.
     pub fn python(&self, root: &Path) -> Option<PathBuf> {
         let venv = if self.profile == "dml" {
@@ -622,8 +715,72 @@ transcribe:
         let s = Settings::from_config(&cfg(
             "transcribe:\n  profile: cuda\n  align:\n    quality:\n      max_unreliable_ratio: 0.03\n",
         ));
-        let params = s.params(Path::new("D:/media/a.mp3"), "job", true);
+        let params = s.params(Path::new("D:/media/a.mp3"), "job", true, None);
         assert_eq!(params.align.quality.max_unreliable_ratio, 0.03);
         assert_eq!(params.align.mode, "native");
+        assert!(params.stop_file.is_empty());
+    }
+
+    #[test]
+    fn stop_file_is_passed_only_when_requested() {
+        let s = Settings::from_config(&Config::Null);
+        let stop = Path::new("D:/root/transcribe.stop");
+        let params = s.params(Path::new("D:/media/a.mp3"), "job", true, Some(stop));
+        assert!(params.stop_file.ends_with("transcribe.stop"));
+    }
+
+    #[test]
+    fn profile_auto_uses_only_dml_venv() {
+        let root = std::env::temp_dir().join(format!("hds-profile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("sidecar").join("venv-transcribe-dml")).unwrap();
+        std::fs::write(
+            root.join("sidecar")
+                .join("venv-transcribe-dml")
+                .join("pyvenv.cfg"),
+            "",
+        )
+        .unwrap();
+        assert_eq!(resolve_profile("auto", &root), "dml");
+        assert_eq!(resolve_profile("cpu", &root), "cpu");
+        assert_eq!(resolve_profile("bogus", &root), "dml");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn unknown_vad_and_sample_rate_are_notices() {
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  asr:\n    vad: webrtc\n  decode:\n    sample_rate: 44100\n",
+        ));
+        assert_eq!(s.asr.vad, "silero");
+        assert_eq!(s.decode.sample_rate, 16000);
+        assert!(s.notices.iter().any(|n| n.contains("asr.vad=webrtc")));
+        assert!(s
+            .notices
+            .iter()
+            .any(|n| n.contains("decode.sample_rate=44100")));
+    }
+
+    #[test]
+    fn asr_device_and_threads_are_read() {
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  asr:\n    device_id: 2\n    intra_threads: 6\n",
+        ));
+        assert_eq!(s.asr.device_id, 2);
+        assert_eq!(s.asr.intra_threads, 6);
+    }
+
+    #[test]
+    fn models_dir_and_hf_token_env_reach_worker_env() {
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  models_dir: models\n  hf_token_env: HDS_HF_TOKEN\n",
+        ));
+        assert!(s.models_dir.ends_with("models"));
+        assert_eq!(s.hf_token_env, "HDS_HF_TOKEN");
+        assert_eq!(s.diarization.hf_token_env, "HDS_HF_TOKEN");
+        let env = s.worker_env();
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "HDS_MODELS_DIR" && v.ends_with("models")));
     }
 }

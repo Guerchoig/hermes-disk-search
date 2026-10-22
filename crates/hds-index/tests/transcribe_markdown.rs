@@ -2,7 +2,7 @@
 //! рендерит Rust (контракт §8), Python отдаёт структуру.
 
 use hds_index::transcribe::{
-    detect_speaker_slots, format_timestamp, render_markdown, segments_from_blocks,
+    detect_speaker_slots, format_timestamp, render_markdown, segments_from_blocks, worker_diarized,
 };
 use hds_transcribe::Block;
 
@@ -75,4 +75,24 @@ fn blocks_become_segments() {
     assert_eq!(segments[0].text, "раз");
     assert_eq!(segments[0].t_start, Some(0.5));
     assert_eq!(segments[0].t_end, Some(2.5));
+}
+
+#[test]
+fn render_headers_only_for_real_diarization() {
+    let blocks = vec![block(Some("SPEAKER_00"), 0.0, 1.0, "текст")];
+    let with = |status: &str| hds_transcribe::TranscribeResult {
+        blocks: blocks.clone(),
+        diarization: serde_json::json!({"status": status}),
+        ..Default::default()
+    };
+    assert!(worker_diarized(&with("ok")));
+    assert!(worker_diarized(&with("split")));
+    assert!(!worker_diarized(&with("failed")));
+    assert!(!worker_diarized(&with("disabled")));
+    // Старый воркер без статуса: решают блоки.
+    let legacy = hds_transcribe::TranscribeResult {
+        blocks,
+        ..Default::default()
+    };
+    assert!(worker_diarized(&legacy));
 }

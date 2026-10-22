@@ -162,6 +162,35 @@ LLM-патчи (P4), установщики/упаковка (P5), удален�
   fp16) не пройден ⇒ `hotwords.backend: none`; числа и команды —
   `tools/parity/out/py_transcribe/P3_REPORT.md`.
 
+## Эксплуатационные детали (P4-фиксы по ревью)
+
+* **Один воркер на процесс-владелец.** Rust запускает `worker.py` лениво и
+  переиспользует его между файлами: после стадии модели выгружаются, процесс
+  остаётся. `idle_unload_sec`/`max_requests` действуют на уровне транспорта, а
+  не на каждый файл.
+* **`cancel` работает во время `transcribe`.** Запрос обрабатывается в
+  reader-потоке (`hds_sidecar.runtime.serve(..., control=...)`) и ставит флаг
+  отмены; последовательный `handle` до очереди во время долгой стадии не дойдёт.
+  Второй путь — файл `transcribe.stop` (только демон; `transcribe-once` его не
+  слушает, иначе оставшийся файл отменял бы задание).
+* **Модели и токен:** `transcribe.models_dir` → env воркера `HDS_MODELS_DIR`,
+  HF-кэш — `<models_dir>/hf-home` (если `HF_HOME` не задан вручную);
+  `transcribe.hf_token_env` задаёт имя переменной с токеном.
+* **Ревизия ASR:** `transcribe.asr.revision` — локальный `.ckpt` или каталог с
+  `<variant>.ckpt` (фиксация весов); HF-revision к этому рантайму не применим.
+* **Частота:** декодирование всегда 16 кГц; `decode.sample_rate` с другим
+  значением игнорируется с notice — ASR/VAD/диаризация на другой частоте не
+  поддерживаются.
+* **ONNX (DML/CPU) без word timestamps:** слова получают `interpolated`, но при
+  полном отсутствии `aligned`-слов merge атрибутирует их по пересечению
+  ASR-сегмента с turns (`speaker_source="segment"`), а не отдаёт всё в
+  `UNASSIGNED`.
+* **Заголовки `.md`:** Rust рисует их только при `diarization.status = ok|split`
+  из результата воркера; `disabled/failed` → текст без меток (не «### UNASSIGNED»).
+* **WhisperX** остаётся опциональным: в `requirements.lock` он закомментирован
+  (упаковка — P5). Для `align.mode: hybrid` установите `whisperx` вручную, иначе
+  будет warning и нативные таймкоды; явный `whisperx` без пакета — `align_failed`.
+
 ## Тесты
 
 ```powershell

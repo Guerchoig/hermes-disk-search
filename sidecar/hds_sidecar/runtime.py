@@ -22,12 +22,17 @@ CODE_INTERNAL = -32603
 CODE_UNKNOWN_METHOD = -32601
 
 
-def serve(handle, idle_timeout: float = 60.0) -> int:
+def serve(handle, idle_timeout: float = 60.0, control=None) -> int:
     """Обслуживать запросы до EOF/`shutdown`/простоя.
 
     `handle(req)` разбирает запрос и отвечает через :mod:`stdio`; возвращает
     истинное значение, если процесс нужно завершить (`shutdown`). Исключение в
     обработчике не завершает цикл — клиент получает `-32603`.
+
+    `control(req)` вызывается **в потоке-читателе** до постановки запроса в
+    очередь. Это единственный способ обработать `cancel` во время долгого
+    `transcribe`: главный поток занят, последовательный `handle` до очереди не
+    дойдёт. Ответ на `cancel` всё равно отправит `handle`, когда освободится.
     """
     lines: "queue.Queue" = queue.Queue()
 
@@ -36,7 +41,18 @@ def serve(handle, idle_timeout: float = 60.0) -> int:
             raw = stdio.readline()
             if not raw:
                 break
-            lines.put(raw.decode("utf-8", "replace"))
+            line = raw.decode("utf-8", "replace")
+            if control is not None:
+                try:
+                    early = json.loads(line)
+                except Exception:  # noqa: BLE001 - битый JSON обработает главный цикл
+                    early = None
+                if isinstance(early, dict):
+                    try:
+                        control(early)
+                    except Exception as e:  # noqa: BLE001 - отмена не должна убивать читатель
+                        stdio.err(None, CODE_INTERNAL, "control error: %s" % e)
+            lines.put(line)
         lines.put(None)  # EOF
 
     threading.Thread(target=reader, daemon=True, name="hds-sidecar-reader").start()

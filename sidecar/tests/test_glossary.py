@@ -182,6 +182,20 @@ class ApplyTest(unittest.TestCase):
         self.assertEqual(blocks[0]["words"][1]["text"], "1С.")
         self.assertEqual(blocks[0]["text"], "в 1С. отчёте")
 
+    def test_competing_terms_of_different_length_need_review(self):
+        gl = glossary.Glossary.from_dict({"terms": [
+            term(canonical="ЗУП", variants=["зуп"], priority="high"),
+            term(canonical="ЗУП Зарплата", variants=["зуп зарплата"], priority="high"),
+        ]})
+        blocks = [block([word(0, "зуп"), word(1, "зарплата")])]
+        before = blocks[0]["text"]
+        edits, stats = gl.apply(blocks)
+        self.assertEqual(blocks[0]["text"], before)
+        self.assertEqual(stats["applied"], 0)
+        self.assertEqual(len(edits), 2)
+        self.assertTrue(all(e["needs_review"] for e in edits))
+        self.assertTrue(all(e["reason"] == "ambiguous" for e in edits))
+
     def test_idempotent_second_pass(self):
         gl = glossary.Glossary.from_dict(
             {"terms": [term(canonical="1С", variants=["индинес"], allow_global=True)]}

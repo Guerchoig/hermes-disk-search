@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import unittest
 
-from hds_transcribe.diarize_pyannote import map_labels, plan_blocks
+from hds_transcribe.diarize_pyannote import plan_blocks
 
 
 class PlanBlocksTest(unittest.TestCase):
@@ -25,24 +25,6 @@ class PlanBlocksTest(unittest.TestCase):
         self.assertEqual(plan_blocks(0.0, 1200.0, 60.0), [])
 
 
-class MapLabelsTest(unittest.TestCase):
-    def test_label_mapped_by_overlap_in_region(self):
-        canonical = [
-            {"start": 0.0, "end": 100.0, "speaker": "SPEAKER_00"},
-            {"start": 100.0, "end": 200.0, "speaker": "SPEAKER_01"},
-        ]
-        local = [  # локальные метки блока начинаются с 0
-            {"start": 60.0, "end": 110.0, "speaker": "SPEAKER_00"},
-            {"start": 110.0, "end": 180.0, "speaker": "SPEAKER_01"},
-        ]
-        mapping = map_labels(local, canonical, 60.0, 120.0)
-        self.assertEqual(mapping["SPEAKER_00"], "SPEAKER_00")
-        self.assertEqual(mapping["SPEAKER_01"], "SPEAKER_01")
-
-    def test_speaker_outside_region_not_mapped(self):
-        canonical = [{"start": 0.0, "end": 100.0, "speaker": "SPEAKER_00"}]
-        local = [{"start": 150.0, "end": 180.0, "speaker": "SPEAKER_07"}]
-        self.assertEqual(map_labels(local, canonical, 60.0, 120.0), {})
 
 
 if __name__ == "__main__":

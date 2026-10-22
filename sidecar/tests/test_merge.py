@@ -74,6 +74,29 @@ class AssignSpeakerTest(unittest.TestCase):
         self.assertTrue(out[0]["overlap"])
         self.assertGreaterEqual(stats["overlap_words"], 1)
 
+    def test_interpolated_only_uses_segment_fallback(self):
+        # ONNX-путь: все слова interpolated, aligned-доказательств нет.
+        # Без fallback весь текст уходил бы в UNASSIGNED (DML-профиль).
+        words = [
+            word("раз", 0.1, 0.6, alignment="interpolated"),
+            word("два", 2.2, 2.6, alignment="interpolated"),
+        ]
+        out, stats = merge.assign_speakers(words, TURNS)
+        self.assertEqual([w["speaker"] for w in out], ["SPEAKER_00", "SPEAKER_01"])
+        self.assertEqual([w["speaker_source"] for w in out], ["segment", "segment"])
+        self.assertEqual(stats["speaker_fallback_words"], 2)
+        self.assertEqual(stats["unassigned_words"], 0)
+
+    def test_segment_fallback_does_not_override_word_evidence(self):
+        words = [
+            word("первое", 0.1, 0.6),
+            word("вставка", 3.0, 3.4, alignment="interpolated"),
+        ]
+        out, stats = merge.assign_speakers(words, TURNS)
+        self.assertEqual(out[0]["speaker"], "SPEAKER_00")
+        self.assertNotIn("speaker_source", out[0])
+        self.assertEqual(stats["speaker_fallback_words"], 0)
+
 
 class BuildBlocksTest(unittest.TestCase):
     def test_speaker_change_splits(self):

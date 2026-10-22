@@ -3245,23 +3245,27 @@ mod tests {
             s.warnings
         );
 
-        // Секции нет — `configured` пуст, backend решает модель. На чистой машине
-        // модели нет ⇒ sortformer; на dev-машине с установленной Nemotron-3
-        // (%ProgramData%/%APPDATA%) — nemotron3. Тест не должен зависеть от
-        // установленных моделей, поэтому проверяем согласованность решения.
-        let s = diarization_summary(&cfg("index:\n  roots: []\n"));
+        // Секции `diarization.backend` нет — backend решает модель. Явно задаём
+        // несуществующий путь, чтобы тест не зависел от установленных моделей
+        // машины: файла нет ⇒ sortformer.
+        let absent = td
+            .join("absent.onnx")
+            .display()
+            .to_string()
+            .replace('\\', "/");
+        let c = cfg(&format!(
+            "index:\n  roots: []\ndiarization:\n  nemotron3:\n    model: '{absent}'\n"
+        ));
+        let s = diarization_summary(&c);
         assert!(s.configured.is_none());
-        match s.backend {
-            DiarBackend::Nemotron3 => assert!(
-                s.nemotron_model.is_some(),
-                "nemotron3 без модели — противоречие"
-            ),
-            DiarBackend::Sortformer => assert!(
-                s.nemotron_model.is_none(),
-                "sortformer при найденной модели Nemotron-3 — противоречие"
-            ),
-            DiarBackend::Off => panic!("без секции diarization off невозможен"),
-        }
+        assert_eq!(s.backend, DiarBackend::Sortformer);
+        assert!(
+            !s.nemotron_model
+                .as_deref()
+                .map(|p| p.exists())
+                .unwrap_or(false),
+            "модель не должна существовать"
+        );
         assert_eq!(s.device, "auto");
 
         let _ = std::fs::remove_dir_all(&td);

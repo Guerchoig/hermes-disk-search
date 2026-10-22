@@ -57,11 +57,50 @@ def onnx_dir(asr: AsrParams) -> str:
 
 
 def hf_home() -> str:
-    """Кэш Hugging Face: `HF_HOME` → `~/.cache/huggingface`."""
+    """Кэш Hugging Face: `HF_HOME` → `<models_dir>/hf-home` → `~/.cache/huggingface`.
+
+    Второй вариант — требование §7: на сервере служба не видит пользовательский
+    кэш, поэтому модели живут рядом с поставкой (`HDS_MODELS_DIR`).
+    """
     home = (os.environ.get("HF_HOME") or "").strip()
     if home:
         return home
+    models = (os.environ.get("HDS_MODELS_DIR") or "").strip()
+    if models:
+        return os.path.join(models, "hf-home")
     return os.path.join(os.path.expanduser("~"), ".cache", "huggingface")
+
+
+def resolve_gigaam_source(asr: AsrParams) -> str:
+    """Источник весов GigaAM: вариант или закреплённый локальный snapshot.
+
+    `gigaam.load_model` принимает либо имя варианта, либо путь к `.ckpt`.
+    Поэтому `transcribe.asr.revision` — это **локальный** `.ckpt`/каталог с
+    `<variant>.ckpt` (фиксация весов для воспроизводимости, R14). HF-revision
+    здесь не применим: выбранный рантайм скачивает веса с CDN Sber, а не из HF.
+    """
+    revision = (asr.revision or "").strip()
+    if not revision:
+        return asr.variant
+    path = os.path.expanduser(revision)
+    if os.path.isfile(path):
+        return path
+    if os.path.isdir(path):
+        for name in ("%s.ckpt" % asr.variant, "v3_%s.ckpt" % asr.variant):
+            candidate = os.path.join(path, name)
+            if os.path.isfile(candidate):
+                return candidate
+        raise JobError(
+            "model_missing",
+            "в %s нет %s.ckpt или v3_%s.ckpt" % (path, asr.variant, asr.variant),
+            "Укажите файл .ckpt в transcribe.asr.revision или оставьте ключ пустым.",
+        )
+    raise JobError(
+        "bad_request",
+        "transcribe.asr.revision=%r не является локальным .ckpt/каталогом" % revision,
+        "Выбранный рантайм GigaAM закрепляется локальным файлом весов: "
+        "укажите путь к .ckpt или каталогу со снапшотом.",
+    )
 
 
 def hf_token(env_name: str = "HF_TOKEN") -> Optional[str]:

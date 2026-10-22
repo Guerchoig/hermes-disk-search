@@ -88,9 +88,20 @@ pub fn cmd_transcribe_check_cfg(cfg: &Config, file: Option<String>, json: bool) 
     }
 
     // Статическая проверка: Python-стек (probe) — без падения на отсутствии venv.
-    let probe = python
-        .as_ref()
-        .and_then(|py| probe_worker(py, &root, &settings));
+    // В legacy-режиме интерпретатор не нужен: проверка не должна «падать» только
+    // из-за отсутствия venv (сценарий отката §12).
+    let ok = if settings.is_python() {
+        python.is_some()
+    } else {
+        true
+    };
+    let probe = if settings.is_python() {
+        python
+            .as_ref()
+            .and_then(|py| probe_worker(py, &root, &settings))
+    } else {
+        None
+    };
     // P2: агрегат `alignment_quality` последних заданий — диагностика флагов без UI.
     let transcripts = latest_transcripts(&settings.state_dir, 3);
     if json {
@@ -99,7 +110,7 @@ pub fn cmd_transcribe_check_cfg(cfg: &Config, file: Option<String>, json: bool) 
             "engine": settings.engine,
             "profile": settings.profile,
             "python": python.as_ref().map(|p| p.display().to_string()),
-            "ok": python.is_some(),
+            "ok": ok,
             "probe": probe,
             "alignment": alignment_json(&settings),
             "glossary": glossary_json(&settings),
@@ -119,7 +130,7 @@ pub fn cmd_transcribe_check_cfg(cfg: &Config, file: Option<String>, json: bool) 
         print_probe(probe.as_ref());
         print_transcripts(&transcripts);
     }
-    if python.is_some() {
+    if ok {
         0
     } else {
         1

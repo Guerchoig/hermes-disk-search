@@ -27,6 +27,8 @@ pub struct WorkerConfig {
     pub stderr_log: Option<PathBuf>,
     /// Дополнительные аргументы воркера (транскрибация: `--profile cuda`).
     pub extra_args: Vec<String>,
+    /// Переменные окружения воркера (`HDS_MODELS_DIR`, `HF_HOME`, …).
+    pub env: Vec<(String, String)>,
 }
 
 impl WorkerConfig {
@@ -42,6 +44,7 @@ impl WorkerConfig {
             parity: false,
             stderr_log: None,
             extra_args: Vec::new(),
+            env: Vec::new(),
         }
     }
 }
@@ -435,6 +438,7 @@ fn start_process(cfg: &WorkerConfig) -> Result<(Child, ChildStdin, Receiver<Stri
         .arg("--idle-timeout")
         .arg(cfg.idle_timeout.as_secs().to_string())
         .args(&cfg.extra_args)
+        .envs(cfg.env.iter().map(|(key, value)| (key, value)))
         .current_dir(&cfg.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());

@@ -95,6 +95,16 @@ class AsrDecodeParamsTest(unittest.TestCase):
         self.assertEqual(DecodeParams.from_dict({"channels": "SPLIT"}).channels, "split")
         self.assertEqual(DecodeParams.from_dict({"channels": "bogus"}).channels, "auto")
 
+    def test_unknown_vad_falls_back_to_silero(self):
+        self.assertEqual(AsrParams.from_dict({"vad": "webrtc"}).vad, "silero")
+        self.assertEqual(AsrParams.from_dict({"vad": "OFF"}).vad, "off")
+
+    def test_sample_rate_is_always_16000(self):
+        # ASR/VAD/диаризация не поддерживают другую частоту: значение из
+        # конфига не должно молча сдвигать таймкоды.
+        self.assertEqual(DecodeParams.from_dict({"sample_rate": 44100}).sample_rate, 16000)
+        self.assertEqual(DecodeParams.from_dict({}).sample_rate, 16000)
+
 
 if __name__ == "__main__":
     unittest.main()

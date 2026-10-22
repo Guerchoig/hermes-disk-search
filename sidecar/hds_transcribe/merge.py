@@ -124,10 +124,30 @@ def assign_speakers(words, exclusive_turns, regular_turns=None, opts=None):
             evidence_speakers.add(speaker)
 
     # Проход 2: неуверенные/не-aligned слова не двигают спикера — берут соседа.
+    # Исключение (P3.1): если `aligned`-слов нет вообще (ONNX-путь не отдаёт
+    # word timestamps, все слова `interpolated`), соседа-доказательства не
+    # существует. Тогда атрибуция идёт по пересечению **сегмента** слова с
+    # turns: она не считается доказательством смены спикера, но иначе весь
+    # текст уходил бы в `UNASSIGNED` (DML/ONNX-профиль).
+    fallback_words = 0
+    if not evidence_speakers and exclusive_turns:
+        for word in words:
+            if word.get("speaker") is not None:
+                continue
+            speaker, candidates, ambiguous = _direct_speaker(word, exclusive_turns, opts)
+            word["speakers"] = candidates
+            word["ambiguous"] = ambiguous
+            word["overlap"] = len(candidates) >= 2
+            if speaker is not None and not ambiguous:
+                word["speaker"] = speaker
+                word["speaker_source"] = "segment"
+                fallback_words += 1
     for index, word in enumerate(words):
         if word.get("speaker") is None:
             neighbour = _neighbour_speaker(words, index)
             word["speaker"] = neighbour
+            if neighbour is not None:
+                word.setdefault("speaker_source", "neighbour")
 
     unassigned = sum(1 for w in words if not w.get("speaker"))
     ambiguous = sum(1 for w in words if w.get("ambiguous"))
@@ -138,6 +158,7 @@ def assign_speakers(words, exclusive_turns, regular_turns=None, opts=None):
         "unassigned_words": unassigned,
         "ambiguous_words": ambiguous,
         "overlap_words": overlap,
+        "speaker_fallback_words": fallback_words,
         "speakers": speakers,
     }
     return words, stats
