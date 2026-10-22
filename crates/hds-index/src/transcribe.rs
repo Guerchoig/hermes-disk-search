@@ -137,6 +137,10 @@ pub struct TranscribeConfig {
     /// `auto_transcribe.state_dir` — чтобы `out_dir` содержал только выход.
     /// `None` — писать рядом с выходом (прежнее поведение, §5.3).
     pub service_dir: Option<PathBuf>,
+    /// `transcribe.engine`: `python` (новый путь) | `legacy` (старый).
+    pub engine: String,
+    /// Настройки python-воркера (`transcribe.*`, с маппингом старых ключей).
+    pub settings: Option<hds_transcribe::Settings>,
 }
 
 impl Default for TranscribeConfig {
@@ -154,6 +158,8 @@ impl Default for TranscribeConfig {
             unassigned_label: DEFAULT_UNASSIGNED_LABEL.to_string(),
             diarization: DiarizationSettings::default(),
             service_dir: None,
+            engine: "legacy".to_string(),
+            settings: None,
         }
     }
 }
@@ -179,11 +185,16 @@ impl TranscribeConfig {
         let enabled = dig(cfg, "index.transcribe")
             .and_then(|v| v.as_bool())
             .unwrap_or(true);
+        // P1: новые ключи `transcribe.*`; `engine: python` переключает путь,
+        // `legacy` оставляет старую HTTP-цепочку нетронутой (§6).
+        let settings = hds_transcribe::Settings::from_config(cfg);
         TranscribeConfig {
             url,
             model,
             mode,
             custom,
+            engine: settings.engine.clone(),
+            settings: Some(settings),
             // W1: ключ читается здесь, а не в движке. Нет ключа → None (хост даст
             // `ru`), явная пустая строка → Some("") = авто-детекция.
             language: dig(cfg, "index.whisper_language")
@@ -229,6 +240,8 @@ impl TranscribeConfig {
         });
         // F2: отдельно запоминаем, был ли ключ задан (см. `backend_explicit`).
         let backend_raw = dig_str(cfg, "auto_transcribe.diarization_backend");
+        // P1: `transcribe.*` — общие настройки нового python-пути (и engine).
+        let settings = hds_transcribe::Settings::from_config(cfg);
         TranscribeConfig {
             url: dig_str(cfg, "index.transcribe_url")
                 .unwrap_or_else(|| DEFAULT_TRANSCRIBE_URL.to_string())
@@ -268,6 +281,8 @@ impl TranscribeConfig {
                     .unwrap_or(true),
             },
             service_dir,
+            engine: settings.engine.clone(),
+            settings: Some(settings),
         }
     }
 
@@ -434,11 +449,180 @@ impl TranscribeClient {
         &self.cfg
     }
 
+    /// Включён ли новый python-путь (`transcribe.engine: python`).
+    pub fn is_python(&self) -> bool {
+        self.cfg.engine == "python"
+    }
+
+    /// Настройки `transcribe.*` (если конфиг их не собрал — дефолты P0).
+    fn python_settings(&self) -> hds_transcribe::Settings {
+        self.cfg
+            .settings
+            .clone()
+            .unwrap_or_else(|| hds_transcribe::Settings::from_config(&serde_yaml::Value::Null))
+    }
+
+    /// Запустить воркер и собрать параметры задания.
+    fn python_client(
+        &self,
+        path: &Path,
+        with_diarization: bool,
+    ) -> Result<(hds_transcribe::Client, hds_transcribe::TranscribeParams)> {
+        let root = project_root();
+        let settings = self.python_settings();
+        let python = settings.python(&root).ok_or_else(|| {
+            CoreError::Other(format!(
+                "не найден интерпретатор воркера транскрибации \
+                 (HDS_TRANSCRIBE_PYTHON / sidecar/venv-transcribe[-dml] / sidecar/python) в {}",
+                root.display()
+            ))
+        })?;
+        let mut ccfg = hds_transcribe::ClientConfig::from_settings(&python, &root, &settings);
+        let _ = std::fs::create_dir_all(&settings.state_dir);
+        // stderr воркера — в журнал задания рядом с артефактами (прогресс/ошибки).
+        ccfg.stderr_log = Some(settings.state_dir.join("transcribe-worker.log"));
+        let client = hds_transcribe::Client::spawn(ccfg).map_err(|e| e.to_core())?;
+        let job_id = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("job")
+            .to_string();
+        let params = settings.params(path, &job_id, with_diarization);
+        Ok((client, params))
+    }
+
+    /// Python-путь одного задания: воркер → (warnings в журнал) → результат.
+    fn python_transcribe(
+        &self,
+        path: &Path,
+        with_diarization: bool,
+    ) -> Result<hds_transcribe::TranscribeResult> {
+        let (mut client, params) = self.python_client(path, with_diarization)?;
+        let result = client.transcribe(&params);
+        client.shutdown();
+        let result = result.map_err(|e| e.to_core())?;
+        for warning in &result.warnings {
+            eprintln!("транскрибация: {warning}");
+        }
+        Ok(result)
+    }
+
+    /// Python-путь записи результата: `transcribe` → `postprocess` → `.md`.
+    ///
+    /// Контракты §8 сохранены: `.md` рендерит Rust (`### SPEAKER_NN [..]`),
+    /// `.orig.md` — текст **после** postprocess, но **до** подстановки имён,
+    /// `.speakers.json` — пустая карта меток, коллизии — суффикс `-2`.
+    fn python_transcribe_to_file(&self, path: &Path) -> Result<TranscribeOutcome> {
+        let out_dir = self
+            .cfg
+            .out_dir
+            .clone()
+            .ok_or_else(|| CoreError::Other("не задан auto_transcribe.out_dir".to_string()))?;
+        let (mut client, params) = self.python_client(path, self.cfg.diarization.enabled)?;
+        let result = client.transcribe(&params);
+        let result = match result {
+            Ok(r) => r,
+            Err(e) => {
+                client.shutdown();
+                return Err(e.to_core());
+            }
+        };
+        for warning in &result.warnings {
+            eprintln!("транскрибация: {warning}");
+        }
+        // Отдельный вызов postprocess (P3): глоссарий меняет `words[].text` и
+        // пересобирает `block.text`; ASR не пересчитывается (§5.2), правки —
+        // `<stem>.edits.json` в state_dir. LLM-патчи подключатся в P4.
+        let settings = self.python_settings();
+        let pp = hds_transcribe::PostprocessParams {
+            job_id: result.job_id.clone(),
+            transcript_path: result.transcript_path.clone(),
+            glossary: settings.glossary.clone(),
+            hotwords: settings.hotwords.clone(),
+            llm: settings.llm.clone(),
+        };
+        let post = client.postprocess(&pp);
+        client.shutdown();
+        let blocks = match post {
+            Ok(p) => p.blocks,
+            Err(e) => {
+                eprintln!("postprocess: {e} — используется текст ASR");
+                result.blocks.clone()
+            }
+        };
+        let text = render_markdown(&blocks, self.cfg.diarization.enabled);
+        if text.trim().is_empty() {
+            return Err(CoreError::Other(format!(
+                "воркер вернул пустой текст (файл {})",
+                path.display()
+            )));
+        }
+        let ext = self
+            .cfg
+            .out_format
+            .trim()
+            .trim_start_matches('.')
+            .to_string();
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("output")
+            .to_string();
+        std::fs::create_dir_all(&out_dir)?;
+        let svc_dir = self
+            .cfg
+            .service_dir
+            .clone()
+            .unwrap_or_else(|| out_dir.clone());
+        std::fs::create_dir_all(&svc_dir)?;
+        let out_path = next_free_path(&out_dir, &stem, &ext);
+        write_text_atomic(&out_path, &text)?;
+        let used_stem = out_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or(&stem)
+            .to_string();
+        let orig_path = svc_dir.join(format!("{used_stem}.orig.{ext}"));
+        write_text_atomic(&orig_path, &text)?;
+        let speakers = detect_speaker_slots(&text);
+        let mut map = serde_json::Map::new();
+        for s in &speakers {
+            map.insert(s.clone(), json!(""));
+        }
+        let sidecar = json!({
+            "speakers": serde_json::Value::Object(map),
+            "unassigned_label": self.cfg.unassigned_label,
+            "source": path.to_string_lossy(),
+            "out": out_path.to_string_lossy(),
+            // P1: артефакты python-воркера (ASR-структура и диаризация) — рядом,
+            // для повторного postprocess без ASR.
+            "transcript": result.transcript_path,
+            "diarization": result.diarization_path,
+            "alignment_quality": result.alignment_quality,
+        });
+        let speakers_path = svc_dir.join(format!("{used_stem}.speakers.json"));
+        let pretty = serde_json::to_string_pretty(&sidecar)
+            .map_err(|e| CoreError::Other(format!("speakers.json: {e}")))?;
+        write_text_atomic(&speakers_path, &pretty)?;
+        Ok(TranscribeOutcome {
+            out_path,
+            orig_path,
+            speakers_path,
+            speakers,
+            chars: text.chars().count(),
+        })
+    }
+
     /// Транскрибация файла через владельца GPU → сегменты с таймкодами.
     ///
     /// Ошибку (недоступный владелец/не-200) возвращаем как `Err` — вызывающий
     /// ([`MediaRouter`]) превращает её в сегмент-сообщение, не роняя файл.
     pub fn transcribe(&self, path: &Path) -> Result<Vec<Segment>> {
+        if self.is_python() {
+            // Индексация медиа: диаризация не нужна (как и в legacy-ветке).
+            let result = self.python_transcribe(path, false)?;
+            return Ok(segments_from_blocks(&result.blocks));
+        }
         let (host, port, prefix) = split_base(&self.cfg.url)?;
         let target = format!("{prefix}/internal/transcribe");
         let mut body = json!({
@@ -485,6 +669,9 @@ impl TranscribeClient {
     /// Метки спикеров пишутся **как отдаёт движок** (`SPEAKER_NN`, `UNASSIGNED`) —
     /// без преобразования (§5.4).
     pub fn transcribe_to_file(&self, path: &Path) -> Result<TranscribeOutcome> {
+        if self.is_python() {
+            return self.python_transcribe_to_file(path);
+        }
         let out_dir = self
             .cfg
             .out_dir
@@ -708,6 +895,76 @@ pub fn segments_from_json(v: &serde_json::Value) -> Vec<Segment> {
 
 /// Ведущий сегмент медиафайла — порт `extract_media`:
 /// `"Медиафайл: <имя>\n<ffprobe|метаданные недоступны>"`.
+/// Блоки python-воркера → сегменты индексации (текст + границы).
+pub fn segments_from_blocks(blocks: &[hds_transcribe::Block]) -> Vec<Segment> {
+    let mut out = Vec::new();
+    for block in blocks {
+        let text = block.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        out.push(Segment {
+            text: text.to_string(),
+            page: None,
+            t_start: block.start,
+            t_end: block.end,
+            head: None,
+        });
+    }
+    out
+}
+
+/// `HH:MM:SS` для заголовков `.md` (часы не обрезаются — записи бывают > 24 ч).
+pub fn format_timestamp(seconds: f64) -> String {
+    let total = if seconds.is_finite() && seconds > 0.0 {
+        seconds.round() as u64
+    } else {
+        0
+    };
+    format!(
+        "{:02}:{:02}:{:02}",
+        total / 3600,
+        (total % 3600) / 60,
+        total % 60
+    )
+}
+
+/// Рендер `.md` из блоков (контракт §8: формат живёт в Rust, не в Python).
+///
+/// * `### SPEAKER_NN [HH:MM:SS - HH:MM:SS]` + текст реплики;
+/// * при включённой диаризации блок без спикера получает литерал `UNASSIGNED`;
+/// * при выключенной — текст без заголовков (семантика `backend=off`).
+pub fn render_markdown(blocks: &[hds_transcribe::Block], diarization: bool) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        let text = block.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        if diarization {
+            let speaker = block
+                .speaker
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(DEFAULT_UNASSIGNED_LABEL);
+            let start = format_timestamp(block.start.unwrap_or(0.0));
+            let end = format_timestamp(block.end.unwrap_or_else(|| block.start.unwrap_or(0.0)));
+            out.push_str(&format!("### {speaker} [{start} - {end}]\n{text}\n\n"));
+        } else {
+            out.push_str(text);
+            out.push_str("\n\n");
+        }
+    }
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out
+}
+
 pub fn lead_segment(path: &Path) -> Segment {
     let name = path
         .file_name()

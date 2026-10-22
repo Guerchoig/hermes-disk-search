@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 hds-core = { path = "../hds-core" }
 hds-extract = { path = "../hds-extract" }
+# P1: python-путь транскрибации/диаризации (sidecar/hds_transcribe).
+hds-transcribe = { path = "../hds-transcribe" }
 hds-clip = { path = "../hds-clip" }
 # W5: константы/проверка модели Nemotron-3 (размер, sha256) и поиск пути по
 # каталогам моделей — один источник истины для `llm_host` и `hds check`.

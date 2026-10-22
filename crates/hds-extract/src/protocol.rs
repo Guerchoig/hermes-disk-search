@@ -47,6 +47,9 @@ pub struct RpcError {
     pub code: i64,
     pub message: String,
     pub hint: Option<String>,
+    /// Машинный код задания (`model_missing`, `cuda_oom`, …) — аддитивное поле
+    /// протокола 1; извлечение его не использует, `hds-transcribe` — использует.
+    pub kind: Option<String>,
 }
 
 impl std::fmt::Display for RpcError {
@@ -100,7 +103,17 @@ pub fn parse_error(v: &Value) -> RpcError {
             .get("hint")
             .and_then(|h| h.as_str())
             .map(|h| h.to_string()),
+        kind: v
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .map(|k| k.to_string()),
     }
+}
+
+/// Объект ошибки из строки-ответа (для машинного `kind` без повторного разбора).
+pub fn error_from_line(line: &str) -> Option<RpcError> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    v.get("error").map(parse_error)
 }
 
 /// Разбор `hello.result`.

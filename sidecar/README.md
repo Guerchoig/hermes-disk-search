@@ -9,8 +9,13 @@
 
 | Файл | Что |
 |---|---|
-| `hds_extract/worker.py` | воркер: `hello`/`extract`/`normalize`/`clip_image`/`shutdown`, idle-timeout, изоляция stdout |
+| `hds_sidecar/` | **общий пакет** (не процесс): `stdio` (fd1→stderr, UTF-8 stdin, NDJSON, reply/ok/err), `runtime` (reader-thread, idle-timeout, EOF, изоляция ошибки одного запроса), `config` (state_dir/config_path/load_config), `progress` (`[stage] …` в stderr), `fs` (temp/безопасные пути/long-path) |
+| `hds_extract/worker.py` | воркер: `hello`/`extract`/`normalize`/`clip_image`/`shutdown`, idle-timeout, изоляция stdout; транспорт — `hds_sidecar` |
 | `hds_extract/requirements.lock` | зависимости воркера (вариант A, сняты со спайка 3) |
+| `hds_transcribe/` | воркер транскрибации/диаризации (GigaAM-v3 + pyannote, профили cuda/cpu/dml), см. `hds_transcribe/README.md` |
+
+`hds_sidecar` намеренно **не импортирует** torch/fitz/pymorphy3 на уровне
+модуля: иначе один воркер тянул бы зависимости другого (правило границы §5.1).
 
 ## Запуск (разработка)
 

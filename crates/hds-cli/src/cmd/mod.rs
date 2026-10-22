@@ -19,6 +19,7 @@ pub mod service;
 pub mod status;
 pub mod stop;
 pub mod transcribe;
+pub mod transcribe_check;
 pub mod ui;
 pub mod watch;
 pub mod whisper_check;

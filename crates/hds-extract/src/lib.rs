@@ -16,4 +16,4 @@ pub mod protocol;
 pub mod worker;
 
 pub use protocol::{Capabilities, ExtractResult, RpcError, Segment, PROTOCOL_VERSION};
-pub use worker::{discover_python, Worker, WorkerConfig};
+pub use worker::{discover_python, discover_python_with, Worker, WorkerConfig};

@@ -1,0 +1,32 @@
+# P1: окружение транскрибации/диаризации — venv-transcribe (CUDA или CPU).
+#
+# Ставится ПО ВЫБОРУ профиля от общего CPython (sidecar/python):
+#   cuda: --extra-index-url https://download.pytorch.org/whl/cu128  torch==2.8.0+cu128
+#   cpu : --extra-index-url https://download.pytorch.org/whl/cpu    torch==2.8.0+cpu
+#
+# Версии зафиксированы по P0 (tools/parity/out/py_transcribe/spike/REPORT.md §1):
+# torch 2.8.0+cu128, transformers 4.57.1, pyannote.audio 4.0.0.
+# torchcodec НЕ ставим: 0.7.0 не грузится с FFmpeg 9, а боевой путь декодирует
+# аудио ffmpeg CLI и подаёт pyannote {"waveform": tensor} (§7.1).
+torch==2.8.0
+torchaudio==2.8.0
+transformers==4.57.1
+pyannote-audio==4.0.0
+onnx==1.19.0
+onnxruntime==1.23.2
+silero-vad==6.2.3
+numpy>=1.26,<3
+sentencepiece
+soundfile
+hydra-core==1.3.*
+omegaconf==2.3.*
+psutil
+# P3: глоссарий читается из data/glossary.yaml (glossary.py); PyYAML уже стоит
+# транзитивно (pyannote/whisperx), но теперь импортируется напрямую — фиксируем.
+pyyaml>=6.0
+# word_timestamps есть только в пакете из GitHub (HF remote-code их не отдаёт).
+gigaam @ git+https://github.com/salute-developers/GigaAM.git@7447938d791c4f3e643386ee22c33777004293a5
+# P2: `align.mode: whisperx|hybrid` требует whisperx (P0: 3.8.7rc1). Он стоит
+# только в CUDA-venv; для cpu/dml `hybrid` деградирует до native с warning,
+# явный `whisperx` — ошибка `align_failed`. Упаковка в venv — задача P5.
+# whisperx==3.8.7rc1

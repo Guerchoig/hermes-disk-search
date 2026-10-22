@@ -601,6 +601,7 @@ dependencies = [
  "hds-index",
  "hds-mcp",
  "hds-search",
+ "hds-transcribe",
  "hds-ui",
  "rusqlite",
  "serde_json",
@@ -672,6 +673,7 @@ dependencies = [
  "hds-core",
  "hds-diarize",
  "hds-extract",
+ "hds-transcribe",
  "hex",
  "rusqlite",
  "serde",
@@ -723,6 +725,17 @@ dependencies = [
  "hds-core",
  "hds-index",
  "rusqlite",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
+name = "hds-transcribe"
+version = "0.1.0"
+dependencies = [
+ "hds-core",
+ "hds-extract",
+ "serde",
  "serde_json",
  "serde_yaml",
 ]

@@ -1,0 +1,1 @@
+# Пакет тестов sidecar: `python -m unittest discover -s sidecar/tests -t sidecar`.

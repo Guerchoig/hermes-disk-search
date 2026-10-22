@@ -1253,6 +1253,56 @@ pub fn requested_backend_of(cfg: &Config) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// P1: сводка нового python-пути транскрибации (`transcribe.*`).
+#[derive(Debug, Clone)]
+pub struct TranscribeSummary {
+    /// `transcribe.engine`: `python` | `legacy`.
+    pub engine: String,
+    /// `transcribe.profile`: `cuda|cpu|dml`.
+    pub profile: String,
+    /// Найденный интерпретатор воркера (`HDS_TRANSCRIBE_PYTHON` → venv профиля).
+    pub python: Option<PathBuf>,
+    /// Каталог артефактов (`transcript.json`/`diarization.json`).
+    pub state_dir: PathBuf,
+    /// Строка ASR для отчёта: `e2e_rnnt / torch / cuda / batch 8`.
+    pub asr: String,
+    /// Строка диаризации: модель, устройство, размер блока.
+    pub diarization: String,
+    /// Заметки о маппинге старых ключей / неподдержанных режимах.
+    pub notices: Vec<String>,
+}
+
+/// Собрать сводку `transcribe.*` (не запускает воркер и не грузит модели).
+pub fn transcribe_summary(cfg: &Config) -> TranscribeSummary {
+    let settings = hds_transcribe::Settings::from_config(cfg);
+    let root = hds_core::config::project_root();
+    let python = settings.python(&root);
+    let asr = format!(
+        "{} / {} / {} / batch {}",
+        settings.asr.variant, settings.asr.backend, settings.asr.device, settings.asr.batch_size
+    );
+    let diarization = format!(
+        "{} / {} / блоки {:.0} мин{}",
+        settings.diarization.model,
+        settings.diarization.device,
+        settings.diarization.block_minutes,
+        if settings.diarization.enabled {
+            ""
+        } else {
+            " (выключена)"
+        }
+    );
+    TranscribeSummary {
+        engine: settings.engine.clone(),
+        profile: settings.profile.clone(),
+        python,
+        state_dir: settings.state_dir.clone(),
+        asr,
+        diarization,
+        notices: settings.notices.clone(),
+    }
+}
+
 /// Пункт для legacy-ветки (sortformer GGUF): регресс не ломаем.
 fn sortformer_legacy_check(s: &DiarSummary, device: &str) -> Check {
     let legacy = match s.sortformer_model.as_deref() {
@@ -2439,6 +2489,39 @@ fn same_path(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// P1: `transcribe.engine` — python (sidecar) или legacy (llm_host).
+///
+/// Для python проверяем наличие интерпретатора воркера (env → venv профиля →
+/// sidecar/python → `.venv`): без него задания падают ещё до модели.
+fn check_transcribe(cfg: &Config) -> Check {
+    let s = transcribe_summary(cfg);
+    if s.engine != "python" {
+        return Check::new(
+            "transcribe",
+            "ok",
+            format!("транскрибация: legacy, профиль {}", s.profile),
+        )
+        .msg(format!("ASR: {}; диаризация: {}", s.asr, s.diarization));
+    }
+    let title = format!("транскрибация: python, профиль {}", s.profile);
+    match &s.python {
+        Some(python) => Check::new("transcribe", "ok", title).msg(format!(
+            "интерпретатор: {}; ASR: {}; диаризация: {}",
+            python.display(),
+            s.asr,
+            s.diarization
+        )),
+        None => Check::new("transcribe", "fail", title)
+            .msg(
+                "интерпретатор воркера не найден (HDS_TRANSCRIBE_PYTHON / sidecar/venv-transcribe)",
+            )
+            .fix(
+                "Соберите venv профиля (sidecar\\hds_transcribe\\requirements*.lock) \
+                 или задайте HDS_TRANSCRIBE_PYTHON.",
+            ),
+    }
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -2455,6 +2538,8 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_index_transcribe_legacy(cfg));
     checks.push(check_auto_transcribe_dirs(cfg));
     checks.push(check_transcribe_daemon());
+    // P1: новый путь транскрибации (python-sidecar) — движок/профиль/интерпретатор.
+    checks.push(check_transcribe(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);
@@ -3160,10 +3245,23 @@ mod tests {
             s.warnings
         );
 
-        // Секции нет — `configured` пуст, backend решает модель (здесь её нет).
+        // Секции нет — `configured` пуст, backend решает модель. На чистой машине
+        // модели нет ⇒ sortformer; на dev-машине с установленной Nemotron-3
+        // (%ProgramData%/%APPDATA%) — nemotron3. Тест не должен зависеть от
+        // установленных моделей, поэтому проверяем согласованность решения.
         let s = diarization_summary(&cfg("index:\n  roots: []\n"));
         assert!(s.configured.is_none());
-        assert_eq!(s.backend, DiarBackend::Sortformer);
+        match s.backend {
+            DiarBackend::Nemotron3 => assert!(
+                s.nemotron_model.is_some(),
+                "nemotron3 без модели — противоречие"
+            ),
+            DiarBackend::Sortformer => assert!(
+                s.nemotron_model.is_none(),
+                "sortformer при найденной модели Nemotron-3 — противоречие"
+            ),
+            DiarBackend::Off => panic!("без секции diarization off невозможен"),
+        }
         assert_eq!(s.device, "auto");
 
         let _ = std::fs::remove_dir_all(&td);

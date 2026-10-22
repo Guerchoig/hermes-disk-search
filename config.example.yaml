@@ -403,6 +403,89 @@ auto_transcribe:
 
 
 
+# --- Транскрибация/диаризация на Python-sidecar (P1) --------------------------
+# Новый боевой путь: GigaAM-v3 (e2e_rnnt, fp16 CUDA) + pyannote community-1.
+#   engine: python — sidecar/hds_transcribe (venv профиля, отдельный процесс);
+#   engine: legacy — прежняя цепочка через llm_host (index.whisper_*,
+#                    auto_transcribe.diarization* — читаются и работают).
+# Параметры передаются воркеру из Rust; Python config.yaml не читает.
+# Решения P0: VAD Silero (окна ≤25 с), align.mode native, hotwords none, LLM off.
+transcribe:
+  engine: python
+  # auto → cuda (основной профиль). cpu — fallback и правильный выбор для iGPU;
+  # dml — код-путь/fallback, на встроенной AMD iGPU медленнее CPU в 2,2–2,5×.
+  profile: auto                 # auto | cuda | cpu | dml
+  request_timeout_sec: 25200    # 7 ч: длинная запись + запас
+  idle_unload_sec: 600          # простой → освободить VRAM, процесс оставить
+  max_requests: 20              # после N файлов — перезапуск воркера
+  fallback_cpu: true            # cuda_oom/dml_oom/onnx_error → одна попытка на CPU
+  max_duration_hours: 6
+  state_dir: data/auto-transcribe  # transcript.json/diarization.json (не в out_dir)
+  asr:
+    model: ai-sage/GigaAM-v3
+    variant: e2e_rnnt           # e2e_rnnt | rnnt | e2e_ctc (последние — контроль)
+    revision: ""                # "" = variant
+    language: ru                # "" = автоопределение
+    device: auto                # auto | cuda | cpu
+    backend: auto               # auto | torch | onnx (dml ⇒ onnx)
+    provider: auto              # auto | cuda | dml | cpu (ORT EP при backend: onnx)
+    batch_size: 8
+    longform: off               # P1: transcribe_longform не используется
+    vad: silero                 # silero | off
+    max_chunk_sec: 25
+    fp16: true                  # CUDA — да; CPU — нет
+    cache_dir: ""               # "" → HDS_GIGAAM_CACHE → models/gigaam
+    onnx_dir: ""                # "" → HDS_GIGAAM_ONNX → models/onnx/<variant>
+  decode:
+    channels: auto              # auto (корреляция L/R) | downmix | split
+    ffmpeg: ""                  # "" → HDS_FFMPEG → PATH
+    ffprobe: ""
+    sample_rate: 16000
+  align:
+    mode: native                # native (default) | whisperx | hybrid (P2, только CUDA-venv)
+    model: jonatasgrosman/wav2vec2-large-xlsr-53-russian  # WhisperX-модель для ru
+    device: auto                # auto | cuda | cpu (на AMD/Intel — cpu)
+    max_shift_sec: 0.35         # hybrid: расхождение native/whisperx → берём whisperx
+    quality:                    # флаги слов и alignment_quality
+      max_gap_sec: 1.5          # разрыв внутри фразы → low_confidence (не пауза между чанками)
+      min_duration_sec: 0.02    # слово короче → low_confidence
+      overlap_tolerance_sec: 0.12  # конфликт таймкодов соседних слов (3 кадра GigaAM по 40 мс)
+      min_aligned_ratio: 0.80   # порог alignment_quality.ok по доле aligned
+      max_unreliable_ratio: 0.02  # (low_confidence+failed)/words ≤ 2 % — гейт P2
+  diarization:
+    enabled: true
+    required: true              # нет модели/токена ⇒ задание падает
+    model: pyannote/speaker-diarization-community-1
+    device: auto                # auto | cuda | cpu (на AMD/Intel → cpu)
+    num_speakers: 0             # 0 = неизвестно (действуют min/max)
+    min_speakers: 1
+    max_speakers: 20
+    block_minutes: 20           # длинные файлы режутся блоками 15–30 мин
+    block_overlap_sec: 60       # сшивка спикеров между блоками
+  cache:
+    diarization: true           # не пересчитывать pyannote при смене ASR
+  # --- Глоссарий (P3): детерминированные замены по словам после ASR ------------
+  # `postprocess` меняет только `words[].text` и пересобирает `block.text`;
+  # таймкоды/спикеры/alignment не трогаются, правки — в `<stem>.edits.json`.
+  # variants — кандидаты: без `context` рядом, `allow_global` или `priority: high`
+  # замена не применяется, случай уходит в edits.json как needs_review (§4.2).
+  glossary:
+    path: ""                    # "" = замены выключены (поведение P2).
+                                # Рабочий глоссарий по умолчанию — data/glossary.yaml
+                                # (data/* в .gitignore: там могут быть ФИО клиентов);
+                                # пример формата — sidecar/hds_transcribe/glossary.example.yaml
+    terms: []                   # явные термины (для тестов/переопределений)
+  hotwords:
+    enabled: false              # до ворот G1/G2 biasing выключен (P3_REPORT.md)
+    backend: none               # none | gigastt (gigastt включается только после G1+G2)
+    phrases: []                 # свои фразы; пусто → из глоссария (канон+pronunciations)
+    max_phrases: 64             # жёсткий лимит gigastt (too_many_hotwords)
+    max_phrase_chars: 64        # жёсткий лимит gigastt (hotword_phrase_too_long)
+    boost: 5.0                  # additive logit boost (P0: эффект при 8)
+    url: "http://127.0.0.1:9876"  # для backend: gigastt через HTTP (в CLI — файл)
+  llm:
+    enabled: false              # LLM-постобработка — P4
+
 # --- Диаризация: Nemotron-3 (Sortformer v3, до 8 спикеров) --------------------
 # Новый путь (W4/W5): llm_host декодирует медиа в WAV 16 кГц **один раз**, ASR идёт
 # по срезу ведущей тишины, диаризация — по полному WAV; `.md` получает метки

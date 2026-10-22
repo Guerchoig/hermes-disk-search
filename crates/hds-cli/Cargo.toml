@@ -14,6 +14,8 @@ rust-version.workspace = true
 hds-core = { path = "../hds-core" }
 hds-index = { path = "../hds-index" }
 hds-extract = { path = "../hds-extract" }
+# P1: `transcribe-check` (probe Python-стека) — типизированный клиент воркера.
+hds-transcribe = { path = "../hds-transcribe" }
 hds-clip = { path = "../hds-clip" }
 hds-search = { path = "../hds-search" }
 hds-mcp = { path = "../hds-mcp" }

@@ -25,6 +25,8 @@ pub struct WorkerConfig {
     pub parity: bool,
     /// Файл для stderr воркера (None — наследуется родителем).
     pub stderr_log: Option<PathBuf>,
+    /// Дополнительные аргументы воркера (транскрибация: `--profile cuda`).
+    pub extra_args: Vec<String>,
 }
 
 impl WorkerConfig {
@@ -39,17 +41,37 @@ impl WorkerConfig {
             max_requests: 0,
             parity: false,
             stderr_log: None,
+            extra_args: Vec::new(),
         }
     }
 }
 
-/// Поиск интерпретатора воркера: `HDS_EXTRACT_PYTHON` → `sidecar/python` (A) → `.venv` (C).
+/// Поиск интерпретатора воркера извлечения: `HDS_EXTRACT_PYTHON` → `sidecar/python` → `.venv`.
 pub fn discover_python(root: &Path) -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("HDS_EXTRACT_PYTHON") {
+    discover_python_with(root, "HDS_EXTRACT_PYTHON", None)
+}
+
+/// Обобщённый поиск интерпретатора (транскрибация использует свои env/venv).
+///
+/// Порядок: `<env_var>` → `sidecar/<venv_rel>` (venv профиля) → `sidecar/python`
+/// (портативный CPython) → `.venv` проекта (только разработка).
+pub fn discover_python_with(root: &Path, env_var: &str, venv_rel: Option<&str>) -> Option<PathBuf> {
+    if let Ok(p) = std::env::var(env_var) {
         if !p.is_empty() {
             let pb = PathBuf::from(p);
             if pb.exists() {
                 return Some(pb);
+            }
+        }
+    }
+    if let Some(rel) = venv_rel {
+        let venv = root.join("sidecar").join(rel);
+        if venv.join("pyvenv.cfg").exists() {
+            for name in ["Scripts/python.exe", "bin/python3", "bin/python"] {
+                let py = venv.join(name);
+                if py.exists() {
+                    return Some(py);
+                }
             }
         }
     }
@@ -136,6 +158,8 @@ pub struct Worker {
     requests: u64,
     caps: Capabilities,
     started: Instant,
+    /// Последняя ошибка JSON-RPC (машинный `kind` для `hds-transcribe`).
+    last_error: Option<protocol::RpcError>,
 }
 
 /// Чем кончилась попытка запроса (`call_once`) — от этого зависит, поднимать ли
@@ -180,6 +204,7 @@ impl Worker {
             requests: 0,
             caps: Capabilities::default(),
             started: Instant::now(),
+            last_error: None,
         };
         w.handshake()?;
         Ok(w)
@@ -188,6 +213,11 @@ impl Worker {
     /// Возможности воркера (после `hello`).
     pub fn capabilities(&self) -> &Capabilities {
         &self.caps
+    }
+
+    /// Последняя ошибка JSON-RPC (в т.ч. машинный `kind`) — для `hds-transcribe`.
+    pub fn last_error(&self) -> Option<&protocol::RpcError> {
+        self.last_error.as_ref()
     }
 
     /// PID процесса воркера (для замера RSS по дереву процессов, §5.1).
@@ -232,6 +262,7 @@ impl Worker {
         self.rx = rx;
         self.next_id = 1;
         self.requests = 0;
+        self.last_error = None;
         self.handshake()
     }
 
@@ -257,9 +288,19 @@ impl Worker {
     /// конфига в Python-воркере → 43 537 «error» в БД за один прогон). Таймаут
     /// по-прежнему отдаёт ошибку файла без повтора (повтор удвоил бы ожидание).
     fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.request(method, params, true)
+    }
+
+    /// Публичный запрос с управлением повтором (§5.4).
+    ///
+    /// `retry_dead = true` — падение канала (процесс упал/закрыт) поднимает
+    /// воркер и повторяет запрос **один** раз (извлечение: запрос идемпотентен).
+    /// `false` — для транскрибации: падение посреди 30-минутного задания не
+    /// повторяем внутри вызова (повтор — на уровне демона, `max_attempts`).
+    pub fn request(&mut self, method: &str, params: Value, retry_dead: bool) -> Result<Value> {
         match self.call_once(method, &params) {
             Ok(v) => Ok(v),
-            Err(CallFail::Dead(_)) => {
+            Err(CallFail::Dead(_)) if retry_dead => {
                 self.restart()?;
                 self.call_once(method, &params)
                     .map_err(CallFail::into_error)
@@ -295,8 +336,16 @@ impl Worker {
             ))));
         }
         self.requests += 1;
+        self.last_error = None;
         match self.rx.recv_timeout(self.cfg.request_timeout) {
-            Ok(resp) => protocol::parse_response(&resp, id).map_err(CallFail::Other),
+            Ok(resp) => match protocol::parse_response(&resp, id) {
+                Ok(v) => Ok(v),
+                Err(e) => {
+                    // Машинный `kind` нужен вызывающему (model_missing/cuda_oom/…).
+                    self.last_error = protocol::error_from_line(&resp);
+                    Err(CallFail::Other(e))
+                }
+            },
             Err(RecvTimeoutError::Timeout) => {
                 self.kill();
                 Err(CallFail::Timeout(CoreError::Other(format!(
@@ -385,6 +434,7 @@ fn start_process(cfg: &WorkerConfig) -> Result<(Child, ChildStdin, Receiver<Stri
         .arg(&cfg.root)
         .arg("--idle-timeout")
         .arg(cfg.idle_timeout.as_secs().to_string())
+        .args(&cfg.extra_args)
         .current_dir(&cfg.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped());

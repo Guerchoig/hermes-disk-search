@@ -1,0 +1,47 @@
+# Пример глоссария (P3, PLAN_PYTHON_SIDECAR_TRANSCRIBE.md §4.2).
+#
+# Лежит рядом с модулем, потому что `data/*` в .gitignore: реальный глоссарий —
+# рабочий файл (`data/glossary.yaml` или пользовательский путь), в репозиторий
+# он не попадает (там могут быть ФИО клиентов/продуктов).
+# Путь задаётся в `transcribe.glossary.path` (относительный — от корня проекта).
+#
+# Правила (детерминированные, без моделей):
+#   * variants — КАНДИДАТЫ, а не гарантия: замена только если рядом (±6 слов)
+#     есть слово из `context`, либо `allow_global: true`, либо `priority: high`;
+#     иначе текст не меняется, случай попадает в `<stem>.edits.json` с
+#     `needs_review: true`;
+#   * канон пишется в текст ровно как в файле (регистр/написание);
+#   * case_sensitive: true — вариант совпадает с учётом регистра;
+#   * forbid — фразы, которые нельзя использовать как замену вообще
+#     (слишком общие: «один эс» без контекста).
+terms:
+  - canonical: "1С"
+    variants: ["один эс", "индинес", "индес", "1 эс", "1c"]
+    type: product
+    context: ["бухгалтерия", "ERP", "документооборот", "учёт"]
+    priority: normal
+    case_sensitive: false
+    allow_global: false          # «один эс» без контекста НЕ заменяем
+    pronunciations: ["один эс"]
+
+  - canonical: "ERP"
+    variants: ["ерп", "ерпи", "rp система", "ерпи система"]
+    type: product
+    context: ["система", "внедрение", "проект"]
+    priority: normal
+    allow_global: false
+    pronunciations: ["ерп", "ерпи"]
+
+  - canonical: "МЧД"
+    variants: ["эм че дэ", "мчд"]
+    type: abbreviation
+    priority: high
+    allow_global: true           # однозначная аббревиатура
+
+  - canonical: "ЗУП"
+    variants: ["зуп", "з уп", "зарплата и управление персоналом"]
+    type: product
+    priority: high
+    allow_global: true
+
+forbid: []
