@@ -241,6 +241,58 @@ def smooth_islands(words, opts: MergeOptions = None) -> int:
     return fixed
 
 
+def smooth_turn_tails(words, opts: MergeOptions = None) -> int:
+    """Отдать следующему спикеру «хвост» реплики, продолжающий его фразу.
+
+    pyannote иногда относит последнее слово turn'а к предыдущему спикеру:
+    «…Угу. **То**» (SPEAKER_02) / «есть, мы, получается…» (SPEAKER_01). Внутри
+    одной серии такое слово не «островок» (слева та же серия), поэтому правило
+    [`smooth_islands`] его не видит.
+
+    Условия переноса (все обязательны):
+    * на границе смены спикера хвост предыдущей серии — слова без завершающей
+      пунктуации (`.!?…`), не длиннее `max_island_words` и короче `min_island_sec`;
+    * первое слово следующей серии начинается со **строчной** буквы (продолжение
+      фразы, а не новое предложение);
+    * в хвосте нет `overlap`.
+
+    Возвращает число перенесённых слов; у них `speaker_source = "smoothed"`.
+    """
+    opts = opts or MergeOptions()
+    if len(words) < 2:
+        return 0
+    moved = 0
+    for index in range(1, len(words)):
+        prev_speaker = words[index - 1].get("speaker")
+        next_speaker = words[index].get("speaker")
+        if not prev_speaker or not next_speaker or prev_speaker == next_speaker:
+            continue
+        first_text = (words[index].get("text") or "").lstrip()
+        if not first_text or not first_text[0].islower():
+            continue
+        tail = []
+        cursor = index - 1
+        while cursor >= 0 and words[cursor].get("speaker") == prev_speaker:
+            text = (words[cursor].get("text") or "").strip()
+            if _ends_sentence(text) or words[cursor].get("overlap"):
+                break
+            tail.insert(0, words[cursor])
+            if len(tail) > opts.max_island_words:
+                break
+            if _run_duration(tail) >= opts.min_island_sec:
+                break
+            cursor -= 1
+        if not tail or len(tail) > opts.max_island_words:
+            continue
+        if _run_duration(tail) >= opts.min_island_sec:
+            continue
+        for word in tail:
+            word["speaker"] = next_speaker
+            word["speaker_source"] = "smoothed"
+        moved += len(tail)
+    return moved
+
+
 def join_words(words: Sequence[dict]) -> str:
     """Собрать текст блока из слов, не ломая пунктуацию (`слово ,` → `слово,`)."""
     text = " ".join((w.get("text") or "").strip() for w in words if (w.get("text") or "").strip())
@@ -349,8 +401,10 @@ def merge_transcript(words, exclusive_turns, regular_turns=None, opts: MergeOpti
     """Полный merge: спикеры по словам + склейка блоков. Возвращает `(blocks, stats)`."""
     opts = opts or MergeOptions()
     words, stats = assign_speakers(words, exclusive_turns, regular_turns, opts)
-    # Правило 6: короткие «островки» чужого спикера внутри фразы — к соседям.
+    # Правило 6: короткие «островки» чужого спикера внутри фразы — к соседям,
+    # затем «хвосты» реплик, продолжающие фразу следующего спикера («То» / «есть»).
     stats["smoothed_words"] = smooth_islands(words, opts)
+    stats["smoothed_tail_words"] = smooth_turn_tails(words, opts)
     blocks = build_blocks(words, opts)
     stats["blocks"] = len(blocks)
     stats["speakers"] = sorted(

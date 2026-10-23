@@ -265,5 +265,58 @@ class MonologueTest(unittest.TestCase):
         self.assertEqual([b["speaker"] for b in blocks], ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"])
 
 
+class SmoothTurnTailsTest(unittest.TestCase):
+    """Правило 7: «хвост» реплики, продолжающий фразу следующего спикера."""
+
+    def _sentence(self):
+        # «Угу.» (02) + «То» (02) + «есть, мы…» (01, со строчной) — как в записи 24.09.
+        return [
+            {**word("Угу.", 1.9, 2.0), "speaker": "SPEAKER_02"},
+            {**word("То", 2.05, 2.15), "speaker": "SPEAKER_02"},
+            {**word("есть,", 2.2, 2.4), "speaker": "SPEAKER_01"},
+            {**word("трогаем?", 2.5, 3.0), "speaker": "SPEAKER_01"},
+        ]
+
+    def test_lowercase_continuation_moves_tail(self):
+        words = self._sentence()
+        self.assertEqual(merge.smooth_turn_tails(words), 1)
+        self.assertEqual([w["speaker"] for w in words],
+                         ["SPEAKER_02", "SPEAKER_01", "SPEAKER_01", "SPEAKER_01"])
+        self.assertEqual(words[1]["speaker_source"], "smoothed")
+        blocks = merge.build_blocks(words)
+        self.assertEqual([b["text"] for b in blocks],
+                         ["Угу.", "То есть, трогаем?"])
+
+    def test_capitalized_next_word_is_not_continuation(self):
+        words = self._sentence()
+        words[2]["text"] = "Есть,"
+        self.assertEqual(merge.smooth_turn_tails(words), 0)
+        self.assertEqual(words[1]["speaker"], "SPEAKER_02")
+
+    def test_finished_sentence_stays(self):
+        # «Да.» — завершённая фраза, хвостом не считается.
+        words = [
+            {**word("Да.", 1.0, 1.4), "speaker": "SPEAKER_00"},
+            {**word("продолжим", 1.5, 2.0), "speaker": "SPEAKER_01"},
+        ]
+        self.assertEqual(merge.smooth_turn_tails(words), 0)
+        self.assertEqual(words[0]["speaker"], "SPEAKER_00")
+
+    def test_long_tail_is_kept(self):
+        words = [
+            {**word("ну", 0.0, 0.2), "speaker": "SPEAKER_02"},
+            {**word("это", 0.2, 0.4), "speaker": "SPEAKER_02"},
+            {**word("самое", 0.4, 0.6), "speaker": "SPEAKER_02"},
+            {**word("продолжим", 0.7, 1.1), "speaker": "SPEAKER_01"},
+        ]
+        self.assertEqual(merge.smooth_turn_tails(words), 0)
+
+    def test_overlap_tail_is_kept(self):
+        words = self._sentence()
+        words[1]["overlap"] = True
+        self.assertEqual(merge.smooth_turn_tails(words), 0)
+        self.assertEqual(words[1]["speaker"], "SPEAKER_02")
+
+
 if __name__ == "__main__":
     unittest.main()
