@@ -78,3 +78,37 @@ fn crashed_worker_is_restarted_and_request_retried() {
     assert!(!w.is_alive());
     let _ = std::fs::remove_file(&marker);
 }
+
+/// Регрессия 23.10.2026: воркер, который падает сразу при старте, не должен
+/// уводить клиент в бесконечную рекурсию `restart → handshake → restart`.
+///
+/// Так выглядит распакованный архив без собранного профиля расшифровки:
+/// интерпретатор (`sidecar/python`) на месте, но `worker.py` падает на импорте
+/// torch. До фикса `hds transcribe-check` печатал «thread 'main' has overflowed
+/// its stack» и завершался с `0xC00000FD` вместо внятной ошибки.
+#[test]
+fn worker_that_dies_on_start_returns_error_instead_of_recursing() {
+    let root = repo_root();
+    let py = match discover_python(&root) {
+        Some(p) => p,
+        None => {
+            println!("пропуск: нет интерпретатора Python (sidecar/python или .venv)");
+            return;
+        }
+    };
+    let tests_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut cfg = WorkerConfig::new(&py, &tests_dir);
+    cfg.script = tests_dir.join("mock_worker_dead.py");
+    cfg.request_timeout = Duration::from_secs(20);
+
+    let started = std::time::Instant::now();
+    match Worker::spawn(cfg) {
+        Ok(_) => panic!("воркер, падающий на старте, не должен считаться запущенным"),
+        Err(err) => assert!(!err.message().is_empty(), "ошибка без текста"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(15),
+        "запуск не должен «крутиться»: {:?}",
+        started.elapsed()
+    );
+}

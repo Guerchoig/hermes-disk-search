@@ -244,13 +244,27 @@ impl Worker {
     }
 
     fn handshake(&mut self) -> Result<()> {
-        let v = self.call("hello", json!({"protocol": PROTOCOL_VERSION}))?;
+        self.handshake_once().map_err(CallFail::into_error)
+    }
+
+    /// Один `hello` **без** перезапуска.
+    ///
+    /// Зачем: рукопожатие вызывается из [`Worker::restart`], а `restart` — из
+    /// повтора запроса. Раньше `handshake` шёл через `call(..., retry_dead=true)`:
+    /// если процесс не поднимается вовсе (нет зависимостей в интерпретаторе,
+    /// битый venv — ровно так выглядит поставка **без** собранного профиля
+    /// расшифровки), `restart` → `handshake` → `restart` → … уходили в
+    /// бесконечную рекурсию и падали `stack overflow` (23.10.2026,
+    /// `hds transcribe-check` на распакованном архиве). Теперь неудачный
+    /// handshake — обычная ошибка запуска.
+    fn handshake_once(&mut self) -> std::result::Result<(), CallFail> {
+        let v = self.call_once("hello", &json!({ "protocol": PROTOCOL_VERSION }))?;
         let caps = protocol::capabilities_from(&v);
         if caps.protocol != PROTOCOL_VERSION {
-            return Err(CoreError::Other(format!(
+            return Err(CallFail::Other(CoreError::Other(format!(
                 "воркер: протокол {} (ждали {})",
                 caps.protocol, PROTOCOL_VERSION
-            )));
+            ))));
         }
         self.caps = caps;
         Ok(())
