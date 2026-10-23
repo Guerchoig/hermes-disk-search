@@ -75,7 +75,7 @@ pub fn resolve_profile(raw: &str, root: &Path) -> String {
 /// Настройки транскрибации, собранные из конфига.
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// `transcribe.engine`: `python` | `legacy` (по умолчанию `legacy`).
+    /// `transcribe.engine`: `python` | `legacy` (по умолчанию **python**, P6).
     pub engine: String,
     /// `transcribe.profile`: `cuda|cpu|dml` (`auto` → `cuda`).
     pub profile: String,
@@ -546,7 +546,9 @@ impl Settings {
             .unwrap_or_else(|| "ru".to_string());
 
         Settings {
-            engine: text(cfg, "transcribe.engine", "legacy").to_lowercase(),
+            // P6: python-путь — боевой по умолчанию; `legacy` — явный откат
+            // старой цепочки (llm_host) на переходный релиз (§12).
+            engine: text(cfg, "transcribe.engine", "python").to_lowercase(),
             profile,
             request_timeout_sec: integer(cfg, "transcribe.request_timeout_sec", 25_200).max(60)
                 as u64,
@@ -667,6 +669,14 @@ mod tests {
         assert_eq!(s.align.quality.min_aligned_ratio, 0.80);
         assert_eq!(s.align.quality.max_unreliable_ratio, 0.02);
         assert!(s.notices.is_empty(), "дефолты не должны давать notice");
+    }
+
+    #[test]
+    fn engine_defaults_to_python_and_legacy_is_explicit() {
+        let s = Settings::from_config(&Config::Null);
+        assert!(s.is_python(), "P6: python engine is the default");
+        let s = Settings::from_config(&cfg("transcribe:\n  engine: legacy\n"));
+        assert!(!s.is_python(), "legacy must stay an explicit rollback");
     }
 
     #[test]

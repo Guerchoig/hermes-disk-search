@@ -64,13 +64,13 @@
 |---|---|
 | Основная система | Windows 10 или Windows 11, 64-битная |
 | Дополнительная система | Mac на процессоре Apple Silicon (чипы серии M): программа для неё собирается, но на живой машине пока не проверялась |
-| Видеокарта | **не обязательна**. Без видеокарты NVIDIA программа работает, но медленнее. Рекомендуется NVIDIA с объёмом памяти 8 ГБ и более |
-| Свободное место | около 12 ГБ на программу и модели, плюс место под базу поиска (зависит от объёма дисков) |
-| Интернет | нужен один раз, при установке: загрузить модели и набор файлов движка |
+| Видеокарта | **не обязательна**. NVIDIA — основной путь (расшифровка на CUDA, рекомендуется 8 ГБ и более). AMD/Intel — профиль DirectML; на **встроенной** графике он медленнее процессора, поэтому там выбирается профиль CPU. Без видеокарты всё работает медленнее |
+| Свободное место | около **20–30 ГБ**: программа и модели поиска (~12 ГБ), Python-стек расшифровки (1,5–7,4 ГБ в зависимости от профиля), плюс место под базу поиска |
+| Интернет | нужен один раз, при установке: загрузить модели, набор файлов движка и Python-стек расшифровки |
 | Права администратора | не нужны. Для автозапуска установщик спросит согласие и создаст задания в планировщике заданий Windows |
 | Java 11 и новее | нужна **только** для файлов Microsoft Project (`.mpp`). Без неё остальные форматы читаются как обычно |
 | Распознавание текста на картинках | по желанию: ставится распознаватель Tesseract |
-| Расшифровка видео/аудио | по желанию: догружаются модель распознавания речи и модель разделения по говорящим |
+| Расшифровка видео/аудио | по желанию: ставятся Python-стек (GigaAM-v3 + pyannote, 1,5–7,4 ГБ) и модели (~3–4 ГБ); профиль выбирается по видеокарте |
 
 ## 3. Установка на Windows: по шагам, от скачивания до первого поиска
 
@@ -124,7 +124,10 @@ Get-Content .\hds-0.14.0-windows-x64.zip.sha256.txt           # ожидаемы
 | Распознаватель текста Tesseract | текст на картинках и сканах | `-SkipOcr` |
 | Набор файлов движка (около 90–200 МБ) | ИИ-модели и распознавание речи | `-SkipEngine` |
 | Модели (около 9 ГБ) | поиск по содержимому и ответы по файлам | `-SkipModels` |
-| Модель распознавания речи, модели поиска по картинкам, модель разделения по говорящим | расшифровка видео/аудио, поиск картинок по содержанию, метки говорящих | `-SkipWhisper`, `-SkipClip`, `-SkipDiarization` |
+| **Python-стек расшифровки** (GigaAM-v3 + pyannote, 1,5–7,4 ГБ) | распознавание речи и разделение по говорящим; профиль выбирается по видеокарте (`-TranscribeProfile cuda\|cpu\|dml`) | `-SkipTranscribeStack` |
+| **Модели расшифровки** (GigaAM ~1 ГБ, wav2vec2 ~1,2 ГБ, pyannote ~1,2 ГБ) | загружаются в машинную папку моделей; для gated-моделей нужен токен Hugging Face (`-HfToken` или переменная `HF_TOKEN`) | `-SkipTranscribeModels` |
+| Модели поиска по картинкам | поиск картинок по содержанию | `-SkipClip` |
+| Старые модели распознавания/диаризации (whisper GGML, Nemotron-3, Sortformer) | **только для отката** `transcribe.engine: legacy` | `-SkipWhisper`, `-SkipDiarization` |
 | Порядок «папка → расшифровка видео/аудио» | текстовая расшифровка видео/аудио; папки создаются, если их ещё нет | `-SkipTranscribe` |
 | Задания автозапуска и задача для страницы управления | служба слежения за файлами, служба моделей и подключение ассистентов поднимаются сами | `-NoAutostart` |
 | Подключение Cline и Hermes, ярлык «Hermes Disk Search», файл настроек | готовность к работе сразу после установки | `-SkipIntegrations` |
@@ -525,23 +528,50 @@ hds index --rechunk                    # заново нарезать текс�
 
 ### Настройка
 
-В файле настроек `config.yaml` есть раздел `auto_transcribe`:
+Расшифровку выполняет отдельный Python-стек **GigaAM-v3** (распознавание речи) +
+**pyannote community-1** (разделение по говорящим). Он ставится установщиком и
+работает в своём окружении (`sidecar\venv-transcribe`), чтобы не мешать чтению
+документов и поиску.
+
+В файле настроек `config.yaml`:
 
 ```yaml
 auto_transcribe:
   enabled: true              # включить обработку
   inbox_dir: 'D:\media_in'   # сюда кладём записи
   out_dir:   'D:\media_out'  # здесь появляются расшифровки
-  diarization_backend: nemotron3   # ЯВНЫЙ backend уходит в запрос и сильнее секции diarization
-                                   # ниже; нет ключа ⇒ backend выбирает служба (diarization.backend)
+  source_disposal: delete    # delete | keep | move (что делать с исходником)
 
-# Разделение по говорящим (новый движок — 8 говорящих вместо 4)
-diarization:
-  backend: nemotron3         # nemotron3 | sortformer (прежний) | off
-  nemotron3:
-    device: auto             # auto | cpu | directml (на Mac — coreml)
-    chunk_min: 10            # размер блока обработки, минут (память ~25 МБ/мин)
+transcribe:
+  engine: python             # python — новый стек (по умолчанию); legacy — откат
+  profile: auto              # auto | cuda | cpu | dml (auto: NVIDIA→cuda, iGPU AMD/Intel→cpu)
+  models_dir: ''             # '' → HDS_MODELS_DIR / машинная папка установщика
+  asr:
+    variant: e2e_rnnt        # основной вариант GigaAM-v3 (ru, пунктуация)
+    backend: auto            # auto | torch | onnx (для профиля dml — onnx)
+  align:
+    mode: native             # native | whisperx | hybrid (whisperx — только если установлен)
+  diarization:
+    enabled: true
+    max_speakers: 20         # предел; число говорящих определяется автоматически
+  glossary:
+    path: ''                 # '' → без замен; пример формата — ниже
+  llm:
+    enabled: false           # LLM-правка текста выключена по умолчанию
 ```
+
+* **Профиль** выбирает установщик: NVIDIA → `cuda` (torch + CUDA), нет видеокарты
+  или встроенная AMD/Intel → `cpu` (ONNX CPU), дискретная AMD/Intel → `dml`
+  (ONNX + DirectML). **Профиль `dml` на дискретной AMD/Intel пока экспериментальный**:
+  на встроенной графике он измеримо медленнее CPU, на дискретной карте живьём не
+  проверялся. Меняется ключом `transcribe.profile` (или `-TranscribeProfile` при
+  установке) с пересборкой окружения.
+* **Модели** лежат в машинной папке (`%ProgramData%\hermes-disk-search\models` на
+  сервере, `%APPDATA%\OpenResearchTools\models` на рабочей машине); HF-кэш —
+  `<models_dir>\hf-home`. Обновлять модели вручную не нужно, ревизии закреплены.
+* **Токен Hugging Face** нужен только на **первую** загрузку gated-моделей
+  (`pyannote/community-1`, `segmentation-3.0`): передайте `-HfToken` установщику
+  или переменную `HF_TOKEN`. В работе токен не нужен — стек читает локальный кэш.
 
 Папки исключаются из обхода поиска автоматически: и сами записи, и полученные расшифровки в
 базу поиска не попадают.
@@ -550,8 +580,9 @@ diarization:
 
 1. служба видит в папке «входящие» **готовый** (дописанный) файл;
 2. запись **один раз** переводится во внутренний звуковой формат (16 кГц, моно): по нему идёт
-   распознавание речи (ведущая тишина перед речью отбрасывается — ИИ-модель на тишине «выдумывает»
-   фразы вроде «Thank you») и разделение по говорящим (до **8** человек, прежняя модель знала 4);
+   распознавание речи **GigaAM-v3** (с пунктуацией; тишина отбрасывается по VAD — модель на
+   тишине «выдумывает» фразы) и разделение по говорящим **pyannote community-1**
+   (до **20** меток, число говорящих определяется по записи);
 3. полученный текст сохраняется в папку «исходящие» как файл с расширением `.md`;
 4. исходная запись удаляется — **только если расшифровка видео/аудио прошла успешно**. Поведение задаётся
    ключом `source_disposal`: `delete` (удалять, по умолчанию), `keep` (оставлять), `move`
@@ -563,7 +594,8 @@ diarization:
 ### Вид расшифровки видео/аудио и имена говорящих
 
 Реплики размечены заголовками: `### SPEAKER_00 [00:00:01 - 00:00:11]` — то есть говорящий и
-время. Метки идут от `SPEAKER_00` до `SPEAKER_07` (новый движок различает до 8 говорящих). Реплика,
+время. Метки идут от `SPEAKER_00`; предел — `transcribe.diarization.max_speakers` (по умолчанию 20).
+Реплика,
 которую не удалось связать с говорящим, помечается как `### UNASSIGNED […]`.
 Рядом с расшифровкой видео/аудио в служебной папке лежат два файла: `.orig.md` — текст до подстановки имён
 и `.speakers.json` — таблица соответствия «метка → имя». Перед любой правкой расшифровки видео/аудио
@@ -601,35 +633,35 @@ diarization:
   паузу; запрос к ассистенту может вытеснить расшифровку видео/аудио, а наполнение базы — нет.
 * Если возможность включена, но ещё не запускалась ни одна запись, запуск честно предупредит об
   этом: пока не появится файл в папке «входящие», службе нечего делать.
-* Для разделения по говорящим нужна модель **Nemotron-3** (NVIDIA Sortformer v3, до 8 говорящих):
-  файл `nemotron3_diar_v3.onnx`, 400 506 656 байт, она **не входит** в архив программы.
-  Установщик (`setup.cmd`, серверный `install-server.cmd -Fetch`) скачивает её сам и проверяет
-  sha256; вручную — `powershell -File installers\fetch_nemotron3_model.ps1`. Модель лежит в
-  `%APPDATA%\OpenResearchTools\models\nemotron3\` (на сервере — в машинной папке моделей
-  `HDS_MODELS_DIR`, на Mac — в `~/Library/Application Support/OpenResearchTools/models/nemotron3/`).
-  Без неё задание не выполняется (`diarization.required: true`); догрузить — тем же сценарием.
-* Проверить готовность можно командой `hds check` (пункт «диаризация»: какой движок выбран, путь
-  модели, сошёлся ли sha256, устройство обработки, найден ли `ffmpeg`) и `hds whisper-check`
-  (показывает то же для распознавания речи). `hds transcribe-watch --dry-run` дополнительно
-  показывает, что именно запросит конвейер.
-* При разделении по говорящим через Nemotron-3 результат — всегда `.md` со спикерами, и внутренний
-  ответ движка возвращает `mode: "transcript"` (даже если запрошен `speech`).
-* Для разделения по говорящим нужен **ffmpeg** (он переводит запись в звуковой формат): установщик
-  ставит его машинно, вручную — `winget install --scope machine -e --id Gyan.FFmpeg` (Mac —
-  `brew install ffmpeg`).
-* Прежний движок (`4` говорящих, файл `.gguf`, около 449 МБ) остался запасным вариантом: поставьте
-  `diarization.backend: sortformer` и сценарий `installers\fetch_diarization_model.ps1`. Ключ
-  `diarization.backend` задаёт выбор службы, а **явный** `auto_transcribe.diarization_backend`
-  перекрывает его для записей (в шаблоне он указан как `nemotron3` — уберите строку или задайте
-  `sortformer`, если хотите прежний движок для конвейера). Без клиентского ключа служба выбирает
-  backend сама: `nemotron3` при годной модели, иначе `sortformer` с предупреждением.
-* Язык распознавания задаётся ключом `index.whisper_language`: `ru` — фиксировать русский (так
-  правильно для русских записей), пустая строка — определять автоматически.
-* Одна запись ограничена **6 часами**: звук на этом пути переводится в WAV (RIFF, 16 бит), более
-  длинные файлы нужно разделить на части — RF64 пока не поддерживается. Предел проверяется сразу
-  после перевода файла в звук, до распознавания: задание получает понятную ошибку, а не час работы.
-* **macOS:** разделение по говорящим работает через CoreML с запасным вариантом CPU и **на живой
-  машине не проверялось** (как и остальная macOS-сборка — она best-effort).
+* Модели расшифровки (GigaAM, wav2vec2, pyannote) **не входят** в архив: их заранее скачивает
+  установщик. Вручную: `powershell -File installers\fetch_transcribe_models.ps1 -ModelsDir <папка>`
+  (для первой загрузки gated-моделей — `-HfToken`). Для профилей `cpu`/`dml` дополнительно
+  экспортируется ONNX: `installers\export_gigaam_onnx.ps1 -ModelsDir <папка>`.
+* Проверить готовность: `hds transcribe-check` (старое имя `hds whisper-check` сохранилось) —
+  профиль и вендор видеокарты, движок (CUDA/ONNX), версии, наличие каждой модели и ONNX, токен,
+  `ffmpeg` и версия, предупреждения; плюс `hds check` (пункт «транскрибация», модели и путь
+  воркера). `hds transcribe-watch --dry-run` показывает, что именно запросит конвейер.
+* **Профиль `dml` (дискретная AMD/Intel) — экспериментальный**: на встроенной графике DirectML
+  медленнее CPU, на дискретной карте живьём не проверен. Для встроенной AMD/Intel установщик
+  выбирает `cpu`.
+* Нужен **ffmpeg** (переводит запись в звуковой формат): установщик ставит его машинно, вручную —
+  `winget install --scope machine -e --id Gyan.FFmpeg` (Mac — `brew install ffmpeg`).
+* Язык распознавания — `transcribe.asr.language` (`ru` по умолчанию; пустая строка — авто).
+  Старый ключ `index.whisper_language` продолжает читаться для режима `legacy`.
+* Одна запись ограничена **6 часами** (`transcribe.max_duration_hours`): на Python-пути жёсткого
+  ограничения WAV нет, но 6 часов звука — это ~1,4 ГБ памяти плюс модели; больше — только явным
+  ключом.
+* **Глоссарий и LLM-правки:** `transcribe.glossary.path` — файл терминов (пример формата —
+  `sidecar\hds_transcribe\glossary.example.yaml`); замены детерминированные, спорные случаи
+  помечаются для ручной проверки в `<имя>.edits.json`. LLM-правка (`transcribe.llm.enabled`)
+  **выключена** по умолчанию.
+* **Откат:** `transcribe.engine: legacy` возвращает прежнюю цепочку (whisper + Nemotron-3 через
+  `llm_host`) без миграции базы и файлов; старые модели должны быть установлены
+  (`installers\fetch_whisper_model.ps1`, `fetch_nemotron3_model.ps1`). В обычном пакете 0.22+
+  legacy-диаризатор Nemotron **не поставляется** (`DirectML.dll` не входит) — для полного
+  отката нужен переходный архив, собранный с `-LegacyDiarizer`.
+* **macOS:** Python-стек ставится best-effort, на живой машине не проверялся (как и остальная
+  macOS-сборка).
 
 ## 9. Подключение ИИ-ассистентов (Cline, Hermes Desktop)
 
@@ -892,13 +924,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 2. В распакованной папке запустите двойным щелчком файл **`update.cmd`**. Он сам снимет пометку
    «скачано из интернета», сам найдёт папку установки и её версию, остановит задания автозапуска
    и службу моделей, поставит новую версию, переключит указатель, **пересоздаст задания
-   автозапуска и ярлык на рабочем столе по новой версии**, **докачает модель разделения по
-   говорящим** (Nemotron-3, 400 МБ; уже скачанную пропустит) и запустит всё обратно.
+   автозапуска и ярлык на рабочем столе по новой версии**, **докачает Python-стек расшифровки**
+   (окружение при отсутствии + модели; уже скачанные пропустит) и запустит всё обратно.
    Пересоздание обязательно: задания и ярлык хранят полный путь к программе, а обновление
    подменяет только каталог версии — иначе после обновления запускались бы прежние файлы.
-   Докачка модели идемпотентна; если нужно обновиться без интернета — `update.cmd -NoModels`
-   (тогда запустите `powershell -File installers\fetch_nemotron3_model.ps1` позже: до этого
-   расшифровка записей падает, а `hds check` показывает ровно эту команду).
+   Докачка идемпотентна; если нужно обновиться без интернета — `update.cmd -NoModels`
+   (тогда запустите `installers\fetch_transcribe_models.ps1` позже: до этого задания расшифровки
+   падают, а `hds transcribe-check` показывает, чего не хватает).
 3. Проверьте состояние: папка установки → `app\current\bin\hds.exe check` (или ярлык проверки на
    странице управления). В выводе есть строка «раскладка»: у правильной установки там сказано,
    что программа запускается из `app\current\bin`.
@@ -992,7 +1024,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | `hds transcribe-watch` | служба расшифровки видео/аудио (в фоне); `--dry-run` — проверка без запуска |
 | `hds transcribe-once "D:\media_in\запись.m4a"` | расшифровать один файл прямо сейчас |
 | `hds transcribe-stop` | аккуратно остановить службу расшифровки видео/аудио |
-| `hds whisper-check [--file <запись>]` | проверить готовность распознавания речи |
+| `hds transcribe-check [--file <запись>] [--json]` | проверить готовность расшифровки: профиль, вендор GPU, движок, версии, модели, ONNX, токен, ffmpeg; `--file` — пробный прогон. Старое имя `hds whisper-check` работает как алиас |
 | `llm_host run` / `stop` / `status` / `devices` | служба моделей: запуск, остановка, состояние, список видеокарт |
 | `llm_host load <роль>` / `unload <роль>` | заранее поднять или выгрузить модель (роли: `chat`, `embedding`, `rerank`, `whisper`, `transcribe`) |
 
@@ -1011,10 +1043,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | Команда или сценарий | Что делает |
 |---|---|
 | `setup.cmd` | установка на Windows: ставит всё нужное и создаёт автозапуск |
-| `setup.ps1 [-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SkipOcr -SkipWhisper -SkipClip -SkipDiarization -SkipTranscribe -NonInteractive -SmokeTest]` | то же с аргументами команды: что не ставить и нужен ли короткий пробный прогон |
+| `setup.ps1 [-SkipModels -SkipEngine -NoAutostart -SkipIntegrations -SkipOcr -SkipWhisper -SkipClip -SkipDiarization -SkipTranscribe -SkipTranscribeStack -SkipTranscribeModels -TranscribeProfile auto\|cuda\|cpu\|dml -HfToken <токен> -NonInteractive -SmokeTest]` | то же с аргументами команды: что не ставить (в т.ч. Python-стек и его модели), какой профиль расшифровки и токен Hugging Face для первой загрузки gated-моделей |
 | `install_macos.command` | то же на Mac |
 | `update.cmd [-RollbackTo <версия>]` | обновление и возврат к прошлой версии на Windows |
-| `installers\update.ps1 -Root <папка> [-Profile server] [-From <архив>] [-Version <версия>] [-ListVersions] [-RollbackTo <версия>] [-WhatIf]` | обновление с явными аргументами команды: корень установки, архив, версия |
+| `installers\update.ps1 -Root <папка> [-Profile server] [-From <архив>] [-Version <версия>] [-TranscribeProfile auto\|cuda\|cpu\|dml] [-HfToken <токен>] [-NoModels] [-ListVersions] [-RollbackTo <версия>] [-WhatIf]` | обновление с явными аргументами команды: корень установки, архив, версия; догружает Python-стек и модели расшифровки (кроме `-NoModels`) |
 | `installers/update.command` | то же на Mac (нужен `pwsh`) |
 | `installers\install_app_version.ps1 -From <архив> -Version <версия> -Root <папка> -SetCurrent` | поставить конкретную версию рядом с другими (раскладка `app\<версия>`) |
 | `hds config init --path <файл настроек> [--print] [--merge-defaults] [--force]` | собрать (серверный профиль) или дополнить файл настроек из шаблона `server_config.example.yaml`; `--print` — только показать, `--merge-defaults` — дописать недостающие значения по умолчанию |
@@ -1023,14 +1055,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | `install_hermes.ps1`, `install_cline.ps1` | подключение ассистентов Hermes Desktop и Cline |
 | `installers/fetch_llm_models.ps1` | догрузить модели |
 | `installers/fetch_engine_runtime.ps1` | догрузить набор файлов движка; `-PatchEngine` и `-RollbackEnginePatch` — поставить или снять наши исправления движка |
-| `installers/fetch_whisper_model.ps1` | догрузить модель распознавания речи |
-| `installers/fetch_nemotron3_model.ps1` | догрузить модель разделения по говорящим (Nemotron-3, 400 МБ, sha256 проверяется) |
-| `installers/fetch_diarization_model.ps1` | прежняя модель разделения по говорящим (sortformer, 4 говорящих) |
-| `installers/fetch_diarization_model.ps1` | догрузить модель разделения по говорящим |
+| `installers/fetch_whisper_model.ps1` | догрузить модель распознавания речи — **только для отката** `transcribe.engine: legacy` |
+| `installers/fetch_nemotron3_model.ps1` | догрузить модель разделения по говорящим Nemotron-3 — **только для legacy** (400 МБ, sha256 проверяется) |
+| `installers/fetch_diarization_model.ps1` | прежняя модель разделения по говорящим (sortformer, 4 говорящих) — только для legacy |
 | `installers/fetch_clip_models.ps1` | догрузить модели поиска по картинкам |
 | `installers/configure_ocr.py` | настроить распознаватель текста (языковые наборы, пути) |
 | `installers/build_sidecar.ps1` | собрать служебную программу чтения документов |
-| `installers/build_rust_release.ps1` | собрать выпускной архив (для разработчика) |
+| `installers/build_transcribe_sidecar.ps1 -Profile cuda\|cpu\|dml [-SelfTest] [-Force]` | собрать окружение расшифровки (`sidecar\venv-transcribe[-dml]`); идемпотентно, `-Force` — пересобрать |
+| `installers/export_gigaam_onnx.ps1 -ModelsDir <папка> [-Verify] [-Force]` | экспорт GigaAM в ONNX для профилей `cpu`/`dml` (в `<папка>\gigaam-onnx\<вариант>`) |
+| `installers/fetch_transcribe_models.ps1 -ModelsDir <папка> [-HfToken <токен>] [-Offline]` | загрузить/проверить модели расшифровки (GigaAM-v3, wav2vec2-ru, community-1, segmentation-3.0), манифест с ревизиями и sha256 |
+| `installers/build_rust_release.ps1 [-TranscribeProfile cuda\|cpu\|dml] [-LegacyDiarizer]` | собрать выпускной архив (для разработчика); профиль кладёт ровно одно окружение расшифровки, `-LegacyDiarizer` — переходный архив со старым Nemotron/DirectML |
 
 Системные команды Windows и macOS (например `Get-FileHash`, `Expand-Archive`, `sc.exe`, `xattr`)
 в этом перечне не расписаны: смотрите их справку средствами самой системы. Здесь перечислено
@@ -1108,7 +1142,8 @@ hds check --json     # машинный вывод
 | Папка | Что внутри |
 |---|---|
 | `crates/hds-core` | настройки, база данных, обмен по сети, список пользователей и ключей доступа, диагностика |
-| `crates/hds-extract` | связь со служебной программой чтения документов |
+| `crates/hds-extract` | связь со служебными Python-программами (чтение документов, расшифровка) |
+| `crates/hds-transcribe` | типы и клиент Python-воркера расшифровки (`sidecar/hds_transcribe`) |
 | `crates/hds-index` | обход дисков, слежение за файлами, расшифровка видео/аудио, диагностика |
 | `crates/hds-llama` | работа с движком и служба моделей |
 | `crates/hds-clip` | поиск картинок по изображению |
@@ -1117,8 +1152,32 @@ hds check --json     # машинный вывод
 | `crates/hds-ui` | страница управления |
 | `crates/hds-cli` | командная строка `hds` |
 
-Служебная программа чтения документов на Python — папка `hds` (исходный текст) и `sidecar`
-(собранный вид).
+Служебные программы на Python — папка `hds` (исходный текст чтения документов) и `sidecar`
+(два воркера: `hds_extract` — документы, `hds_transcribe` — расшифровка; общий транспорт
+`hds_sidecar`).
+
+### Python-стек расшифровки (P5)
+
+* Окружения: `sidecar\venv-transcribe` (профили `cuda`/`cpu`) или
+  `sidecar\venv-transcribe-dml` (ONNX + `onnxruntime-directml`); создаются от портативного
+  CPython `sidecar\python`. Ровно **один** профиль на дерево — `onnxruntime` и
+  `onnxruntime-directml` не живут вместе.
+* Сборка/модели:
+  ```powershell
+  installers\build_transcribe_sidecar.ps1 -Profile cuda -SelfTest
+  installers\export_gigaam_onnx.ps1 -ModelsDir D:\models -Verify   # cpu/dml
+  installers\fetch_transcribe_models.ps1 -ModelsDir D:\models -HfToken <token>
+  ```
+* Модели: `<models>\gigaam`, `<models>\hf-home`, `<models>\gigaam-onnx\<вариант>`;
+  манифест с закреплёнными ревизиями и sha256 — `<models>\transcribe-models.json`.
+  Рантайм работает офлайн (`HF_HUB_OFFLINE=1`), токен нужен только на первую загрузку.
+* Диагностика: `hds transcribe-check` (профиль, вендор GPU, EP, версии, модели, ONNX, токен,
+  ffmpeg, RTF/VRAM последних заданий) и `hds check`.
+* Отчёты и замеры этапов — `tools/parity/out/py_transcribe/` (`P*_REPORT.md`, логи; каталог
+  не входит в репозиторий).
+* **DML (дискретная AMD/Intel) — экспериментальный профиль**: на встроенной AMD/Intel DirectML
+  медленнее CPU; живой приёмки на дискретной карте нет. Python-DML (`onnxruntime-directml`)
+  не связан со старым Rust-диаризатором Nemotron.
 
 ### Сборка и проверки
 
@@ -1139,9 +1198,11 @@ cargo test --workspace
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 -Version 0.1.0
 ```
 
-Ключ `-SkipBuild` использует уже собранные файлы. Состав архива, порядок выпуска и требования к
-нему описаны в `RELEASING.md`; сборка выпуска проверяется в непрерывной интеграции (файл
-`.github/workflows/release.yml`).
+Ключ `-SkipBuild` использует уже собранные файлы. `-TranscribeProfile cuda|cpu|dml` кладёт в
+архив **одно** окружение расшифровки (без ключа — только код, окружение соберёт установщик);
+`-LegacyDiarizer` собирает переходный архив со старым Nemotron и `DirectML.dll` (по умолчанию
+их в пакете нет). Состав архива, порядок выпуска и требования к нему описаны в `RELEASING.md`;
+сборка выпуска проверяется в непрерывной интеграции (файл `.github/workflows/release.yml`).
 
 ### Наши исправления движка
 
@@ -1156,9 +1217,10 @@ powershell -File installers\fetch_engine_runtime.ps1 -RollbackEnginePatch
 
 ### Что осталось на Python
 
-Только служебная программа чтения документов и разбора русских слов. Остальные компоненты были
-перенесены на язык Rust; журнал этого перехода и текущие состояния — `STATUS.md` и
-`MIGRATION_PLAN_RUST.md`.
+Чтение документов и разбор русских слов, плюс расшифровка/диаризация (GigaAM + pyannote) —
+сознательно в Python: это быстро меняющийся слой моделей, а Rust остаётся оркестратором,
+файлами и очередью. Остальные компоненты перенесены на Rust; журнал и состояния — `STATUS.md`,
+`MIGRATION_PLAN_RUST.md`, `PLAN_PYTHON_SIDECAR_TRANSCRIBE.md`.
 
 ### Заметки об окружении
 
