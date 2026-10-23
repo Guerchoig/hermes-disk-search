@@ -25,7 +25,25 @@
 > **не проверено** (машины нет, кросс-сборка с Windows невозможна), статус зафиксирован в README.
 > Отчёт: `tools/parity/out/diar_nemotron/report.md` (гитигнор), план — `PLAN_DIARIZATION_NEMOTRON.md`.
 >
-> **Релиз 0.20.6 выпущен (20.10.2026, тег `v0.20.6`, `RELEASE_NOTES_v0.20.6.md`):** PATCH по двум
+> **Релиз 0.22.0 выпущен (23.10.2026, тег `v0.22.0`, `RELEASE_NOTES_v0.22.0.md`, ветка
+> `python-sidecar-transcribe`):** MINOR — расшифровка переведена на **Python-sidecar**
+> (`sidecar/hds_transcribe`: GigaAM-v3 `e2e_rnnt` + Silero VAD + pyannote community-1),
+> `transcribe.engine: python` по умолчанию. Старая цепочка (`legacy`: `llm_host` + whisper +
+> Nemotron-3) сохранена на один минорный релиз — откат **одним ключом**, схема БД и артефакты
+> `.md/.orig.md/.speakers.json` не менялись (переиндексация не нужна). Профили: `cuda`
+> (torch cu128) — основной, `cpu` — fallback и правильный выбор для встроенной AMD/Intel,
+> `dml` — заморожен как экспериментальный. Venv профиля (1,5–7,4 ГБ) в архив **не входит**:
+> его собирает установщик (`build_transcribe_sidecar.ps1 -Profile …`), модели —
+> `fetch_transcribe_models.ps1` в машинный каталог, глоссарий/LLM-патчи — опционально
+> (`transcribe.llm.enabled: false`). Правки перед тегом: валидатор LLM-патчей
+> (`outside_window`, `word_order`; обоснование замены — только глоссарием, `allow_global` в
+> ответе модели гейт не открывает); CI-джоба `test-python` (169 тестов sidecar) блокирует
+> сборку, smoke распакованного архива проверяет оба воркера и `transcribe-check --json` →
+> `engine=python`; тесты `whisper-check` возвращены в набор (тест-конфиг явно задаёт
+> `transcribe.engine: legacy`). **Проверено:** `cargo fmt --check`,
+> `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` и Python-набор
+> sidecar — зелёные локально; `rust.yml` и `release.yml` — все блокирующие джобы success.
+>
 > дефектам, найденным при разборе «индексация на серверном стенде стоит»; схема БД, формат настроек и
 > поиск не менялись — переиндексация не требуется.
 > **(1) Наполнение базы на серверном стенде не работало (0.20.5).** Python-воркер извлечения
