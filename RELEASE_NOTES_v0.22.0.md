@@ -30,7 +30,9 @@
 * **Установщики**: `build_transcribe_sidecar.ps1 -Profile cuda|cpu|dml`,
   `export_gigaam_onnx.ps1`, `fetch_transcribe_models.ps1` (пины ревизий, sha256),
   идемпотентные `setup.ps1` / `install_server.ps1` / `update.ps1`;
-  `build_rust_release.ps1 -TranscribeProfile` кладёт **один** venv в пакет.
+  релизный архив **venv не содержит** — профиль (ровно один) собирается на
+  машине; `build_rust_release.ps1 -TranscribeProfile` нужен только для
+  локальной сборки пакета с уже готовым venv.
 * **Лицензии/атрибуция**: добавлен раздел про GigaAM/pyannote/wav2vec2/Silero/
   torch/ORT в `NOTICE.md`.
 
@@ -115,5 +117,7 @@ transcribe:
 * `export_gigaam_onnx.ps1` ставит **только** вариант `rnnt` (`e2e_rnnt`): GigaAM
   экспортирует `ctc` одним `<model>.onnx`, и этот формат установщиком пока не
   проверяется.
-* venv профиля входит в архив целиком (вариант A): обновление копирует 1,5–7,4 ГБ.
+* venv профиля (1,5–7,4 ГБ) **в архив не входит**: пакет компактный, но стек
+  расшифровки после установки/обновления собирается на машине (шаг 2 «Миграции»);
+  `update.ps1` делает это сам, если venv ещё нет.
 * macOS/Metal — без изменений (best-effort, без живой приёмки).
