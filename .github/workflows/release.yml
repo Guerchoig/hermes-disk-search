@@ -5,8 +5,11 @@ name: Release
 # must be produced, otherwise no release is published. macOS is best-effort (not
 # verified on real hardware yet - MIGRATION_PLAN_RUST.md section 10.0): the mac
 # jobs are non-blocking and their assets are attached only when they succeed.
-# Python core is gone; only the `sidecar/` worker is packaged (built by the
-# build-sidecar-* jobs from hds/*.py + sidecar/).
+# Python core is gone; the `sidecar/` tree ships TWO workers (extraction and
+# transcription) plus the shared `hds_sidecar` package, built by the
+# build-sidecar-* jobs. The transcription profile venv (1.5-7.4 GB, GPU-specific)
+# is NOT packaged: setup/install_server/update build it on the target machine
+# (`build_transcribe_sidecar.ps1`), the models are fetched separately.
 #
 # Trigger: version tag push (`git push origin vX.Y.Z`) or manual workflow_dispatch
 # with a version input.
@@ -70,6 +73,25 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+  # ---------- Python sidecar: unittest suite (P1-P6, blocking) ----------------
+  test-python:
+    needs: [check-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check numpy PyYAML
+
+      - name: Python sidecar tests (unittest)
+        env:
+          PYTHONPATH: sidecar
+        run: python -m unittest discover sidecar/tests -v
+
   # ---------- Windows sidecar: portable CPython + worker + extractor modules ----------
   build-sidecar-windows:
     needs: [test-rust]
@@ -111,7 +133,7 @@ jobs:
 
   # ---------- Rust: Windows binaries + package (zip + sha256) ----------
   build-windows:
-    needs: [test-rust, build-sidecar-windows]
+    needs: [test-rust, test-python, build-sidecar-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -145,6 +167,27 @@ jobs:
             throw "embedded client package is missing in the server archive"
           }
           Write-Host ("version.txt: " + (Get-Content dist\check\version.txt -Raw).Trim())
+
+      - name: "Smoke: Python sidecar tree + transcribe-check"
+        shell: pwsh
+        run: |
+          # P1-P6: the archive must carry BOTH workers (extract + transcribe) and the
+          # shared transport package; the transcription venv is NOT shipped (the
+          # installer builds it), but its sources and lock files must be present.
+          $root = "dist\check"
+          foreach ($f in @(
+            "sidecar\hds_sidecar\__init__.py",
+            "sidecar\hds_transcribe\worker.py",
+            "sidecar\hds_transcribe\requirements.lock",
+            "sidecar\python")) {
+            if (-not (Test-Path (Join-Path $root $f))) { throw "missing in the archive: $f" }
+          }
+          $raw = & "$root\bin\hds.exe" transcribe-check --json
+          if ($LASTEXITCODE -ne 0) { throw "transcribe-check exited with $LASTEXITCODE" }
+          $info = ($raw | Out-String) | ConvertFrom-Json
+          if ($info.engine -ne "python") { throw "unexpected engine: $($info.engine)" }
+          if (-not $info.python) { throw "transcribe-check found no worker interpreter" }
+          Write-Host ("[ok] transcribe-check: engine=" + $info.engine + ", python=" + $info.python)
 
       - uses: actions/upload-artifact@v5
         with:

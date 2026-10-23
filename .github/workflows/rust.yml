@@ -11,7 +11,7 @@ on:
     # Ветки, с которых собирается продукт и режется релиз (RELEASING.md §4):
     # `server-multiuser` — текущая боевая ветка серверной подсистемы; `main` и
     # `w2-llm-host` — история (main = Python-эпоха, w2-llm-host = ядро на Rust).
-    branches: [main, w2-llm-host, server-multiuser]
+    branches: [main, w2-llm-host, server-multiuser, python-sidecar-transcribe]
   pull_request:
   workflow_dispatch:
 
@@ -47,6 +47,27 @@ jobs:
       - name: Rust tests
         run: cargo test --workspace
 
+  # ---------- Python sidecar: unittest suite (P1-P6, blocking) ----------------
+  # `sidecar/tests` covers the extractor/transcription workers without models:
+  # glossary, LLM patch validator (windows/word order/allow_global), merge,
+  # quality, protocol, degradation. Model/HF-dependent tests must not land here.
+  test-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install test dependencies
+        run: python -m pip install --disable-pip-version-check numpy PyYAML
+
+      - name: Python sidecar tests (unittest)
+        env:
+          PYTHONPATH: sidecar
+        run: python -m unittest discover sidecar/tests -v
+
   test-rust-macos:
     runs-on: macos-latest
     continue-on-error: true
@@ -61,7 +82,7 @@ jobs:
         run: cargo test --workspace
 
   build-windows:
-    needs: [test-rust]
+    needs: [test-rust, test-python]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
