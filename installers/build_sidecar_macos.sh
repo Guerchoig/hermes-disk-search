@@ -40,7 +40,21 @@ cp "$ROOT/sidecar/hds_extract/worker.py" "$OUT/hds_extract/"
 cp "$ROOT/sidecar/hds_extract/requirements.lock" "$OUT/hds_extract/"
 cp "$ROOT/sidecar/README.md" "$OUT/"
 
-# --- 3. self-contained copy of the extractor/lemmatizer modules ---------------
+# --- 3. shared packages: hds_sidecar (both workers) + hds_transcribe ----------
+# `hds_extract.worker` imports `hds_sidecar`; the transcription worker runs from
+# the profile venv, and installers/build_transcribe_sidecar.ps1 takes the package
+# AND the lock files from THIS tree (an installed archive has no repo sources).
+for pkg in hds_sidecar hds_transcribe; do
+    if [ ! -d "$ROOT/sidecar/$pkg" ]; then
+        echo "missing package: sidecar/$pkg" >&2
+        exit 1
+    fi
+    mkdir -p "$OUT/$pkg"
+    cp -R "$ROOT/sidecar/$pkg/." "$OUT/$pkg/"
+    find "$OUT/$pkg" -type d -name __pycache__ -prune -exec rm -rf {} + 2>/dev/null || true
+done
+
+# --- 4. self-contained copy of the extractor/lemmatizer modules ---------------
 for m in __init__.py config.py extractors.py extract_av.py extract_static.py \
          lemmatizer.py whisper_cpp.py; do
     if [ ! -f "$ROOT/hds/$m" ]; then
@@ -50,7 +64,7 @@ for m in __init__.py config.py extractors.py extract_av.py extract_static.py \
     cp "$ROOT/hds/$m" "$OUT/hds/"
 done
 
-# --- 4. worker dependencies into the portable interpreter ---------------------
+# --- 5. worker dependencies into the portable interpreter ---------------------
 if [ ! -f "$PYDIR/.hds-deps" ]; then
     echo "[..] uv pip install worker dependencies..."
     uv pip install --python "$PY" --break-system-packages \
@@ -58,7 +72,7 @@ if [ ! -f "$PYDIR/.hds-deps" ]; then
     touch "$PYDIR/.hds-deps"
 fi
 
-# --- 5. self-test: the copied package must import without the project core ----
+# --- 6. self-test: the copied package must import without the project core ----
 echo "[..] self-test: importing the copied hds package from $OUT"
-"$PY" -c "import sys; sys.path.insert(0, r'$OUT'); import hds.config, hds.extractors, hds.extract_av, hds.extract_static, hds.lemmatizer, hds.whisper_cpp, jpype, mpxj; print('sidecar-ok')"
+"$PY" -c "import os, sys; sys.path.insert(0, r'$OUT'); import hds.config, hds.extractors, hds.extract_av, hds.extract_static, hds.lemmatizer, hds.whisper_cpp, jpype, mpxj; import hds_sidecar, hds_extract.worker; assert os.path.isfile(os.path.join(r'$OUT', 'hds_transcribe', 'worker.py')); assert os.path.isfile(os.path.join(r'$OUT', 'hds_transcribe', 'requirements.lock')); print('sidecar-ok')"
 echo "[ok] sidecar assembled: $OUT"

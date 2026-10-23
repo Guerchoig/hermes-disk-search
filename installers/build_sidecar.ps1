@@ -2,8 +2,12 @@
 #
 # Produces a `sidecar\` directory that works WITHOUT the project's Python core:
 #   sidecar\
-#     hds_extract\worker.py            - the stdio JSON-RPC worker
+#     hds_extract\worker.py            - the stdio JSON-RPC worker (extraction)
 #     hds_extract\requirements.lock    - worker dependencies
+#     hds_sidecar\                     - shared transport/config/progress package (P1)
+#     hds_transcribe\                  - transcription worker + requirements*.lock (P1-P6);
+#                                        the profile venv is built from THIS copy by
+#                                        installers\build_transcribe_sidecar.ps1
 #     python\                          - portable CPython (python-build-standalone) + deps
 #     hds\                             - extractor/lemmatizer modules the worker needs
 #     README.md
@@ -60,7 +64,22 @@ Copy-Item (Join-Path $root "sidecar\hds_extract\worker.py") $pkgDir -Force
 Copy-Item (Join-Path $root "sidecar\hds_extract\requirements.lock") $pkgDir -Force
 Copy-Item (Join-Path $root "sidecar\README.md") $OutDir -Force
 
-# --- 3. self-contained copy of the extractor/lemmatizer modules -------------
+# --- 3. shared packages: hds_sidecar (both workers) + hds_transcribe --------
+# `hds_extract.worker` imports `hds_sidecar`; the transcription worker runs from
+# the profile venv, and `installers\build_transcribe_sidecar.ps1` takes the
+# package AND the lock files from this tree (an installed archive has no
+# repository sources, so without the copy the venv cannot be built).
+foreach ($pkg in @("hds_sidecar", "hds_transcribe")) {
+    $src = Join-Path $root "sidecar\$pkg"
+    if (-not (Test-Path $src)) { throw "missing package: $src" }
+    $dst = Join-Path $OutDir $pkg
+    New-Item -ItemType Directory -Force -Path $dst | Out-Null
+    Copy-Item (Join-Path $src "*") $dst -Recurse -Force
+    Get-ChildItem -Path $dst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# --- 4. self-contained copy of the extractor/lemmatizer modules -------------
 $mods = @("__init__.py", "config.py", "extractors.py", "extract_av.py",
     "extract_static.py", "lemmatizer.py", "whisper_cpp.py")
 foreach ($m in $mods) {
@@ -69,7 +88,7 @@ foreach ($m in $mods) {
     Copy-Item $src $hdsDir -Force
 }
 
-# --- 4. worker dependencies into the portable interpreter -------------------
+# --- 5. worker dependencies into the portable interpreter -------------------
 $depsMarker = Join-Path $pyDir ".hds-deps"
 if ($Force -or -not (Test-Path $depsMarker)) {
     Write-Host "[..] uv pip install worker dependencies..."
@@ -80,11 +99,15 @@ if ($Force -or -not (Test-Path $depsMarker)) {
     New-Item -ItemType File -Force -Path $depsMarker | Out-Null
 }
 
-# --- 5. self-test: the copied package must import without the project core ---
+# --- 6. self-test: the copied package must import without the project core ---
 if ($SelfTest) {
-    $code = "import sys; sys.path.insert(0, r'$OutDir'); " +
+    $code = "import os, sys; sys.path.insert(0, r'$OutDir'); " +
         "import hds.config, hds.extractors, hds.extract_av, hds.extract_static, " +
-        "hds.lemmatizer, hds.whisper_cpp, jpype, mpxj; print('sidecar-ok')"
+        "hds.lemmatizer, hds.whisper_cpp, jpype, mpxj; " +
+        "import hds_sidecar, hds_extract.worker; " +
+        "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_transcribe', 'worker.py')); " +
+        "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_transcribe', 'requirements.lock')); " +
+        "print('sidecar-ok')"
     Write-Host "[..] self-test: importing the copied hds package from $OutDir"
     & $py.FullName -c $code
     if ($LASTEXITCODE -ne 0) { throw "sidecar self-test failed" }

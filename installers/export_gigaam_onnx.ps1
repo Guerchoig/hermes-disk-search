@@ -16,6 +16,10 @@
 # re-exported unless -Force. -Verify loads every graph in an ONNX Runtime CPU
 # session (no GPU needed).
 #
+# Only the rnnt variant is staged (decision 23.10.2026): GigaAM exports ctc as a
+# SINGLE <model>.onnx (no _encoder/_decoder/_joint), so the file checks below do
+# not describe it. A ctc request fails fast with an explanation.
+#
 # Examples:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File installers\export_gigaam_onnx.ps1 -ModelsDir D:\models -Verify
 #   ... -Variant e2e_rnnt -Dtype fp32 -Force
@@ -34,6 +38,13 @@ param(
 )
 $ErrorActionPreference = "Stop"
 . (Join-Path $PSScriptRoot "sidecar_common.ps1")
+
+# rnnt only (decision 23.10.2026): `gigaam.to_onnx` writes ctc as one <model>.onnx,
+# which this script does not verify/stamp.
+if ($Variant -notmatch "rnnt") {
+    throw ("export_gigaam_onnx: only the rnnt variant is supported (got '$Variant'). " +
+        "GigaAM exports ctc as a single <model>.onnx and is not staged by this script.")
+}
 
 $root = Get-SidecarRoot -ScriptRoot $PSScriptRoot
 if (-not $ModelsDir) {

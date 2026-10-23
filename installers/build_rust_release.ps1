@@ -119,6 +119,18 @@ if ($WithSidecar) {
     Copy-Item (Join-Path $SidecarDir "*") $sidecarDst -Recurse -Force
     Get-ChildItem -Path $sidecarDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    # Review decision 23.10.2026: never ship the developer's transcription venv.
+    # With -TranscribeProfile exactly one venv is staged below; without it the
+    # package must carry no (multi-GB, possibly wrong-profile) venv at all.
+    Get-ChildItem -Path $sidecarDst -Directory -Filter "venv-transcribe*" -ErrorAction SilentlyContinue |
+        Remove-Item -Recurse -Force
+    # `python` is the portable CPython of the EXTRACT worker (hds_extract). It is
+    # rebuilt (build_transcribe_sidecar -> build_sidecar) when a profile is
+    # staged; without a profile it is required, so it is kept.
+    if ($TranscribeProfile -ne "none") {
+        $portablePy = Join-Path $sidecarDst "python"
+        if (Test-Path $portablePy) { Remove-Item -Recurse -Force $portablePy }
+    }
 }
 
 # P5.5: exactly ONE transcription profile venv in the package. The torch stack
