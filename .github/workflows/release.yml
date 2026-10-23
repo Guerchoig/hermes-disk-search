@@ -182,10 +182,19 @@ jobs:
             "sidecar\python")) {
             if (-not (Test-Path (Join-Path $root $f))) { throw "missing in the archive: $f" }
           }
+          # The unpacked archive has no config.yaml (the installer generates it),
+          # and `transcribe-check` reads the config before anything else: point it
+          # at a minimal one so the smoke checks the sidecar tree, not a missing file.
+          $env:HDS_CONFIG = Join-Path $root "smoke-config.yaml"
+          Set-Content -Path $env:HDS_CONFIG -Encoding ascii -Value @(
+            "transcribe:",
+            "  engine: python"
+          )
           $raw = & "$root\bin\hds.exe" transcribe-check --json
           if ($LASTEXITCODE -ne 0) { throw "transcribe-check exited with $LASTEXITCODE" }
           $info = ($raw | Out-String) | ConvertFrom-Json
           if ($info.engine -ne "python") { throw "unexpected engine: $($info.engine)" }
+          if (-not $info.ok) { throw "transcribe-check reports not ok" }
           if (-not $info.python) { throw "transcribe-check found no worker interpreter" }
           Write-Host ("[ok] transcribe-check: engine=" + $info.engine + ", python=" + $info.python)
 
