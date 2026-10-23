@@ -27,6 +27,10 @@
 * **Диагностика**: `hds transcribe-check` (алиас `whisper-check`) и `hds check`
   показывают профиль, вендора GPU, EP, версии, наличие моделей/ONNX, токен,
   ffmpeg, а также RTF/VRAM последних заданий.
+* **Проверка без собранного профиля**: если venv расшифровки ещё не собран
+  (свежая установка или обновление до 0.22.0), `transcribe-check` сообщает об
+  этом обычной ошибкой запуска воркера: рукопожатие больше не уходит в
+  бесконечный перезапуск (stack overflow движка клиента исправлен до тега).
 * **Установщики**: `build_transcribe_sidecar.ps1 -Profile cuda|cpu|dml`,
   `export_gigaam_onnx.ps1`, `fetch_transcribe_models.ps1` (пины ревизий, sha256),
   идемпотентные `setup.ps1` / `install_server.ps1` / `update.ps1`;

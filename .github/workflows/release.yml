@@ -182,6 +182,11 @@ jobs:
             "sidecar\python")) {
             if (-not (Test-Path (Join-Path $root $f))) { throw "missing in the archive: $f" }
           }
+          # RELEASING §2: the transcription profile venv (1.5-7.4 GB) is built by
+          # the installer on the target machine and must never be packed.
+          $venv = Get-ChildItem (Join-Path $root "sidecar") -Directory -Filter "venv-transcribe*" `
+            -ErrorAction SilentlyContinue
+          if ($venv) { throw "the transcription venv must not be in the archive: $($venv.Name -join ', ')" }
           # The unpacked archive has no config.yaml (the installer generates it),
           # and `transcribe-check` reads the config before anything else: point it
           # at a minimal one so the smoke checks the sidecar tree, not a missing file.
