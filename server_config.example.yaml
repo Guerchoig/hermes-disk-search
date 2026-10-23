@@ -60,6 +60,11 @@ auto_transcribe:
   # `diarization.required` (nemotron3; the legacy sortformer path always fails hard).
   diarization_required: true
   source_disposal: ${SOURCE_DISPOSAL}
+  # Re-transcribe (and overwrite the existing output) when the same file is
+  # dropped into the inbox again: the product default since 0.22.0 - a newer
+  # transcript must not silently shadow a re-dropped source. Set to false to
+  # keep the first result instead.
+  overwrite_existing: true
   pause_indexing: true
 
 # Diarization: Nemotron-3 (Sortformer v3, up to 8 speakers) through parakeet-rs +

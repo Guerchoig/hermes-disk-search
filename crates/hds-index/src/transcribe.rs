@@ -138,6 +138,10 @@ pub struct TranscribeConfig {
     /// `auto_transcribe.state_dir` — чтобы `out_dir` содержал только выход.
     /// `None` — писать рядом с выходом (прежнее поведение, §5.3).
     pub service_dir: Option<PathBuf>,
+    /// `auto_transcribe.overwrite_existing`: повторная заливка того же файла
+    /// перезаписывает готовый `<stem>.<ext>` (и sidecar-файлы) вместо суффикса
+    /// `-2`. `false` (по умолчанию) — прежнее поведение «коллизия → суффикс».
+    pub overwrite_existing: bool,
     /// `transcribe.engine`: `python` (новый путь) | `legacy` (старый).
     pub engine: String,
     /// Настройки python-воркера (`transcribe.*`, с маппингом старых ключей).
@@ -164,6 +168,7 @@ impl Default for TranscribeConfig {
             diarization: DiarizationSettings::default(),
             service_dir: None,
             engine: "legacy".to_string(),
+            overwrite_existing: false,
             settings: None,
             stop_file: None,
         }
@@ -288,6 +293,9 @@ impl TranscribeConfig {
             },
             service_dir,
             engine: settings.engine.clone(),
+            overwrite_existing: dig(cfg, "auto_transcribe.overwrite_existing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
             settings: Some(settings),
             // Демон: отмена файлом `transcribe.stop` (как legacy-поведение).
             stop_file: Some(project_root().join("transcribe.stop")),
@@ -654,7 +662,7 @@ impl TranscribeClient {
             .clone()
             .unwrap_or_else(|| out_dir.clone());
         std::fs::create_dir_all(&svc_dir)?;
-        let out_path = next_free_path(&out_dir, &stem, &ext);
+        let out_path = out_path_for(&out_dir, &stem, &ext, self.cfg.overwrite_existing);
         write_text_atomic(&out_path, &text)?;
         let used_stem = out_path
             .file_stem()
@@ -844,7 +852,7 @@ impl TranscribeClient {
             .clone()
             .unwrap_or_else(|| out_dir.clone());
         std::fs::create_dir_all(&svc_dir)?;
-        let out_path = next_free_path(&out_dir, &stem, &ext);
+        let out_path = out_path_for(&out_dir, &stem, &ext, self.cfg.overwrite_existing);
         write_text_atomic(&out_path, text)?;
         let used_stem = out_path
             .file_stem()
@@ -927,6 +935,19 @@ pub fn detect_speaker_slots(text: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Путь выхода с учётом `auto_transcribe.overwrite_existing`.
+///
+/// * `overwrite = false` — прежнее поведение: коллизия даёт `<stem>-2.<ext>`… (§5.3);
+/// * `overwrite = true` — имя фиксировано `<stem>.<ext>`: повторная расшифровка
+///   того же файла **перезаписывает** прежний результат (запись атомарная,
+///   [`write_text_atomic`]), чтобы в `out_dir` не копились `-2`, `-3`…
+pub fn out_path_for(dir: &Path, stem: &str, ext: &str, overwrite: bool) -> PathBuf {
+    if overwrite {
+        return dir.join(format!("{stem}.{ext}"));
+    }
+    next_free_path(dir, stem, ext)
 }
 
 /// Свободный путь `dir/<stem>.<ext>`; при коллизии — `dir/<stem>-2.<ext>`, `-3`… (§5.3).
@@ -1304,6 +1325,35 @@ mod tests {
         assert_eq!(name(&second), "клип-2.md");
         std::fs::write(&second, "x").unwrap();
         assert_eq!(name(&next_free_path(&dir, "клип", "md")), "клип-3.md");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// `auto_transcribe.overwrite_existing`: повторная заливка пишет в **тот же**
+    /// `<stem>.<ext>` (перезапись), без ключа — прежний суффикс `-2`.
+    #[test]
+    fn overwrite_existing_keeps_the_output_name() {
+        let with: Config = serde_yaml::from_str(
+            "auto_transcribe:\n  out_dir: 'D:\\out'\n  overwrite_existing: true\n",
+        )
+        .unwrap();
+        assert!(TranscribeConfig::from_auto_transcribe(&with).overwrite_existing);
+        let without: Config =
+            serde_yaml::from_str("auto_transcribe:\n  out_dir: 'D:\\out'\n").unwrap();
+        assert!(!TranscribeConfig::from_auto_transcribe(&without).overwrite_existing);
+
+        let dir = std::env::temp_dir().join(format!("hds-overwrite-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let existing = dir.join("клип.md");
+        std::fs::write(&existing, "old").unwrap();
+        assert_eq!(out_path_for(&dir, "клип", "md", true), existing);
+        assert_eq!(
+            out_path_for(&dir, "клип", "md", false)
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "клип-2.md"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

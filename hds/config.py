@@ -150,7 +150,7 @@ def _default_config_yaml():
         "  ignore_suffixes: ['.part', '.tmp', '.crdownload', '.!qb', '.bak']\n"
         "  queue_file: 'data/auto-transcribe-queue.jsonl'\n"
         "  state_dir: 'data/auto-transcribe'\n"
-        "  overwrite_existing: false\n"
+        "  overwrite_existing: true\n"
         "  max_attempts: 3\n"
         "  source_disposal: delete\n"
         "  source_disposal_dir: ''\n"

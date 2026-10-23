@@ -386,7 +386,7 @@ auto_transcribe:
   # --- очередь/идемпотентность ---
   queue_file: 'data/auto-transcribe-queue.jsonl'
   state_dir: 'data/auto-transcribe'
-  overwrite_existing: false   # перетранскрибировать, если выход уже есть и свежее
+  overwrite_existing: true    # перетранскрибировать, если выход уже есть и не старше входа
   max_attempts: 3
   source_disposal: delete     # после УСПЕХА: delete (удалять исходник) | keep | move
   source_disposal_dir: ''     # для source_disposal: move — каталог архива
