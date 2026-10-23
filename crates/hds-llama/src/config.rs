@@ -858,6 +858,14 @@ pub fn build(path: &Path, root: &Value) -> LlmHostConfig {
 /// («индексация — ровно один экземпляр на машину»): попадают в `errors`
 /// (fail-fast с числами), роль не создаётся.
 fn config_role_names(root: &Value, gpu: &GpuConfig, errors: &mut Vec<String>) -> Vec<String> {
+    // P6.3: при `transcribe.engine: python` ASR делает Python-sidecar (GigaAM),
+    // поэтому whisper-роль llm_host не планируется вовсе: ни базовой, ни
+    // репликами из `llm.whisper*`/`gpu.devices[].roles`. Старые ключи
+    // `index.whisper_*` остаются в конфиге для отката на `engine: legacy`.
+    let python_transcribe = dig(root, "transcribe.engine")
+        .and_then(|v| v.as_str())
+        .map(|v| v.trim().eq_ignore_ascii_case("python"))
+        .unwrap_or(false);
     let mut extra: Vec<String> = Vec::new();
     for section in ["llm", "llm_server"] {
         if let Some(map) = dig(root, section).and_then(|v| v.as_mapping()) {
@@ -876,6 +884,9 @@ fn config_role_names(root: &Value, gpu: &GpuConfig, errors: &mut Vec<String>) ->
         if name.is_empty() || ROLES.contains(&name.as_str()) || replicas.contains(&name) {
             continue;
         }
+        if python_transcribe && role_base(&name) == "whisper" {
+            continue;
+        }
         if let Some(base) = single_instance_violation(&name) {
             errors.push(format!(
                 "роль «{name}»: «{base}» существует ровно в одном экземпляре на машину \
@@ -890,7 +901,11 @@ fn config_role_names(root: &Value, gpu: &GpuConfig, errors: &mut Vec<String>) ->
     }
     // Реплики — по базовой роли и номеру: `chat-2`, `chat-3`, `whisper-2`…
     replicas.sort_by_key(|n| (role_base(n).to_string(), replica_index(n).unwrap_or(0)));
-    let mut names: Vec<String> = ROLES.iter().map(|s| s.to_string()).collect();
+    let mut names: Vec<String> = ROLES
+        .iter()
+        .filter(|r| !(python_transcribe && **r == "whisper"))
+        .map(|s| s.to_string())
+        .collect();
     names.extend(replicas);
     names
 }
@@ -1235,6 +1250,28 @@ mod tests {
     }
 
     /// Legacy-строка из реального конфига: понятые флаги + список непонятых.
+    #[test]
+    fn python_engine_drops_whisper_role() {
+        let root: serde_yaml::Value = serde_yaml::from_str(
+            "transcribe:\n  engine: python\nllm:\n  whisper:\n    model: w.bin\n",
+        )
+        .unwrap();
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert!(
+            !cfg.roles.iter().any(|r| role_base(&r.role) == "whisper"),
+            "{:?}",
+            cfg.roles.iter().map(|r| &r.role).collect::<Vec<_>>()
+        );
+        assert!(cfg.role("chat").is_some());
+
+        let root: serde_yaml::Value = serde_yaml::from_str(
+            "transcribe:\n  engine: legacy\nllm:\n  whisper:\n    model: w.bin\n",
+        )
+        .unwrap();
+        let cfg = build(Path::new("t.yaml"), &root);
+        assert!(cfg.role("whisper").is_some(), "legacy keeps whisper");
+    }
+
     #[test]
     fn extra_args_parses_known_flags() {
         let ea = parse_extra_args("--cache-type-k q8_0 --cache-type-v q8_0 -ngl 99");

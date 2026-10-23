@@ -50,6 +50,29 @@ V). База — тот же MIT-лицензированный движок; и
   (Windows: `%LOCALAPPDATA%\jdk-21`; macOS: `/opt/homebrew/opt/openjdk` или
   `/Library/Java/JavaVirtualMachines`) — OpenJDK/Oracle JDK (GPLv2 + Classpath Exception).
 
+## Python-sidecar транскрибации (GigaAM + pyannote, P1–P5)
+Зависимости — `sidecar/hds_transcribe/requirements.lock` / `requirements-dml.lock`
+(точные версии в venv профиля). Лицензии по данным репозиториев на 23.10.2026 —
+перед выпуском сверьте тексты из пакетов:
+* **GigaAM** (`salute-developers/GigaAM`, веса `ai-sage/GigaAM-v3` в CDN Sber) — MIT;
+* **pyannote.audio 4.0.0** — MIT; model `pyannote/speaker-diarization-community-1` —
+  **CC BY 4.0** (gated: требуется принятие условий на Hugging Face);
+  `pyannote/segmentation-3.0` — MIT (gated, принимается вместе с community-1);
+* **wav2vec2-large-xlsr-53-russian** (`jonatasgrosman`) — Apache-2.0;
+* **Silero VAD** (`silero-vad`) — MIT;
+* **PyTorch 2.8.0** (+cu128/cpu) — BSD-3-Clause; **torchaudio** — BSD-2-Clause;
+* **transformers 4.57.1**, **huggingface_hub** — Apache-2.0;
+* **onnx / onnxruntime 1.23.2** — MIT/Apache-2.0; **onnxruntime-directml 1.24.4**
+  (Python-DML профиль) — MIT + Microsoft DirectML (см. ниже);
+* **numpy** — BSD-3, **soundfile** (libsndfile) — BSD-3/LGPL, **sentencepiece** —
+  Apache-2.0, **hydra-core/omegaconf** — MIT/BSD, **psutil** — BSD-3, **PyYAML** — MIT.
+Модели в архив/репозиторий **не входят**: их ставит `installers/fetch_transcribe_models.ps1`
+(пины ревизий и sha256 — в `<models>\transcribe-models.json`), ONNX-экспорт —
+`installers/export_gigaam_onnx.ps1`. Для gated-моделей нужен токен владельца
+(`-HfToken`) только на первичную загрузку; рантайм работает офлайн (`HF_HUB_OFFLINE=1`).
+DirectML в **python-профиле** — это `onnxruntime-directml` внутри venv; `Rust-DirectML.dll`
+(legacy Nemotron) в default-пакет **не входит** (P6.2, см. `-LegacyDiarizer`).
+
 ## Базы данных
 * **SQLite** (bundled в `rusqlite`) — public domain;
 * **sqlite-vec** — MIT / Apache-2.0.

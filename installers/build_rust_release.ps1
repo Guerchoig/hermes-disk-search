@@ -18,7 +18,16 @@ param(
     [switch]$SkipZip,
     [switch]$WithSidecar,
     [string]$SidecarDir = "",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    # P5.5: one transcription profile venv in the package (CUDA or DML; cpu is
+    # the server fallback). none = code only, the installer builds it later.
+    [ValidateSet("none", "cuda", "cpu", "dml")]
+    [string]$TranscribeProfile = "none",
+    # P6.2: legacy Nemotron-3 diarizer (hds-diarize + parakeet-rs + ort, and
+    # Rust-DirectML.dll) is NOT part of the default package: the python stack
+    # (GigaAM/pyannote) does diarization. Opt in only for a legacy-compatible
+    # archive during the transition release.
+    [switch]$LegacyDiarizer
 )
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -49,17 +58,24 @@ foreach ($b in @("hds", "hds_mcp", "llm_host")) {
 # Nemotron-3 diarizer does not load on a machine without the Windows SDK.
 # Since W5 every binary links ONNX Runtime (hds-index -> hds-diarize), so the DLL
 # must be next to all of them: one bin\ folder covers hds/hds_mcp/llm_host.
-$dml = Join-Path $root "target\release\DirectML.dll"
-if (-not (Test-Path $dml)) {
-    $found = Get-ChildItem -Path (Join-Path $root "target\release") -Recurse -Filter "DirectML.dll" -File -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($found) { $dml = $found.FullName }
-}
-if (Test-Path $dml) {
-    Copy-Item $dml (Join-Path $binDir "DirectML.dll") -Force
-    Write-Host "[diar] DirectML.dll staged from $dml"
+if ($LegacyDiarizer) {
+    $dml = Join-Path $root "target\release\DirectML.dll"
+    if (-not (Test-Path $dml)) {
+        $found = Get-ChildItem -Path (Join-Path $root "target\release") -Recurse -Filter "DirectML.dll" -File -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($found) { $dml = $found.FullName }
+    }
+    if (Test-Path $dml) {
+        Copy-Item $dml (Join-Path $binDir "DirectML.dll") -Force
+        Write-Host "[diar] legacy: DirectML.dll staged from $dml"
+    } else {
+        throw "DirectML.dll not found under target\release - build with the 'directml' feature of parakeet-rs (default on Windows), or drop -LegacyDiarizer"
+    }
 } else {
-    throw "DirectML.dll not found under target\release - build with the 'directml' feature of parakeet-rs (default on Windows), otherwise the Nemotron-3 diarizer falls back to CPU only"
+    # P6.2: default package has no legacy diarizer (no DirectML.dll, no
+    # Nemotron model fetch requirement). Python-DML lives in the venv
+    # (onnxruntime-directml) and is unaffected.
+    Write-Host "[diar] legacy Nemotron/DirectML is not staged (default; use -LegacyDiarizer for a transition archive)"
 }
 
 # installation scripts at the archive root (setup.ps1 resolves paths relative to itself)
@@ -103,6 +119,21 @@ if ($WithSidecar) {
     Copy-Item (Join-Path $SidecarDir "*") $sidecarDst -Recurse -Force
     Get-ChildItem -Path $sidecarDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# P5.5: exactly ONE transcription profile venv in the package. The torch stack
+# is profile-specific (onnxruntime vs onnxruntime-directml cannot share a venv),
+# so a universal archive is not built (PLAN §7).
+if ($TranscribeProfile -ne "none") {
+    Write-Host "[p5] building the $TranscribeProfile transcription venv into $sidecarDst"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\build_transcribe_sidecar.ps1") `
+        -Profile $TranscribeProfile -OutDir $sidecarDst
+    if ($LASTEXITCODE -ne 0) { throw "build_transcribe_sidecar.ps1 failed (exit $LASTEXITCODE)" }
+    $venvs = @(Get-ChildItem -Path $sidecarDst -Directory -Filter "venv-transcribe*" -ErrorAction SilentlyContinue)
+    if ($venvs.Count -ne 1) {
+        throw "expected exactly one venv-transcribe* in $sidecarDst, found $($venvs.Count)"
+    }
+    Write-Host "[p5] transcription venv staged: $($venvs[0].Name)"
 }
 
 # desktop shortcut helper
@@ -168,7 +199,10 @@ $lines | Set-Content -Encoding ascii (Join-Path $stage "sha256.txt")
 # installers download them separately (fetch_nemotron3_model.ps1, fetch_*_model.ps1),
 # so a stray model file in the tree means the wrong thing was copied (or a local
 # experiment leaked into the release).
-$models = Get-ChildItem -Recurse -File $stage -Include *.onnx, *.gguf, *.onnx.data -ErrorAction SilentlyContinue
+# The venv contains third-party test assets (*.onnx inside onnx/onnxruntime
+# packages) - the guard is about OUR model weights only.
+$models = Get-ChildItem -Recurse -File $stage -Include *.onnx, *.gguf, *.onnx.data -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -notmatch '\\sidecar\\(venv-transcribe(-dml)?|python)\\' }
 if ($models) {
     $names = ($models | ForEach-Object { $_.FullName.Replace($root + '\', '') }) -join '; '
     throw "model weights must not be packed into the release: $names"

@@ -24,12 +24,19 @@ param(
     [switch]$SkipClip,         # do not download the CLIP image models
     [switch]$SkipDiarization,  # do not download the diarization models (Nemotron-3 + Sortformer)
     [switch]$SkipTranscribe,   # do not set up the auto-transcription pipeline
+    # P5: Python transcription stack (GigaAM/pyannote) - built by default.
+    [ValidateSet("auto", "cuda", "cpu", "dml")]
+    [string]$TranscribeProfile = "auto",
+    [string]$HfToken = "",     # only for the first download of gated models
+    [switch]$SkipTranscribeStack,   # do not build the transcription venv
+    [switch]$SkipTranscribeModels,  # do not pre-fetch transcription models
     [switch]$NonInteractive    # no final "Press Enter" pause (for unattended runs)
 )
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 Set-Location $root
+. (Join-Path $root "installers\sidecar_common.ps1")
 
 function Step($m) { Write-Host ""; Write-Host "== $m ==" -ForegroundColor Cyan }
 function Ok($m) { Write-Host "[ok] $m" -ForegroundColor Green }
@@ -207,18 +214,6 @@ if ($workerPython -and (Test-Worker -Python $workerPython)) {
     Note "Fallback: install Python 3.10+ and set the HDS_EXTRACT_PYTHON environment variable."
 }
 
-$workerPython = Find-WorkerPython
-if ($workerPython -and (Test-Worker -Python $workerPython)) {
-    Ok "worker is ready ($workerPython)"
-} elseif ($workerPython) {
-    Warn "worker did not answer 'hello': $workerPython"
-    Note "The bundled sidecar may be incomplete. Fallback: install Python 3.10+ and set HDS_EXTRACT_PYTHON."
-} else {
-    Warn "no Python for the extraction worker found."
-    Note "Expected sidecar\python\python.exe (bundled) or .venv\Scripts\python.exe."
-    Note "Fallback: install Python 3.10+ and set the HDS_EXTRACT_PYTHON environment variable."
-}
-
 # --- 4b. OCR (Tesseract): binary path + rus/eng language packs ---------------
 # configure_ocr.py: finds tesseract (PATH + standard install dirs), ensures the
 # rus/eng language packs in a user-writable tessdata, writes index.ocr_tesseract_cmd
@@ -365,6 +360,86 @@ if (-not $SkipModels) {
     }
 } else {
     Step "Models (skipped)"
+}
+
+# --- 7a. Python transcription stack (P5) ------------------------------------
+# GigaAM-v3 + pyannote run in their own venv (sidecar\venv-transcribe[-dml]);
+# the profile is chosen by the GPU vendor (iGPU AMD/Intel -> cpu: P0 measured
+# DML 2.2-2.5x slower there). Idempotent: an up-to-date venv is not rebuilt.
+Step "Python transcription stack (GigaAM + pyannote)"
+$transcribeProfile = Get-TranscribeProfile -Preferred $TranscribeProfile
+$transcribeModels = $env:HDS_MODELS_DIR
+if (-not $transcribeModels) { $transcribeModels = Join-Path $env:APPDATA "OpenResearchTools\models" }
+$stackReady = $false
+Note "profile: $transcribeProfile, models: $transcribeModels"
+if ($SkipTranscribeStack) {
+    Warn "skipped (-SkipTranscribeStack): the python transcription engine stays unavailable"
+} else {
+    try {
+        $bargs = @("-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $root "installers\build_transcribe_sidecar.ps1"),
+            "-Profile", $transcribeProfile, "-OutDir", (Join-Path $root "sidecar"), "-SelfTest")
+        & powershell @bargs
+        if ($LASTEXITCODE -ne 0) { throw "build_transcribe_sidecar.ps1 exited with code $LASTEXITCODE" }
+        $stackReady = $true
+        Ok "venv $(Get-SidecarVenvName $transcribeProfile) ready"
+    } catch {
+        Warn "transcription venv not ready: $_"
+        Note "Repeat later: powershell -File installers\build_transcribe_sidecar.ps1 -Profile $transcribeProfile"
+    }
+}
+
+if ($SkipTranscribeModels -or $SkipTranscribeStack) {
+    Warn "transcription models: not pre-fetched (ONNX export and downloads skipped)"
+} else {
+    if ($transcribeProfile -in @("dml", "cpu")) {
+        # ONNX is mandatory for DML and measurably faster than torch on CPU
+        # (P0: RTF 0.074 vs 0.170 on meet0924).
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\export_gigaam_onnx.ps1") `
+                -ModelsDir $transcribeModels -GigaamCache (Join-Path $transcribeModels "gigaam")
+            if ($LASTEXITCODE -ne 0) { Warn "ONNX export failed (exit $LASTEXITCODE)" }
+        } catch { Warn "ONNX export: $_" }
+    }
+    try {
+        $fargs = @("-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", (Join-Path $root "installers\fetch_transcribe_models.ps1"),
+            "-ModelsDir", $transcribeModels)
+        if ($HfToken) { $fargs += @("-HfToken", $HfToken) }
+        & powershell @fargs
+        if ($LASTEXITCODE -ne 0) { Warn "transcription models not fully fetched (exit $LASTEXITCODE)" }
+        else { Ok "transcription models ready" }
+    } catch {
+        Warn "transcription models: $_"
+        Note "Repeat later: powershell -File installers\fetch_transcribe_models.ps1 -ModelsDir `"$transcribeModels`""
+    }
+}
+
+# Switch the pipeline to the python engine and point it at the profile/models.
+# Old keys (auto_transcribe.*, index.whisper_*) stay as they are - they are the
+# legacy path (transcribe.engine: legacy).
+if (Test-Path $cfg) {
+    if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "profile" -Value $transcribeProfile) {
+        Ok "transcribe.profile = $transcribeProfile"
+    } else { Warn "config.yaml has no transcribe block - set profile manually" }
+    if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "models_dir" -Value "'$transcribeModels'") {
+        Ok "transcribe.models_dir = $transcribeModels"
+    } else { Warn "transcribe.models_dir not set (transcribe block missing?)" }
+    if (-not $SkipTranscribeStack -and $stackReady) {
+        if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "engine" -Value "python") {
+            Ok "transcribe.engine = python"
+        } else { Warn "transcribe.engine not set (transcribe block missing?)" }
+    } elseif (-not $SkipTranscribeStack) {
+        Warn "transcribe.engine left unchanged: the python venv is not ready (legacy path keeps working)"
+    }
+    if ($transcribeProfile -in @("dml", "cpu")) {
+        if (Set-ConfigPathNested -Path $cfg -Section "transcribe" -Sub "asr" -Key "backend" -Value "onnx") {
+            Ok "transcribe.asr.backend = onnx"
+        }
+        if (Set-ConfigPathNested -Path $cfg -Section "transcribe" -Sub "asr" -Key "provider" -Value $transcribeProfile) {
+            Ok "transcribe.asr.provider = $transcribeProfile"
+        }
+    }
 }
 
 # --- 7b. Automatic transcription (desktop branch, R3.8) ---------------------

@@ -341,6 +341,92 @@ fn print_probe(probe: Option<&serde_json::Value>) {
         "[{}] модель диаризации в кэше HF",
         if cached { "ok" } else { "--" }
     );
+    // P5.6: профиль/вендор GPU, версия ffmpeg, наличие каждой модели и ONNX.
+    let profile = probe.get("profile").and_then(|v| v.as_str()).unwrap_or("");
+    let gpu = probe.get("gpu").unwrap_or(&serde_json::Value::Null);
+    let vendor = gpu.get("vendor").and_then(|v| v.as_str()).unwrap_or("");
+    let names = gpu
+        .get("names")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+        .unwrap_or_default();
+    println!(
+        "[..] профиль: {profile} · GPU: {} {}",
+        if vendor.is_empty() {
+            "не определён"
+        } else {
+            vendor
+        },
+        if names.is_empty() {
+            String::new()
+        } else {
+            format!("({names})")
+        }
+    );
+    if let Some(version) = probe.get("ffmpeg_version").and_then(|v| v.as_str()) {
+        if !version.is_empty() {
+            println!("[..] ffmpeg: {version}");
+        }
+    }
+    if let Some(models) = probe.get("models").and_then(|v| v.as_object()) {
+        let mut rows = Vec::new();
+        if let Some(gigaam) = models.get("gigaam").and_then(|v| v.as_str()) {
+            rows.push(format!(
+                "GigaAM {}",
+                if gigaam.is_empty() {
+                    "нет".to_string()
+                } else {
+                    Path::new(gigaam)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| gigaam.to_string())
+                }
+            ));
+        }
+        for (key, label) in [
+            ("align", "wav2vec2-ru"),
+            ("diarization", "community-1"),
+            ("segmentation", "segmentation-3.0"),
+        ] {
+            let ok = models.get(key).and_then(|v| v.as_bool()).unwrap_or(false);
+            rows.push(format!("{label} {}", if ok { "есть" } else { "нет" }));
+        }
+        let onnx = models
+            .get("onnx")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let variant = models
+            .get("onnx_variant")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        rows.push(format!(
+            "ONNX {}",
+            if onnx {
+                format!("есть ({variant})")
+            } else {
+                "нет".to_string()
+            }
+        ));
+        println!(
+            "[{}] модели: {}",
+            if rows.iter().all(|r| !r.ends_with("нет")) {
+                "ok"
+            } else {
+                "--"
+            },
+            rows.join(" · ")
+        );
+    }
+    if let Some(warnings) = probe.get("warnings").and_then(|v| v.as_array()) {
+        for warning in warnings.iter().filter_map(|w| w.as_str()) {
+            println!("[!!] {warning}");
+        }
+    }
 }
 
 /// Сводка `alignment_quality` одного `*.transcript.json` (P2).

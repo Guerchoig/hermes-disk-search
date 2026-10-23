@@ -58,5 +58,55 @@ class HfHomeTest(unittest.TestCase):
                 self.assertEqual(models.hf_home(), env["HF_HOME"])
 
 
+class OnnxDirTest(unittest.TestCase):
+    """P5: каталог gigaam-onnx и имена файлов, которые пишет `to_onnx`."""
+
+    def _touch(self, path: str) -> None:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(b"x")
+
+    def test_default_dir_is_gigaam_onnx_when_nothing_exists(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"HDS_MODELS_DIR": tmp, "HDS_GIGAAM_ONNX": ""}
+            with mock.patch.dict(os.environ, env, clear=False):
+                path = models.onnx_dir(AsrParams(variant="e2e_rnnt"))
+            self.assertEqual(path, os.path.join(tmp, "gigaam-onnx", "e2e_rnnt"))
+
+    def test_v3_prefixed_export_is_found(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(os.path.join(tmp, "gigaam-onnx", "e2e_rnnt", "v3_e2e_rnnt_encoder.onnx"))
+            env = {"HDS_MODELS_DIR": tmp, "HDS_GIGAAM_ONNX": ""}
+            with mock.patch.dict(os.environ, env, clear=False):
+                path = models.onnx_dir(AsrParams(variant="e2e_rnnt"))
+            self.assertEqual(path, os.path.join(tmp, "gigaam-onnx", "e2e_rnnt"))
+            # Без .yaml имя остаётся коротким - его проверит load_onnx (ошибка
+            # будет понятной), а не подменяется молча.
+            self.assertEqual(models.resolve_onnx_variant(path, "e2e_rnnt"), "e2e_rnnt")
+
+    def test_explicit_onnx_dir_wins(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(os.path.join(tmp, "explicit", "e2e_rnnt_encoder.onnx"))
+            env = {"HDS_MODELS_DIR": tmp, "HDS_GIGAAM_ONNX": ""}
+            with mock.patch.dict(os.environ, env, clear=False):
+                path = models.onnx_dir(AsrParams(variant="e2e_rnnt",
+                                                 onnx_dir=os.path.join(tmp, "explicit")))
+            self.assertEqual(path, os.path.join(tmp, "explicit"))
+
+    def test_legacy_onnx_dir_still_supported(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(os.path.join(tmp, "onnx", "e2e_rnnt_fp32", "v3_e2e_rnnt_encoder.onnx"))
+            env = {"HDS_MODELS_DIR": tmp, "HDS_GIGAAM_ONNX": ""}
+            with mock.patch.dict(os.environ, env, clear=False):
+                path = models.onnx_dir(AsrParams(variant="e2e_rnnt"))
+            self.assertEqual(path, os.path.join(tmp, "onnx", "e2e_rnnt_fp32"))
+
+    def test_resolve_variant_prefers_names_with_yaml(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._touch(os.path.join(tmp, "v3_e2e_rnnt.yaml"))
+            self.assertEqual(models.resolve_onnx_variant(tmp, "e2e_rnnt"), "v3_e2e_rnnt")
+            self.assertEqual(models.resolve_onnx_variant(tmp, "e2e_ctc"), "e2e_ctc")
+
+
 if __name__ == "__main__":
     unittest.main()

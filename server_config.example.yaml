@@ -81,6 +81,44 @@ diarization:
     trim_lead_in_sec: 0.3
     drop_silent_segments: true
 
+# Python-sidecar transcription (P5): GigaAM-v3 + pyannote community-1 in
+# <app>\sidecar\venv-transcribe[-dml]. The service runs as LocalSystem, so the
+# models must live in the machine dir (HDS_MODELS_DIR / %ProgramData%); the
+# installer pre-fetches them (installers/fetch_transcribe_models.ps1) and the
+# worker then works with HF_HUB_OFFLINE=1. `engine: legacy` keeps the old Rust
+# chain for one minor release (PLAN_PYTHON_SIDECAR_TRANSCRIBE §12).
+transcribe:
+  engine: python
+  # auto -> cuda on NVIDIA, cpu on an integrated AMD/Intel GPU (DML is slower
+  # there), dml on a discrete AMD/Intel card.
+  profile: auto
+  request_timeout_sec: 25200
+  idle_unload_sec: 600
+  max_requests: 20
+  fallback_cpu: true
+  max_duration_hours: 6
+  state_dir: data/auto-transcribe
+  models_dir: ''
+  hf_token_env: HF_TOKEN
+  asr:
+    model: ai-sage/GigaAM-v3
+    variant: e2e_rnnt
+    backend: auto
+    provider: auto
+    device: auto
+    onnx_dir: ''
+  align:
+    mode: native
+    model: jonatasgrosman/wav2vec2-large-xlsr-53-russian
+  diarization:
+    enabled: true
+    model: pyannote/speaker-diarization-community-1
+    device: auto
+  glossary:
+    path: ''
+  llm:
+    enabled: false
+
 # Publish /mcp and /ui only through a reverse proxy with TLS.
 mcp_http:
   host: '${MCP_HOST}'

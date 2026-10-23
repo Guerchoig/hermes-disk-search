@@ -19,6 +19,7 @@ import importlib.metadata as md
 import importlib.util
 import os
 import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -160,6 +161,68 @@ def hello(params: dict) -> dict:
     }
 
 
+def _gpu_info() -> dict:
+    """Вендор/имя GPU без импорта torch (P5.6: профиль должен быть объясним).
+
+    На Windows — Win32_VideoController через PowerShell (диагностика вызывается
+    один раз, 1-2 с); на других платформах — пусто.
+    """
+    if os.name != "nt":
+        return {}
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance Win32_VideoController).Name"],
+            capture_output=True, text=True, timeout=10,
+        )
+        names = [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
+    except Exception:  # noqa: BLE001
+        return {}
+    joined = " | ".join(names)
+    vendor = ""
+    if "NVIDIA" in joined:
+        vendor = "nvidia"
+    elif any(word in joined for word in ("AMD", "Radeon")):
+        vendor = "amd"
+    elif "Intel" in joined:
+        vendor = "intel"
+    return {"vendor": vendor, "names": names}
+
+
+def _ffmpeg_version(ffmpeg: str) -> str:
+    if not ffmpeg:
+        return ""
+    try:
+        proc = subprocess.run([ffmpeg, "-version"], capture_output=True, text=True, timeout=5)
+        first = (proc.stdout or "").splitlines()
+        return first[0].strip() if first else ""
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _models_info(asr) -> dict:
+    """Наличие моделей на диске (без загрузки весов)."""
+    cache = models.gigaam_cache_dir(asr)
+    names = ["v3_%s.ckpt" % asr.variant, "%s.ckpt" % asr.variant]
+    if asr.revision:
+        try:
+            names.insert(0, os.path.basename(models.resolve_gigaam_source(asr)))
+        except Exception:  # noqa: BLE001
+            pass
+    gigaam = next((os.path.join(cache, n) for n in names
+                   if os.path.isfile(os.path.join(cache, n))), "")
+    out = {
+        "gigaam": gigaam,
+        "align": models.model_cached("jonatasgrosman/wav2vec2-large-xlsr-53-russian"),
+        "diarization": models.model_cached("pyannote/speaker-diarization-community-1"),
+        "segmentation": models.model_cached("pyannote/segmentation-3.0"),
+        "onnx_dir": models.onnx_dir(asr),
+        "onnx": models.has_onnx(models.onnx_dir(asr), asr.variant),
+        "onnx_variant": models.resolve_onnx_variant(models.onnx_dir(asr), asr.variant),
+    }
+    return out
+
+
 def probe(params: dict) -> dict:
     """Подробная диагностика стека (для `hds transcribe-check`)."""
     out = {"profile": PROFILE, "python": sys.version.split()[0], "versions": _versions()}
@@ -186,8 +249,10 @@ def probe(params: dict) -> dict:
     out["devices"] = devices
     out["ffmpeg"] = shutil.which("ffmpeg") or ""
     out["ffprobe"] = shutil.which("ffprobe") or ""
-    out["gigaam_cache"] = models.gigaam_cache_dir(TranscribeParams().asr)
-    out["onnx_dir"] = models.onnx_dir(TranscribeParams().asr)
+    out["ffmpeg_version"] = _ffmpeg_version(out["ffmpeg"])
+    asr = TranscribeParams().asr
+    out["gigaam_cache"] = models.gigaam_cache_dir(asr)
+    out["onnx_dir"] = models.onnx_dir(asr)
     out["hf_home"] = models.hf_home()
     out["hf_token"] = bool(models.hf_token())
     try:
@@ -196,6 +261,29 @@ def probe(params: dict) -> dict:
         )
     except Exception:  # noqa: BLE001
         out["diarization_model_cached"] = False
+    # P5.6: вендор GPU, наличие каждой модели и ONNX-экспорта + явные замечания
+    # («профиль dml, а EP DirectML нет» и т.п.) - без них профиль не объясним.
+    out["gpu"] = _gpu_info()
+    try:
+        out["models"] = _models_info(asr)
+    except Exception as e:  # noqa: BLE001
+        out["models"] = {"error": "%s: %s" % (type(e).__name__, e)}
+    warnings = []
+    providers = (devices.get("onnxruntime") or {}).get("providers") or []
+    if PROFILE == "dml" and "DmlExecutionProvider" not in providers:
+        warnings.append("профиль dml, но DmlExecutionProvider недоступен "
+                        "(нужен onnxruntime-directml в venv-transcribe-dml)")
+    if PROFILE == "cuda":
+        torch_info = devices.get("torch") or {}
+        if torch_info.get("error") or not torch_info.get("cuda_available"):
+            warnings.append("профиль cuda, но torch не видит CUDA "
+                            "(проверьте сборку torch cu128 и драйвер)")
+    models_info = out.get("models") or {}
+    if models_info.get("gigaam") == "" and asr.backend == "torch":
+        warnings.append("веса GigaAM не найдены в %s" % out["gigaam_cache"])
+    if not out["ffmpeg"]:
+        warnings.append("ffmpeg не найден в PATH (декодирование аудио не работает)")
+    out["warnings"] = warnings
     return out
 
 

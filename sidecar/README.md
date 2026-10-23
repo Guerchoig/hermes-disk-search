@@ -44,6 +44,40 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 
 В релизе это делает джоба CI `build-sidecar`; `build-windows` кладёт готовое дерево в пакет.
 
+## Транскрибация (P5): профили, venv и модели
+
+Второй воркер (`hds_transcribe/`) живёт в **своём** venv: torch/pyannote нельзя
+тащить в извлечение документов, а профили несовместимы между собой
+(`onnxruntime` и `onnxruntime-directml` дают один модуль `onnxruntime`).
+
+| Профиль | venv | Что внутри |
+|---|---|---|
+| `cuda` | `sidecar\venv-transcribe` | torch 2.8.0 **cu128**, pyannote 4.0, GigaAM (git) |
+| `cpu` | `sidecar\venv-transcribe` | torch 2.8.0 **cpu**, тот же стек; ONNX CPU — быстрее torch (P0) |
+| `dml` | `sidecar\venv-transcribe-dml` | torch cpu + `onnxruntime-directml==1.24.4`; gigaam `--no-deps` |
+
+Установка (идемпотентна, ровно один профиль на дерево):
+
+```powershell
+# 1) портативный CPython + извлечение (если ещё нет)
+powershell -File installers\build_sidecar.ps1 -OutDir sidecar -SelfTest
+# 2) venv транскрибации
+powershell -File installers\build_transcribe_sidecar.ps1 -Profile cuda -SelfTest
+# 3) ONNX для dml/cpu (в <models>\gigaam-onnx\<variant>\)
+powershell -File installers\export_gigaam_onnx.ps1 -ModelsDir D:\models -Verify
+# 4) модели: GigaAM-v3, wav2vec2-ru, community-1, segmentation-3.0
+powershell -File installers\fetch_transcribe_models.ps1 -ModelsDir D:\models -HfToken <token>
+```
+
+Rust ищет интерпретатор так: `HDS_TRANSCRIBE_PYTHON` → `sidecar\venv-transcribe[-dml]`
+→ `sidecar\python` → `.venv`. Профиль `auto` определяется по наличию venv
+(`crates/hds-transcribe/src/settings.rs`), установщик выбирает его по GPU.
+
+Модели и HF-кэш: `transcribe.models_dir` (`HDS_MODELS_DIR`) →
+`<models>\gigaam`, `<models>\hf-home`, `<models>\gigaam-onnx\<variant>`;
+в рантайме воркер работает с `HF_HUB_OFFLINE=1` (сервер — LocalSystem).
+Манифест загрузки с пинами ревизий и sha256 — `<models>\transcribe-models.json`.
+
 ## MS Project (.mpp)
 
 `.mpp`/`.mpt`/`.mpx` извлекаются через **mpxj** (Java, JPype). Нужна **Java 11+**: воркер сам

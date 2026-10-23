@@ -9,6 +9,7 @@
 //! ffmpeg, лемматизатор (через `capabilities` воркера), реранк. Осознанно **не**
 //! покрываем whisper/mpxj/vulkan — их проверяет Python-версия до W5.
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -1266,6 +1267,9 @@ pub struct TranscribeSummary {
     pub state_dir: PathBuf,
     /// Строка ASR для отчёта: `e2e_rnnt / torch / cuda / batch 8`.
     pub asr: String,
+    /// `transcribe.asr.backend` (`torch|onnx`) — нужен, чтобы не требовать ONNX
+    /// от CUDA-профиля (P5.6).
+    pub asr_backend: String,
     /// Строка диаризации: модель, устройство, размер блока.
     pub diarization: String,
     /// P4: статус LLM-постобработки одной строкой (включена/выключена, модель, хост).
@@ -1274,6 +1278,90 @@ pub struct TranscribeSummary {
     pub llm_stats: Option<String>,
     /// Заметки о маппинге старых ключей / неподдержанных режимах.
     pub notices: Vec<String>,
+    /// P5.6: наличие моделей на диске (`GigaAM`, `wav2vec2`, `community-1`,
+    /// `segmentation-3.0`, `ONNX`) — проверка без запуска воркера.
+    pub models: Vec<(String, bool)>,
+}
+
+/// Каталог моделей без загрузки настроек воркера (P5.6).
+fn transcribe_models_root(settings: &hds_transcribe::Settings) -> PathBuf {
+    if !settings.models_dir.as_os_str().is_empty() {
+        return settings.models_dir.clone();
+    }
+    if let Ok(value) = std::env::var("HDS_MODELS_DIR") {
+        if !value.trim().is_empty() {
+            return PathBuf::from(value);
+        }
+    }
+    if cfg!(windows) {
+        if let Some(pd) = std::env::var_os("ProgramData") {
+            return PathBuf::from(pd).join("hermes-disk-search").join("models");
+        }
+    }
+    PathBuf::from("models")
+}
+
+/// P5.6: есть ли в каталоге ONNX-граф варианта (`<variant>_encoder.onnx`,
+/// `v3_<variant>_encoder.onnx`, `<variant>.onnx` или `encoder.onnx`).
+fn onnx_present(dir: &Path, variant: &str) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    let names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let expected = [
+        format!("{variant}_encoder.onnx"),
+        format!("v3_{variant}_encoder.onnx"),
+        "encoder.onnx".to_string(),
+        format!("{variant}.onnx"),
+        format!("v3_{variant}.onnx"),
+    ];
+    names.iter().any(|n| expected.contains(n))
+}
+
+/// P5.6: GigaAM-веса, HF-модели (align/diarization/segmentation) и ONNX.
+fn transcribe_models(settings: &hds_transcribe::Settings) -> Vec<(String, bool)> {
+    let root = transcribe_models_root(settings);
+    let variant = settings.asr.variant.as_str();
+    let gigaam = [
+        root.join("gigaam").join(format!("v3_{variant}.ckpt")),
+        root.join("gigaam").join(format!("{variant}.ckpt")),
+    ]
+    .iter()
+    .any(|p| p.is_file());
+    let cached = |repo: &str| {
+        let snapshots = root
+            .join("hf-home")
+            .join("hub")
+            .join(format!("models--{}", repo.replace('/', "--")))
+            .join("snapshots");
+        fs::read_dir(&snapshots)
+            .map(|mut entries| entries.next().is_some())
+            .unwrap_or(false)
+    };
+    let onnx = [
+        root.join("gigaam-onnx").join(variant),
+        root.join("gigaam-onnx").join(format!("{variant}_fp32")),
+        root.join("onnx").join(variant),
+        root.join("onnx").join(format!("{variant}_fp32")),
+    ]
+    .iter()
+    .any(|dir| onnx_present(dir, variant));
+    vec![
+        ("GigaAM".to_string(), gigaam),
+        ("wav2vec2-ru".to_string(), cached(&settings.align.model)),
+        (
+            "community-1".to_string(),
+            cached(&settings.diarization.model),
+        ),
+        (
+            "segmentation-3.0".to_string(),
+            cached("pyannote/segmentation-3.0"),
+        ),
+        ("ONNX".to_string(), onnx),
+    ]
 }
 
 /// P4: статус LLM-постобработки для `hds check` (без запуска воркера).
@@ -1364,6 +1452,7 @@ pub fn transcribe_summary(cfg: &Config) -> TranscribeSummary {
             " (выключена)"
         }
     );
+    let models = transcribe_models(&settings);
     TranscribeSummary {
         engine: settings.engine.clone(),
         profile: settings.profile.clone(),
@@ -1372,8 +1461,10 @@ pub fn transcribe_summary(cfg: &Config) -> TranscribeSummary {
         llm_stats: latest_llm_stats(&settings.state_dir),
         llm: llm_line(&settings),
         asr,
+        asr_backend: settings.asr.backend.clone(),
         diarization,
         notices: settings.notices.clone(),
+        models,
     }
 }
 
@@ -2578,13 +2669,48 @@ fn check_transcribe(cfg: &Config) -> Check {
         .msg(format!("ASR: {}; диаризация: {}", s.asr, s.diarization));
     }
     let title = format!("транскрибация: python, профиль {}", s.profile);
+    let models_line = s
+        .models
+        .iter()
+        .map(|(name, ok)| format!("{name}: {}", if *ok { "есть" } else { "нет" }))
+        .collect::<Vec<_>>()
+        .join(", ");
     match &s.python {
-        Some(python) => Check::new("transcribe", "ok", title).msg(format!(
-            "интерпретатор: {}; ASR: {}; диаризация: {}",
-            python.display(),
-            s.asr,
-            s.diarization
-        )),
+        Some(python) => {
+            // ONNX нужен только onnx-бэкенду (dml/cpu); CUDA работает на torch.
+            let missing: Vec<&str> = s
+                .models
+                .iter()
+                .filter(|(name, ok)| !*ok && (name.as_str() != "ONNX" || s.asr_backend == "onnx"))
+                .map(|(name, _)| name.as_str())
+                .collect();
+            let check = Check::new(
+                "transcribe",
+                if missing.is_empty() { "ok" } else { "warn" },
+                title,
+            )
+            .msg(format!(
+                "интерпретатор: {}; ASR: {}; диаризация: {}; модели: {}",
+                python.display(),
+                s.asr,
+                s.diarization,
+                models_line
+            ));
+            if missing.is_empty() {
+                check
+            } else {
+                check.fix(format!(
+                    "нет моделей ({}): powershell -File installers\\fetch_transcribe_models.ps1 \
+                     -ModelsDir <каталог моделей>{}",
+                    missing.join(", "),
+                    if missing.contains(&"ONNX") {
+                        " и installers\\export_gigaam_onnx.ps1"
+                    } else {
+                        ""
+                    }
+                ))
+            }
+        }
         None => Check::new("transcribe", "fail", title)
             .msg(
                 "интерпретатор воркера не найден (HDS_TRANSCRIBE_PYTHON / sidecar/venv-transcribe)",
@@ -3477,5 +3603,50 @@ mod tests {
             )),
             None
         );
+    }
+
+    /// P5.6: `hds check` видит модели на диске по `transcribe.models_dir`
+    /// (GigaAM-веса, HF-снапшоты, ONNX-экспорт) без запуска воркера.
+    #[test]
+    fn transcribe_summary_lists_models_from_models_dir() {
+        use super::transcribe_summary;
+        let root = std::env::temp_dir().join(format!("hds-diag-models-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let models = root.join("models");
+        std::fs::create_dir_all(models.join("gigaam")).expect("temp");
+        std::fs::write(models.join("gigaam").join("v3_e2e_rnnt.ckpt"), b"x").expect("temp");
+        let segmentation = models
+            .join("hf-home")
+            .join("hub")
+            .join("models--pyannote--segmentation-3.0")
+            .join("snapshots")
+            .join("abc");
+        std::fs::create_dir_all(&segmentation).expect("temp");
+        std::fs::create_dir_all(models.join("gigaam-onnx").join("e2e_rnnt")).expect("temp");
+        std::fs::write(
+            models
+                .join("gigaam-onnx")
+                .join("e2e_rnnt")
+                .join("v3_e2e_rnnt_encoder.onnx"),
+            b"x",
+        )
+        .expect("temp");
+        let path = models.to_string_lossy().replace('\\', "/");
+        let text = format!(
+            "transcribe:\n  engine: python\n  models_dir: '{path}'\n  asr:\n    backend: onnx\n"
+        );
+        let s = transcribe_summary(&cfg(&text));
+        let present = |name: &str| {
+            s.models
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, ok)| *ok)
+                .unwrap_or(false)
+        };
+        assert!(present("GigaAM"), "{:?}", s.models);
+        assert!(present("segmentation-3.0"), "{:?}", s.models);
+        assert!(present("ONNX"), "{:?}", s.models);
+        assert!(!present("wav2vec2-ru"), "{:?}", s.models);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -47,6 +47,10 @@ dist/
 # портативный CPython + зависимости + копия модулей извлечения
 sidecar/python/
 sidecar/hds/
+# P5: profile venvs of the transcription sidecar (built by
+# installers\build_transcribe_sidecar.ps1, 1.5-6 GB)
+sidecar/venv-transcribe/
+sidecar/venv-transcribe-dml/
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
 

@@ -72,7 +72,7 @@ def _check_provider(provider: str) -> None:
 
 def load(asr: AsrParams):
     """Создать ORT-сессии: `(sessions, cfg, provider)`. DML-safe опции."""
-    from .models import onnx_dir
+    from .models import onnx_dir, resolve_onnx_variant
 
     provider = asr.ort_provider()
     _check_provider(provider)
@@ -89,8 +89,12 @@ def load(asr: AsrParams):
     _patch_session_options(rt, intra)
     _patch_providers(onnx_utils, provider, asr.device_id)
     directory = onnx_dir(asr)
+    # Экспорт `gigaam.to_onnx` называет файлы по cfg.model_name (`v3_e2e_rnnt`),
+    # а `asr.variant` короткий (`e2e_rnnt`): без резолва load_onnx ищет
+    # несуществующий `<variant>.yaml` (найдено аудитом P5.0).
+    model_name = resolve_onnx_variant(directory, asr.variant)
     try:
-        sessions, cfg = onnx_utils.load_onnx(directory, asr.variant, provider=provider)
+        sessions, cfg = onnx_utils.load_onnx(directory, model_name, provider=provider)
     except FileNotFoundError as e:
         raise JobError(
             "model_missing",

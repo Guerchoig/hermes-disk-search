@@ -64,9 +64,14 @@ param(
     [string]$HealthUrl = "",
     [switch]$WhatIf,
     # F3: skip the Nemotron-3 diarization model top-up (offline hosts / manual).
-    [switch]$NoModels
+    [switch]$NoModels,
+    # P5: desktop/server python transcription stack top-up (venv + models).
+    [ValidateSet("auto", "cuda", "cpu", "dml")]
+    [string]$TranscribeProfile = "auto",
+    [string]$HfToken = ""
 )
 $ErrorActionPreference = "Continue"
+. (Join-Path $PSScriptRoot "sidecar_common.ps1")
 $here = $PSScriptRoot
 if (-not (Test-Path $Root)) { throw "root not found: $Root" }
 $Root = (Resolve-Path $Root).Path
@@ -401,6 +406,78 @@ try {
         Write-Host "[..] (whatif) would run: installers\fetch_nemotron3_model.ps1 -ModelsDir <models dir>"
     } else {
         Write-Host "[..] -NoModels: Nemotron-3 diarization model step skipped"
+    }
+
+    # --- 3b. Python transcription stack top-up (P5) -------------------------
+    # An updated install gets the new sidecar (copied with the version), but the
+    # torch venv is not part of the archive: build it once, then top up the
+    # models. Non-fatal - the transcribe role keeps `engine: legacy` until the
+    # python stack exists.
+    $tp = Get-TranscribeProfile -Preferred $TranscribeProfile
+    $modelsTr = $env:HDS_MODELS_DIR
+    if (-not $modelsTr) {
+        if ($Profile -eq "server") { $modelsTr = Join-Path $env:ProgramData "hermes-disk-search\models" }
+        else { $modelsTr = Join-Path $env:APPDATA "OpenResearchTools\models" }
+    }
+    $venvName = Get-SidecarVenvName $tp
+    $venvCfg = Join-Path $cur "sidecar\$venvName\pyvenv.cfg"
+    Write-Host "[..] transcription profile: $tp"
+    if ($WhatIf) {
+        if (-not (Test-Path $venvCfg)) { Write-Host "[..] (whatif) would build venv $venvName in $cur\sidecar" }
+        Write-Host "[..] (whatif) would run installers\fetch_transcribe_models.ps1 -ModelsDir $modelsTr"
+    } else {
+        if (-not (Test-Path $venvCfg)) {
+            $builder = Join-Path $cur "installers\build_transcribe_sidecar.ps1"
+            if (Test-Path $builder) {
+                Write-Host "[..] building transcription venv $venvName (one-time, 1.5-6 GB)"
+                try {
+                    & powershell -NoProfile -ExecutionPolicy Bypass -File $builder -Profile $tp -OutDir (Join-Path $cur "sidecar") -SelfTest
+                    if ($LASTEXITCODE -eq 0) { Write-Host "[ok] transcription venv: $venvName" }
+                    else { Write-Host "[!!] transcription venv failed (exit $LASTEXITCODE): run $builder manually" -ForegroundColor Yellow }
+                } catch {
+                    Write-Host "[!!] transcription venv error: $_ - run $builder manually" -ForegroundColor Yellow
+                }
+            } else {
+                Write-Host "[..] build_transcribe_sidecar.ps1 not found in $cur - venv step skipped"
+            }
+        } else {
+            Write-Host "[ok] transcription venv already present: $venvName"
+        }
+        if (-not $NoModels) {
+            if ($tp -in @("dml", "cpu")) {
+                $exporter = Join-Path $cur "installers\export_gigaam_onnx.ps1"
+                if (Test-Path $exporter) {
+                    try {
+                        & powershell -NoProfile -ExecutionPolicy Bypass -File $exporter -ModelsDir $modelsTr -GigaamCache (Join-Path $modelsTr "gigaam")
+                        if ($LASTEXITCODE -eq 0) { Write-Host "[ok] GigaAM ONNX export ($tp)" }
+                        else { Write-Host "[!!] GigaAM ONNX export failed (exit $LASTEXITCODE)" -ForegroundColor Yellow }
+                    } catch { Write-Host "[!!] GigaAM ONNX export: $_" -ForegroundColor Yellow }
+                }
+            }
+            $fetchTr = Join-Path $cur "installers\fetch_transcribe_models.ps1"
+            if (Test-Path $fetchTr) {
+                $targs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $fetchTr, "-ModelsDir", $modelsTr)
+                if ($HfToken) { $targs += @("-HfToken", $HfToken) }
+                try {
+                    & powershell @targs
+                    if ($LASTEXITCODE -eq 0) { Write-Host "[ok] transcription models: $modelsTr" }
+                    else { Write-Host "[!!] transcription models NOT fetched (exit $LASTEXITCODE): run $fetchTr" -ForegroundColor Yellow }
+                } catch {
+                    Write-Host "[!!] transcription models fetch failed: $_ - run $fetchTr" -ForegroundColor Yellow
+                }
+            }
+        } else {
+            Write-Host "[..] -NoModels: transcription models step skipped"
+        }
+        # Config: profile + machine models. Server -> ProgramData config, desktop
+        # -> config.yaml next to bin.
+        $cfgTr = if ($Profile -eq "server") { Join-Path $env:ProgramData "hermes-disk-search\config.yaml" } else { Join-Path $cur "config.yaml" }
+        if ((Test-Path $cfgTr) -and (Test-Path $venvCfg)) {
+            Set-ConfigPath -Path $cfgTr -Section "transcribe" -Key "profile" -Value $tp | Out-Null
+            Set-ConfigPath -Path $cfgTr -Section "transcribe" -Key "models_dir" -Value "'$modelsTr'" | Out-Null
+            Set-ConfigPath -Path $cfgTr -Section "transcribe" -Key "engine" -Value "python" | Out-Null
+            Write-Host "[ok] transcribe.profile/models_dir/engine updated in $cfgTr"
+        }
     }
 
     # --- 4. launch points + restart -----------------------------------------

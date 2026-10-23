@@ -42,18 +42,58 @@ def gigaam_cache_dir(asr: AsrParams) -> str:
     return ensure_dir(fallback)
 
 
+def _onnx_names(variant: str) -> tuple:
+    """Возможные имена экспортированных графов (P0-экспорт добавляет `v3_`).
+
+    `gigaam.to_onnx` пишет файлы по `cfg.model_name` (`v3_e2e_rnnt_encoder.onnx`,
+    `v3_e2e_rnnt.yaml`), а `asr.variant` — короткое имя (`e2e_rnnt`). Раньше
+    проверялся только `encoder.onnx`, которого экспорт не создаёт: DML/CPU-путь
+    после установки не находил модель. Поддерживаем оба варианта и старый
+    `onnx/<variant>` из спайка.
+    """
+    return (
+        "%s_encoder.onnx" % variant,
+        "v3_%s_encoder.onnx" % variant,
+        "encoder.onnx",
+        "%s.onnx" % variant,
+        "v3_%s.onnx" % variant,
+    )
+
+
+def has_onnx(directory: str, variant: str) -> bool:
+    """Есть ли в каталоге граф(ы) для варианта (RNNT — encoder+.., CTC — один)."""
+    if not directory:
+        return False
+    return any(os.path.isfile(os.path.join(directory, name)) for name in _onnx_names(variant))
+
+
+def resolve_onnx_variant(directory: str, variant: str) -> str:
+    """Имя для `onnx_utils.load_onnx`: `e2e_rnnt` или `v3_e2e_rnnt`.
+
+    Загрузчик GigaAM строит пути как `<dir>/<name>.yaml` и `<dir>/<name>_encoder.onnx`,
+    поэтому имя обязано совпадать с тем, что реально лежит в каталоге.
+    """
+    for name in ("v3_%s" % variant, variant):
+        if os.path.isfile(os.path.join(directory, "%s.yaml" % name)):
+            return name
+    return variant
+
+
 def onnx_dir(asr: AsrParams) -> str:
-    """Каталог экспорта ONNX (`encoder/decoder/joint.onnx` + `.yaml`)."""
+    """Каталог ONNX-экспорта: `<models>/gigaam-onnx/<variant>` (P5) или старый `onnx/`."""
+    default_dir = os.path.join(_models_dir(), "gigaam-onnx", asr.variant)
     candidates = [
         asr.onnx_dir,
         os.environ.get("HDS_GIGAAM_ONNX", ""),
+        default_dir,
+        os.path.join(_models_dir(), "gigaam-onnx", "%s_fp32" % asr.variant),
         os.path.join(_models_dir(), "onnx", asr.variant),
-        os.path.join(_models_dir(), "onnx", "e2e_rnnt_fp32"),
+        os.path.join(_models_dir(), "onnx", "%s_fp32" % asr.variant),
     ]
     for path in candidates:
-        if path and os.path.isfile(os.path.join(path, "encoder.onnx")):
+        if has_onnx(path, asr.variant):
             return path
-    return next((p for p in candidates if p), candidates[-1])
+    return next((p for p in candidates if p), default_dir)
 
 
 def hf_home() -> str:

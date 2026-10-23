@@ -44,6 +44,12 @@ param(
     [string]$AdminPassword = "",
     [switch]$Fetch,                  # download runtime/models unattended (fetch_*.ps1, idempotent)
     [switch]$NoFetch,                # force-skip downloads (even with -Fetch)
+    # --- P5: Python transcription stack (GigaAM/pyannote) ---
+    [ValidateSet("auto", "cuda", "cpu", "dml")]
+    [string]$TranscribeProfile = "auto",   # auto -> NVIDIA cuda / iGPU cpu / discrete AMD dml
+    [string]$HfToken = "",           # first download of gated models only; never stored
+    [switch]$SkipTranscribeStack,    # do not build sidecar\venv-transcribe[-dml]
+    [switch]$SkipTranscribeModels,   # do not pre-fetch transcription models
     # --- 0.20.2 (incident 15.10.2026): services need their config and their deps ---
     [switch]$SkipDeps,               # do NOT install machine-wide deps (Tesseract OCR, ffmpeg)
     [switch]$NoConfigPin,            # keep the root config.yaml and do NOT pin HDS_CONFIG for services
@@ -51,6 +57,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "sidecar_common.ps1")
 
 # --- Locate the SOURCE (the unpacked archive: bin\hds.exe next to this script)
 # and the install root (TARGET). `-Root` defaults to the source folder, which is
@@ -414,6 +421,79 @@ if ($Fetch -and -not $NoFetch) {
         } catch {
             $summary += "[!!] fetch error: $name - $($_.Exception.Message)"
         }
+    }
+
+    # --- P5: Python transcription stack (GigaAM-v3 + pyannote) --------------
+    # The profile follows the GPU (NVIDIA -> cuda, integrated AMD/Intel -> cpu,
+    # discrete AMD/Intel -> dml). The venv is built into app\current\sidecar;
+    # models go to the MACHINE dir above, so the LocalSystem service finds them
+    # and works offline.
+    $tp = Get-TranscribeProfile -Preferred $TranscribeProfile
+    $sidecarDir = Join-Path $Root "sidecar"
+    $stackOk = $false
+    $summary += "[..] transcription profile: $tp"
+    if ($SkipTranscribeStack) {
+        $summary += "[..] transcription venv skipped (-SkipTranscribeStack)"
+    } else {
+        $builder = Join-Path $PSScriptRoot "build_transcribe_sidecar.ps1"
+        if (-not (Test-Path $builder)) {
+            $summary += "[!!] build_transcribe_sidecar.ps1 not found in $PSScriptRoot"
+        } else {
+            try {
+                & powershell -NoProfile -ExecutionPolicy Bypass -File $builder -Profile $tp -OutDir $sidecarDir -SelfTest
+                if ($LASTEXITCODE -eq 0) {
+                    $stackOk = $true
+                    $summary += "[ok] transcribe venv: $(Get-SidecarVenvName $tp) ($tp)"
+                } else { $summary += "[!!] transcribe venv failed (exit $LASTEXITCODE): run $builder manually" }
+            } catch {
+                $summary += "[!!] transcribe venv error: $($_.Exception.Message)"
+            }
+        }
+    }
+    if ($SkipTranscribeModels) {
+        $summary += "[..] transcription models skipped (-SkipTranscribeModels)"
+    } else {
+        if ($tp -in @("dml", "cpu")) {
+            $exporter = Join-Path $PSScriptRoot "export_gigaam_onnx.ps1"
+            if (Test-Path $exporter) {
+                try {
+                    & powershell -NoProfile -ExecutionPolicy Bypass -File $exporter -ModelsDir $modelsDir -GigaamCache (Join-Path $modelsDir "gigaam")
+                    if ($LASTEXITCODE -eq 0) { $summary += "[ok] GigaAM ONNX export ($tp)" }
+                    else { $summary += "[!!] GigaAM ONNX export failed (exit $LASTEXITCODE)" }
+                } catch { $summary += "[!!] GigaAM ONNX export: $($_.Exception.Message)" }
+            }
+        }
+        $fetcher = Join-Path $PSScriptRoot "fetch_transcribe_models.ps1"
+        if (Test-Path $fetcher) {
+            $targs = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $fetcher, "-ModelsDir", $modelsDir)
+            if ($HfToken) { $targs += @("-HfToken", $HfToken) }
+            try {
+                & powershell @targs
+                if ($LASTEXITCODE -eq 0) { $summary += "[ok] transcription models: $modelsDir" }
+                else { $summary += "[!!] transcription models failed (exit $LASTEXITCODE): run $fetcher manually" }
+            } catch {
+                $summary += "[!!] transcription models error: $($_.Exception.Message)"
+            }
+        }
+    }
+    # Point the new python engine at the built profile and machine models.
+    if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "profile" -Value $tp) {
+        $summary += "[ok] transcribe.profile = $tp"
+    }
+    if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "models_dir" -Value "'$modelsDir'") {
+        $summary += "[ok] transcribe.models_dir = $modelsDir"
+    }
+    if ($stackOk) {
+        if (Set-ConfigPath -Path $cfg -Section "transcribe" -Key "engine" -Value "python") {
+            $summary += "[ok] transcribe.engine = python"
+        }
+    } elseif (-not $SkipTranscribeStack) {
+        $summary += "[--] transcribe.engine left unchanged: python venv is not ready (legacy keeps working)"
+    }
+    if ($tp -in @("dml", "cpu")) {
+        Set-ConfigPathNested -Path $cfg -Section "transcribe" -Sub "asr" -Key "backend" -Value "onnx" | Out-Null
+        Set-ConfigPathNested -Path $cfg -Section "transcribe" -Sub "asr" -Key "provider" -Value $tp | Out-Null
+        $summary += "[ok] transcribe.asr: backend=onnx provider=$tp"
     }
 }
 

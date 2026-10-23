@@ -441,7 +441,7 @@ transcribe:
     max_chunk_sec: 25
     fp16: true                  # CUDA — да; CPU — нет
     cache_dir: ""               # "" → HDS_GIGAAM_CACHE → models/gigaam
-    onnx_dir: ""                # "" → HDS_GIGAAM_ONNX → models/onnx/<variant>
+    onnx_dir: ""                # "" → HDS_GIGAAM_ONNX → <models>/gigaam-onnx/<variant>
   decode:
     channels: auto              # auto (корреляция L/R) | downmix | split
     ffmpeg: ""                  # "" → HDS_FFMPEG → PATH

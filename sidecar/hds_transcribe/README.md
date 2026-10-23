@@ -27,7 +27,7 @@
 | Метод | Что |
 |---|---|
 | `hello` | `{protocol: 1, python, pid, profile, capabilities, versions, devices}` — без импорта torch |
-| `probe` | тяжёлая диагностика: torch/CUDA, ORT EP, ffmpeg, кэши моделей (для `hds transcribe-check`) |
+| `probe` | тяжёлая диагностика: torch/CUDA, ORT EP, вендор GPU, версия ffmpeg, наличие GigaAM-весов / HF-моделей / ONNX, токен, `warnings` (для `hds transcribe-check`) |
 | `transcribe` | полный конвейер → `transcript.json`, блоки, спикеры, `alignment_quality`, `warnings` |
 | `postprocess` | читает `transcript.json`, применяет глоссарий (P3) → `<stem>.edits.json` + `needs_review` в транскрипте; ASR не пересчитывается; LLM — P4 |
 | `cancel` | ставит флаг отмены для активного `job_id` (второй способ — файл `stop_file`) |
@@ -228,6 +228,16 @@ whisperx — `align:whisperx`. `align.mode: whisperx` без пакета даё
 * **WhisperX** остаётся опциональным: в `requirements.lock` он закомментирован
   (упаковка — P5). Для `align.mode: hybrid` установите `whisperx` вручную, иначе
   будет warning и нативные таймкоды; явный `whisperx` без пакета — `align_failed`.
+* **ONNX (P5):** экспорт `gigaam.to_onnx` называет файлы по `cfg.model_name`
+  (`v3_e2e_rnnt_encoder.onnx`, `v3_e2e_rnnt.yaml`), а `asr.variant` короткий
+  (`e2e_rnnt`). Воркер резолвит имя (`models.resolve_onnx_variant`) и ищет каталог
+  `<models>/gigaam-onnx/<variant>` (старый `onnx/<variant>[_fp32]` тоже читается).
+  Установка: `installers/export_gigaam_onnx.ps1 -ModelsDir <models> -Verify`.
+* **Профиль и модели (P5):** venv — `sidecar/venv-transcribe` (cuda/cpu) или
+  `sidecar/venv-transcribe-dml`; установщики — `installers/build_transcribe_sidecar.ps1`
+  и `installers/fetch_transcribe_models.ps1` (пины ревизий, `transcribe-models.json`).
+  `probe.warnings` прямо говорит, если профиль `dml` без DirectML EP, `cuda` без
+  CUDA или нет весов/ffmpeg — то же печатает `hds transcribe-check`.
 
 ## Тесты
 
