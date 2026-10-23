@@ -1,4 +1,11 @@
 //! W3: тесты `hds whisper-check` — путь через стаб-владельца GPU (без движка).
+//!
+//! P4–P6 (23.10.2026): `stub_owner_ok` и `json_mode_ok` построены на **legacy**-
+//! ветке (HTTP к владельцу GPU), а `transcribe.engine` по умолчанию теперь
+//! `python`. Поэтому тест-конфиг **явно** задаёт `transcribe: {engine: legacy}`:
+//! без ключа клиент шёл бы в python-путь, на стаб-сервер не ходил и `h.join()`
+//! ждал бы `accept()` вечно. Python-путь проверяется своими тестами
+//! (`hds-transcribe`), здесь важна именно ветка отката (§12 плана).
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -24,9 +31,13 @@ fn media_file(tag: &str) -> PathBuf {
 fn cfg_with_url(tag: &str, url: &str) -> Config {
     let d = temp_dir(tag);
     let path = d.join("config.yaml");
+    // Ключ `transcribe.engine: legacy` обязателен: по умолчанию теперь `python`,
+    // и запрос ушёл бы в воркер, а не в стаб владельца GPU.
     std::fs::write(
         &path,
-        format!("index:\n  transcribe: true\n  transcribe_url: \"{url}\"\n"),
+        format!(
+            "index:\n  transcribe: true\n  transcribe_url: \"{url}\"\ntranscribe:\n  engine: legacy\n"
+        ),
     )
     .unwrap();
     load_from(&path).unwrap()
