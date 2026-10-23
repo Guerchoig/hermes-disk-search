@@ -489,8 +489,23 @@ transcribe:
     max_phrase_chars: 64        # жёсткий лимит gigastt (hotword_phrase_too_long)
     boost: 5.0                  # additive logit boost (P0: эффект при 8)
     url: "http://127.0.0.1:9876"  # для backend: gigastt через HTTP (в CLI — файл)
+  # --- LLM-постобработка (P4): патчи только через llm_host ---------------------
+  # Инференс — в llm_host (`POST /v1/chat/completions`, OpenAI-совместимый);
+  # Python не загружает LLM, поэтому VRAM не складывается. LLM предлагает только
+  # JSON-патчи {word_ids, replacement, reason, needs_review}, валидатор в Python
+  # принимает/отклоняет патч целиком: спикер, таймкоды, alignment, числа/даты и
+  # отрицания не меняются; лимит — max_edits_per_1000 правок на 1000 слов.
+  # Недоступный llm_host/таймаут/мусор → warning и результат как без LLM.
+  # По умолчанию выключено (работает только глоссарий). Порядок слоёв:
+  # глоссарий → LLM.
   llm:
-    enabled: false              # LLM-постобработка — P4
+    enabled: false              # LLM-постобработка (P4); true — только осознанно
+    base_url: "http://127.0.0.1:8010/v1"  # фасад llm_host (роль chat)
+    model: chat                 # имя модели/роли в теле запроса (/v1/models)
+    temperature: 0              # зафиксировано 0: постобработка детерминирована
+    max_tokens: 2048            # потолок ответа (патчи — компактный JSON)
+    timeout_sec: 300            # один HTTP-запрос (не всё задание)
+    max_edits_per_1000: 10      # предохранитель: правок на 1000 слов
 
 # --- Диаризация: Nemotron-3 (Sortformer v3, до 8 спикеров) --------------------
 # Новый путь (W4/W5): llm_host декодирует медиа в WAV 16 кГц **один раз**, ASR идёт

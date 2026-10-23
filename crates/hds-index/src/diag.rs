@@ -1268,8 +1268,80 @@ pub struct TranscribeSummary {
     pub asr: String,
     /// Строка диаризации: модель, устройство, размер блока.
     pub diarization: String,
+    /// P4: статус LLM-постобработки одной строкой (включена/выключена, модель, хост).
+    pub llm: String,
+    /// P4: счётчики патчей последнего `postprocess.llm` из `state_dir` (если есть).
+    pub llm_stats: Option<String>,
     /// Заметки о маппинге старых ключей / неподдержанных режимах.
     pub notices: Vec<String>,
+}
+
+/// P4: статус LLM-постобработки для `hds check` (без запуска воркера).
+///
+/// `llm.enabled` по умолчанию `false` — это норма, поэтому строка честная, а не
+/// «ошибка»: при выключенной LLM замены делает только глоссарий.
+fn llm_line(settings: &hds_transcribe::Settings) -> String {
+    let llm = &settings.llm;
+    if !llm.enabled {
+        return "выключена (только глоссарий)".to_string();
+    }
+    format!(
+        "включена: model={}, host={}, ≤{} правок/1000 слов, timeout {:.0} с",
+        llm.model, llm.base_url, llm.max_edits_per_1000, llm.timeout_sec
+    )
+}
+
+/// P4: сводка патчей последнего транскрипта (`transcript.json.postprocess.llm`).
+///
+/// Читаем самый свежий `*.transcript.json` в `state_dir`: это дешёвая
+/// диагностика «что реально сделала LLM», без запуска воркера и моделей.
+/// `None` — журнала нет или LLM в нём не включали.
+fn latest_llm_stats(state_dir: &Path) -> Option<String> {
+    let mut rows: Vec<(SystemTime, PathBuf)> = Vec::new();
+    for entry in std::fs::read_dir(state_dir).ok()?.flatten() {
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or_default();
+        if !name.ends_with(".transcript.json") {
+            continue;
+        }
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(UNIX_EPOCH);
+        rows.push((modified, path));
+    }
+    rows.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    for (_, path) in rows {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(data) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(llm) = data.get("postprocess").and_then(|p| p.get("llm")) else {
+            continue;
+        };
+        if llm.get("enabled").and_then(|v| v.as_bool()) != Some(true) {
+            continue;
+        }
+        let count = |key: &str| llm.get(key).and_then(|v| v.as_u64()).unwrap_or(0);
+        let latency = llm
+            .get("latency_ms")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        return Some(format!(
+            "патчи LLM: предложено {}, принято {}, отклонено {}, review {}, {:.0} мс",
+            count("proposed"),
+            count("applied"),
+            count("rejected"),
+            count("needs_review"),
+            latency
+        ));
+    }
+    None
 }
 
 /// Собрать сводку `transcribe.*` (не запускает воркер и не грузит модели).
@@ -1297,6 +1369,8 @@ pub fn transcribe_summary(cfg: &Config) -> TranscribeSummary {
         profile: settings.profile.clone(),
         python,
         state_dir: settings.state_dir.clone(),
+        llm_stats: latest_llm_stats(&settings.state_dir),
+        llm: llm_line(&settings),
         asr,
         diarization,
         notices: settings.notices.clone(),
@@ -2522,6 +2596,21 @@ fn check_transcribe(cfg: &Config) -> Check {
     }
 }
 
+/// P4: отдельный пункт `hds check` про LLM-постобработку.
+///
+/// `cmd_check` печатает `msg` только у `warn/fail`, поэтому статус, модель, хост
+/// и счётчики последнего прогона собраны **в заголовке** — иначе при `ok`
+/// (LLM выключена штатно или включена и работает) пользователь их не увидит.
+fn check_transcribe_llm(cfg: &Config) -> Check {
+    let s = transcribe_summary(cfg);
+    let mut title = format!("LLM-постобработка: {}", s.llm);
+    if let Some(stats) = &s.llm_stats {
+        title.push_str("; ");
+        title.push_str(stats);
+    }
+    Check::new("transcribe-llm", "ok", title)
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -2540,6 +2629,9 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_transcribe_daemon());
     // P1: новый путь транскрибации (python-sidecar) — движок/профиль/интерпретатор.
     checks.push(check_transcribe(cfg));
+    // P4: LLM-постобработка — включённость/модель/хост и счётчики последнего
+    // прогона (в заголовке, потому что `ok` печатается без `msg`).
+    checks.push(check_transcribe_llm(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);
@@ -2670,6 +2762,42 @@ mod tests {
             "fix={}",
             chk.fix
         );
+    }
+
+    /// P4: `hds check` показывает статус LLM и счётчики патчей из последнего
+    /// `transcript.json` (без запуска воркера).
+    #[test]
+    fn transcribe_check_reports_llm_status_and_patch_stats() {
+        use super::{latest_llm_stats, llm_line};
+        let s = hds_transcribe::Settings::from_config(&cfg("transcribe:\\n  engine: python"));
+        assert!(llm_line(&s).contains("выключена"), "{}", llm_line(&s));
+
+        let s = hds_transcribe::Settings::from_config(&cfg(
+            "transcribe:\n  llm:\n    enabled: true\n    model: chat\n    base_url: 'http://127.0.0.1:8010/v1'\n",
+        ));
+        let line = llm_line(&s);
+        assert!(line.contains("включена: model=chat"), "{line}");
+        assert!(line.contains("model=chat"), "{line}");
+        assert!(line.contains("http://127.0.0.1:8010/v1"), "{line}");
+
+        let dir = std::env::temp_dir().join(format!("hds-diag-llm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp");
+        assert!(latest_llm_stats(&dir).is_none(), "пустой state_dir");
+        std::fs::write(
+            dir.join("meet.transcript.json"),
+            r#"{"postprocess": {"llm": {"enabled": true, "model": "chat",
+                "proposed": 9, "applied": 2, "rejected": 7, "needs_review": 1,
+                "latency_ms": 1235.4}}}"#,
+        )
+        .expect("записать");
+        let stats = latest_llm_stats(&dir).expect("счётчики");
+        assert!(stats.contains("предложено 9"), "{stats}");
+        assert!(stats.contains("принято 2"), "{stats}");
+        assert!(stats.contains("отклонено 7"), "{stats}");
+        assert!(stats.contains("review 1"), "{stats}");
+        assert!(stats.contains("1235 мс"), "{stats}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// F3 (M5 T0.3): рассинхрон `llm_server.parallel` ↔ `rate_limit.max_inflight`

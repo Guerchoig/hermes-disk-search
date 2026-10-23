@@ -27,6 +27,7 @@ use std::time::Duration;
 use hds_core::config::{dig, project_root, Config};
 use hds_core::error::{CoreError, Result};
 use hds_core::http;
+use hds_transcribe::Settings;
 use serde_json::json;
 
 use crate::chunker::Segment;
@@ -590,24 +591,40 @@ impl TranscribeClient {
         for warning in &result.warnings {
             eprintln!("транскрибация: {warning}");
         }
-        // Отдельный вызов postprocess (P3): глоссарий меняет `words[].text` и
-        // пересобирает `block.text`; ASR не пересчитывается (§5.2), правки —
-        // `<stem>.edits.json` в state_dir. LLM-патчи подключатся в P4.
-        let pp = hds_transcribe::PostprocessParams {
-            job_id: result.job_id.clone(),
-            transcript_path: result.transcript_path.clone(),
-            glossary: settings.glossary.clone(),
-            hotwords: settings.hotwords.clone(),
-            llm: settings.llm.clone(),
-        };
-        let post = client.postprocess(&pp);
-        drop(guard);
-        let blocks = match post {
-            Ok(p) => p.blocks,
-            Err(e) => {
-                eprintln!("postprocess: {e} — используется текст ASR");
-                result.blocks.clone()
+        // Отдельный вызов postprocess (P3/P4): глоссарий и LLM меняют
+        // `words[].text` и пересобирают `block.text`; ASR не пересчитывается
+        // (§5.2), правки — `<stem>.edits.json` в state_dir. Вызываем только
+        // когда он реально может что-то изменить: `llm.enabled` или непустой
+        // глоссарий (§4.6 п. «два метода»). Иначе результат = P2/P3 без затрат.
+        let post = if Self::python_postprocess_needed(&settings) {
+            let pp = hds_transcribe::PostprocessParams {
+                job_id: result.job_id.clone(),
+                transcript_path: result.transcript_path.clone(),
+                glossary: settings.glossary.clone(),
+                hotwords: settings.hotwords.clone(),
+                llm: settings.llm.clone(),
+            };
+            let post = client.postprocess(&pp);
+            drop(guard);
+            match post {
+                Ok(p) => {
+                    for warning in &p.warnings {
+                        eprintln!("постобработка: {warning}");
+                    }
+                    Some(p)
+                }
+                Err(e) => {
+                    eprintln!("postprocess: {e} — используется текст ASR");
+                    None
+                }
             }
+        } else {
+            drop(guard);
+            None
+        };
+        let blocks = match post {
+            Some(p) => p.blocks,
+            None => result.blocks.clone(),
         };
         // Заголовки рисуем только если воркер реально присвоил спикеров.
         // `required: false` + сбой диаризации → воркер отдаёт блок без спикера,
@@ -673,6 +690,17 @@ impl TranscribeClient {
             speakers,
             chars: text.chars().count(),
         })
+    }
+
+    /// Нужен ли отдельный вызов `postprocess` (P4.6).
+    ///
+    /// `llm.enabled` включает LLM-слой, непустой глоссарий — детерминированные
+    /// замены. Если оба выключены, воркер всё равно вернул бы текст ASR, поэтому
+    /// вызов пропускается: результат идентичен P2/P3 без лишнего JSON-RPC.
+    fn python_postprocess_needed(settings: &Settings) -> bool {
+        settings.llm.enabled
+            || !settings.glossary.path.trim().is_empty()
+            || !settings.glossary.terms.is_empty()
     }
 
     /// Транскрибация файла через владельца GPU → сегменты с таймкодами.
@@ -1363,5 +1391,37 @@ mod tests {
         assert_eq!(tc.mode, "speech");
         assert_eq!(tc.out_dir, None);
         assert_eq!(tc.out_format, DEFAULT_OUT_FORMAT);
+    }
+
+    /// P4.6: `postprocess` вызывается только когда LLM включена или глоссарий
+    /// непустой; иначе результат = P2/P3 без лишнего JSON-RPC.
+    #[test]
+    fn postprocess_is_skipped_until_llm_or_glossary() {
+        let empty: Config = serde_yaml::from_str("transcribe:\n  engine: python\n").unwrap();
+        let settings = hds_transcribe::Settings::from_config(&empty);
+        assert!(!TranscribeClient::python_postprocess_needed(&settings));
+
+        let llm: Config =
+            serde_yaml::from_str("transcribe:\n  llm:\n    enabled: true\n    model: chat\n")
+                .unwrap();
+        let settings = hds_transcribe::Settings::from_config(&llm);
+        assert!(settings.llm.enabled);
+        assert!(TranscribeClient::python_postprocess_needed(&settings));
+
+        let glossary: Config =
+            serde_yaml::from_str("transcribe:\n  glossary:\n    path: data/glossary.yaml\n")
+                .unwrap();
+        assert!(TranscribeClient::python_postprocess_needed(
+            &hds_transcribe::Settings::from_config(&glossary)
+        ));
+
+        // Явные термины в конфиге — тоже повод вызвать postprocess.
+        let terms: Config = serde_yaml::from_str(
+            "transcribe:\n  glossary:\n    terms:\n      - canonical: \"1С\"\n",
+        )
+        .unwrap();
+        assert!(TranscribeClient::python_postprocess_needed(
+            &hds_transcribe::Settings::from_config(&terms)
+        ));
     }
 }

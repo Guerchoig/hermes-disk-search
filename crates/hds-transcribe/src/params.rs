@@ -338,7 +338,8 @@ pub struct LlmParams {
 impl Default for LlmParams {
     fn default() -> Self {
         LlmParams {
-            // Подтверждено владельцем: LLM-постобработка выключена до P4.
+            // Подтверждено владельцем: LLM-постобработка выключена по умолчанию
+            // (работает только глоссарий); включается `transcribe.llm.enabled`.
             enabled: false,
             base_url: "http://127.0.0.1:8010/v1".to_string(),
             model: "chat".to_string(),

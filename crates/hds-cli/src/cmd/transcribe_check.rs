@@ -115,6 +115,7 @@ pub fn cmd_transcribe_check_cfg(cfg: &Config, file: Option<String>, json: bool) 
             "alignment": alignment_json(&settings),
             "glossary": glossary_json(&settings),
             "hotwords": hotwords_json(&settings),
+            "llm": llm_json(&settings),
             "diarization": {
                 "enabled": settings.diarization.enabled,
                 "model": settings.diarization.model,
@@ -229,6 +230,19 @@ fn print_static(_cfg: &Config, settings: &Settings, python: Option<&Path>) {
             } else {
                 "не пройдены"
             }
+        );
+        // P4: LLM-постобработка (патчи через llm_host). По умолчанию выключена.
+        let llm = &settings.llm;
+        println!(
+            "[{}] LLM-постобработка: enabled={} model={} host={} (temperature 0, \
+             ≤{} правок/1000 слов, max_tokens {}, timeout {:.0} с)",
+            if llm.enabled { "ok" } else { "--" },
+            llm.enabled,
+            llm.model,
+            llm.base_url,
+            llm.max_edits_per_1000,
+            llm.max_tokens,
+            llm.timeout_sec
         );
     } else {
         println!("[..] engine=legacy: POST /internal/transcribe (владелец GPU — llm_host)");
@@ -356,6 +370,13 @@ pub struct TranscriptSummary {
     pub vram_peak_mb: Option<f64>,
     /// P3: слов-кандидатов на ручную проверку (`postprocess.needs_review`).
     pub review: u64,
+    /// P4: была ли включена LLM, модель и счётчики патчей последнего прогона.
+    pub llm_enabled: bool,
+    pub llm_model: String,
+    pub llm_applied: u64,
+    pub llm_rejected: u64,
+    pub llm_needs_review: u64,
+    pub llm_latency_ms: Option<f64>,
 }
 
 fn number(value: Option<&serde_json::Value>) -> Option<f64> {
@@ -425,6 +446,20 @@ pub fn summarize_transcript(path: &Path) -> Option<TranscriptSummary> {
             .and_then(|v| v.as_array())
             .map(|a| a.len())
             .unwrap_or(0) as u64,
+        // P4: счётчики LLM-патчей (`postprocess.llm`, пишет Python-воркер).
+        llm_enabled: data
+            .pointer("/postprocess/llm/enabled")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        llm_model: data
+            .pointer("/postprocess/llm/model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        llm_applied: count(data.pointer("/postprocess/llm/applied")),
+        llm_rejected: count(data.pointer("/postprocess/llm/rejected")),
+        llm_needs_review: count(data.pointer("/postprocess/llm/needs_review")),
+        llm_latency_ms: number(data.pointer("/postprocess/llm/latency_ms")),
     })
 }
 
@@ -501,6 +536,20 @@ fn hotwords_json(settings: &Settings) -> serde_json::Value {
     })
 }
 
+/// LLM-постобработка (P4): включённость, модель, хост и лимиты патчей.
+fn llm_json(settings: &Settings) -> serde_json::Value {
+    let llm = &settings.llm;
+    serde_json::json!({
+        "enabled": llm.enabled,
+        "base_url": llm.base_url,
+        "model": llm.model,
+        "temperature": llm.temperature,
+        "max_tokens": llm.max_tokens,
+        "timeout_sec": llm.timeout_sec,
+        "max_edits_per_1000": llm.max_edits_per_1000,
+    })
+}
+
 /// Одна сводка транскрипта для `--json`.
 fn transcript_json(row: &TranscriptSummary) -> serde_json::Value {
     let reasons: serde_json::Map<String, serde_json::Value> = row
@@ -523,6 +572,14 @@ fn transcript_json(row: &TranscriptSummary) -> serde_json::Value {
         "rtf_total": row.rtf_total,
         "vram_peak_mb": row.vram_peak_mb,
         "review": row.review,
+        "llm": {
+            "enabled": row.llm_enabled,
+            "model": row.llm_model,
+            "applied": row.llm_applied,
+            "rejected": row.llm_rejected,
+            "needs_review": row.llm_needs_review,
+            "latency_ms": row.llm_latency_ms,
+        },
     })
 }
 
@@ -548,9 +605,24 @@ fn print_transcripts(rows: &[TranscriptSummary]) {
             .vram_peak_mb
             .map(|v| format!("{v:.0} МБ"))
             .unwrap_or_else(|| "—".to_string());
+        let llm = if row.llm_enabled {
+            format!(
+                "{}: applied={} rejected={} review={} ({} мс)",
+                row.llm_model,
+                row.llm_applied,
+                row.llm_rejected,
+                row.llm_needs_review,
+                row.llm_latency_ms
+                    .map(|v| format!("{v:.0}"))
+                    .unwrap_or_else(|| "—".to_string())
+            )
+        } else {
+            "off".to_string()
+        };
         println!(
             "     {} ({}) · mode={} · words={} blocks={} · aligned={:.2}% · \
-             low={} failed={} ({:.2}%) · gap≤{:.2} с · reasons={} · rtf_total={} · vram={} · review={}",
+             low={} failed={} ({:.2}%) · gap≤{:.2} с · reasons={} · rtf_total={} · vram={} · \
+             review={} · llm={}",
             row.file,
             row.media,
             row.mode,
@@ -568,7 +640,8 @@ fn print_transcripts(rows: &[TranscriptSummary]) {
             },
             rtf,
             vram,
-            row.review
+            row.review,
+            llm
         );
     }
 }
@@ -608,7 +681,12 @@ mod tests {
                     "reasons": {"gap": 11}
                 },
                 "stats": {"rtf_total": 0.0417, "vram_peak_mb": 6749.0},
-                "postprocess": {"needs_review": [{"word_id": 5, "term": "1С"}]}
+                "postprocess": {
+                    "needs_review": [{"word_id": 5, "term": "1С"}],
+                    "llm": {"enabled": true, "model": "qwen2.5-7b-instruct",
+                            "applied": 2, "rejected": 1, "needs_review": 1,
+                            "latency_ms": 1234.5}
+                }
             }"#,
         );
         let summary = summarize_transcript(&path).expect("разбор");
@@ -624,6 +702,13 @@ mod tests {
         assert_eq!(summary.rtf_total, Some(0.0417));
         assert_eq!(summary.vram_peak_mb, Some(6749.0));
         assert_eq!(summary.review, 1);
+        // P4: счётчики патчей и модель из postprocess.llm.
+        assert!(summary.llm_enabled);
+        assert_eq!(summary.llm_model, "qwen2.5-7b-instruct");
+        assert_eq!(summary.llm_applied, 2);
+        assert_eq!(summary.llm_rejected, 1);
+        assert_eq!(summary.llm_needs_review, 1);
+        assert_eq!(summary.llm_latency_ms, Some(1234.5));
 
         let rows = latest_transcripts(&dir, 3);
         assert!(rows.iter().any(|row| row.file == "meet0924"));

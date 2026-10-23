@@ -1,4 +1,4 @@
-# hds_transcribe — sidecar транскрибации и диаризации (P1, P2)
+# hds_transcribe — sidecar транскрибации и диаризации (P1–P4)
 
 Отдельный процесс (не метод `hds_extract`): 30-минутная транскрибация не должна
 блокировать извлечение документов, а CUDA/DML-контекст не нужен процессу,
@@ -142,7 +142,7 @@ whisperx — `align:whisperx`. `align.mode: whisperx` без пакета даё
 
 ## Не входит в P2
 
-LLM-патчи (P4), установщики/упаковка (P5), удаление legacy-цепочки (P6).
+Установщики/упаковка (P5), удаление legacy-цепочки (P6).
 `decode.channels: split` проверен на **синтетической** двухдорожечной
 записи (код-путь, не приёмка — реальных таких записей в корпусе нет).
 
@@ -162,7 +162,43 @@ LLM-патчи (P4), установщики/упаковка (P5), удален�
   fp16) не пройден ⇒ `hotwords.backend: none`; числа и команды —
   `tools/parity/out/py_transcribe/P3_REPORT.md`.
 
-## Эксплуатационные детали (P4-фиксы по ревью)
+## P4: LLM-постобработка (`llm_patch.py`)
+
+* Инференс — **только** в `llm_host` (`POST /v1/chat/completions`, OpenAI-совместимый):
+  Python не загружает LLM, поэтому VRAM не складывается (§4.6). Перед вызовом
+  `gc.collect()` + `torch.cuda.empty_cache()` (на DML ORT-сессии уже закрыты
+  `asr_onnx.unload`).
+* Порядок слоёв: **глоссарий → LLM**. LLM видит уже исправленный детерминированным
+  слоем текст и не может переписать его правки (пересечение по словам → отказ).
+* Кандидаты — только подозрительные фрагменты: слова `low_confidence`/`failed`,
+  спорные случаи глоссария (`needs_review`), паттерны (смешанные алфавиты,
+  цифра+кириллица) и близкие к вариантам глоссария слова. Окна ±6 слов, ≤25 слов
+  на окно, ≤10 окон на запрос, ≤8 запросов на файл.
+* LLM возвращает **только JSON-патчи**
+  `{"edits": [{"word_ids": [...], "replacement": "...", "reason": "...",
+  "needs_review": false, "allow_global": false}]}`; ответ разбирается терпимо
+  (markdown-обёртки, лишние поля, одиночная правка). Мусор — отклонённый патч,
+  текст не меняется.
+* Валидатор (без LLM) отклоняет патч **целиком** с машинной причиной:
+  `unknown_word_ids`, `cross_block`, `non_contiguous_word_ids`, `speaker_mismatch`,
+  `metadata_change` (спикер/start/end/alignment), `overlaps_applied`,
+  `no_change`, `too_long` (>3×), `forbidden`, `negation_lost`, `numbers_changed`,
+  `no_glossary_context`, `edit_limit`. Контекст глоссария не обязателен, если
+  модель выставила `allow_global`, у термина `allow_global`/`priority: high`,
+  либо замена содержит канон термина, а исходный фрагмент похож на его вариант
+  (сходство ≥ 0,80: `RP-система` ↔ `rp система`). `needs_review: true` — текст
+  не меняется, случай идёт человеку.
+* Лимит правок: `ceil(max_edits_per_1000 × слов / 1000)`, минимум 1.
+* `edits.json` — единый журнал: `source: glossary|llm`, `status:
+  applied|rejected|needs_review`, `reason`, `model`, `latency_ms`, `llm_reason`;
+  `transcript.json.postprocess.llm` — сводка (`windows`, `requests`, `proposed`,
+  `applied`, `rejected`, `needs_review`, `latency_ms`, `errors`) только при
+  `llm.enabled: true`. При выключенной LLM и пустом глоссарии файл и текст
+  идентичны P2/P3.
+* Деградация: недоступный `llm_host`, таймаут, HTTP-ошибка, мусор → warning в
+  журнал задания и результат как без LLM; задание не падает.
+* Числа на `meet0924` (18 мин) и сравнение квантов — `tools/parity/out/
+  py_transcribe/P4_REPORT.md` (gitignored).
 
 * **Один воркер на процесс-владелец.** Rust запускает `worker.py` лениво и
   переиспользует его между файлами: после стадии модели выгружаются, процесс

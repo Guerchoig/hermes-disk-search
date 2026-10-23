@@ -167,6 +167,104 @@ fn hotwords_from_config(cfg: &Config) -> HotwordsParams {
     }
 }
 
+/// Потолок правок LLM на 1000 слов (`transcribe.llm.max_edits_per_1000`).
+///
+/// Это предохранитель от «переписывания» транскрипта: при 10 правках на 1000
+/// слов 18-минутная встреча получает единицы правок, а не десятки.
+pub const LLM_MAX_EDITS_PER_1000_LIMIT: f64 = 100.0;
+/// Границы таймаута одного HTTP-запроса к `llm_host` (`transcribe.llm.timeout_sec`).
+pub const LLM_TIMEOUT_MIN_SEC: f64 = 5.0;
+pub const LLM_TIMEOUT_MAX_SEC: f64 = 3600.0;
+/// Границы `max_tokens` ответа LLM (патчи — компактный JSON).
+pub const LLM_MAX_TOKENS_MIN: i64 = 64;
+pub const LLM_MAX_TOKENS_MAX: i64 = 32768;
+
+/// `transcribe.llm.*` → [`LlmParams`] (P4.0).
+///
+/// Rust — единственный источник истины: воркер получает готовые значения и
+/// `config.yaml` не читает (§5.3). Инференс живёт в `llm_host`
+/// (`/v1/chat/completions`), Python лишь предлагает/валидирует патчи (§4.6).
+/// Некорректные значения не роняют конфиг: они приводятся к безопасным с
+/// честным notice — иначе «LLM включена», а фактически молча выключена.
+fn llm_from_config(cfg: &Config, notices: &mut Vec<String>) -> LlmParams {
+    let enabled = flag(cfg, "transcribe.llm.enabled", false);
+    let mut base_url = text(cfg, "transcribe.llm.base_url", "http://127.0.0.1:8010/v1");
+    while base_url.ends_with('/') {
+        base_url.pop();
+    }
+    let model = text(cfg, "transcribe.llm.model", "chat");
+
+    let raw_temperature = number(cfg, "transcribe.llm.temperature", 0.0);
+    // Постобработка детерминирована: temperature всегда 0 (§4.6 п. 6).
+    if (raw_temperature - 0.0).abs() > f64::EPSILON {
+        notices.push(format!(
+            "transcribe.llm.temperature={raw_temperature} не поддерживается: \
+             постобработка детерминирована — используется 0"
+        ));
+    }
+
+    let raw_max_tokens = integer(cfg, "transcribe.llm.max_tokens", 2048);
+    let max_tokens = raw_max_tokens.clamp(LLM_MAX_TOKENS_MIN, LLM_MAX_TOKENS_MAX);
+    if max_tokens != raw_max_tokens {
+        notices.push(format!(
+            "transcribe.llm.max_tokens={raw_max_tokens} вне диапазона \
+             {LLM_MAX_TOKENS_MIN}..{LLM_MAX_TOKENS_MAX} — используется {max_tokens}"
+        ));
+    }
+
+    let raw_timeout = number(cfg, "transcribe.llm.timeout_sec", 300.0);
+    let timeout_sec = raw_timeout.clamp(LLM_TIMEOUT_MIN_SEC, LLM_TIMEOUT_MAX_SEC);
+    if (timeout_sec - raw_timeout).abs() > f64::EPSILON {
+        notices.push(format!(
+            "transcribe.llm.timeout_sec={raw_timeout} вне диапазона \
+             {LLM_TIMEOUT_MIN_SEC}..{LLM_TIMEOUT_MAX_SEC} — используется {timeout_sec}"
+        ));
+    }
+
+    let raw_edits = number(cfg, "transcribe.llm.max_edits_per_1000", 10.0);
+    let max_edits_per_1000 = raw_edits.clamp(0.0, LLM_MAX_EDITS_PER_1000_LIMIT);
+    if (max_edits_per_1000 - raw_edits).abs() > f64::EPSILON {
+        notices.push(format!(
+            "transcribe.llm.max_edits_per_1000={raw_edits} вне диапазона \
+             0..{LLM_MAX_EDITS_PER_1000_LIMIT} — используется {max_edits_per_1000}"
+        ));
+    }
+
+    let valid_url = base_url.starts_with("http://") || base_url.starts_with("https://");
+    let enabled = if enabled && !valid_url {
+        notices.push(format!(
+            "transcribe.llm.base_url={base_url:?} не http(s)-URL — LLM-патчи выключены \
+             (деградация до глоссария)"
+        ));
+        false
+    } else {
+        enabled
+    };
+
+    if enabled {
+        notices.push(format!(
+            "transcribe.llm: включён — host={base_url}, model={model}, temperature=0, \
+             ≤{max_edits_per_1000} правок/1000 слов, max_tokens={max_tokens}, \
+             timeout={timeout_sec} с"
+        ));
+    } else if dig(cfg, "transcribe.llm").is_some() {
+        notices.push(
+            "transcribe.llm.enabled=false — LLM-патчи выключены (работает только глоссарий)"
+                .to_string(),
+        );
+    }
+
+    LlmParams {
+        enabled,
+        base_url,
+        model,
+        temperature: 0.0,
+        max_tokens: max_tokens as u32,
+        timeout_sec,
+        max_edits_per_1000,
+    }
+}
+
 impl Settings {
     /// Собрать настройки из конфига (недостающее — дефолты P0).
     pub fn from_config(cfg: &Config) -> Self {
@@ -300,9 +398,7 @@ impl Settings {
                 hotwords.max_phrase_chars
             ));
         }
-        if flag(cfg, "transcribe.llm.enabled", false) {
-            notices.push("transcribe.llm.enabled=true игнорируется в P1 (LLM — P4)".to_string());
-        }
+        let llm = llm_from_config(cfg, &mut notices);
 
         // P2: поддерживаются native | whisperx | hybrid; неизвестное значение —
         // не молча, а notice + native (решение владельца §6 п. 1–2).
@@ -468,7 +564,7 @@ impl Settings {
             hf_token_env,
             glossary,
             hotwords,
-            llm: LlmParams::default(),
+            llm,
             notices,
         }
     }
@@ -708,6 +804,150 @@ transcribe:
         assert_eq!(params.hotwords.boost, 8.0);
         assert_eq!(params.hotwords.backend, "none");
         assert_eq!(params.hotwords.max_phrases, 64);
+        // P4.0: LLM-параметры едут тем же постпроцессом.
+        assert!(!params.llm.enabled);
+    }
+
+    #[test]
+    fn llm_defaults_are_off_and_silent() {
+        let s = Settings::from_config(&Config::Null);
+        assert!(!s.llm.enabled);
+        assert_eq!(s.llm.base_url, "http://127.0.0.1:8010/v1");
+        assert_eq!(s.llm.model, "chat");
+        assert_eq!(s.llm.temperature, 0.0);
+        assert_eq!(s.llm.max_tokens, 2048);
+        assert_eq!(s.llm.timeout_sec, 300.0);
+        assert_eq!(s.llm.max_edits_per_1000, 10.0);
+        // Отсутствие секции — это норма, а не повод шуметь в журнале.
+        assert!(
+            !s.notices.iter().any(|n| n.contains("transcribe.llm")),
+            "notices: {:?}",
+            s.notices
+        );
+    }
+
+    #[test]
+    fn llm_settings_are_read_and_reported() {
+        let s = Settings::from_config(&cfg(r#"
+transcribe:
+  llm:
+    enabled: true
+    base_url: "http://127.0.0.1:8010/v1/"
+    model: "qwen2.5-7b-instruct"
+    temperature: 0.7
+    max_tokens: 1024
+    timeout_sec: 120
+    max_edits_per_1000: 5
+"#));
+        assert!(s.llm.enabled);
+        // Хвостовой слэш снимается: URL склеивается с `/chat/completions`.
+        assert_eq!(s.llm.base_url, "http://127.0.0.1:8010/v1");
+        assert_eq!(s.llm.model, "qwen2.5-7b-instruct");
+        // Постобработка детерминирована: temperature принудительно 0.
+        assert_eq!(s.llm.temperature, 0.0);
+        assert_eq!(s.llm.max_tokens, 1024);
+        assert_eq!(s.llm.timeout_sec, 120.0);
+        assert_eq!(s.llm.max_edits_per_1000, 5.0);
+        assert!(
+            s.notices
+                .iter()
+                .any(|n| n.contains("transcribe.llm: включён")
+                    && n.contains("qwen2.5-7b-instruct")
+                    && n.contains("http://127.0.0.1:8010/v1")),
+            "notices: {:?}",
+            s.notices
+        );
+        assert!(s
+            .notices
+            .iter()
+            .any(|n| n.contains("transcribe.llm.temperature=0.7")));
+    }
+
+    #[test]
+    fn llm_disabled_section_is_honest_notice() {
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  llm:\n    enabled: false\n    model: chat\n",
+        ));
+        assert!(!s.llm.enabled);
+        assert!(
+            s.notices
+                .iter()
+                .any(|n| n.contains("transcribe.llm.enabled=false")),
+            "notices: {:?}",
+            s.notices
+        );
+    }
+
+    #[test]
+    fn llm_out_of_range_values_are_clamped_with_notices() {
+        let s = Settings::from_config(&cfg(r#"
+transcribe:
+  llm:
+    enabled: true
+    max_tokens: 4
+    timeout_sec: 1
+    max_edits_per_1000: 500
+"#));
+        assert_eq!(s.llm.max_tokens, LLM_MAX_TOKENS_MIN as u32);
+        assert_eq!(s.llm.timeout_sec, LLM_TIMEOUT_MIN_SEC);
+        assert_eq!(s.llm.max_edits_per_1000, LLM_MAX_EDITS_PER_1000_LIMIT);
+        for needle in [
+            "transcribe.llm.max_tokens=4",
+            "transcribe.llm.timeout_sec=1",
+            "transcribe.llm.max_edits_per_1000=500",
+        ] {
+            assert!(
+                s.notices.iter().any(|n| n.contains(needle)),
+                "нет notice {needle}: {:?}",
+                s.notices
+            );
+        }
+    }
+
+    #[test]
+    fn llm_bad_base_url_disables_patches_with_notice() {
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  llm:\n    enabled: true\n    base_url: \"127.0.0.1:8010/v1\"\n",
+        ));
+        assert!(!s.llm.enabled, "некорректный URL не должен включать LLM");
+        assert!(
+            s.notices
+                .iter()
+                .any(|n| n.contains("transcribe.llm.base_url") && n.contains("не http(s)-URL")),
+            "notices: {:?}",
+            s.notices
+        );
+    }
+
+    #[test]
+    fn params_carry_llm_to_worker() {
+        let s = Settings::from_config(&cfg(r#"
+transcribe:
+  llm:
+    enabled: true
+    base_url: "http://127.0.0.1:8010/v1"
+    model: "qwen2.5-7b-instruct"
+    max_tokens: 512
+    timeout_sec: 90
+    max_edits_per_1000: 3
+"#));
+        let params = crate::params::PostprocessParams {
+            job_id: "job".to_string(),
+            transcript_path: "t.transcript.json".to_string(),
+            glossary: s.glossary.clone(),
+            hotwords: s.hotwords.clone(),
+            llm: s.llm.clone(),
+        };
+        assert!(params.llm.enabled);
+        assert_eq!(params.llm.model, "qwen2.5-7b-instruct");
+        assert_eq!(params.llm.max_tokens, 512);
+        assert_eq!(params.llm.timeout_sec, 90.0);
+        assert_eq!(params.llm.max_edits_per_1000, 3.0);
+        // JSON, который реально уходит воркеру: поля аддитивны к P3.
+        let json = serde_json::to_value(&params).expect("params -> json");
+        assert_eq!(json["llm"]["enabled"], true);
+        assert_eq!(json["llm"]["model"], "qwen2.5-7b-instruct");
+        assert_eq!(json["llm"]["max_edits_per_1000"], 3.0);
     }
 
     #[test]

@@ -542,6 +542,11 @@ def _edit(
     return {
         "block_index": block_index,
         "word_id": first.get("word_id"),
+        # P4.3: поля аддитивны — `word_ids` нужны LLM-валидатору (пересечения),
+        # `source`/`status` — единый журнал глоссария и LLM.
+        "word_ids": [
+            word.get("word_id") for word in words[start:end] if isinstance(word, dict)
+        ],
         "before": before,
         "after": term,
         "term": term,
@@ -550,6 +555,8 @@ def _edit(
         "span": [start, end],
         "start": first.get("start"),
         "end": last.get("end"),
+        "source": "glossary",
+        "status": "needs_review" if needs_review else "applied",
     }
 
 

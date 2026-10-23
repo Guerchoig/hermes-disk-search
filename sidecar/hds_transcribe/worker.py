@@ -38,6 +38,7 @@ from hds_transcribe import asr_gigaam, asr_onnx  # noqa: E402
 from hds_transcribe import cache as cache_mod  # noqa: E402
 from hds_transcribe import decode, diarize_pyannote, models, quality  # noqa: E402
 from hds_transcribe import glossary as glossary_mod  # noqa: E402
+from hds_transcribe import llm_patch as llm_mod  # noqa: E402
 from hds_transcribe import merge as merge_mod  # noqa: E402
 from hds_transcribe.errors import (  # noqa: E402
     JobError,
@@ -761,19 +762,75 @@ def _annotate_review(blocks, review_edits) -> None:
             words[start]["needs_review"] = True
 
 
+def _spans_from_edits(edits):
+    """`(applied_spans, review_spans)` из журнала правок (глоссарий и LLM).
+
+    `applied_spans: {block_index: [(start, end)]}` — с ними LLM-патчам
+    пересекаться запрещено. `review_spans: {(block_index, pos)}` — спорные случаи,
+    которые тоже показываем модели как кандидаты.
+    """
+    applied = {}
+    review = set()
+    for edit in edits or []:
+        block_index = edit.get("block_index")
+        span = edit.get("span") or []
+        if not isinstance(block_index, int) or len(span) != 2:
+            continue
+        start, end = span
+        if not isinstance(start, int) or not isinstance(end, int) or end <= start:
+            continue
+        if edit.get("needs_review"):
+            review.add((block_index, start))
+        else:
+            applied.setdefault(block_index, []).append((start, end))
+    return applied, review
+
+
+def _run_llm_layer(blocks, params, glossary, glossary_edits, warnings) -> dict:
+    """P4.1–P4.4: слой LLM после глоссария (пустой, если `llm.enabled=false`)."""
+    applied_spans, review_spans = _spans_from_edits(glossary_edits)
+    if not params.llm_enabled:
+        return {"edits": [], "stats": {"edits": 0, "applied": 0, "rejected": 0,
+                                       "needs_review": 0, "reasons": {}},
+                "summary": {"enabled": False, "model": params.llm_model,
+                            "host": params.llm_base_url}, "warnings": []}
+    # P4.4: перед вызовом llm_host отдать VRAM (модели уже выгружены, но кэш
+    # аллокатора torch держит блоки; на DML ORT-сессии закрыты `asr_onnx.unload`).
+    prog.stage("postprocess", 0.0, llm=params.llm_model, host=params.llm_base_url)
+    result = llm_mod.run(blocks, params, glossary, applied_spans, review_spans)
+    for warning in result.get("warnings") or []:
+        warnings.append(warning)
+        prog.warn(warning)
+    summary = result.get("summary") or {}
+    prog.stage(
+        "postprocess",
+        1.0,
+        windows=summary.get("windows"),
+        applied=summary.get("applied"),
+        rejected=summary.get("rejected"),
+        latency_ms=summary.get("latency_ms"),
+    )
+    return result
+
+
 def postprocess(raw: dict) -> dict:
-    """Постобработка (P3.2): глоссарий по словам, `edits.json`, без ASR.
+    """Постобработка (P3.2 + P4): глоссарий → LLM-патчи, `edits.json`, без ASR.
 
     Читает `transcript.json` (его пишет `transcribe`), меняет **только**
     `words[].text` и пересобирает `block.text` через `merge.join_words`;
     таймкоды, спикеры, `alignment` и `word_id` не трогает. Повторный вызов
     идемпотентен и не запускает ASR — смысл отдельного метода (§5.2).
 
+    Слои: сначала детерминированный глоссарий (`glossary.apply`), затем — при
+    `llm.enabled: true` — LLM-патчи по подозрительным фрагментам
+    (`llm_patch.run`, инференс в `llm_host`). LLM не может переписать то, что
+    уже исправил глоссарий: пересечение по словам → отказ валидатора.
+
     `transcript.json` **дополняется** разметкой `needs_review` (решение
     владельца 22.10.2026): слова-кандидаты на ручную проверку получают
     `needs_review: true`, а сводка — секцию `postprocess` (`needs_review`,
-    статистика, путь к `edits.json`). Текст ASR в файле не переписывается:
-    применённые замены живут в `.md`/`edits.json`, а не в транскрипте.
+    статистика, путь к `edits.json`, `llm` при включённой LLM). Текст ASR в
+    файле не переписывается: применённые замены живут в `.md`/`edits.json`.
     """
     started = time.perf_counter()
     params = PostprocessParams.from_dict(raw)
@@ -793,11 +850,24 @@ def postprocess(raw: dict) -> dict:
     # Копия «как от ASR» — в transcript.json текст остаётся исходным, туда пишутся
     # только пометки needs_review (решение владельца 22.10.2026).
     asr_blocks = copy.deepcopy(blocks)
-    edits, edit_stats = glossary.apply(blocks)
+    glossary_edits, edit_stats = glossary.apply(blocks)
+    # P4.1–P4.4: второй слой — LLM-патчи по подозрительным фрагментам. Порядок
+    # «глоссарий → LLM» подтверждён (§4.6): LLM видит уже исправленный текст и не
+    # может переписать то, что решил детерминированный слой.
+    llm_result = _run_llm_layer(blocks, params, glossary, glossary_edits, warnings)
+    llm_edits = llm_result.get("edits") or []
+    llm_summary = llm_result.get("summary") or {"enabled": bool(params.llm_enabled)}
+    edits = list(glossary_edits) + list(llm_edits)
+    journal = bool(glossary.terms) or bool(params.llm_enabled)
     out_path = None
-    if glossary.terms:
+    if journal:
         out_path = edits_path(path)
-        cache_mod.save_json(out_path, {
+        edit_stats = dict(edit_stats)
+        edit_stats["sources"] = {
+            "glossary": len(glossary_edits),
+            "llm": len(llm_edits),
+        }
+        payload = {
             "version": 1,
             "job_id": params.job_id or data.get("job_id") or "",
             "transcript": os.path.abspath(path),
@@ -805,7 +875,11 @@ def postprocess(raw: dict) -> dict:
             "hotwords": hotwords,
             "stats": edit_stats,
             "edits": edits,
-        })
+        }
+        if params.llm_enabled:
+            # Сводка LLM: модель/хост, окна, запросы, применено/отклонено, latency.
+            payload["llm"] = llm_summary
+        cache_mod.save_json(out_path, payload)
         # Решение владельца: needs_review дублируем в transcript.json (для UI).
         # Текст ASR не переписываем — только метки на словах + сводка.
         review_edits = [e for e in edits if e.get("needs_review")]
@@ -819,23 +893,31 @@ def postprocess(raw: dict) -> dict:
             "edits_path": out_path,
             "needs_review": [
                 {k: edit.get(k) for k in
-                 ("block_index", "word_id", "before", "after", "term", "reason",
-                  "start", "end")}
+                 ("block_index", "word_id", "word_ids", "before", "after", "term",
+                  "reason", "source", "start", "end")}
                 for edit in review_edits
             ],
         }
+        if params.llm_enabled:
+            # Аддитивно к P3: сводка LLM в transcript.json (только если LLM
+            # включали — при `llm.enabled=false` файл байт-в-байт как в P3).
+            data["postprocess"]["llm"] = llm_summary
         cache_mod.save_json(path, data)
-        warnings.append(
-            "глоссарий: применено %d, needs_review %d (edits: %s)"
-            % (edit_stats["applied"], edit_stats["needs_review"], out_path)
-        )
+        if edit_stats.get("applied") or edit_stats.get("needs_review"):
+            warnings.append(
+                "постобработка: применено %d (%d LLM), needs_review %d, отклонено LLM %d "
+                "(edits: %s)"
+                % (edit_stats["applied"] + (llm_result.get("stats") or {}).get("applied", 0),
+                   (llm_result.get("stats") or {}).get("applied", 0),
+                   edit_stats["needs_review"] + (llm_result.get("stats") or {}).get("needs_review", 0),
+                   (llm_result.get("stats") or {}).get("rejected", 0),
+                   out_path)
+            )
     elif "postprocess" in data:
-        # Глоссарий убрали — снимаем прежнюю разметку, чтобы файл снова был как в P2.
+        # Глоссарий убрали и LLM выключена — снимаем прежнюю разметку (как в P2).
         _annotate_review(blocks, [])
         data.pop("postprocess", None)
         cache_mod.save_json(path, data)
-    if params.llm_enabled:
-        warnings.append("LLM-постобработка отключена (llm.enabled: P4)")
     text = "\n\n".join(b.get("text", "") for b in blocks if b.get("text"))
     return {
         "job_id": params.job_id,
@@ -845,6 +927,7 @@ def postprocess(raw: dict) -> dict:
         "edits_path": out_path,
         "glossary": glossary.stats(),
         "hotwords": hotwords,
+        "llm": llm_summary,
         "warnings": warnings,
         "elapsed_ms": round((time.perf_counter() - started) * 1000.0, 1),
     }
