@@ -5,9 +5,12 @@
 > `releasing.md` (Python-эпоха).
 >
 > Платформа продукта: ядро и резиденты — Rust (`crates/` → `bin\{hds,hds_mcp,llm_host}`).
-> Python остался **только** в извлечении/лемматизации: источники `hds/*.py`, воркер
-> `sidecar/hds_extract/worker.py`; в архив кладётся **собранный** self-contained sidecar
-> (портативный CPython + копия модулей) — джобы `build-sidecar-*`. Рантайм движка —
+> Python остался в извлечении/лемматизации (источники `hds/*.py`, воркер
+> `sidecar/hds_extract/worker.py`) и в **расшифровке** (`sidecar/hds_transcribe` +
+> общий транспорт `sidecar/hds_sidecar`); в архив кладётся **собранный**
+> self-contained sidecar (портативный CPython + **оба** воркера + копия модулей) —
+> джобы `build-sidecar-*`. Venv профиля расшифровки (1,5–7,4 ГБ) в архив **не
+> входит**: его собирает установщик на машине. Рантайм движка —
 > отдельный скачиваемый ассет (`runtime-manifests/engine-manifest.json`); наш патч
 > движка — тег `engine-patch-v2` (v1 остался в истории), ONNX-модели CLIP — тег
 > `clip-onnx-v1`.
@@ -19,6 +22,8 @@
   `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,
   `cargo test --workspace`;
+- Python-проверки sidecar зелёные (`$env:PYTHONPATH='sidecar'; python -m unittest
+  discover sidecar\tests`) — джоба `test-python` в `rust.yml` и `release.yml`;
 - `hds check` на реальной машине без критических замечаний;
 - ручная проверка сценария «спроси в чате → ответ со ссылками»;
 - в рабочем дереве нет «выпавших» файлов. Архив релиза собирается из `HEAD`, а стейджинг
@@ -40,7 +45,7 @@
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + воркер + копия `hds\`), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `server_config.example.yaml` (шаблон серверного конфига для `hds config init`), `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_sidecar` + копия `hds\`; **venv профиля расшифровки не входит** — его собирает установщик), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `server_config.example.yaml` (шаблон серверного конфига для `hds config init`), `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
@@ -50,8 +55,10 @@
 | `client-install.ps1` / `client-install.sh` | **да** | скрипт-установщик для клиента (токен — аргументом): скачивает пакет с сервера под платформу клиента, распаковывает и запускает мастер. Сервер отдаёт тот же файл **публично** по `<mcp-path>/client-install.ps1\|sh` |
 | `hermes-disk-search-<ver>-windows.zip` / `-macos.zip` | нет | `git archive HEAD` — исходники (для сборки из кода) |
 
-Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ) и исходники sidecar в архив
-**не входят**: sidecar собирается в CI и кладётся внутрь, модели установщик качает сам.
+Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ), модели расшифровки
+(GigaAM-v3 ~1 ГБ, wav2vec2-ru ~1,2 ГБ, pyannote community-1 + segmentation-3.0 ~1,2 ГБ)
+и venv профиля расшифровки (1,5–7,4 ГБ) в архив **не входят**: sidecar собирается в
+CI и кладётся внутрь, а модели/venv установщик готовит на машине (§2.1).
 
 **Документы пользователей обязательны в поставке.** `README_SERVER_MULTIUSER.md` — то, по чему
 администратор сервера ставит систему и ведёт её; `installers/client_readme.md` — **памятка
@@ -75,6 +82,34 @@
 аргументом). В поставке держим **оба** пакета (кросс-вложение на релизе), чтобы сервер мог
 выдать клиенту его платформу. Пакет содержит только `bin\hds(.exe)` + правило/скилл + мастер +
 `version.txt`; версия объявляется в `/health` и сверяется мастером (W7).
+
+### 2.1 Стек расшифровки (Python-движок, `transcribe.engine: python`)
+
+С 0.22.0 расшифровка идёт через `sidecar/hds_transcribe` (GigaAM-v3 + Silero VAD +
+pyannote community-1); прежняя цепочка (`transcribe.engine: legacy` → `llm_host` +
+whisper + Nemotron-3) сохранена на переходный релиз.
+
+* **Код** едет в поставке (`sidecar\hds_transcribe`, `sidecar\hds_sidecar`), **venv — нет**:
+  `setup.ps1` / `install_server.ps1 -Fetch` / `update.ps1` вызывают
+  `installers\build_transcribe_sidecar.ps1 -Profile cuda|cpu|dml` (1,5–7,4 ГБ; CUDA —
+  основной, `cpu` — встроенная AMD/Intel и fallback, `dml` заморожен как
+  экспериментальный). Ровно один профиль на дерево; `-SkipTranscribeStack` отключает шаг.
+* **Модели** — отдельно, в машинный каталог (`transcribe.models_dir` → `HDS_MODELS_DIR`
+  → `%ProgramData%\hermes-disk-search\models`):
+  `installers\fetch_transcribe_models.ps1 -ModelsDir <dir>` (пины ревизий/sha256);
+  для `cpu/dml` дополнительно `installers\export_gigaam_onnx.ps1` (**только `e2e_rnnt`**:
+  `ctc` пишется одним `<model>.onnx` и установщиком не поддерживается). Gated-модели
+  pyannote требуют принятия лицензии и токена: `-HfToken`/`HF_TOKEN` нужны только на
+  первую загрузку, в конфиг не пишутся; дальше рантайм работает офлайн
+  (`HF_HUB_OFFLINE=1`).
+* **Проверка на машине:** `hds transcribe-check` (алиас `whisper-check`) — движок,
+  профиль, интерпретатор, EP, ffmpeg, наличие моделей/ONNX, счётчики LLM-патчей.
+* **Откат:** `transcribe.engine: legacy` + перезапуск роли `transcribe`; схема БД и
+  артефакты `.md/.orig.md/.speakers.json` не менялись. Legacy-диаризатор Nemotron-3 в
+  default-пакете не поставляется (`bin\DirectML.dll` нет) — для переходного архива
+  собирать `build_rust_release.ps1 -LegacyDiarizer`.
+* **Лицензии** стека расшифровки (GigaAM MIT, pyannote MIT / community-1 CC BY 4.0,
+  wav2vec2 Apache-2.0, Silero MIT, torch/ORT/transformers) — раздел в `NOTICE.md`.
 
 ## 3. Версионирование
 
@@ -104,6 +139,7 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
    cargo fmt --all -- --check
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
+   $env:PYTHONPATH='sidecar'; python -m unittest discover sidecar\tests   # джоба test-python
    ```
    Мигающие тесты не «глушить» удлинением ожиданий, а чинить детерминированность
    (пример: `waited_ms` быстрого пути очереди — F11, 13.10.2026).
@@ -131,8 +167,9 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 |---|---|---|---|
 | `check-version` | ubuntu | да | версия тега/входа = `__version__` в `hds/__init__.py` |
 | `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, тесты воркспейса |
-| `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + воркер + модули, `uv`) |
-| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`) |
+| `test-python` | ubuntu | да | `python -m unittest discover sidecar/tests` (`PYTHONPATH=sidecar`; numpy/PyYAML) — извлечение, расшифровка, глоссарий, LLM-валидатор |
+| `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_sidecar` + копия `hds`, `uv`) |
+| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`, наличие `sidecar\hds_transcribe|hds_sidecar` и `transcribe-check --json` → `engine=python`) |
 | `build-macos` | macos | нет (best-effort) | то же для `macos-arm64` |
 | `fetch-engine-runtime-windows-cuda` | windows | да | рантайм движка по манифесту (sha256) под CUDA → `hds-engine-runtime-windows-x64-cuda.zip` |
 | `fetch-engine-runtime-windows-vulkan` | windows | да | то же под Vulkan → `hds-engine-runtime-windows-x64-vulkan.zip` |
