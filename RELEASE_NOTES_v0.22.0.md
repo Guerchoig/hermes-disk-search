@@ -7,6 +7,26 @@
 > минимум на один минорный релиз — откат переключением одного ключа, без миграции БД
 > и переиндексации.
 
+## Что скачивать
+
+| Файл | Нужен? | Что это |
+|---|---|---|
+| `hds-0.22.0-windows-x64.zip` (+ `.sha256.txt`) | **Да, обязательно** (Windows) | полная поставка (258,8 МБ): `bin\` (`hds`, `hds_mcp`, `llm_host`), установщик `setup.cmd`, обёртки `install-server.cmd` и `update.cmd`, манифесты, собранный sidecar **с обоими воркерами** (`hds_extract`, `hds_transcribe`, `hds_sidecar`, портативный CPython), `config.example.yaml`, `server_config.example.yaml`, `README.md` и `README_SERVER_MULTIUSER.md`, `client\` (пакеты + скрипты). `DirectML.dll` в default-пакете нет (P6.2) |
+| `client-install.ps1` / `client-install.sh` | Для установки клиента | скрипт-установщик (токен аргументом): скачает пакет с сервера, распакует и подключит Cline |
+| `hds-client-0.22.0-windows-x64.zip` (+ `.sha256.txt`) | Для клиента (если не через скрипт) | тонкий клиент: `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt` (12,8 МБ) |
+| `hds-client-0.22.0-macos-arm64.zip` (+ `.sha256.txt`) | Только для macOS | то же для Apple Silicon (13,4 МБ) |
+| `hds-engine-runtime-windows-x64-cuda.zip` | Только для **офлайн-установки** (NVIDIA) | рантайм движка CUDA (593,8 МБ); обычный установщик качает его сам по манифесту |
+| `hds-engine-runtime-windows-x64-vulkan.zip` | Только для **офлайн-установки** (AMD/Intel) | рантайм движка Vulkan (89,9 МБ) |
+| `hds-0.22.0-macos-arm64.zip` (+ `.sha256.txt`) | Только для macOS (best-effort) | полная поставка для Apple Silicon (296,1 МБ) |
+| `hds-engine-runtime-macos-arm64-metal.zip` | Только для macOS офлайн | рантайм движка Metal (54,7 МБ) |
+| `hermes-disk-search-v0.22.0-windows.zip` / `-macos.zip` | Нет | архивы исходников (для разработчиков) |
+
+**В архив не входят** (установщик готовит на машине): модели поиска (LLM/CLIP/whisper),
+модели расшифровки (GigaAM-v3 ~1 ГБ, wav2vec2-ru ~1,2 ГБ, pyannote community-1 +
+segmentation-3.0 ~1,2 ГБ) и **venv профиля расшифровки** (1,5–7,4 ГБ) — после установки
+его собирает `installers\build_transcribe_sidecar.ps1`. `ffmpeg` для расшифровки
+установщик ставит сам.
+
 ## Что нового
 
 * **Новый движок транскрибации/диаризации** — отдельный Python-процесс
