@@ -112,6 +112,17 @@ transcribe:
     provider: auto
     device: auto
     onnx_dir: ''
+  # Block/turn assembly (owner decision 23.10.2026): a monologue stays one
+  # paragraph; short foreign-speaker "islands" inside a phrase are reassigned to
+  # the surrounding speaker (pyannote sometimes cuts a turn mid-phrase).
+  merge:
+    pause_sec: 1.2
+    join_gap_sec: 1.2
+    join_sentences: true
+    max_block_sec: 45
+    max_block_chars: 800
+    min_island_sec: 0.8
+    max_island_words: 2
   align:
     mode: native
     model: jonatasgrosman/wav2vec2-large-xlsr-53-russian

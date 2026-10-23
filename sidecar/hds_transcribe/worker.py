@@ -643,12 +643,27 @@ def transcribe(raw: dict) -> dict:
                 if diar_result.get("status") == "ok":
                     exclusive = diar_result.get("exclusive") or []
                     regular = diar_result.get("regular") or []
+                    # `transcribe.merge.*`: границы реплик и сглаживание
+                    # «островков» спикера (решение владельца 23.10.2026).
+                    merge_opts = merge_mod.MergeOptions(
+                        pause_sec=params.merge.pause_sec,
+                        join_gap_sec=params.merge.join_gap_sec,
+                        join_sentences=params.merge.join_sentences,
+                        max_block_sec=params.merge.max_block_sec,
+                        max_block_chars=params.merge.max_block_chars,
+                        min_island_sec=params.merge.min_island_sec,
+                        max_island_words=params.merge.max_island_words,
+                    )
                     if params.diarization.use_exclusive:
-                        blocks, _stats = merge_mod.merge_transcript(words, exclusive, regular)
+                        blocks, _stats = merge_mod.merge_transcript(
+                            words, exclusive, regular, merge_opts
+                        )
                     else:
                         # Явный отказ от exclusive: обычная разметка (с
                         # перекрытиями) как основная.
-                        blocks, _stats = merge_mod.merge_transcript(words, regular, [])
+                        blocks, _stats = merge_mod.merge_transcript(
+                            words, regular, [], merge_opts
+                        )
                 else:
                     blocks = _single_block(words)
                     error = (diar_result.get("error") or {}).get("message", "")

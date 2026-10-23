@@ -11,7 +11,7 @@ use hds_core::config::{dig, project_root, Config};
 
 use crate::params::{
     AlignParams, AlignQuality, AsrParams, DecodeParams, DiarizationParams, GlossaryParams,
-    HotwordsParams, LlmParams, TranscribeParams,
+    HotwordsParams, LlmParams, MergeParams, TranscribeParams,
 };
 
 /// Ворота P3 (G1/G2): `true` — только если в `P3_REPORT.md` зафиксированы
@@ -91,6 +91,8 @@ pub struct Settings {
     pub align: AlignParams,
     pub decode: DecodeParams,
     pub diarization: DiarizationParams,
+    /// `transcribe.merge.*`: границы реплик и сглаживание «островков» спикера.
+    pub merge: MergeParams,
     /// `transcribe.models_dir` (`HDS_MODELS_DIR`): база для HF-кэша и ONNX.
     pub models_dir: PathBuf,
     /// `transcribe.hf_token_env`: имя переменной с HF-токеном.
@@ -545,6 +547,30 @@ impl Settings {
             })
             .unwrap_or_else(|| "ru".to_string());
 
+        // Склейка реплик: дефолты — «монолог одним абзацем» (join_sentences) и
+        // сглаживание коротких островков чужого спикера внутри фразы.
+        let d = MergeParams::default();
+        let merge = MergeParams {
+            pause_sec: number(cfg, "transcribe.merge.pause_sec", d.pause_sec).max(0.0),
+            join_gap_sec: number(cfg, "transcribe.merge.join_gap_sec", d.join_gap_sec).max(0.0),
+            join_sentences: flag(cfg, "transcribe.merge.join_sentences", d.join_sentences),
+            max_block_sec: number(cfg, "transcribe.merge.max_block_sec", d.max_block_sec).max(5.0),
+            max_block_chars: integer(
+                cfg,
+                "transcribe.merge.max_block_chars",
+                d.max_block_chars as i64,
+            )
+            .max(100) as u32,
+            min_island_sec: number(cfg, "transcribe.merge.min_island_sec", d.min_island_sec)
+                .max(0.0),
+            max_island_words: integer(
+                cfg,
+                "transcribe.merge.max_island_words",
+                d.max_island_words as i64,
+            )
+            .max(0) as u32,
+        };
+
         Settings {
             // P6: python-путь — боевой по умолчанию; `legacy` — явный откат
             // старой цепочки (llm_host) на переходный релиз (§12).
@@ -562,6 +588,7 @@ impl Settings {
             align,
             decode,
             diarization,
+            merge,
             models_dir,
             hf_token_env,
             glossary,
@@ -598,6 +625,7 @@ impl Settings {
             decode: self.decode.clone(),
             asr: self.asr.clone(),
             diarization: diar,
+            merge: self.merge.clone(),
             state_dir: self.state_dir.to_string_lossy().to_string(),
             stop_file: stop_file
                 .map(|p| p.to_string_lossy().to_string())
@@ -969,6 +997,28 @@ transcribe:
         assert_eq!(params.align.quality.max_unreliable_ratio, 0.03);
         assert_eq!(params.align.mode, "native");
         assert!(params.stop_file.is_empty());
+    }
+
+    #[test]
+    fn params_carry_merge_settings_to_worker() {
+        // Дефолты: монолог одним абзацем (join_sentences) и сглаживание островков.
+        let defaults = Settings::from_config(&Config::Null);
+        assert!(defaults.merge.join_sentences);
+        assert_eq!(defaults.merge.max_block_sec, 45.0);
+        assert_eq!(defaults.merge.join_gap_sec, 1.2);
+
+        let s = Settings::from_config(&cfg(
+            "transcribe:\n  merge:\n    join_sentences: false\n    max_block_sec: 30\n    max_block_chars: 500\n    min_island_sec: 0.5\n",
+        ));
+        let params = s.params(Path::new("D:/media/a.mp3"), "job", true, None);
+        assert!(!params.merge.join_sentences);
+        assert_eq!(params.merge.max_block_sec, 30.0);
+        assert_eq!(params.merge.max_block_chars, 500);
+        assert_eq!(params.merge.min_island_sec, 0.5);
+        // JSON, который реально уходит воркеру.
+        let json = serde_json::to_value(&params).expect("params -> json");
+        assert_eq!(json["merge"]["join_sentences"], false);
+        assert_eq!(json["merge"]["max_block_sec"], 30.0);
     }
 
     #[test]

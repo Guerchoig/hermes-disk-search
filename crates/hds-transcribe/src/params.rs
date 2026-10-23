@@ -231,6 +231,42 @@ impl Default for DiarizationParams {
     }
 }
 
+/// Склейка реплик (`transcribe.merge.*`): границы блоков и «островки» спикера.
+///
+/// * `pause_sec` — пауза, после которой начинается новая реплика того же спикера;
+/// * `join_gap_sec` — пауза, при которой соседние блоки склеиваются обратно;
+/// * `join_sentences` — склеивать и через границу предложения (монолог — одним
+///   абзацем; `false` — прежнее поведение «точка режет реплику»);
+/// * `max_block_sec`/`max_block_chars` — предохранители длины абзаца;
+/// * `min_island_sec`/`max_island_words` — короткий «островок» чужого спикера
+///   внутри фразы перекрашивается в соседей (pyannote иногда ставит границу
+///   turn'а посреди фразы: «То» / «есть, мы…»).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MergeParams {
+    pub pause_sec: f64,
+    pub join_gap_sec: f64,
+    pub join_sentences: bool,
+    pub max_block_sec: f64,
+    pub max_block_chars: u32,
+    pub min_island_sec: f64,
+    pub max_island_words: u32,
+}
+
+impl Default for MergeParams {
+    fn default() -> Self {
+        MergeParams {
+            pause_sec: 1.2,
+            join_gap_sec: 1.2,
+            join_sentences: true,
+            max_block_sec: 45.0,
+            max_block_chars: 800,
+            min_island_sec: 0.8,
+            max_island_words: 2,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TranscribeParams {
@@ -241,6 +277,7 @@ pub struct TranscribeParams {
     pub decode: DecodeParams,
     pub asr: AsrParams,
     pub diarization: DiarizationParams,
+    pub merge: MergeParams,
     pub state_dir: String,
     pub stop_file: String,
     pub max_duration_hours: f64,
@@ -257,6 +294,7 @@ impl Default for TranscribeParams {
             decode: DecodeParams::default(),
             asr: AsrParams::default(),
             diarization: DiarizationParams::default(),
+            merge: MergeParams::default(),
             state_dir: String::new(),
             stop_file: String::new(),
             max_duration_hours: default_max_duration_hours(),

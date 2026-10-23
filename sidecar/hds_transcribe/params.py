@@ -253,6 +253,33 @@ class DiarizationParams:
 
 
 @dataclass
+class MergeParams:
+    """Склейка реплик (`transcribe.merge.*`): границы блоков и «островков»."""
+
+    pause_sec: float = 1.2
+    join_gap_sec: float = 1.2
+    join_sentences: bool = True
+    max_block_sec: float = 45.0
+    max_block_chars: int = 800
+    min_island_sec: float = 0.8
+    max_island_words: int = 2
+
+    @classmethod
+    def from_dict(cls, data) -> "MergeParams":
+        data = data if isinstance(data, dict) else {}
+        out = MergeParams(
+            pause_sec=_as_float(data.get("pause_sec"), 1.2),
+            join_gap_sec=_as_float(data.get("join_gap_sec"), 1.2),
+            join_sentences=_as_bool(data.get("join_sentences"), True),
+            max_block_sec=_as_float(data.get("max_block_sec"), 45.0),
+            max_block_chars=int(_as_float(data.get("max_block_chars"), 800)),
+            min_island_sec=_as_float(data.get("min_island_sec"), 0.8),
+            max_island_words=int(_as_float(data.get("max_island_words"), 2)),
+        )
+        return out
+
+
+@dataclass
 class TranscribeParams:
     job_id: str = ""
     path: str = ""
@@ -261,6 +288,7 @@ class TranscribeParams:
     decode: DecodeParams = field(default_factory=DecodeParams)
     asr: AsrParams = field(default_factory=AsrParams)
     diarization: DiarizationParams = field(default_factory=DiarizationParams)
+    merge: MergeParams = field(default_factory=MergeParams)
     state_dir: str = ""
     stop_file: str = ""
     max_duration_hours: float = 6.0
@@ -281,6 +309,7 @@ class TranscribeParams:
             decode=DecodeParams.from_dict(data.get("decode")),
             asr=AsrParams.from_dict(data.get("asr")),
             diarization=diar,
+            merge=MergeParams.from_dict(data.get("merge")),
             state_dir=_as_str(data.get("state_dir"), ""),
             stop_file=_as_str(data.get("stop_file"), ""),
             max_duration_hours=_as_float(data.get("max_duration_hours"), 6.0),

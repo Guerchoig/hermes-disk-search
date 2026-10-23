@@ -442,6 +442,16 @@ transcribe:
     fp16: true                  # CUDA — да; CPU — нет
     cache_dir: ""               # "" → HDS_GIGAAM_CACHE → models/gigaam
     onnx_dir: ""                # "" → HDS_GIGAAM_ONNX → <models>/gigaam-onnx/<variant>
+  # Склейка реплик (решение владельца 23.10.2026): монолог — одним абзацем,
+  # короткие «островки» чужого спикера внутри фразы — к соседям.
+  merge:
+    pause_sec: 1.2              # пауза > этого → новая реплика того же спикера
+    join_gap_sec: 1.2           # пауза ≤ этого → соседние блоки склеиваются обратно
+    join_sentences: true        # склеивать и через границу предложения (точка не режет)
+    max_block_sec: 45           # предохранитель длины абзаца (секунды)
+    max_block_chars: 800        # предохранитель длины абзаца (символы)
+    min_island_sec: 0.8         # «островок» чужого спикера короче → перекрасить в соседей
+    max_island_words: 2         # …или не длиннее N слов
   decode:
     channels: auto              # auto (корреляция L/R) | downmix | split
     ffmpeg: ""                  # "" → HDS_FFMPEG → PATH

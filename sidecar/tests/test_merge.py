@@ -108,9 +108,10 @@ class BuildBlocksTest(unittest.TestCase):
         self.assertEqual([b["speaker"] for b in blocks], ["SPEAKER_00", "SPEAKER_01"])
 
     def test_pause_splits(self):
+        # Пауза больше `pause_sec` (дефолт 1.2 с) — новая реплика.
         words = [
             {**word("a", 0.0, 0.5), "speaker": "SPEAKER_00"},
-            {**word("b", 1.5, 2.0), "speaker": "SPEAKER_00"},
+            {**word("b", 1.9, 2.4), "speaker": "SPEAKER_00"},
         ]
         blocks = merge.build_blocks(words)
         self.assertEqual(len(blocks), 2)
@@ -124,17 +125,22 @@ class BuildBlocksTest(unittest.TestCase):
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["text"], "a b")
 
-    def test_sentence_end_splits(self):
+    def test_sentence_end_joins_by_default(self):
+        # `join_sentences: true` (дефолт): точка не режет монолог на абзацы.
         words = [
             {**word("конец.", 0.0, 0.5), "speaker": "SPEAKER_00"},
             {**word("Новое", 0.6, 1.0), "speaker": "SPEAKER_00"},
         ]
-        self.assertEqual(len(merge.build_blocks(words)), 2)
+        self.assertEqual(len(merge.build_blocks(words)), 1)
+        # Явный отказ — прежнее поведение.
+        blocks = merge.build_blocks(words, merge.MergeOptions(join_sentences=False))
+        self.assertEqual(len(blocks), 2)
 
     def test_forced_limit_splits(self):
+        # `max_block_chars` по умолчанию 800: 500 + 500 символов > лимита.
         words = [
-            {**word("x" * 300, 0.0, 1.0), "speaker": "SPEAKER_00"},
-            {**word("y" * 300, 1.1, 2.0), "speaker": "SPEAKER_00"},
+            {**word("x" * 500, 0.0, 1.0), "speaker": "SPEAKER_00"},
+            {**word("y" * 500, 1.1, 2.0), "speaker": "SPEAKER_00"},
         ]
         self.assertEqual(len(merge.build_blocks(words)), 2)
 
@@ -146,6 +152,117 @@ class BuildBlocksTest(unittest.TestCase):
         blocks, stats = merge.merge_transcript(words, [], [])
         self.assertTrue(blocks)
         self.assertEqual(stats["unassigned_words"], 2)
+
+
+class SmoothIslandsTest(unittest.TestCase):
+    """Правило 6: короткий «островок» чужого спикера внутри фразы."""
+
+    def _words(self, speakers):
+        # Ровные слова по 0.4 с без пауз: важно только распределение спикеров.
+        return [
+            {**word("w%d" % i, i * 0.4, i * 0.4 + 0.35), "speaker": sp}
+            for i, sp in enumerate(speakers)
+        ]
+
+    def test_single_word_island_is_reassigned(self):
+        # «То» (SPEAKER_02) между словами SPEAKER_01 — как в расшифровке 24.09.
+        words = self._words(["SPEAKER_01", "SPEAKER_01", "SPEAKER_02", "SPEAKER_01", "SPEAKER_01"])
+        fixed = merge.smooth_islands(words)
+        self.assertEqual(fixed, 1)
+        self.assertEqual([w["speaker"] for w in words], ["SPEAKER_01"] * 5)
+        self.assertEqual(words[2]["speaker_source"], "smoothed")
+
+    def test_two_word_short_island_is_reassigned(self):
+        words = self._words(
+            ["SPEAKER_00", "SPEAKER_01", "SPEAKER_01", "SPEAKER_00", "SPEAKER_00"]
+        )
+        self.assertEqual(merge.smooth_islands(words), 2)
+        self.assertEqual({w["speaker"] for w in words}, {"SPEAKER_00"})
+
+    def test_long_island_is_kept(self):
+        # Шесть слов другого спикера — это реальная реплика, не «островок».
+        words = self._words(
+            ["SPEAKER_00"] + ["SPEAKER_01"] * 6 + ["SPEAKER_00"]
+        )
+        self.assertEqual(merge.smooth_islands(words), 0)
+        self.assertIn("SPEAKER_01", {w["speaker"] for w in words})
+
+    def test_overlap_island_is_kept(self):
+        # Перебивание помечено `overlap` — не трогаем.
+        words = self._words(["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"])
+        words[1]["overlap"] = True
+        self.assertEqual(merge.smooth_islands(words), 0)
+        self.assertEqual(words[1]["speaker"], "SPEAKER_01")
+
+    def test_complete_sentence_is_not_smoothed(self):
+        # Однословный ответ «Да.» — полноценная реплика, а не «островок».
+        words = self._words(["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"])
+        words[1]["text"] = "Да."
+        self.assertEqual(merge.smooth_islands(words), 0)
+        self.assertEqual(words[1]["speaker"], "SPEAKER_01")
+
+    def test_sentence_is_not_split_between_speakers_after_smoothing(self):
+        # Сквозной путь: слово-островок не должно порождать два блока.
+        words = self._words(["SPEAKER_01", "SPEAKER_01", "SPEAKER_02", "SPEAKER_01", "SPEAKER_01"])
+        self.assertEqual(merge.smooth_islands(words), 1)
+        blocks = merge.build_blocks(words)
+        self.assertEqual(len(blocks), 1, blocks)
+        self.assertEqual({b["speaker"] for b in blocks}, {"SPEAKER_01"})
+        self.assertEqual(blocks[0]["text"].startswith("w0 w1 w2 w3"), True)
+
+    def test_merge_transcript_reports_smoothed_words(self):
+        # `assign_speakers` берёт спикера из turns; «островок» — короткий turn
+        # SPEAKER_02 внутри реплики SPEAKER_01 (как в записи 24.09).
+        words = [
+            word("И", 1.9, 1.98),
+            word("То", 2.05, 2.15),
+            word("есть", 2.2, 2.5),
+            word("трогаем", 2.6, 3.0),
+        ]
+        turns = [
+            {"start": 0.0, "end": 2.0, "speaker": "SPEAKER_01"},
+            {"start": 2.0, "end": 2.18, "speaker": "SPEAKER_02"},
+            {"start": 2.18, "end": 10.0, "speaker": "SPEAKER_01"},
+        ]
+        blocks, stats = merge.merge_transcript(words, turns, [])
+        self.assertEqual(stats["smoothed_words"], 1)
+        self.assertEqual(len(blocks), 1)
+        self.assertEqual(blocks[0]["speaker"], "SPEAKER_01")
+
+
+class MonologueTest(unittest.TestCase):
+    """Правило 5: монолог одного спикера — один абзац, а не 18 реплик."""
+
+    def _monologue(self, count=18, step=1.1, text="фраза."):
+        # Как в расшифровке: фраза с точкой, пауза ~0.6–1.0 с, снова тот же спикер.
+        words = []
+        for i in range(count):
+            start = i * step
+            words.append({**word(text, start, start + 0.5), "speaker": "SPEAKER_02"})
+        return words
+
+    def test_monologue_collapses_into_one_block(self):
+        words = self._monologue()
+        blocks = merge.build_blocks(words)
+        self.assertEqual(len(blocks), 1, [b["text"] for b in blocks])
+        self.assertEqual(blocks[0]["start"], 0.0)
+        self.assertGreater(blocks[0]["end"], 17.0)
+
+    def test_max_block_sec_still_splits_long_monologue(self):
+        words = self._monologue(count=60, step=1.0)
+        blocks = merge.build_blocks(words, merge.MergeOptions(max_block_sec=20.0))
+        self.assertGreater(len(blocks), 1)
+        for block in blocks:
+            self.assertLessEqual(block["end"] - block["start"], 21.0)
+
+    def test_real_speaker_change_is_not_merged(self):
+        words = [
+            {**word("первый.", 0.0, 0.5), "speaker": "SPEAKER_00"},
+            {**word("ответ.", 0.7, 1.2), "speaker": "SPEAKER_01"},
+            {**word("снова.", 1.4, 1.9), "speaker": "SPEAKER_00"},
+        ]
+        blocks = merge.build_blocks(words)
+        self.assertEqual([b["speaker"] for b in blocks], ["SPEAKER_00", "SPEAKER_01", "SPEAKER_00"])
 
 
 if __name__ == "__main__":

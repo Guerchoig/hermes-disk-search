@@ -11,9 +11,15 @@
    один `primary`, оба — в JSON);
 4. `interpolated`/`low_confidence`/`failed` **не двигают** спикера: берём
    ближайшего соседа с `aligned`;
-5. блоки режутся по смене спикера, паузе `> 0.8 с`, границе предложения и
-   принудительно при `> 30 с`/`> 500` символов; соседние блоки одного спикера
-   склеиваются при паузе `≤ 0.3 с`, если не превышают лимиты.
+5. блоки режутся по смене спикера, паузе `> pause_sec` (1.2 с), при
+   `join_sentences: false` — ещё и по границе предложения, и принудительно
+   при `> max_block_sec`/`> max_block_chars` (45 с / 800 символов); соседние
+   блоки одного спикера склеиваются при паузе `≤ join_gap_sec` (1.2 с), по
+   умолчанию — и через границу предложения;
+6. короткие «островки» чужого спикера (`< min_island_sec` или `≤ max_island_words`
+   слов) между двумя словами одного спикера перекрашиваются в него
+   (`speaker_source: smoothed`): pyannote иногда режет фразу посредине
+   («То» / «есть, мы…»). Серии с `overlap=true` не трогаем.
 """
 from __future__ import annotations
 
@@ -27,10 +33,18 @@ UNASSIGNED = "UNASSIGNED"
 
 @dataclass
 class MergeOptions:
-    pause_sec: float = 0.8
-    join_gap_sec: float = 0.3
-    max_block_sec: float = 30.0
-    max_block_chars: int = 500
+    #: Пауза, после которой начинается новая реплика того же спикера.
+    pause_sec: float = 1.2
+    #: Пауза, при которой соседние блоки одного спикера склеиваются обратно.
+    join_gap_sec: float = 1.2
+    #: Склеивать блоки и через границу предложения (монолог — одним абзацем).
+    join_sentences: bool = True
+    max_block_sec: float = 45.0
+    max_block_chars: int = 800
+    #: «Островок» чужого спикера короче этого или не длиннее `max_island_words`
+    #: слов перекрашивается в окружающего спикера.
+    min_island_sec: float = 0.8
+    max_island_words: int = 2
     min_speaker_share: float = 0.5
     ambiguity_margin: float = 0.10
 
@@ -164,6 +178,69 @@ def assign_speakers(words, exclusive_turns, regular_turns=None, opts=None):
     return words, stats
 
 
+def _run_duration(words: Sequence[dict]) -> float:
+    """Длительность серии слов по крайним таймкодам (0.0 — их нет)."""
+    starts = [w.get("start") for w in words if w.get("start") is not None]
+    ends = [w.get("end") for w in words if w.get("end") is not None]
+    if not starts or not ends:
+        return 0.0
+    return max(0.0, float(max(ends)) - float(min(starts)))
+
+
+def smooth_islands(words, opts: MergeOptions = None) -> int:
+    """Перекрасить короткие «островки» чужого спикера (правило 6).
+
+    pyannote ставит границу turn'а иногда **внутри** фразы: одно-два слова
+    получают соседнего спикера, и `build_blocks` разрезает реплику надвое
+    (пример: «То» — SPEAKER_02, «есть, мы, получается…» — SPEAKER_01).
+
+    Серия слов спикера `S` перекрашивается в `P`, если:
+    * она короче `min_island_sec` **или** не длиннее `max_island_words` слов;
+    * слева и справа от неё — один и тот же спикер `P` (`P != S`);
+    * ни одно слово серии не помечено `overlap` (там действительно перебивают).
+
+    Возвращает число перекрашенных слов; у них выставляется
+    `speaker_source = "smoothed"` (не путать с доказательством `aligned`).
+    """
+    opts = opts or MergeOptions()
+    if not words:
+        return 0
+    fixed = 0
+    # До трёх проходов: после перекраски двух соседних островков может
+    # появиться новый (редко, но детерминированно).
+    for _ in range(3):
+        changed = 0
+        index = 0
+        total = len(words)
+        while index < total:
+            speaker = words[index].get("speaker")
+            end = index + 1
+            while end < total and words[end].get("speaker") == speaker:
+                end += 1
+            run = words[index:end]
+            if speaker and index > 0 and end < total:
+                left = words[index - 1].get("speaker")
+                right = words[end].get("speaker")
+                too_short = (
+                    _run_duration(run) < opts.min_island_sec
+                    or len(run) <= opts.max_island_words
+                )
+                overlaps = any(w.get("overlap") for w in run)
+                # Завершённая фраза («Да.») — это полноценный ответ, не «островок».
+                complete = _ends_sentence(run[-1].get("text") or "")
+                if left and left == right and left != speaker and too_short \
+                        and not overlaps and not complete:
+                    for word in run:
+                        word["speaker"] = left
+                        word["speaker_source"] = "smoothed"
+                    changed += len(run)
+            index = end
+        fixed += changed
+        if not changed:
+            break
+    return fixed
+
+
 def join_words(words: Sequence[dict]) -> str:
     """Собрать текст блока из слов, не ломая пунктуацию (`слово ,` → `слово,`)."""
     text = " ".join((w.get("text") or "").strip() for w in words if (w.get("text") or "").strip())
@@ -224,7 +301,7 @@ def build_blocks(words, opts: MergeOptions = None) -> List[dict]:
             prev_end, start = prev.get("end"), word.get("start")
             if prev_end is not None and start is not None and float(start) - float(prev_end) > opts.pause_sec:
                 split = True
-            elif _ends_sentence(prev.get("text") or ""):
+            elif not opts.join_sentences and _ends_sentence(prev.get("text") or ""):
                 split = True
             elif not _fits(_block_of(current), [word], opts):
                 split = True
@@ -254,8 +331,10 @@ def _join_adjacent(blocks: List[dict], opts: MergeOptions) -> List[dict]:
             and start is not None
             and float(start) - float(prev_end) <= opts.join_gap_sec
         )
-        # Границу предложения не «сшиваем» обратно: это осмысленный разрез реплики.
-        if same and small_gap and not _ends_sentence(prev.get("text") or "") \
+        # Границу предложения не «сшиваем» обратно только при
+        # `join_sentences: false`: по умолчанию монолог идёт одним абзацем.
+        sentence_break = (not opts.join_sentences) and _ends_sentence(prev.get("text") or "")
+        if same and small_gap and not sentence_break \
                 and _fits(prev, block["words"], opts):
             prev["words"] = prev["words"] + block["words"]
             prev["end"] = block["end"] if block["end"] is not None else prev["end"]
@@ -267,9 +346,11 @@ def _join_adjacent(blocks: List[dict], opts: MergeOptions) -> List[dict]:
 
 
 def merge_transcript(words, exclusive_turns, regular_turns=None, opts: MergeOptions = None):
-    """Полный merge: спикеры по словам + блоки. Возвращает `(blocks, stats)`."""
+    """Полный merge: спикеры по словам + склейка блоков. Возвращает `(blocks, stats)`."""
     opts = opts or MergeOptions()
     words, stats = assign_speakers(words, exclusive_turns, regular_turns, opts)
+    # Правило 6: короткие «островки» чужого спикера внутри фразы — к соседям.
+    stats["smoothed_words"] = smooth_islands(words, opts)
     blocks = build_blocks(words, opts)
     stats["blocks"] = len(blocks)
     stats["speakers"] = sorted(
