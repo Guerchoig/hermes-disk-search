@@ -55,6 +55,12 @@ MAX_WINDOWS_PER_REQUEST = 10
 MAX_REQUESTS = 8
 #: Предел роста длины замены (кроме канонов глоссария).
 MAX_REPLACEMENT_RATIO = 3
+#: Минимальная доля токенов исходного фрагмента в замене (кроме канонов глоссария).
+MIN_REPLACEMENT_TOKEN_RATIO = 0.5
+#: Слово считается содержательным, если оно длиннее (нормализованно) этого порога.
+CONTENT_WORD_MIN_CHARS = 5
+#: Сходство, при котором слово считается сохранённым в замене (опечатка/форма).
+CONTENT_WORD_KEEP_RATIO = 0.80
 #: Минимальное сходство исходного фрагмента с вариантом глоссария, при котором
 #: каноническая замена (`replacement` содержит канон термина) разрешена **без**
 #: контекста (решение владельца 23.10.2026, вариант C).
@@ -561,6 +567,48 @@ def _variant_similarity(text: str, variants: Sequence[str]) -> float:
     return best
 
 
+def _content_words(text: str) -> List[str]:
+    """Содержательные слова фрагмента: нормализованные под-токены длиной ≥ 5."""
+    return [word for word in _sub_tokens(text) if len(word) >= CONTENT_WORD_MIN_CHARS]
+
+
+def _term_words(term) -> set:
+    """Слова вариантов и канона термина — их «потеря» при замене допустима."""
+    out = set()
+    if term is None:
+        return out
+    out.update(_sub_tokens(term.canonical))
+    for variant in term.all_variants:
+        out.update(_sub_tokens(variant))
+    return out
+
+
+def _word_kept(word: str, replacement_tokens: Sequence[str]) -> bool:
+    """Слово сохранено в замене: точное совпадение или близкая форма (≥0,80)."""
+    if word in replacement_tokens:
+        return True
+    return any(
+        difflib.SequenceMatcher(None, word, token).ratio() >= CONTENT_WORD_KEEP_RATIO
+        for token in replacement_tokens
+    )
+
+
+def _loses_content(before: str, replacement: str, term) -> bool:
+    """Теряет ли замена содержательные слова фрагмента (кроме слов термина).
+
+    Пример: `сейчас написано RP-система` → `сейчас ERP` теряет «написано» —
+    такой патч отклоняется (`content_lost`), хотя длина и числа формально в норме.
+    """
+    replacement_tokens = _sub_tokens(replacement)
+    exempt = _term_words(term)
+    for word in _content_words(before):
+        if word in exempt:
+            continue
+        if not _word_kept(word, replacement_tokens):
+            return True
+    return False
+
+
 def _match_term(glossary, before: str, replacement: str):
     """Термин глоссария, к которому относится патч.
 
@@ -694,6 +742,10 @@ class _Validator:
         if (not is_canonical
                 and len(_TOKEN_RE.findall(replacement)) > MAX_REPLACEMENT_RATIO * before_tokens):
             return "too_long", context
+        # Удаление содержания: нельзя заменять три слова одним не-каноном.
+        min_tokens = max(1, int(math.ceil(MIN_REPLACEMENT_TOKEN_RATIO * before_tokens)))
+        if not is_canonical and len(_TOKEN_RE.findall(replacement)) < min_tokens:
+            return "too_short", context
 
         forbidden = {glossary_mod.normalize(phrase) for phrase in self.glossary.forbid}
         if glossary_mod.normalize(replacement) in forbidden:
@@ -703,6 +755,8 @@ class _Validator:
             return "negation_lost", context
         if _numeric_tokens(before) != _numeric_tokens(replacement):
             return "numbers_changed", context
+        if _loses_content(before, replacement, term):
+            return "content_lost", context
 
         # needs_review: текст не меняется, контекст не требуется (решает человек).
         if not edit.get("needs_review"):

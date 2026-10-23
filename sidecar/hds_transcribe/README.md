@@ -182,8 +182,10 @@ whisperx — `align:whisperx`. `align.mode: whisperx` без пакета даё
 * Валидатор (без LLM) отклоняет патч **целиком** с машинной причиной:
   `unknown_word_ids`, `cross_block`, `non_contiguous_word_ids`, `speaker_mismatch`,
   `metadata_change` (спикер/start/end/alignment), `overlaps_applied`,
-  `no_change`, `too_long` (>3×), `forbidden`, `negation_lost`, `numbers_changed`,
-  `no_glossary_context`, `edit_limit`. Контекст глоссария не обязателен, если
+  `no_change`, `too_long` (>3×), `too_short` (потеря > половины токенов),
+  `content_lost` (потеря содержательного слова вне термина), `forbidden`,
+  `negation_lost`, `numbers_changed`, `no_glossary_context`, `edit_limit`.
+  Контекст глоссария не обязателен, если
   модель выставила `allow_global`, у термина `allow_global`/`priority: high`,
   либо замена содержит канон термина, а исходный фрагмент похож на его вариант
   (сходство ≥ 0,80: `RP-система` ↔ `rp система`). `needs_review: true` — текст

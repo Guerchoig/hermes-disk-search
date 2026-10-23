@@ -336,6 +336,36 @@ class LlmPatchTest(unittest.TestCase):
         self.assertEqual(result["edits"][0]["reason"], "no_glossary_context")
         self.assertEqual(blocks[0]["words"][1]["text"], "слайдик")
 
+    def test_deleting_whole_span_is_rejected(self):
+        # Qwen2.5 Q5_K_M предложила «сейчас написано RP-система» → «ERP-система»
+        # (потеря двух слов). Даже с allow_global патч не применяется.
+        words = [word(0, "сейчас"), word(1, "написано"),
+                 word(2, "RP-система,", alignment="low_confidence")]
+        blocks = [make_block(words)]
+        glossary = glossary_mod.Glossary.from_dict({"terms": [{
+            "canonical": "ERP", "variants": ["rp система"], "context": [],
+        }]})
+        with FakeLlm(content([edit([0, 1, 2], "ERP-система", allow_global=True)])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url), glossary)
+        self.assertEqual(result["stats"]["applied"], 0)
+        self.assertEqual(result["edits"][0]["reason"], "too_short")
+        self.assertEqual(blocks[0]["text"], "сейчас написано RP-система,")
+
+    def test_losing_one_content_word_is_rejected(self):
+        # Токенов достаточно (2 из 3), но потеряно содержательное «написано».
+        words = [word(0, "сейчас"), word(1, "написано"),
+                 word(2, "RP-система,", alignment="low_confidence")]
+        blocks = [make_block(words)]
+        glossary = glossary_mod.Glossary.from_dict({"terms": [{
+            "canonical": "ERP", "variants": ["rp система"], "context": [],
+        }]})
+        with FakeLlm(content([edit([0, 1, 2], "сейчас ERP-система",
+                                    allow_global=True)])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url), glossary)
+        self.assertEqual(result["stats"]["applied"], 0)
+        self.assertEqual(result["edits"][0]["reason"], "content_lost")
+        self.assertEqual(blocks[0]["text"], "сейчас написано RP-система,")
+
     def test_punctuation_only_patch_is_no_change(self):
         words = [word(0, "в"), word(1, "1С,", alignment="low_confidence"), word(2, "отчёт")]
         blocks = [make_block(words)]
