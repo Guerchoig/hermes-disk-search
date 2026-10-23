@@ -10,19 +10,22 @@ VRAM не складывается (§4.6). Модуль чистый: без to
 
 ```json
 {"edits": [{"word_ids": [128, 129], "replacement": "1С",
-            "reason": "глоссарий + контекст ERP", "needs_review": true,
-            "allow_global": false}]}
+            "reason": "глоссарий + контекст ERP", "needs_review": true}]}
 ```
 
 Валидатор (без LLM) принимает или отклоняет патч **целиком**:
-* `word_ids` существуют, лежат в одном блоке и у одного спикера;
+* `word_ids` существуют, лежат в одном блоке, у одного спикера и **входят в
+  отправленные окна** (`outside_window`): модель правит только то, что видела;
 * не меняются `speaker`/`start`/`end`/`alignment` (формат их не содержит, а
   попытка передать их в патче — отказ `metadata_change`);
 * не исчезают отрицания и не меняются числа/даты (`negation_lost`,
-  `numbers_changed`);
+  `numbers_changed`), а сохранившиеся слова идут в том же порядке (`word_order`:
+  отрицание не «переезжает» на другое слово);
 * длина замены ≤ 3× длины фрагмента (кроме канонов глоссария);
-* замена обоснована контекстом термина глоссария либо `allow_global: true`
-  (`no_glossary_context`);
+* замена обоснована **глоссарием** — контекст рядом, `allow_global`/`priority:
+  high` у термина, канон + похожий вариант (`no_glossary_context`). Флаг
+  `allow_global` в ответе модели гейт **не** открывает (решение владельца
+  23.10.2026): он только журналируется;
 * патчи не пересекаются с применёнными глоссарием/другими принятыми патчами;
 * не больше `llm.max_edits_per_1000` правок на 1000 слов (`edit_limit`).
 
@@ -103,7 +106,7 @@ SYSTEM_PROMPT = (
     "слова с идентификаторами word_id, спикера и подозрительные слова. "
     "Верни СТРОГО один JSON-объект без пояснений и markdown:\n"
     '{"edits": [{"word_ids": [1, 2], "replacement": "текст", '
-    '"reason": "кратко", "needs_review": false, "allow_global": false}]}\n'
+    '"reason": "кратко", "needs_review": false}]}\n'
     "Правила:\n"
     "1. Меняй только явные ошибки распознавания в границах указанных word_ids "
     "(термины, аббревиатуры, имена из глоссария, ослышки). НЕ перефразируй, не "
@@ -113,9 +116,10 @@ SYSTEM_PROMPT = (
     "needs_review: true.\n"
     "3. replacement — только текст замены для этих слов, без word_id и кавычек. "
     "Длина — не больше трёх длин исходного фрагмента.\n"
-    "4. allow_global: true ставь, если исправление — каноническое написание "
-    "термина из glossary (replacement содержит canonical, например canonical "
-    "«ERP» → «ERP-система» для «RP-система»); иначе allow_global: false.\n"
+    "4. Поле allow_global не используй: обоснование замены (контекст термина "
+    "из glossary или канон) проверяется автоматически, а флаг из ответа не "
+    "учитывается. Порядок слов фрагмента сохраняй — отрицание должно остаться "
+    "при том же слове.\n"
     "5. word_ids должны идти подряд и принадлежать одному окну. Если правок нет — "
     'верни {"edits": []}. Не предлагай замену, если текст уже верный (в том числе '
     "если меняется только регистр букв у корректной аббревиатуры).\n"
@@ -609,6 +613,45 @@ def _loses_content(before: str, replacement: str, term) -> bool:
     return False
 
 
+def _best_token_index(token: str, tokens: Sequence[str]) -> Optional[int]:
+    """Индекс наиболее похожего токена замены (точное совпадение или ≥ 0,80)."""
+    if token in tokens:
+        return list(tokens).index(token)
+    best: Optional[int] = None
+    best_ratio = 0.0
+    for index, other in enumerate(tokens):
+        ratio = difflib.SequenceMatcher(None, token, other).ratio()
+        if ratio > best_ratio:
+            best, best_ratio = index, ratio
+    return best if best_ratio >= CONTENT_WORD_KEEP_RATIO else None
+
+
+def _order_violated(before: str, replacement: str) -> bool:
+    """Меняется ли порядок сохранившихся слов фрагмента (решение 23.10.2026).
+
+    «договор **не** подписан сегодня» → «договор подписан **не** сегодня»: набор
+    отрицаний тот же, числа не тронуты, содержательные слова на месте, но смысл
+    переворачивается. Поэтому слова, которые остались в замене, обязаны идти в
+    том же порядке. Пропавшие слова здесь не проверяются — их потерю ловят
+    `too_short`/`content_lost`.
+    """
+    before_tokens = [
+        token for token in (glossary_mod.normalize(tok) for tok in _TOKEN_RE.findall(before or ""))
+        if token
+    ]
+    after_tokens = [
+        token
+        for token in (glossary_mod.normalize(tok) for tok in _TOKEN_RE.findall(replacement or ""))
+        if token
+    ]
+    positions: List[int] = []
+    for token in before_tokens:
+        index = _best_token_index(token, after_tokens)
+        if index is not None:
+            positions.append(index)
+    return any(later <= earlier for earlier, later in zip(positions, positions[1:]))
+
+
 def _match_term(glossary, before: str, replacement: str):
     """Термин глоссария, к которому относится патч.
 
@@ -653,6 +696,9 @@ class _Validator:
         self.glossary = glossary
         self.applied_spans = applied_spans or {}
         self.max_edits = max_edits
+        #: `word_id` слов, реально отправленных модели (окна батча). Патч вне
+        #: этого множества — `outside_window`: модель правит только то, что видела.
+        self.allowed_ids: Optional[set] = None
         self.accepted_spans: Dict[int, List[Tuple[int, int]]] = {}
         self.applied = 0
         self.words_by_id: Dict[int, Tuple[int, int]] = {}
@@ -662,6 +708,14 @@ class _Validator:
                 if isinstance(word_id, int):
                     self.words_by_id[word_id] = (block_index, pos)
 
+
+    def restrict_to(self, word_ids) -> None:
+        """Ограничить патчи словами одного батча окон (P4-гейт, `outside_window`).
+
+        Модель видит только окна кандидатов, поэтому её патч не может адресовать
+        слова других блоков/окон (ошибка модели или внедрённая в речь инструкция).
+        """
+        self.allowed_ids = set(word_ids)
 
     def check(self, edit: dict) -> Tuple[Optional[str], Optional[dict]]:
         """`(причина отказа | None, контекст)`. Причина — машинный код.
@@ -680,6 +734,9 @@ class _Validator:
         block_index = positions[0][0]
         if any(pos[0] != block_index for pos in positions):
             return "cross_block", None
+        # Слова обязаны быть в отправленных окнах (модель видит только их).
+        if self.allowed_ids is not None and any(word_id not in self.allowed_ids for word_id in ids):
+            return "outside_window", None
         block = self.blocks[block_index]
         words = block.get("words") or []
         local = sorted(pos[1] for pos in positions)
@@ -755,6 +812,9 @@ class _Validator:
             return "negation_lost", context
         if _numeric_tokens(before) != _numeric_tokens(replacement):
             return "numbers_changed", context
+        # Порядок слов: отрицание/смысл не должны «переезжать» (решение 23.10.2026).
+        if _order_violated(before, replacement):
+            return "word_order", context
         if _loses_content(before, replacement, term):
             return "content_lost", context
 
@@ -769,14 +829,15 @@ class _Validator:
     def _context_ok(self, term, edit, words, start: int, end: int) -> bool:
         """Обоснование замены (§4.2 + решение C от 23.10.2026).
 
-        `allow_global` от модели, `allow_global`/`priority: high` термина,
-        контекст термина рядом — или каноническая замена, когда исходный
-        фрагмент похож на вариант термина (≥ `VARIANT_FUZZY_MIN`). Последнее
-        закрывает `RP-система → ERP-система` без контекста, но не пропускает
-        посторонние вставки канона (`слайдик → слайд ERP`).
+        Только **глоссарий**: `allow_global`/`priority: high` термина, контекст
+        термина рядом — или каноническая замена, когда исходный фрагмент похож на
+        вариант термина (≥ `VARIANT_FUZZY_MIN`). Последнее закрывает
+        `RP-система → ERP-система` без контекста, но не пропускает посторонние
+        вставки канона (`слайдик → слайд ERP`).
+
+        `allow_global` из ответа модели гейт не открывает (решение владельца
+        23.10.2026): иначе флаг в JSON делал бы проверку контекста бессмысленной.
         """
-        if edit.get("allow_global"):
-            return True
         if term is None:
             return False
         if term.allow_global or term.priority == "high":
@@ -927,6 +988,18 @@ def _stats(edits: Sequence[dict]) -> dict:
 
 
 
+def _window_word_ids(blocks, windows: Sequence[Window]) -> set:
+    """`word_id` слов, реально попавших в промпт (объединение окон батча)."""
+    out = set()
+    for window in windows:
+        words = (blocks[window.block_index] or {}).get("words") or []
+        for word in words[window.start:window.end]:
+            word_id = word.get("word_id")
+            if isinstance(word_id, int):
+                out.add(word_id)
+    return out
+
+
 def run(blocks, params, glossary, applied_spans=None, review_spans=None) -> dict:
     """LLM-слой: кандидаты → запросы → валидатор → правки `blocks` на месте.
 
@@ -993,6 +1066,8 @@ def run(blocks, params, glossary, applied_spans=None, review_spans=None) -> dict
     applied_word_ids = set()
     for start in range(0, len(windows), MAX_WINDOWS_PER_REQUEST):
         batch = windows[start:start + MAX_WINDOWS_PER_REQUEST]
+        # Патч допустим только по словам этого батча (модель видит лишь их).
+        validator.restrict_to(_window_word_ids(blocks, batch))
         messages = build_messages(blocks, glossary, batch, applied_word_ids)
         content, error, latency = _post_chat(params, messages)
         summary["requests"] += 1

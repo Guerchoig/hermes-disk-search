@@ -16,7 +16,7 @@
 | Merge | max-overlap; `interpolated/low_confidence/failed` не двигают спикера; `overlap`/`ambiguous` в JSON |
 | Hotwords | `none` — ворота G1/G2 P3 не пройдены (числа — в `P3_REPORT.md`, `tools/parity/out/…`, не коммитится) |
 | Глоссарий | `glossary.py`: детерминированные замены по словам (`variants` — кандидаты, нужен `context`/`allow_global`/`priority: high`), `edits.json` |
-| LLM-постобработка | `enabled: false` (P4) |
+| LLM-постобработка | `enabled: false` (P4); валидатор: окна/порядок слов/глоссарий |
 
 Профили: `cuda` — основной; `cpu` — fallback и правильный выбор для iGPU;
 `dml` — код-путь/fallback (**не** ускорение: на встроенной AMD iGPU медленнее CPU
@@ -176,20 +176,23 @@ whisperx — `align:whisperx`. `align.mode: whisperx` без пакета даё
   на окно, ≤10 окон на запрос, ≤8 запросов на файл.
 * LLM возвращает **только JSON-патчи**
   `{"edits": [{"word_ids": [...], "replacement": "...", "reason": "...",
-  "needs_review": false, "allow_global": false}]}`; ответ разбирается терпимо
-  (markdown-обёртки, лишние поля, одиночная правка). Мусор — отклонённый патч,
-  текст не меняется.
+  "needs_review": false}]}`; ответ разбирается терпимо (markdown-обёртки, лишние
+  поля, одиночная правка). Мусор — отклонённый патч, текст не меняется.
 * Валидатор (без LLM) отклоняет патч **целиком** с машинной причиной:
-  `unknown_word_ids`, `cross_block`, `non_contiguous_word_ids`, `speaker_mismatch`,
-  `metadata_change` (спикер/start/end/alignment), `overlaps_applied`,
-  `no_change`, `too_long` (>3×), `too_short` (потеря > половины токенов),
-  `content_lost` (потеря содержательного слова вне термина), `forbidden`,
-  `negation_lost`, `numbers_changed`, `no_glossary_context`, `edit_limit`.
-  Контекст глоссария не обязателен, если
-  модель выставила `allow_global`, у термина `allow_global`/`priority: high`,
-  либо замена содержит канон термина, а исходный фрагмент похож на его вариант
-  (сходство ≥ 0,80: `RP-система` ↔ `rp система`). `needs_review: true` — текст
-  не меняется, случай идёт человеку.
+  `unknown_word_ids`, `cross_block`, `outside_window` (слово не входило в
+  отправленные окна — модель правит только то, что видела),
+  `non_contiguous_word_ids`, `speaker_mismatch`, `metadata_change`
+  (спикер/start/end/alignment), `overlaps_applied`, `no_change`, `too_long` (>3×),
+  `too_short` (потеря > половины токенов), `word_order` (порядок слов фрагмента
+  меняется — отрицание не может «переехать»), `content_lost` (потеря
+  содержательного слова вне термина), `forbidden`, `negation_lost`,
+  `numbers_changed`, `no_glossary_context`, `edit_limit`.
+* Обоснование замены берётся **только из глоссария**: контекст термина рядом,
+  `allow_global`/`priority: high` у термина, либо замена содержит канон, а
+  исходный фрагмент похож на вариант (сходство ≥ 0,80: `RP-система` ↔
+  `rp система`). Флаг `allow_global` в ответе модели гейт **не** открывает
+  (решение владельца 23.10.2026) — он лишь журналируется.
+  `needs_review: true` — текст не меняется, случай идёт человеку.
 * Лимит правок: `ceil(max_edits_per_1000 × слов / 1000)`, минимум 1.
 * `edits.json` — единый журнал: `source: glossary|llm`, `status:
   applied|rejected|needs_review`, `reason`, `model`, `latency_ms`, `llm_reason`;

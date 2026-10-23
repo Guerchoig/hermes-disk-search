@@ -188,13 +188,55 @@ class LlmPatchTest(unittest.TestCase):
                           blocks[0]["words"][2]["end"]), (2.0, 2.5))
         self.assertEqual(blocks[0]["words"][2]["alignment"], "low_confidence")
 
-    def test_allow_global_patch_applies_without_glossary_context(self):
+    def test_model_allow_global_does_not_open_context_gate(self):
+        # Решение владельца 23.10.2026: флаг allow_global из ответа модели не
+        # является обоснованием замены — без глоссария патч отклоняется.
         blocks = standard_blocks()
         with FakeLlm(content([edit([2], "ЕРП", allow_global=True)])) as fake:
             result = llm_patch.run(blocks, llm_params(base_url=fake.url),
                                    glossary_mod.Glossary())
-        self.assertEqual(result["stats"]["applied"], 1)
+        self.assertEqual(result["stats"]["applied"], 0)
+        self.assertEqual(result["edits"][0]["reason"], "no_glossary_context")
+        self.assertEqual(blocks[0]["words"][2]["text"], "ерпи")
+
+    def test_term_allow_global_applies_without_context(self):
+        # Законный путь: allow_global стоит у ТЕРМИНА в glossary.yaml.
+        blocks = standard_blocks()
+        glossary = glossary_mod.Glossary.from_dict({"terms": [{
+            "canonical": "ЕРП", "variants": ["ерпи"], "allow_global": True,
+        }]})
+        with FakeLlm(content([edit([2], "ЕРП")])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url), glossary)
+        self.assertEqual(result["stats"]["applied"], 1, result["edits"])
         self.assertEqual(blocks[0]["words"][2]["text"], "ЕРП")
+
+    def test_patch_outside_sent_windows_is_rejected(self):
+        # Второй блок не попал в окна (в нём нет подозрительных слов), значит
+        # модель его не видела — патч к нему недопустим.
+        blocks = standard_blocks() + [make_block(
+            [word(7, "второй", speaker="SPEAKER_01"),
+             word(8, "мой", speaker="SPEAKER_01")], speaker="SPEAKER_01")]
+        glossary = glossary_mod.Glossary.from_dict({"terms": [{
+            "canonical": "наш", "variants": ["мой"], "allow_global": True,
+        }]})
+        with FakeLlm(content([edit([8], "ваш")])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url), glossary)
+        self.assertEqual(result["stats"]["applied"], 0)
+        self.assertEqual(result["edits"][0]["reason"], "outside_window")
+        self.assertEqual(blocks[1]["words"][1]["text"], "мой")
+
+    def test_word_order_change_is_rejected(self):
+        # «не подписан» → «подписан не»: набор отрицаний тот же, числа не
+        # тронуты, но смысл обратный — порядок слов обязан сохраняться.
+        words = [word(0, "договор"), word(1, "не", alignment="low_confidence"),
+                 word(2, "подписан"), word(3, "сегодня")]
+        blocks = [make_block(words)]
+        with FakeLlm(content([edit([1, 2], "подписан не")])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url),
+                                   glossary_mod.Glossary())
+        self.assertEqual(result["stats"]["applied"], 0)
+        self.assertEqual(result["edits"][0]["reason"], "word_order")
+        self.assertEqual(blocks[0]["text"], "договор не подписан сегодня")
 
     def test_needs_review_patch_does_not_change_text(self):
         blocks = standard_blocks()
@@ -231,15 +273,18 @@ class LlmPatchTest(unittest.TestCase):
 
 
     def test_edit_limit_is_enforced(self):
-        blocks = standard_blocks()
-        # allowance = ceil(10 * 7 / 1000) = 1 → вторая правка отклоняется.
-        with FakeLlm(content([
-            edit([2], "ERP", allow_global=True),
-            edit([1], "бухгалтерия", allow_global=True),
-        ])) as fake:
-            result = llm_patch.run(blocks, llm_params(base_url=fake.url),
-                                   glossary_mod.Glossary())
-        self.assertEqual(result["stats"]["applied"], 1)
+        words = [word(0, "ерпи", alignment="low_confidence"),
+                 word(1, "зуп", alignment="low_confidence")]
+        blocks = [make_block(words)]
+        # Оба термина разрешены без контекста самим глоссарием (не моделью).
+        glossary = glossary_mod.Glossary.from_dict({"terms": [
+            {"canonical": "ERP", "variants": ["ерпи"], "allow_global": True},
+            {"canonical": "ЗУП", "variants": ["зуп"], "allow_global": True},
+        ]})
+        # allowance = ceil(10 * 2 / 1000) = 1 → вторая правка отклоняется.
+        with FakeLlm(content([edit([0], "ERP"), edit([1], "ЗУП")])) as fake:
+            result = llm_patch.run(blocks, llm_params(base_url=fake.url), glossary)
+        self.assertEqual(result["stats"]["applied"], 1, result["edits"])
         self.assertEqual(result["stats"]["rejected"], 1)
         self.assertIn("edit_limit", [e["reason"] for e in result["edits"]])
 
@@ -499,9 +544,18 @@ class PostprocessLlmTest(unittest.TestCase):
         with open(self.transcript, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
 
-    def run_postprocess(self, url, **llm):
+    #: Термин обосновывает LLM-патч контекстом («бухгалтерию» рядом), но сам в
+    #: тексте не встречается (`ерпи` — не вариант), поэтому глоссарий ничего не
+    #: меняет и правка остаётся за LLM.
+    LLM_GLOSSARY = {"terms": [{
+        "canonical": "ERP", "variants": ["еэрпи"], "context": ["бухгалтерию"],
+    }]}
+
+    def run_postprocess(self, url, glossary=True, **llm):
         request = {"job_id": "job-llm", "transcript_path": self.transcript,
                    "llm": dict(LLM_ON, base_url=url, **llm)}
+        if glossary:
+            request["glossary"] = self.LLM_GLOSSARY
         return worker.postprocess(request)
 
     def read(self, path):
@@ -509,7 +563,7 @@ class PostprocessLlmTest(unittest.TestCase):
             return json.load(f)
 
     def test_llm_patch_is_applied_and_journaled(self):
-        with FakeLlm(content([edit([2], "ERP", allow_global=True)])) as fake:
+        with FakeLlm(content([edit([2], "ERP")])) as fake:
             result = self.run_postprocess(fake.url)
         self.assertIn("ERP", result["text"])
         self.assertEqual(result["llm"]["applied"], 1)
@@ -534,7 +588,7 @@ class PostprocessLlmTest(unittest.TestCase):
         with open(self.transcript, encoding="utf-8") as f:
             before = json.load(f)
         with FakeLlm(content([edit([2], "ERP", allow_global=True)])) as fake:
-            result = self.run_postprocess(fake.url, enabled=False)
+            result = self.run_postprocess(fake.url, glossary=False, enabled=False)
         self.assertEqual(fake.requests, [])
         self.assertFalse(os.path.exists(self.edits))
         self.assertEqual(result["text"], "про бухгалтерию ерпи систему не закрыли 25")
@@ -580,7 +634,7 @@ class PostprocessLlmTest(unittest.TestCase):
         self.assertEqual(sources["llm"]["reason"], "overlaps_applied")
 
     def test_repeated_postprocess_is_idempotent(self):
-        with FakeLlm(content([edit([2], "ERP", allow_global=True)])) as fake:
+        with FakeLlm(content([edit([2], "ERP")])) as fake:
             first = self.run_postprocess(fake.url)
             second = self.run_postprocess(fake.url)
         self.assertEqual(first["text"], second["text"])
@@ -589,9 +643,9 @@ class PostprocessLlmTest(unittest.TestCase):
         self.assertEqual(saved["postprocess"]["llm"]["applied"], 1)
 
     def test_no_llm_and_no_glossary_clears_previous_markup(self):
-        with FakeLlm(content([edit([2], "ERP", allow_global=True)])) as fake:
+        with FakeLlm(content([edit([2], "ERP")])) as fake:
             self.run_postprocess(fake.url)
-        self.run_postprocess("http://127.0.0.1:9/v1", enabled=False)
+        self.run_postprocess("http://127.0.0.1:9/v1", glossary=False, enabled=False)
         saved = self.read(self.transcript)
         self.assertNotIn("postprocess", saved)
         self.assertFalse(saved["blocks"][0]["words"][2].get("needs_review", False))
