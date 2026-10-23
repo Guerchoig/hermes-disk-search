@@ -43,6 +43,17 @@
 > `transcribe.engine: legacy`). **Проверено:** `cargo fmt --check`,
 > `clippy --workspace --all-targets -D warnings`, `cargo test --workspace` и Python-набор
 > sidecar — зелёные локально; `rust.yml` и `release.yml` — все блокирующие джобы success.
+> Перед тегом найден и исправлен дефект поставки: `Worker::handshake` шёл через повтор с
+> перезапуском, и воркер, падающий на старте (интерпретатор есть, `torch`/`pyannote` нет —
+> ровно так выглядит архив **без** собранного venv), уводил клиент в бесконечную рекурсию
+> `restart → handshake` → `stack overflow` (`0xC00000FD`); `hds transcribe-check` на
+> распакованном архиве воспроизводил это локально. Теперь `hello` выполняется один раз,
+> регрессионный тест `worker_that_dies_on_start_returns_error_instead_of_recursing`.
+> **Ассеты (15 файлов):** Windows x64 258,8 МБ (+ sha256; проверено на скачанном архиве:
+> `sidecar\` с обоими воркерами и портативным CPython, `venv-transcribe` **нет**,
+> `bin\DirectML.dll` нет), рантаймы движка CUDA 593,8 МБ / Vulkan 89,9 МБ, macOS 296,1 МБ и
+> Metal 54,7 МБ (best-effort), клиентские пакеты 12,8/13,4 МБ и `client-install.ps1|sh`,
+> архивы исходников.
 >
 > дефектам, найденным при разборе «индексация на серверном стенде стоит»; схема БД, формат настроек и
 > поиск не менялись — переиндексация не требуется.
