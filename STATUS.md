@@ -2,7 +2,8 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
-> **Анонимизация документов (ветка `anonymizer-sidecar`, P1–P7, релиз 0.23.0):**
+> **Релиз 0.23.0 выпущен (26.10.2026, тег `v0.23.0`, ветка `anonymizer-sidecar`,
+> `RELEASE_NOTES_v0.23.0.md`) — анонимизация документов (P1–P7):**
 > документы (`docx/xlsx/txt/md/xml`) скрываются и восстанавливаются Python-sidecar
 > `sidecar/hds_anonymize` (движки из `anonymizer_proxy` без правок алгоритмов, offline-first) +
 > Rust-клиент `crates/hds-anonymize` + CLI `hds anon` + карточка «Анонимизация» в `hds ui`.
@@ -20,6 +21,13 @@
 > **Осталось:** golden-паритет NER (порог 0.3) и живой GPU-спайк — не выполнялись (нет весов и
 > запущенного `llm_host`); стек анонимизации ставится отдельными установщиками (`setup.ps1` его
 > пока не запускает, `hds check` показывает `warn` до установки).
+> **CI релиза (`release.yml`, прогон 40341474289):** все 11 джоб success — `check-version`
+> (тег = `__version__`), `test-rust`, `test-python` (212 тестов; FILE_BUSY помечен
+> Windows-only — на Linux rename поверх открытого файла разрешён), `build-sidecar-*`
+> (в архиве `hds_anonymize` + `hds_sidecar`, venv профилей нет), `fetch-engine-runtime-*`,
+> `build-*`, `release`. **Ассеты (15 файлов):** Windows x64 247,2 МБ (+sha256), macOS 282,6 МБ
+> (+sha256), клиентские пакеты 12,3/12,9 МБ, рантаймы движка CUDA 566,3 / Vulkan 85,7 /
+> Metal 52,2 МБ, `client-install.ps1|sh`, архивы исходников.
 >
 > **Диаризация Nemotron-3 (ветка `server-multiuser`, треки W0–W8 закрыты, W9 — документация):**
 > разделение по говорящим переведено с sortformer (4 спикера, GGUF в движке) на **Nemotron-3
