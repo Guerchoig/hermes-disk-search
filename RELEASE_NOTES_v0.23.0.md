@@ -12,7 +12,7 @@
 
 | Файл | Нужен? | Что это |
 |---|---|---|
-| `hds-0.23.0-windows-x64.zip` (+ `.sha256.txt`) | **Да, обязательно** (Windows) | полная поставка: `bin\` (`hds`, `hds_mcp`, `llm_host`), установщик `setup.cmd`, обёртки `install-server.cmd` и `update.cmd`, манифесты, собранный sidecar **с тремя воркерами** (`hds_extract`, `hds_transcribe`, `hds_anonymize`, `hds_sidecar`, портативный CPython), `config.example.yaml` (с секцией `anonymize`), `server_config.example.yaml`, `README.md`, `README_ANONYMIZATION.md`, `README_SERVER_MULTIUSER.md`, `client\` (пакеты + скрипты) |
+| `hds-0.23.0-windows-x64.zip` (+ `.sha256.txt`) | **Да, обязательно** (Windows) | полная поставка: `bin\` (`hds`, `hds_mcp`, `llm_host`), установщик `setup.cmd`, обёртки `install-server.cmd` и `update.cmd`, манифесты, собранный sidecar **с тремя воркерами** (`hds_extract`, `hds_transcribe`, `hds_anonymize`, `hds_sidecar`, портативный CPython), `config.example.yaml` (с секцией `anonymize`), `server_config.example.yaml`, `README.md`, `README_SERVER_MULTIUSER.md`, `client\` (пакеты + скрипты) |
 | `client-install.ps1` / `client-install.sh` | Для установки клиента | скрипт-установщик (токен аргументом): скачает пакет с сервера, распакует и подключит Cline |
 | `hds-client-0.23.0-windows-x64.zip` (+ `.sha256.txt`) | Для клиента (если не через скрипт) | тонкий клиент: `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt` |
 | `hds-client-0.23.0-macos-arm64.zip` (+ `.sha256.txt`) | Только для macOS | то же для Apple Silicon |
@@ -25,6 +25,10 @@
 **В архив не входят** (установщик готовит на машине): модели поиска, модели расшифровки и
 **venv профиля расшифровки**, а также **стек анонимизации** — окружение `sidecar\venv-anonymize`
 и модели GLiNER PII / navec / slovnet. Порядок установки — ниже.
+
+Руководство `README_ANONYMIZATION.md` есть в архивах исходников и в репозитории (короткая версия —
+глава 19 `README.md`); в архив приложения файл попадёт со следующего выпуска
+(в 0.23.0 его там ещё нет — это исправлено в `installers\build_rust_release.ps1`).
 
 ## Что нового
 
