@@ -271,6 +271,12 @@ class PartialScenariosTest(RoundtripBase):
         res = _run(self.h.anonymize(src, out, values=["Иванов Иван"]))
         self.assertTrue(os.path.isfile(res["out_path"]))
 
+    @unittest.skipUnless(
+        os.name == "nt",
+        "FILE_BUSY — сценарий Windows: Word/LibreOffice держат файл и замена "
+        "даёт PermissionError. На POSIX rename поверх открытого файла разрешён, "
+        "поэтому сценарий там не воспроизводится",
+    )
     def test_file_busy(self):
         src = os.path.join(self.dir, "doc.txt")
         with open(src, "w", encoding="utf-8", newline="") as f:
