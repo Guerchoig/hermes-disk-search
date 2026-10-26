@@ -756,6 +756,7 @@ dependencies = [
 name = "hds-ui"
 version = "0.1.0"
 dependencies = [
+ "hds-anonymize",
  "hds-core",
  "hds-extract",
  "hds-index",

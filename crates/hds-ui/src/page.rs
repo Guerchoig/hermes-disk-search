@@ -50,6 +50,7 @@ pub const PAGE: &str = r#"<!doctype html>
  <nav class="tabs">
   <button data-tab="search" class="active" onclick="showTab('search')">Главная</button>
   <button data-tab="transcribe" onclick="showTab('transcribe')">Транскрибация</button>
+  <button data-tab="anonymize" onclick="showTab('anonymize')">Анонимизация</button>
  </nav>
  <div id="tab-search">
  <section><h2>Состояние</h2><div id="status" class="muted">…</div></section>
@@ -217,6 +218,47 @@ pub const PAGE: &str = r#"<!doctype html>
      <span id="trmsg" class="muted"></span></div>
    </div>
   </div>
+ </div>
+
+ <div id="tab-anonymize" hidden>
+  <section><h2>Анонимизация документов</h2>
+   <div class="muted">Вход — файл или папка (папка обрабатывается по верхнему уровню).
+    Выходной каталог — <code>anonymize.output_dir</code> из конфига: его можно изменить
+    и сохранить. Форматы: docx, xlsx, txt, md, xml.</div>
+   <div class="row" style="margin-top:8px"><span class="muted" style="min-width:70px">путь</span>
+    <input id="anopath" placeholder="D:\in" style="min-width:420px"
+     onkeydown="if(event.key==='Enter')loadAnonLs()">
+    <button onclick="loadAnonLs()">Обзор</button>
+    <span id="anolsmsg" class="muted"></span></div>
+   <div class="row" style="margin-top:6px"><span class="muted" style="min-width:70px">out_dir</span>
+    <input id="anoutdir" style="min-width:420px">
+    <button onclick="saveAnonOutDir()">Сохранить</button>
+    <span id="anoutmsg" class="muted"></span></div>
+   <div id="anoninfo" class="muted">…</div></section>
+
+  <section><h2>Найденные файлы</h2>
+   <div class="row"><button onclick="loadAnonLs()">Обновить список</button>
+    <span id="anoncount" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Файл</th><th>Размер</th><th>Изменён</th><th>Станет</th></tr></thead>
+    <tbody id="anonrows"><tr><td colspan=4 class="muted">введите путь и нажмите «Обзор»</td></tr></tbody></table>
+   <div class="muted">Клик по строке подставляет этот файл в поле входа — обработается только он.
+    Файлы с пометкой «уже обработан» — результат прежнего акта (повтор даст warning).</div></section>
+
+  <section><h2>Действия</h2>
+   <div class="muted">Значения и токены — по одному на строку. Значения PII в отчёт не выводятся:
+    только токены и счётчики. Одна активная пачка — кнопки блокируются до завершения.</div>
+   <textarea id="anonitems" spellcheck="false"
+    placeholder="значения (скрыть указанное) или токены [PERSON_1] (показать указанное)"></textarea>
+   <div class="row" style="margin-top:8px">
+    <button id="anbtn1" onclick="anonRun('anonymize')">Скрыть всё</button>
+    <button id="anbtn2" onclick="anonRun('values')">Скрыть указанное</button>
+    <button id="anbtn3" onclick="anonRun('deanonymize')">Показать всё</button>
+    <button id="anbtn4" onclick="anonRun('deanon-values')">Показать указанное</button>
+    <span id="anrunmsg" class="muted"></span></div>
+   <div id="anprogress" class="muted">готов к запуску</div></section>
+
+  <section><h2>Отчёт</h2>
+   <div id="anreport" class="muted">отчёта пока нет</div></section>
  </div>
 
 </main>
@@ -436,13 +478,15 @@ async function clineSync(){
 }
 // --- Транскрибация (PLAN_AUTO_TRANSCRIBE §8) ---
 function showTab(name){
-  const tr=(name==='transcribe');
-  document.getElementById('tab-search').style.display=tr?'none':'block';
-  document.getElementById('tab-transcribe').style.display=tr?'block':'none';
+  const tabs=['search','transcribe','anonymize'];
+  const cur=tabs.indexOf(name)>=0? name : 'search';
+  tabs.forEach(function(t){
+    document.getElementById('tab-'+t).style.display=(t===cur?'block':'none'); });
   Array.prototype.forEach.call(document.querySelectorAll('nav.tabs button'), function(b){
-    b.classList.toggle('active', b.getAttribute('data-tab')===name); });
-  try{ localStorage.setItem('hds.tab', name); }catch(e){}
-  if(tr){ loadTrList(); loadTrDirs(); loadDaemon(); }
+    b.classList.toggle('active', b.getAttribute('data-tab')===cur); });
+  try{ localStorage.setItem('hds.tab', cur); }catch(e){}
+  if(cur==='transcribe'){ loadTrList(); loadTrDirs(); loadDaemon(); }
+  if(cur==='anonymize'){ loadAnonLs(); loadAnonStatus(); }
 }
 function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
 function fmtTime(t){ return t? new Date(t*1000).toLocaleString() : '—'; }
@@ -578,10 +622,113 @@ async function watchAct(action){
     await loadWatchDaemon();
   }catch(e){ m.textContent='ошибка: '+e; }
 }
+// --- Анонимизация (PLAN_ANONYMIZER_SIDECAR §2.5) ---
+let anTimer=null;
+function anButtons(on){
+  ['anbtn1','anbtn2','anbtn3','anbtn4'].forEach(function(id){
+    const b=document.getElementById(id); if(b) b.disabled=!!on; });
+}
+function anonItems(){
+  const t=document.getElementById('anonitems').value||'';
+  return t.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
+}
+async function loadAnonLs(){
+  const p=document.getElementById('anopath').value.trim();
+  const m=document.getElementById('anolsmsg'); m.textContent='…';
+  try{ const j=await jget('/api/anonymize/ls?path='+encodeURIComponent(p));
+    if(j.out_dir) document.getElementById('anoutdir').value=j.out_dir;
+    document.getElementById('anoninfo').innerHTML='каталог выхода: <code>'+esc(j.out_dir||'?')+
+      '</code> · форматы: '+esc((j.formats||[]).join(', '))+
+      (j.formats_source==='fallback'? ' <span class="warnbox">воркер недоступен — форматы по умолчанию</span>':'')+
+      (j.db_path? '<br>БД токенов: <code>'+esc(j.db_path)+'</code>':'');
+    if(j.error) m.innerHTML='<span class="err">'+esc(j.error)+'</span>';
+    else m.textContent='файлов: '+((j.files||[]).length);
+    const tb=document.getElementById('anonrows');
+    const f=j.files||[];
+    document.getElementById('anoncount').textContent='найдено: '+f.length;
+    if(!f.length){ tb.innerHTML='<tr><td colspan=4 class="muted">'+esc(j.note||'нет файлов')+'</td></tr>'; return; }
+    tb.innerHTML=f.map(function(x){
+      return '<tr data-path="'+esc(x.path)+'" title="подставить этот файл во вход"><td>'+esc(x.name)+
+        (x.processed?' <span class="warnbox">уже обработан</span>':'')+
+        '</td><td class="muted">'+fmtSize(x.size)+'</td><td class="muted">'+esc(fmtTime(x.mtime))+
+        '</td><td class="muted">'+esc(x.anonymized_out||'')+'</td></tr>';
+    }).join('');
+    Array.prototype.forEach.call(tb.querySelectorAll('tr'), function(r){
+      r.onclick=function(){ document.getElementById('anopath').value=r.getAttribute('data-path'); loadAnonLs(); };
+    });
+  }catch(e){ m.innerHTML='<span class="err">ошибка: '+esc(''+e)+'</span>'; }
+}
+async function saveAnonOutDir(){
+  const m=document.getElementById('anoutmsg'); m.textContent='…';
+  try{ const r=await jpost('/api/config/anonymize-dirs',{out_dir:document.getElementById('anoutdir').value.trim()});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function anonRun(action){
+  const p=document.getElementById('anopath').value.trim();
+  const m=document.getElementById('anrunmsg');
+  if(!p){ m.textContent='укажите путь (файл или папка)'; return; }
+  const items=anonItems();
+  if((action==='values'||action==='deanon-values') && !items.length){
+    m.textContent='для «указанного» заполните список (по одному на строку)'; return; }
+  m.textContent='запуск…'; anButtons(true);
+  try{ const r=await jpost('/api/anonymize/run',{path:p,action:action,items:items});
+    m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+    if(r.started) pollAnon(); else anButtons(false);
+  }catch(e){ m.textContent='ошибка: '+e; anButtons(false); }
+}
+async function loadAnonStatus(){
+  try{ const j=await jget('/api/anonymize/status'); anonShow(j); }catch(e){}
+}
+async function pollAnon(){
+  try{ const j=await jget('/api/anonymize/status'); anonShow(j);
+    if(j.running){ if(!anTimer) anTimer=setInterval(pollAnon, 2000); }
+    else if(anTimer){ clearInterval(anTimer); anTimer=null; loadAnonLs(); }
+  }catch(e){ document.getElementById('anprogress').textContent='ошибка статуса: '+e; }
+}
+function anonTokens(t){
+  return t.map(function(x){ return esc(x.token)+'×'+x.count; }).join(', ');
+}
+function anonShow(j){
+  const p=document.getElementById('anprogress'), r=document.getElementById('anreport');
+  if(j.running){
+    anButtons(true);
+    p.textContent='… '+esc(j.title||j.action||'')+' · '+esc(j.stage||'')+
+      (j.detail? ' · '+j.detail : '')+' · файлов: '+j.done+'/'+j.total+
+      (j.current? ' · текущий: '+j.current : '')+' · '+j.elapsed_sec+' с';
+  } else { anButtons(false);
+    p.textContent=j.total? 'акт завершён ('+j.elapsed_sec+' с)' : 'готов к запуску';
+  }
+  const res=j.result||null;
+  if(!res){ if(!j.running) r.innerHTML='<span class="muted">отчёта пока нет</span>'; return; }
+  const files=res.files||[];
+  let h='<div class="row"><b>'+esc(res.title||'')+'</b>: '+esc(res.msg||'')+
+    ' · файлов: '+(res.total||files.length)+' · неудач: '+(res.failed||0)+
+    ' · устройство: '+esc(res.device||'')+'</div>';
+  if(res.lease) h+='<div class="warnbox">'+esc(res.lease)+'</div>';
+  h+='<table class="tr"><thead><tr><th>Файл</th><th>Выход</th><th>Токены</th><th>Итог</th></tr></thead><tbody>';
+  h+=files.map(function(f){
+    let toks='—';
+    if(f.tokens&&f.tokens.length) toks=anonTokens(f.tokens);
+    else if(f.restored&&f.restored.length) toks='восстановлено: '+f.restored.map(esc).join(', ');
+    let extra='';
+    if(typeof f.matched_count==='number'||typeof f.unmatched_count==='number'){
+      extra=' · найдено: '+(f.matched_count||0)+', не найдено: '+(f.unmatched_count||0); }
+    const warn=(f.warnings&&f.warnings.length)? '<div class="muted">'+f.warnings.map(esc).join('; ')+'</div>':'';
+    const st=f.ok? '<span class="ok">готово</span>'+extra
+      : '<span class="err">'+esc(f.kind||'error')+': '+esc(f.error||'')+'</span>'+
+        (f.hint? '<div class="muted">'+esc(f.hint)+'</div>':'');
+    return '<tr><td>'+esc(f.file||'')+'</td><td class="muted">'+esc(f.out_path||'—')+
+      '</td><td class="muted">'+toks+'</td><td>'+st+warn+'</td></tr>';
+  }).join('');
+  h+='</tbody></table>';
+  r.innerHTML=h;
+}
 function initTab(){
   let t='search';
   try{ t=localStorage.getItem('hds.tab')||'search'; }catch(e){}
-  showTab(t==='transcribe'?'transcribe':'search');
+  const known=['search','transcribe','anonymize'];
+  showTab(known.indexOf(t)>=0? t : 'search');
   loadWatchDaemon();
 }
 initTab();

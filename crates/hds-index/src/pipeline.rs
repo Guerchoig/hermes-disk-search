@@ -86,8 +86,10 @@ pub fn index_filter(cfg: &Config) -> (Excludes, IndexLimits) {
 }
 
 /// R2.1 (PLAN_TRANSCRIBE_SERVICE): каталоги конвейера автотранскрибации, исключаемые из
-/// индексации неявно: `auto_transcribe.inbox_dir`, `out_dir`, `state_dir`. `state_dir`
-/// относительный — приводится к абсолютному пути от корня проекта.
+/// индексации неявно: `auto_transcribe.inbox_dir`, `out_dir`, `state_dir`,
+/// `anonymize.output_dir` (P5, `PLAN_ANONYMIZER_SIDECAR` §2.6 — анонимизированные
+/// копии индексировать не нужно: в БД остались бы токены вместо PII, а оригинал
+/// уже проиндексирован). Относительные пути приводятся к абсолютным от корня.
 pub fn implicit_excludes(cfg: &Config) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for key in ["auto_transcribe.inbox_dir", "auto_transcribe.out_dir"] {
@@ -98,18 +100,21 @@ pub fn implicit_excludes(cfg: &Config) -> Vec<String> {
             }
         }
     }
-    if let Some(s) = dig(cfg, "auto_transcribe.state_dir").and_then(|v| v.as_str()) {
-        let s = s.trim();
-        if !s.is_empty() {
-            let p = Path::new(s);
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                project_root().join(p)
-            };
-            let abs = abs.to_string_lossy().to_string();
-            if !out.iter().any(|x| x == &abs) {
-                out.push(abs);
+    // Относительные пути этих ключей приводим к абсолютным от корня проекта.
+    for key in ["auto_transcribe.state_dir", "anonymize.output_dir"] {
+        if let Some(s) = dig(cfg, key).and_then(|v| v.as_str()) {
+            let s = s.trim();
+            if !s.is_empty() {
+                let p = Path::new(s);
+                let abs = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    project_root().join(p)
+                };
+                let abs = abs.to_string_lossy().to_string();
+                if !out.iter().any(|x| x == &abs) {
+                    out.push(abs);
+                }
             }
         }
     }

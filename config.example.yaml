@@ -402,6 +402,29 @@ auto_transcribe:
   #          управления (service/task/process) и действия уводит в SCM.
 
 
+# --- Анонимизация документов (PLAN_ANONYMIZER_SIDECAR) --------------------------
+# Python-sidecar `sidecar/hds_anonymize` + Rust-клиент `hds-anonymize`:
+# NER-модели (GLiNER PII / Natasha+Slovnet) скрывают сущности в DOCX/XLSX/TXT/MD/XML
+# и восстанавливают их из БД токенов. UI: закладка «Анонимизация»; CLI `hds anon`.
+# Решения: сессий нет (только вход/выход), токены per-type + дедуп по (значение, тип),
+# модели NER не меняем. Секция может отсутствовать — карточка создаст её при сохранении.
+anonymize:
+  output_dir: 'data/anonymized'          # выходной каталог (из индексации исключается неявно)
+  db_path: 'data/anonymize.db'           # SQLite токенов (WAL); Rust к БД не обращается
+  model: 'knowledgator/gliner-pii-large-v1.0'
+  threshold: 0.3                         # как в anonymizer_proxy (НЕ 0.5)
+  max_input_chars: 1500                  # окно модели; длинный текст — чанки с перекрытием
+  chunk_overlap: 200
+  timeout_sec: 300                       # таймаут NER-вызова
+  natasha: true                          # второй движок (navec/slovnet/pymorphy2)
+  max_file_mb: 200                       # гиганты пропускаются с warning
+  gpu: auto                              # auto = lease у llm_host, иначе CPU; off = всегда CPU
+  llm_host_url: 'http://127.0.0.1:8010'  # порт роли chat (lease /internal/anon/*)
+  lease_timeout_sec: 120                 # ожидание занятого chat-сеанса
+  gpu_reserve_mb: 2048                   # NVML-резерв GLiNER (модель ~1 ГБ + активации)
+  request_timeout_sec: 600               # RPC на файл
+  idle_timeout_sec: 60                   # простой воркера до выгрузки
+
 
 # --- Транскрибация/диаризация на Python-sidecar (P1) --------------------------
 # Новый боевой путь: GigaAM-v3 (e2e_rnnt, fp16 CUDA) + pyannote community-1.

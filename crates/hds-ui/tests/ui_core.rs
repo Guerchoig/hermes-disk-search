@@ -697,3 +697,112 @@ fn access_token_new_issues_working_token() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+// --- P5: закладка «Анонимизация» (PLAN_ANONYMIZER_SIDECAR §2.5) ---
+
+/// Страница содержит закладку, карточку и API-маршруты анонимизации.
+#[test]
+fn page_has_anonymize_tab() {
+    let (_, _, body) = route("GET", "/", "", &ReqHeaders::default(), "");
+    for needle in [
+        "tab-anonymize",
+        "/api/anonymize/ls",
+        "/api/anonymize/status",
+        "/api/anonymize/run",
+        "/api/config/anonymize-dirs",
+        "Скрыть всё",
+        "Скрыть указанное",
+        "Показать всё",
+        "Показать указанное",
+        "anonitems",
+        "anopath",
+        "anreport",
+    ] {
+        assert!(body.contains(needle), "в странице нет {needle}");
+    }
+}
+
+/// Статус акта доступен сразу (акта нет — нейтральное состояние, без воркера).
+#[test]
+fn anonymize_status_is_idle_shape() {
+    let (status, _, body) = route(
+        "GET",
+        "/api/anonymize/status",
+        "",
+        &ReqHeaders::default(),
+        "",
+    );
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["running"], false);
+    assert!(v["files"].is_array(), "{v}");
+}
+
+/// POST без CSRF-заголовка отклоняется (как остальные POST-маршруты UI).
+#[test]
+fn anonymize_run_requires_csrf() {
+    let bad = ReqHeaders {
+        origin: None,
+        content_type: None,
+        x_hds_ui: None,
+        authorization: None,
+        ..ReqHeaders::default()
+    };
+    assert_eq!(route("POST", "/api/anonymize/run", "", &bad, "{}").0, 403);
+}
+
+/// Пустой путь/неизвестное действие/пустой список — понятные ошибки без запуска
+/// воркера (валидация идёт до чтения конфига и spawn).
+#[test]
+fn anonymize_run_validates_body() {
+    let (status, _, body) = route("POST", "/api/anonymize/run", "", &h(), "{}");
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["error"].as_str().unwrap_or("").contains("путь не задан"),
+        "{v}"
+    );
+
+    let (_, _, body) = route(
+        "POST",
+        "/api/anonymize/run",
+        "",
+        &h(),
+        r#"{"path":"D:/nope","action":"bogus"}"#,
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false);
+
+    let (_, _, body) = route(
+        "POST",
+        "/api/anonymize/run",
+        "",
+        &h(),
+        r#"{"path":"D:/nope","action":"values"}"#,
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false);
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("хотя бы один элемент"),
+        "{v}"
+    );
+}
+
+/// Пустой выходной каталог не пишется в config.yaml (валидация до файла).
+#[test]
+fn anonymize_out_dir_rejects_empty() {
+    let (status, _, body) = route(
+        "POST",
+        "/api/config/anonymize-dirs",
+        "",
+        &h(),
+        r#"{"out_dir":"  "}"#,
+    );
+    assert_eq!(status, 200);
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["ok"], false);
+}

@@ -10,6 +10,9 @@ hds-core = { path = "../hds-core" }
 hds-index = { path = "../hds-index" }
 hds-search = { path = "../hds-search" }
 hds-extract = { path = "../hds-extract" }
+# P5 (PLAN_ANONYMIZER_SIDECAR §2.5): карточка «Анонимизация» — типизированный
+# клиент Python-воркера, обход папки и GPU-lease.
+hds-anonymize = { path = "../hds-anonymize" }
 hds-llama = { path = "../hds-llama" }
 walkdir.workspace = true
 serde_yaml.workspace = true

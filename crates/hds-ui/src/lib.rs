@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod anonymize;
 pub mod config_edit;
 pub mod page;
 pub mod transcribe;
@@ -1941,6 +1942,12 @@ pub fn route_full(
                 }
                 json_ok(transcribe::file_json(&name))
             }
+            // P5 (§2.5): обзор входа и ход акта анонимизации.
+            ("GET", "/api/anonymize/ls") => {
+                let path = qp(query, "path").unwrap_or_default();
+                json_ok(anonymize::ls_json(&path))
+            }
+            ("GET", "/api/anonymize/status") => json_ok(anonymize::status_json()),
             ("GET", "/api/config") => json_ok(config_edit::get_config()),
             ("GET", "/api/access/users") => json_ok(access_users_json(access_path)),
             ("GET", "/api/access/projects") => json_ok(access_projects_json(access_path)),
@@ -2127,6 +2134,18 @@ pub fn route_full(
                             .unwrap_or("")
                             .to_string();
                         json_ok(config_edit::set_transcribe_dirs(&inbox, &out))
+                    }
+                    // P5 (§2.5): акт анонимизации (фоновая пачка, поллинг
+                    // `/api/anonymize/status`). Значения PII в ответ не попадают.
+                    "/api/anonymize/run" => json_ok(anonymize::run_json(body)),
+                    "/api/config/anonymize-dirs" => {
+                        let v = serde_json::from_str::<Value>(body).unwrap_or(Value::Null);
+                        let out = v
+                            .get("out_dir")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string();
+                        json_ok(config_edit::set_anonymize_out_dir(&out))
                     }
                     _ => (
                         404,

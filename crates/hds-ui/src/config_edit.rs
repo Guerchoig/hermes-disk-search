@@ -129,6 +129,56 @@ pub fn set_transcribe_dirs(inbox: &str, out: &str) -> Value {
     }
 }
 
+/// `POST /api/config/anonymize-dirs`: выходной каталог анонимизации
+/// (`PLAN_ANONYMIZER_SIDECAR.md` §2.5/§2.6).
+///
+/// Секции `anonymize` в `config.yaml` может не быть (карточка появилась позже
+/// остальных секций) — тогда она дописывается в конец файла: без этого первое
+/// сохранение из UI падало бы на «не найдена секция».
+pub fn set_anonymize_out_dir(out: &str) -> Value {
+    let out = out.trim().trim_matches('"').trim_matches('\'').to_string();
+    if out.is_empty() {
+        return json!({ "ok": false, "msg": "пустой выходной каталог" });
+    }
+    let text = match std::fs::read_to_string(config_path()) {
+        Ok(t) => t,
+        Err(e) => return json!({ "ok": false, "msg": format!("чтение config.yaml: {e}") }),
+    };
+    let has_section = text
+        .split('\n')
+        .any(|l| l == "anonymize:" || l.starts_with("anonymize:"));
+    let new_text = if has_section {
+        match replace_scalar(&text, "anonymize", "output_dir", &out) {
+            Ok(t) => t,
+            Err(e) => return json!({ "ok": false, "msg": e }),
+        }
+    } else {
+        let mut t = text.clone();
+        if !t.ends_with('\n') {
+            t.push('\n');
+        }
+        t.push_str("\nanonymize:\n  output_dir: '");
+        t.push_str(&out.replace('\'', "''"));
+        t.push_str("'\n");
+        t
+    };
+    let cfg = match load_text(&new_text) {
+        Ok(c) => c,
+        Err(e) => {
+            return json!({ "ok": false, "msg": format!("итоговый config.yaml некорректен: {e}") })
+        }
+    };
+    if scal(&cfg, "anonymize.output_dir") != out {
+        return json!({ "ok": false,
+            "msg": "значение не применилось — проверьте секцию anonymize в config.yaml" });
+    }
+    match write_config(&new_text) {
+        Ok(()) => json!({ "ok": true, "out_dir": out,
+            "msg": "Сохранено. Применяется к новым актам анонимизации." }),
+        Err(e) => json!({ "ok": false, "msg": e }),
+    }
+}
+
 /// Значения списка `key` как строки (для проверки после записи).
 fn list_of(cfg: &Config, key: &str) -> Option<Vec<String>> {
     dig(cfg, key).and_then(|v| v.as_sequence()).map(|s| {
