@@ -85,7 +85,8 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check numpy PyYAML
+        # python-docx/openpyxl/lxml: module-level imports of the anonymize worker.
+        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml
 
       - name: Python sidecar tests (unittest)
         env:
@@ -179,6 +180,8 @@ jobs:
             "sidecar\hds_sidecar\__init__.py",
             "sidecar\hds_transcribe\worker.py",
             "sidecar\hds_transcribe\requirements.lock",
+            "sidecar\hds_anonymize\worker.py",
+            "sidecar\hds_anonymize\requirements.lock",
             "sidecar\python")) {
             if (-not (Test-Path (Join-Path $root $f))) { throw "missing in the archive: $f" }
           }
@@ -187,6 +190,10 @@ jobs:
           $venv = Get-ChildItem (Join-Path $root "sidecar") -Directory -Filter "venv-transcribe*" `
             -ErrorAction SilentlyContinue
           if ($venv) { throw "the transcription venv must not be in the archive: $($venv.Name -join ', ')" }
+          # P5-P6: the anonymization venv (3-6 GB) is built by the installer too.
+          $anonVenv = Get-ChildItem (Join-Path $root "sidecar") -Directory -Filter "venv-anonymize*" `
+            -ErrorAction SilentlyContinue
+          if ($anonVenv) { throw "the anonymization venv must not be in the archive: $($anonVenv.Name -join ', ')" }
           # The unpacked archive has no config.yaml (the installer generates it),
           # and `transcribe-check` reads the config before anything else: point it
           # at a minimal one so the smoke checks the sidecar tree, not a missing file.
@@ -202,6 +209,11 @@ jobs:
           if (-not $info.ok) { throw "transcribe-check reports not ok" }
           if (-not $info.python) { throw "transcribe-check found no worker interpreter" }
           Write-Host ("[ok] transcribe-check: engine=" + $info.engine + ", python=" + $info.python)
+
+          # P5: the anonymize CLI must be wired; the venv is not shipped and the
+          # smoke config has no `anonymize` section - `anon --help` still works.
+          & "$root\bin\hds.exe" anon --help
+          if ($LASTEXITCODE -ne 0) { throw "anon --help exited with $LASTEXITCODE" }
 
       - uses: actions/upload-artifact@v5
         with:

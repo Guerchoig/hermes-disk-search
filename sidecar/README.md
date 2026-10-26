@@ -13,6 +13,7 @@
 | `hds_extract/worker.py` | воркер: `hello`/`extract`/`normalize`/`clip_image`/`shutdown`, idle-timeout, изоляция stdout; транспорт — `hds_sidecar` |
 | `hds_extract/requirements.lock` | зависимости воркера (вариант A, сняты со спайка 3) |
 | `hds_transcribe/` | воркер транскрибации/диаризации (GigaAM-v3 + pyannote, профили cuda/cpu/dml), см. `hds_transcribe/README.md` |
+| `hds_anonymize/` | воркер анонимизации/деанонимизации (GLiNER PII / Natasha+Slovnet, DOCX/XLSX/TXT/MD/XML, база меток SQLite), см. раздел ниже |
 
 `hds_sidecar` намеренно **не импортирует** torch/fitz/pymorphy3 на уровне
 модуля: иначе один воркер тянул бы зависимости другого (правило границы §5.1).
@@ -77,6 +78,33 @@ Rust ищет интерпретатор так: `HDS_TRANSCRIBE_PYTHON` → `si
 `<models>\gigaam`, `<models>\hf-home`, `<models>\gigaam-onnx\<variant>`;
 в рантайме воркер работает с `HF_HUB_OFFLINE=1` (сервер — LocalSystem).
 Манифест загрузки с пинами ревизий и sha256 — `<models>\transcribe-models.json`.
+
+## Анонимизация (P5–P6): venv, модели и контракт
+
+Третий воркер (`hds_anonymize/`) тоже живёт в **своём** venv: в lock есть `torch`
+(его импортирует GLiNER даже для ONNX-пути) и `onnxruntime`, которых нет у извлечения.
+
+| Профиль | venv | Что внутри |
+|---|---|---|
+| `cpu` | `sidecar\venv-anonymize` | `onnxruntime==1.29.0` (пин из lock) |
+| `cuda` | `sidecar\venv-anonymize` | `onnxruntime-gpu==1.24.4`; CPU-пин из lock фильтруется |
+
+```powershell
+powershell -File installers\build_anonymize_sidecar.ps1 -Profile cpu -SelfTest
+powershell -File installers\fetch_anonymize_models.ps1 -ModelsDir D:\models   # без HF-токена
+```
+
+Rust ищет интерпретатор так: `HDS_ANONYMIZE_PYTHON` → `sidecar\venv-anonymize` →
+`sidecar\python` → `.venv`. Модели — `<models>\anonymize`: `hf-home` (HF-кэш GLiNER PII),
+`navec_news_v1_1B_250K_300d_100q.tar`, `slovnet_ner_news_v1.tar`; манифест с ревизиями и
+sha256 — `<models>\anonymize-models.json`.
+
+Методы: `hello` (в т.ч. `formats`), `warmup`, `inspect` (метки/маркер — **без значений**),
+`anonymize`, `anonymize_values`, `deanonymize`, `deanonymize_values`, `shutdown`; прогресс —
+notifications без `id`. База меток (`mapping_store.py`, SQLite WAL) — единственный модуль доступа:
+нумерация per-type, дедуп по (значение, тип). Rust к базе не обращается и передаёт все параметры
+аргументами (`--model/--db/--models-dir/--device/--gpu-mem-limit-mb/…`), `config.yaml` воркер не
+читает. Проверки воркера — `sidecar/tests/test_anonymize_*.py` (модели не нужны).
 
 ## MS Project (.mpp)
 

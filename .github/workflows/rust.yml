@@ -9,9 +9,10 @@ name: Rust CI
 on:
   push:
     # Ветки, с которых собирается продукт и режется релиз (RELEASING.md §4):
-    # `server-multiuser` — текущая боевая ветка серверной подсистемы; `main` и
+    # `anonymizer-sidecar` — текущая ветка анонимизации (P1-P6, релиз 0.23.0);
+    # `server-multiuser` — боевая ветка серверной подсистемы; `main` и
     # `w2-llm-host` — история (main = Python-эпоха, w2-llm-host = ядро на Rust).
-    branches: [main, w2-llm-host, server-multiuser, python-sidecar-transcribe]
+    branches: [main, w2-llm-host, server-multiuser, python-sidecar-transcribe, anonymizer-sidecar]
   pull_request:
   workflow_dispatch:
 
@@ -48,9 +49,11 @@ jobs:
         run: cargo test --workspace
 
   # ---------- Python sidecar: unittest suite (P1-P6, blocking) ----------------
-  # `sidecar/tests` covers the extractor/transcription workers without models:
-  # glossary, LLM patch validator (windows/word order/allow_global), merge,
-  # quality, protocol, degradation. Model/HF-dependent tests must not land here.
+  # `sidecar/tests` covers the extractor/transcription/anonymization workers
+  # without models: glossary, LLM patch validator (windows/word order/
+  # allow_global), merge, quality, protocol, degradation, anonymize round-trip
+  # (values mode needs python-docx/openpyxl/lxml, not the NER weights).
+  # Model/HF-dependent tests must not land here.
   test-python:
     runs-on: ubuntu-latest
     steps:
@@ -61,7 +64,9 @@ jobs:
           python-version: '3.12'
 
       - name: Install test dependencies
-        run: python -m pip install --disable-pip-version-check numpy PyYAML
+        # python-docx/openpyxl/lxml: `hds_anonymize.file_parser` imports them at
+        # module level, so the anonymize tests cannot be skipped here.
+        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml
 
       - name: Python sidecar tests (unittest)
         env:

@@ -73,6 +73,22 @@ V). База — тот же MIT-лицензированный движок; и
 DirectML в **python-профиле** — это `onnxruntime-directml` внутри venv; `Rust-DirectML.dll`
 (legacy Nemotron) в default-пакет **не входит** (P6.2, см. `-LegacyDiarizer`).
 
+## Python-sidecar анонимизации (GLiNER PII + Natasha, P1–P6)
+
+Зависимости — `sidecar/hds_anonymize/requirements.lock` (точные версии в
+`sidecar\venv-anonymize`). Лицензии по данным пакетов на 26.10.2026 — перед выпуском сверьте
+тексты из пакетов:
+
+* **Natasha**, **navec**, **slovnet** — MIT (модели navec/slovnet — ассеты релизов
+  `natasha/navec` и `natasha/slovnet`); **pymorphy2** — MIT (нужен `setuptools<81`);
+* **python-docx**, **openpyxl** — MIT; **lxml** — BSD; **numpy** — BSD-3;
+* **onnxruntime** / **onnxruntime-gpu** — MIT; **PyTorch** — BSD-3-Clause;
+  **transformers**, **huggingface_hub** — Apache-2.0; **setuptools** — MIT;
+* **GLiNER** (`gliner`) и модель `knowledgator/gliner-pii-large-v1.0` — лицензии указаны на PyPI
+  и в карточке модели на Hugging Face: зафиксируйте их при распространении. В архив модели
+  **не входят** — их скачивает `installers/fetch_anonymize_models.ps1` (пины ревизий и sha256 —
+  в `<models>\anonymize-models.json`), токен HF не требуется.
+
 ## Базы данных
 * **SQLite** (bundled в `rusqlite`) — public domain;
 * **sqlite-vec** — MIT / Apache-2.0.

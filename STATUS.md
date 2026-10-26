@@ -2,6 +2,25 @@
 
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
+> **Анонимизация документов (ветка `anonymizer-sidecar`, P1–P7, релиз 0.23.0):**
+> документы (`docx/xlsx/txt/md/xml`) скрываются и восстанавливаются Python-sidecar
+> `sidecar/hds_anonymize` (движки из `anonymizer_proxy` без правок алгоритмов, offline-first) +
+> Rust-клиент `crates/hds-anonymize` + CLI `hds anon` + карточка «Анонимизация» в `hds ui`.
+> Решения: сессий нет (только вход/выход), метки per-type с дедупом по (значение, тип), база
+> `data/anonymize.db` живёт в воркере (Rust к ней не обращается), выход `data/anonymized`
+> исключается из индексации неявно. GPU — аренда у `llm_host` (роль `anon`,
+> `/internal/anon/enter|exit`, приоритет 100; недоступность — fallback CPU с предупреждением).
+> **P5:** карточка (`GET /api/anonymize/{ls,status}`, `POST /api/anonymize/run`,
+> `POST /api/config/anonymize-dirs`; admin-гейт, `admin_op` в аудите, пофайловый прогресс, отчёт
+> без значений PII). **P6:** `installers/build_anonymize_sidecar.ps1` (cpu/cuda),
+> `installers/fetch_anonymize_models.ps1` (GLiNER PII в HF-кэш + navec/slovnet, без HF-токена),
+> `hds_anonymize` в поставке, пункт `anonymize` в `hds check`. **Проверено:** sidecar-тесты 28/28,
+> `cargo fmt/clippy/test --workspace` (110 наборов, 0 failed), живой smoke UI: обзор папки →
+> «скрыть указанное» → метка `[PERSON_1]` без значений → деанонимизация вернула текст.
+> **Осталось:** golden-паритет NER (порог 0.3) и живой GPU-спайк — не выполнялись (нет весов и
+> запущенного `llm_host`); стек анонимизации ставится отдельными установщиками (`setup.ps1` его
+> пока не запускает, `hds check` показывает `warn` до установки).
+>
 > **Диаризация Nemotron-3 (ветка `server-multiuser`, треки W0–W8 закрыты, W9 — документация):**
 > разделение по говорящим переведено с sortformer (4 спикера, GGUF в движке) на **Nemotron-3
 > (Sortformer v3, до 8 спикеров)** через `parakeet-rs 0.4.2` + ONNX Runtime `2.0.0-rc.15`; ASR —

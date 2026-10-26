@@ -6,11 +6,12 @@
 >
 > Платформа продукта: ядро и резиденты — Rust (`crates/` → `bin\{hds,hds_mcp,llm_host}`).
 > Python остался в извлечении/лемматизации (источники `hds/*.py`, воркер
-> `sidecar/hds_extract/worker.py`) и в **расшифровке** (`sidecar/hds_transcribe` +
-> общий транспорт `sidecar/hds_sidecar`); в архив кладётся **собранный**
-> self-contained sidecar (портативный CPython + **оба** воркера + копия модулей) —
-> джобы `build-sidecar-*`. Venv профиля расшифровки (1,5–7,4 ГБ) в архив **не
-> входит**: его собирает установщик на машине. Рантайм движка —
+> `sidecar/hds_extract/worker.py`), в **расшифровке** (`sidecar/hds_transcribe`) и в
+> **анонимизации** (`sidecar/hds_anonymize`) + общий транспорт `sidecar/hds_sidecar`;
+> в архив кладётся **собранный** self-contained sidecar (портативный CPython + **все
+> воркеры** + копия модулей) — джобы `build-sidecar-*`. Venv профилей (расшифровка
+> 1,5–7,4 ГБ, анонимизация 3–6 ГБ) в архив **не входят**: их собирает установщик на
+> машине. Рантайм движка —
 > отдельный скачиваемый ассет (`runtime-manifests/engine-manifest.json`); наш патч
 > движка — тег `engine-patch-v2` (v1 остался в истории), ONNX-модели CLIP — тег
 > `clip-onnx-v1`.
@@ -24,7 +25,11 @@
   `cargo test --workspace`;
 - Python-проверки sidecar зелёные (`$env:PYTHONPATH='sidecar'; python -m unittest
   discover sidecar\tests`) — джоба `test-python` в `rust.yml` и `release.yml`;
-- `hds check` на реальной машине без критических замечаний;
+  для набора анонимизации нужны `python-docx`, `openpyxl`, `lxml` (ставятся в джобе);
+- `hds check` на реальной машине без критических замечаний. Пункт `anonymize` может быть
+  `warn`, если стек анонимизации не установлен: это **опциональный** стек (в архив не входит),
+  установка — `installers\build_anonymize_sidecar.ps1` + `installers\fetch_anonymize_models.ps1`;
+  `fail` в нём означал бы ошибку кода, а не «не установлено»;
 - ручная проверка сценария «спроси в чате → ответ со ссылками»;
 - в рабочем дереве нет «выпавших» файлов. Архив релиза собирается из `HEAD`, а стейджинг
   копирует дерево, поэтому **случайно удалённый файл ломает выпуск**: пропавшие
@@ -45,7 +50,7 @@
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
-| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_sidecar` + копия `hds\`; **venv профиля расшифровки не входит** — его собирает установщик), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `server_config.example.yaml` (шаблон серверного конфига для `hds config init`), `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
+| `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds\`; **venv профилей расшифровки и анонимизации не входят** — их собирает установщик), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `server_config.example.yaml` (шаблон серверного конфига для `hds config init`), `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
 | `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
@@ -111,6 +116,35 @@ whisper + Nemotron-3) сохранена на переходный релиз.
 * **Лицензии** стека расшифровки (GigaAM MIT, pyannote MIT / community-1 CC BY 4.0,
   wav2vec2 Apache-2.0, Silero MIT, torch/ORT/transformers) — раздел в `NOTICE.md`.
 
+### 2.2 Стек анонимизации (Python-движок, `hds_anonymize`)
+
+С 0.23.0 есть анонимизация/деанонимизация документов (DOCX/XLSX/TXT/MD/XML): NER-модели
+(GLiNER PII + Natasha/Slovnet) и база меток в Python-воркере, Rust — клиент, UI-карточка, CLI
+`hds anon` и аренда видеопамяти у `llm_host`. Стек **опциональный** и в архив, как и
+окружение расшифровки, **не входит**.
+
+* **Код** едет в поставке (`sidecar\hds_anonymize` + `sidecar\hds_sidecar`), **venv — нет**:
+  `installers\build_anonymize_sidecar.ps1 -Profile cpu|cuda` (3–6 ГБ; ровно один `onnxruntime`
+  в venv: CPU-пин из lock фильтруется при `cuda`, ставится `onnxruntime-gpu`). Идемпотентность —
+  маркер `.hds-anonymize-profile` (профиль + Python + sha256 lock), `-Force` пересобирает.
+* **Модели** — `installers\fetch_anonymize_models.ps1 -ModelsDir <dir>`: GLiNER PII
+  (`knowledgator/gliner-pii-large-v1.0`) в `<models>\anonymize\hf-home` (HF-кэш), navec и
+  slovnet `.tar` рядом, манифест `<models>\anonymize-models.json` (ревизии + sha256). Модель
+  **публичная**: HF-токен не требуется (`-HfToken` — только для лимитов, не сохраняется).
+  `-Offline` работает по локальному кэшу.
+* **Данные:** база меток `anonymize.db_path` (`data/anonymize.db`, SQLite WAL) — создаётся первым
+  актом, живёт в воркере; выходной каталог `anonymize.output_dir` исключается из индексации
+  неявно. Схема БД поиска не меняется — переиндексация не нужна.
+* **Проверка на машине:** `hds anon check` (интерпретатор/модели/БД/адрес аренды) и пункт
+  `anonymize` в `hds check` (`warn`, пока стек не установлен).
+* **GPU:** `anonymize.gpu: auto` → аренда у `llm_host` (`/internal/anon/enter|exit`, роль `anon`);
+  недоступный хост → процессор с предупреждением в отчёте, `503 gpu_busy` → акт отклоняется.
+* **Откат:** кода в архиве нет изменений схемы поиска; достаточно не устанавливать стек
+  (или удалить `sidecar\venv-anonymize` / модели) — остальные функции не затрагиваются.
+* **Лицензии** стека (GLiNER, Natasha/navec/slovnet, pymorphy2, python-docx/openpyxl/lxml,
+  onnxruntime, torch/transformers) — раздел в `NOTICE.md`; лицензию модели сверяйте по карточке
+  на Hugging Face.
+
 ## 3. Версионирование
 
 SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
@@ -140,6 +174,8 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
    cargo clippy --workspace --all-targets -- -D warnings
    cargo test --workspace
    $env:PYTHONPATH='sidecar'; python -m unittest discover sidecar\tests   # джоба test-python
+   # точечно, если правили анонимизацию (модели NER не нужны):
+   $env:PYTHONPATH='sidecar'; python -m unittest discover sidecar\tests -p 'test_anonymize_*.py'
    ```
    Мигающие тесты не «глушить» удлинением ожиданий, а чинить детерминированность
    (пример: `waited_ms` быстрого пути очереди — F11, 13.10.2026).
@@ -167,9 +203,9 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 |---|---|---|---|
 | `check-version` | ubuntu | да | версия тега/входа = `__version__` в `hds/__init__.py` |
 | `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, тесты воркспейса |
-| `test-python` | ubuntu | да | `python -m unittest discover sidecar/tests` (`PYTHONPATH=sidecar`; numpy/PyYAML) — извлечение, расшифровка, глоссарий, LLM-валидатор |
-| `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_sidecar` + копия `hds`, `uv`) |
-| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`, наличие `sidecar\hds_transcribe|hds_sidecar` и `transcribe-check --json` → `engine=python`) |
+| `test-python` | ubuntu | да | `python -m unittest discover sidecar/tests` (`PYTHONPATH=sidecar`; numpy/PyYAML + python-docx/openpyxl/lxml для набора анонимизации) — извлечение, расшифровка, глоссарий, LLM-валидатор, анонимизация |
+| `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds`, `uv`) |
+| `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`, наличие `sidecar\hds_transcribe|hds_sidecar`, каталог `sidecar` с `hds_anonymize` и `transcribe-check --json` → `engine=python`, `anon --help`) |
 | `build-macos` | macos | нет (best-effort) | то же для `macos-arm64` |
 | `fetch-engine-runtime-windows-cuda` | windows | да | рантайм движка по манифесту (sha256) под CUDA → `hds-engine-runtime-windows-x64-cuda.zip` |
 | `fetch-engine-runtime-windows-vulkan` | windows | да | то же под Vulkan → `hds-engine-runtime-windows-x64-vulkan.zip` |
