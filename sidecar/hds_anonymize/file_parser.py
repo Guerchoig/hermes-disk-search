@@ -1380,43 +1380,53 @@ class FileAssembler:
         return result
 
     def _assemble_xml(self, original_content: bytes, anonymized_text: str, structure: dict) -> bytes:
-        """Сборка XML файла"""
+        """Сборка XML файла.
+
+        Правка относительно anonymizer_proxy (P1b-приёмка §5): замена
+        ПОЗИЦИОННАЯ, а не по `path`. Пути в structure НЕуникальны
+        (два `Task/Name` дают одинаковый путь), и словарь path→текст
+        перезатирал первые вхождения — текст после «анон → деан» не
+        совпадал с исходным. Порядок обхода в parse и сборке совпадает
+        (один и тот же DFS: text → PII-атрибуты → дети → tail), поэтому
+        позиционное соответствие «entry_i ↔ строка i» точное.
+        """
         root = ET.fromstring(original_content)
-        
-        # Разбиваем анонимизированный текст на части
+
         anon_parts = anonymized_text.split("\n")
-        part_idx = 0
-        
-        # Создаём маппинг path -> новый текст
-        replacements = {}
-        for elem_info in structure.get("elements", []):
-            if part_idx < len(anon_parts):
-                replacements[elem_info["path"]] = anon_parts[part_idx]
-                part_idx += 1
-        
-        # Рекурсивно заменяем текст
+        entries = structure.get("elements", [])
+        idx = 0
+
+        pii_attrs = ["name", "Name", "ResourceName", "Author", "Manager"]
+
         def replace_text(element, path=""):
+            nonlocal idx
             current_path = f"{path}/{element.tag}" if path else element.tag
-            
+
+            # Текст элемента
             if element.text and element.text.strip():
-                if current_path in replacements:
-                    element.text = replacements[current_path]
-            
+                if idx < len(entries) and idx < len(anon_parts):
+                    element.text = anon_parts[idx]
+                idx += 1
+
+            # Атрибуты — только те, что parse внёс в text_parts
             for attr_name, attr_value in element.attrib.items():
-                attr_path = f"{current_path}@{attr_name}"
-                if attr_path in replacements:
-                    element.set(attr_name, replacements[attr_path])
-            
+                if attr_value and len(attr_value) > 2 and any(
+                    pii in attr_name for pii in pii_attrs
+                ):
+                    if idx < len(anon_parts):
+                        element.set(attr_name, anon_parts[idx])
+                    idx += 1
+
             for child in element:
                 replace_text(child, current_path)
-            
+
             if element.tail and element.tail.strip():
-                tail_path = f"{current_path}/tail"
-                if tail_path in replacements:
-                    element.tail = replacements[tail_path]
-        
+                if idx < len(anon_parts):
+                    element.tail = anon_parts[idx]
+                idx += 1
+
         replace_text(root)
-        
+
         # ET не поддерживает pretty_print, используем indent для форматирования
         ET.indent(root, space="  ")
         return ET.tostring(root, encoding="unicode").encode("utf-8")

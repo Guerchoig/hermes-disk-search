@@ -354,25 +354,47 @@ impl Worker {
         }
         self.requests += 1;
         self.last_error = None;
-        match self.rx.recv_timeout(self.cfg.request_timeout) {
-            Ok(resp) => match protocol::parse_response(&resp, id) {
-                Ok(v) => Ok(v),
-                Err(e) => {
-                    // Машинный `kind` нужен вызывающему (model_missing/cuda_oom/…).
-                    self.last_error = protocol::error_from_line(&resp);
-                    Err(CallFail::Other(e))
-                }
-            },
-            Err(RecvTimeoutError::Timeout) => {
+        // Нотификации без `id` (progress, §3 анонимизации) приходят МЕЖДУ
+        // запросом и ответом — пропускаем их и ждём ответ с нашим `id`.
+        // Общий дедлайн — как раньше один `recv_timeout`: суммарное ожидание
+        // не превышает `request_timeout`.
+        let deadline = Instant::now() + self.cfg.request_timeout;
+        loop {
+            let remain = deadline.saturating_duration_since(Instant::now());
+            if remain.is_zero() {
                 self.kill();
-                Err(CallFail::Timeout(CoreError::Other(format!(
+                return Err(CallFail::Timeout(CoreError::Other(format!(
                     "воркер: таймаут {method} ({:?}) — процесс перезапущен",
                     self.cfg.request_timeout
-                ))))
+                ))));
             }
-            Err(RecvTimeoutError::Disconnected) => Err(CallFail::Dead(CoreError::Other(
-                "воркер: поток вывода закрыт (процесс упал?)".into(),
-            ))),
+            match self.rx.recv_timeout(remain) {
+                Ok(resp) => {
+                    if protocol::is_notification(&resp) {
+                        continue; // progress-нотификация — пропустить
+                    }
+                    return match protocol::parse_response(&resp, id) {
+                        Ok(v) => Ok(v),
+                        Err(e) => {
+                            // Машинный `kind` нужен вызывающему (model_missing/cuda_oom/…).
+                            self.last_error = protocol::error_from_line(&resp);
+                            Err(CallFail::Other(e))
+                        }
+                    };
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    self.kill();
+                    return Err(CallFail::Timeout(CoreError::Other(format!(
+                        "воркер: таймаут {method} ({:?}) — процесс перезапущен",
+                        self.cfg.request_timeout
+                    ))));
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(CallFail::Dead(CoreError::Other(
+                        "воркер: поток вывода закрыт (процесс упал?)".into(),
+                    )));
+                }
+            }
         }
     }
 

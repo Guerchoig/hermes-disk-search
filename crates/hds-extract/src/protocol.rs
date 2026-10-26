@@ -74,6 +74,17 @@ pub fn request(id: i64, method: &str, params: Value) -> String {
     json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string()
 }
 
+/// Строка — progress-нотификация без `id` (аддитивное поле протокола 1:
+/// анонимизация шлёт `{"jsonrpc":"2.0","method":"progress",...}` между
+/// запросом и ответом). Клиент такие строки ПРОПУСКАЕТ, а не считает
+/// «неожиданным id» (PLAN_ANONYMIZER_SIDECAR.md §2.3).
+pub fn is_notification(line: &str) -> bool {
+    match serde_json::from_str::<Value>(line) {
+        Ok(v) => v.get("method").is_some() && v.get("id").is_none(),
+        Err(_) => false, // битый JSON — не нотификация, разбирать как ответ
+    }
+}
+
 /// Разбор строки-ответа: `result` при успехе, иначе ошибка (сверяется `id`).
 pub fn parse_response(line: &str, expect_id: i64) -> Result<Value> {
     let v: Value = serde_json::from_str(line)

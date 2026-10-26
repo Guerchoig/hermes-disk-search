@@ -37,8 +37,9 @@ from hds_sidecar import progress, runtime, stdio  # noqa: E402
 PROTOCOL = stdio.PROTOCOL
 ROOT = stdio.arg("--root") or os.path.dirname(_SIDE)
 
-# Форматы P1 (XML/MS Project — P1b); папку перечисляет Rust по hello.formats
-FORMATS = ["docx", "xlsx", "txt", "md"]
+# Форматы P1: DOCX/XLSX/TXT/MD; P1b добавляет XML (MS Project) — слой
+# парсера/сборки уже готов (file_parser.py, §1 реш. №7)
+FORMATS = ["docx", "xlsx", "txt", "md", "xml"]
 
 MODEL_MISSING_HINT = (
     "установите веса: powershell -File installers\\fetch_anonymize_models.ps1 "
@@ -91,18 +92,26 @@ def _setup_env_and_settings(args: argparse.Namespace) -> str:
 def _build_out_path(in_path: str, params: dict, mode: str):
     """Выходной путь: `out_path` из RPC, иначе out_dir + имя по схеме плана
     (§3): `<stem>.anonymized.<ext>` / `<stem>.deanon.<ext>`; у входа
-    `a.anonymized.docx` суффикс `.anonymized` отбрасывается → `a.deanon.docx`."""
+    `a.anonymized.docx` суффикс `.anonymized` отбрасывается → `a.deanon.docx`.
+    Path-safety: `..`-компоненты в out_dir/out_path запрещены (§3, kind
+    out_of_dir; основная валидация — на стороне Rust-клиента)."""
     from pathlib import Path
 
     src = Path(in_path)
     if params.get("out_path"):
-        return Path(params["out_path"])
-    out_dir = params.get("out_dir") or str(src.parent)
-    stem = src.stem
-    if stem.endswith(".anonymized"):
-        stem = stem[: -len(".anonymized")]
-    suffix = ".anonymized" if mode == "anonymize" else ".deanon"
-    return Path(out_dir) / f"{stem}{suffix}{src.suffix}"
+        out = Path(params["out_path"])
+    else:
+        out_dir = params.get("out_dir") or str(src.parent)
+        stem = src.stem
+        if stem.endswith(".anonymized"):
+            stem = stem[: -len(".anonymized")]
+        suffix = ".anonymized" if mode == "anonymize" else ".deanon"
+        out = Path(out_dir) / f"{stem}{suffix}{src.suffix}"
+    if ".." in out.parts:
+        from hds_anonymize.handlers import OutOfDirError
+
+        raise OutOfDirError(f"выходной путь вне разрешённого каталога: {out}")
+    return out
 
 
 def _precheck_weights(models_dir: str) -> None:
@@ -132,6 +141,7 @@ def _err(mid, exc: BaseException) -> None:
     from hds_anonymize.handlers import (
         FileBusyError,
         ModelMissingError,
+        OutOfDirError,
         UnsupportedFormatError,
     )
 
@@ -146,6 +156,8 @@ def _err(mid, exc: BaseException) -> None:
     elif isinstance(exc, (ModelMissingError, FileNotFoundError, ImportError)):
         kind = "model_missing"
         hint = MODEL_MISSING_HINT
+    elif isinstance(exc, OutOfDirError):
+        kind = "out_of_dir"
     elif isinstance(exc, LookupError):
         kind = "db_missing"
         hint = "БД токенов отсутствует/пуста; проверьте anonymize.db_path"

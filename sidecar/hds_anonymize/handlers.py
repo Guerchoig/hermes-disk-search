@@ -29,8 +29,8 @@ from .mapping_store import MappingStore, TOKEN_PATTERN
 from .replacer import TextReplacer, split_entities_by_segments
 from .schemas import Entity
 
-# Форматы P1 (XML/MS Project — P1b; слой парсера уже готов)
-FORMATS = ["docx", "xlsx", "txt", "md"]
+# Форматы P1 + XML/MS Project (P1b; слой парсера уже готов)
+FORMATS = ["docx", "xlsx", "txt", "md", "xml"]
 
 # Маска существующих плейсхолдеров при детерминированном поиске значений
 # (из anonymizer_proxy/proxy/utils.py — не переименовываем)
@@ -68,6 +68,11 @@ class FileBusyError(ValueError):
 
 class ModelMissingError(RuntimeError):
     """Веса NER-моделей отсутствуют в --models-dir (offline-first)."""
+
+
+class OutOfDirError(ValueError):
+    """Выходной путь выходит за разрешённый каталог (`..`, absolute-подмена)
+    — kind: out_of_dir (§3; основная валидация — на стороне Rust)."""
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:

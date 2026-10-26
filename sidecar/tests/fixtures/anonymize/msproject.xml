@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Project xmlns="http://schemas.microsoft.com/project">
+  <Name>Проект ЖКП СПС</Name>
+  <Author>Иванов Иван</Author>
+  <Manager>ООО Ромашка</Manager>
+  <Tasks>
+    <Task>
+      <UID>1</UID>
+      <Name>Согласование с Петров Пётр</Name>
+      <Notes>Звонок по тел. +7 912 345-67-89</Notes>
+    </Task>
+    <Task>
+      <UID>2</UID>
+      <Name>Отчёт для АО Ромашка</Name>
+      <Notes>Сумма 51 903,14 руб.</Notes>
+    </Task>
+  </Tasks>
+  <Resources>
+    <Resource>
+      <UID>1</UID>
+      <Name>Иванов Иван</Name>
+    </Resource>
+  </Resources>
+</Project>

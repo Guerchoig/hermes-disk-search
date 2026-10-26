@@ -92,7 +92,7 @@ class AnonymizeWorkerTest(unittest.TestCase):
         # hello: протокол, форматы, capabilities — stdout содержит ТОЛЬКО протокол
         hello = replies[1]["result"]
         self.assertEqual(hello["protocol"], 1)
-        self.assertEqual(hello["formats"], ["docx", "xlsx", "txt", "md"])
+        self.assertEqual(hello["formats"], ["docx", "xlsx", "txt", "md", "xml"])
         self.assertIn("anonymize_values", hello["capabilities"])
         self.assertEqual(hello["model"], "knowledgator/gliner-pii-large-v1.0")
 
