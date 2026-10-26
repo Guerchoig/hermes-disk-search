@@ -2737,6 +2737,102 @@ fn check_transcribe_llm(cfg: &Config) -> Check {
     Check::new("transcribe-llm", "ok", title)
 }
 
+/// Есть ли `model.onnx` в HF-кэше GLiNER (рекурсивно; `blobs` не интересны —
+/// ONNX лежит в snapshot, но обход простой и без «умных» фильтров).
+fn has_gliner_onnx(dir: &Path) -> bool {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = match fs::read_dir(&d) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                stack.push(p);
+            } else if p.file_name().and_then(|n| n.to_str()) == Some("model.onnx") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// P6: анонимизация — sidecar (venv), веса, БД токенов и GPU-lease.
+///
+/// Реальный `/internal/anon/enter` **не** вызываем: он выгрузил бы роли chat на
+/// время проверки. Вместо этого сообщаем конфигурацию и доступность `llm_host`
+/// (пункт `chat` проверяет его подробно); недоступность — штатный fallback CPU,
+/// поэтому это `warn`, а не `fail`: `hds check` не должен «краснеть» на машинах,
+/// где анонимизация не используется.
+fn check_anonymize(cfg: &Config) -> Check {
+    let root = config::project_root();
+    let settings = hds_anonymize::Settings::from_config(cfg);
+    let models = hds_anonymize::settings::models_dir(&root);
+    let python = hds_anonymize::discover_python(&root);
+    let db = settings.db_abs(&root);
+
+    let mut missing: Vec<String> = Vec::new();
+    if python.is_none() {
+        missing.push("venv-anonymize".to_string());
+    }
+    if !models.join("navec_news_v1_1B_250K_300d_100q.tar").is_file() {
+        missing.push("navec".to_string());
+    }
+    if !models.join("slovnet_ner_news_v1.tar").is_file() {
+        missing.push("slovnet".to_string());
+    }
+    if !has_gliner_onnx(&models.join("hf-home")) {
+        missing.push("GLiNER ONNX".to_string());
+    }
+
+    let db_note = if db.is_file() {
+        format!("БД: {}", db.display())
+    } else {
+        format!("БД создастся первым актом ({})", db.display())
+    };
+    let lease = if settings.gpu == "off" {
+        "GPU-lease: off (CPU)".to_string()
+    } else {
+        let state = match probe_role(cfg, "chat", PROBE_TIMEOUT) {
+            Probe::Llama(_) => "llm_host доступен — lease при акте, fallback CPU",
+            Probe::Foreign => "порт chat занят чужим сервисом — акты на CPU",
+            Probe::Down => "llm_host не отвечает — акты на CPU (fallback)",
+        };
+        format!(
+            "GPU-lease: {} → {} ({state})",
+            settings.gpu, settings.llm_host_url
+        )
+    };
+    let msg = format!(
+        "интерпретатор: {}; модели: {}; {db_note}; {lease}",
+        python
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "не найден".to_string()),
+        models.display()
+    );
+    let title = if missing.is_empty() {
+        "анонимизация: sidecar, веса и БД готовы".to_string()
+    } else {
+        format!("анонимизация: нет {}", missing.join(", "))
+    };
+    let check = Check::new(
+        "anonymize",
+        if missing.is_empty() { "ok" } else { "warn" },
+        title,
+    )
+    .msg(msg);
+    if missing.is_empty() {
+        check
+    } else {
+        check.fix(
+            "Соберите venv и скачайте модели: installers\\build_anonymize_sidecar.ps1 \
+             -Profile cpu|cuda; installers\\fetch_anonymize_models.ps1",
+        )
+    }
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -2758,6 +2854,8 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     // P4: LLM-постобработка — включённость/модель/хост и счётчики последнего
     // прогона (в заголовке, потому что `ok` печатается без `msg`).
     checks.push(check_transcribe_llm(cfg));
+    // P6: анонимизация — venv/веса/БД/lease (`hds anon check` — та же сводка).
+    checks.push(check_anonymize(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);

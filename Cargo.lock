@@ -681,6 +681,7 @@ dependencies = [
  "blake2",
  "directories",
  "flate2",
+ "hds-anonymize",
  "hds-clip",
  "hds-core",
  "hds-diarize",

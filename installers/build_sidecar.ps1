@@ -8,6 +8,9 @@
 #     hds_transcribe\                  - transcription worker + requirements*.lock (P1-P6);
 #                                        the profile venv is built from THIS copy by
 #                                        installers\build_transcribe_sidecar.ps1
+#     hds_anonymize\                   - anonymization worker + requirements.lock (P1-P5);
+#                                        the profile venv is built from THIS copy by
+#                                        installers\build_anonymize_sidecar.ps1
 #     python\                          - portable CPython (python-build-standalone) + deps
 #     hds\                             - extractor/lemmatizer modules the worker needs
 #     README.md
@@ -69,7 +72,7 @@ Copy-Item (Join-Path $root "sidecar\README.md") $OutDir -Force
 # the profile venv, and `installers\build_transcribe_sidecar.ps1` takes the
 # package AND the lock files from this tree (an installed archive has no
 # repository sources, so without the copy the venv cannot be built).
-foreach ($pkg in @("hds_sidecar", "hds_transcribe")) {
+foreach ($pkg in @("hds_sidecar", "hds_transcribe", "hds_anonymize")) {
     $src = Join-Path $root "sidecar\$pkg"
     if (-not (Test-Path $src)) { throw "missing package: $src" }
     $dst = Join-Path $OutDir $pkg
@@ -107,6 +110,8 @@ if ($SelfTest) {
         "import hds_sidecar, hds_extract.worker; " +
         "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_transcribe', 'worker.py')); " +
         "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_transcribe', 'requirements.lock')); " +
+        "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_anonymize', 'worker.py')); " +
+        "assert os.path.isfile(os.path.join(r'$OutDir', 'hds_anonymize', 'requirements.lock')); " +
         "print('sidecar-ok')"
     Write-Host "[..] self-test: importing the copied hds package from $OutDir"
     & $py.FullName -c $code
