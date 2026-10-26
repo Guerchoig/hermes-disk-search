@@ -39,7 +39,9 @@ hds anon check
 * Окружение идемпотентно: маркер `.hds-anonymize-profile` хранит профиль, версию Python и sha256
   `requirements.lock`; `-Force` пересобирает venv.
 * В venv **ровно один** `onnxruntime`: профиль `cuda` ставит `onnxruntime-gpu` (CPU-пин из lock
-  отфильтровывается), профиль `cpu` — `onnxruntime` из lock.
+  отфильтровывается) + `nvidia-cublas-cu12`/`nvidia-cuda-runtime-cu12`/`nvidia-cudnn-cu12`
+  (CUDA 12 DLL для ORT: без них CUDA-провайдер молча падает в CPU), профиль `cpu` — `onnxruntime`
+  из lock.
 * Размер: окружение ~3–6 ГБ (в lock есть `torch`, его импортирует GLiNER даже для ONNX-пути),
   модели ~1 ГБ. Время установки — десятки минут при медленной сети.
 * Токен Hugging Face **не нужен**: модель `knowledgator/gliner-pii-large-v1.0` публичная.

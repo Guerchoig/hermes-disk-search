@@ -61,10 +61,13 @@ New-Item -ItemType Directory -Force -Path $anonDir, $hfHome | Out-Null
 $tarballs = @()
 if (-not $SkipNatasha) {
     $tarballs = @(
+        # Canonical natasha pack storage (Yandex Cloud, see
+        # sidecar/hds_anonymize/natasha_engine.py). GitHub Releases has no such
+        # assets - v0.23.0 shipped wrong URLs and failed with 404 (fixed in 0.23.1).
         @{ name = "navec_news_v1_1B_250K_300d_100q.tar"
-           url = "https://github.com/natasha/navec/releases/download/v1.0.0/navec_news_v1_1B_250K_300d_100q.tar" },
+           url = "https://storage.yandexcloud.net/natasha-navec/packs/navec_news_v1_1B_250K_300d_100q.tar" },
         @{ name = "slovnet_ner_news_v1.tar"
-           url = "https://github.com/natasha/slovnet/releases/download/v0.5.0/slovnet_ner_news_v1.tar" }
+           url = "https://storage.yandexcloud.net/natasha-slovnet/packs/slovnet_ner_news_v1.tar" }
     )
 }
 foreach ($t in $tarballs) {
@@ -155,6 +158,18 @@ def find_onnx(directory):
     return None
 
 
+def repo_file_list(repo, revision):
+    """Files of the repo at the revision (HF API; used only with network)."""
+    import urllib.parse
+    import urllib.request
+    url = "https://huggingface.co/api/models/%s/tree/%s?recursive=true" % (
+        repo, urllib.parse.quote(revision, safe=""))
+    req = urllib.request.Request(url, headers={"User-Agent": "hds-installer"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    return sorted(i["path"] for i in data if i.get("type") == "file")
+
+
 if not job.get("skip_gliner"):
     repo = job["repo"]
     revision = job["revision"]
@@ -181,11 +196,22 @@ if not job.get("skip_gliner"):
             fail("hf_error", "huggingface_hub is not installed: %s: %s" % (type(e).__name__, e))
         print("[fetch] %s @ %s" % (repo, revision), flush=True)
         token = os.environ.get("HF_TOKEN") or None
-        try:
-            snap = snapshot_download(repo_id=repo, revision=revision,
-                                     token=token, force_download=job.get("force", False))
-        except Exception as e:  # noqa: BLE001
-            fail("hf_download_failed", "%s: %s: %s" % (repo, type(e).__name__, e))
+        # v0.23.0: one pass stalled on the two large LFS files and left an
+        # incomplete snapshot (GLiNER then refused to load it). Retry with
+        # resume; hf_hub_download-based retries pick up .incomplete blobs.
+        last_error = None
+        for attempt in range(3):
+            try:
+                snap = snapshot_download(repo_id=repo, revision=revision,
+                                         token=token, force_download=job.get("force", False))
+                last_error = None
+                break
+            except Exception as e:  # noqa: BLE001
+                last_error = e
+                print("[retry] %s: %s: %s" % (repo, type(e).__name__, e), flush=True)
+                time.sleep(10)
+        if last_error is not None:
+            fail("hf_download_failed", "%s: %s: %s" % (repo, type(last_error).__name__, last_error))
         result["gliner"] = {"status": "downloaded", "snapshot": snap,
                             "resolved": os.path.basename(snap)}
     g = result["gliner"] or {}
@@ -196,8 +222,24 @@ if not job.get("skip_gliner"):
         g["onnx"] = find_onnx(g["snapshot"])
         if not g["onnx"]:
             result["warnings"].append(
-                "no .onnx weights in the snapshot - export GLiNER to ONNX "
-                "(the worker needs model.onnx)")
+                "no .onnx weights in the snapshot - the worker needs an ONNX file")
+        # GLiNER's from_pretrained(local_files_only=True) rejects an INCOMPLETE
+        # snapshot (0.23.0: two large LFS files stalled -> kind: model_missing).
+        # Compare with the repo tree and report exactly what is missing.
+        if not job.get("offline"):
+            try:
+                present = set(f["name"].replace("\\", "/") for f in g["files"])
+                missing = [p for p in repo_file_list(repo, revision) if p not in present]
+                g["missing"] = missing
+                if missing:
+                    result["ok"] = False
+                    result["warnings"].append(
+                        "snapshot incomplete, missing: %s (re-run with network)"
+                        % ", ".join(missing))
+            except Exception as e:  # noqa: BLE001
+                result["warnings"].append(
+                    "cannot verify the snapshot completeness: %s: %s"
+                    % (type(e).__name__, e))
     result["gliner"] = g
 else:
     result["gliner"] = {"status": "skipped"}

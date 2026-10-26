@@ -40,8 +40,15 @@ DEFAULT_LABEL_MAP: Dict[str, str] = {
     "MONEY":      "money amount",
 }
 
-# Возможные расположения ONNX-весей в репозитории модели (пробуются по порядку)
-_ONNX_MODEL_FILES: Tuple[str, ...] = ("onnx/model.onnx", "model.onnx")
+# Возможные расположения ONNX-весей в репозитории модели (пробуются по порядку).
+# knowledgator/gliner-pii-large-v1.0 публикует КВАНТОВАННЫЙ файл
+# onnx/model_quint8.onnx (0.23.0 искал только model.onnx -> ONNX-бэкенд не
+# находил веса и падал в torch-фоллбек без весов, kind: model_missing).
+_ONNX_MODEL_FILES: Tuple[str, ...] = (
+    "onnx/model.onnx",
+    "onnx/model_quint8.onnx",
+    "model.onnx",
+)
 
 
 def detect_onnx_providers() -> List[str]:

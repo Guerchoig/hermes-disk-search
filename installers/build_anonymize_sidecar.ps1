@@ -92,6 +92,12 @@ if ($upToDate) {
     }
     if ($Profile -eq "cuda") {
         Invoke-SidecarPip -VenvPython $py -Arguments @($ortGpu)
+        # onnxruntime-gpu 1.24 (CUDA 12) loads cublasLt64_12/cudnn64_9 from the
+        # nvidia-*-cu12 wheels (site-packages\nvidia\<lib>\bin); gliner_engine
+        # registers those dirs on PATH. Without them ORT silently falls back to
+        # CPU (v0.23.0: "cublasLt64_12.dll is missing").
+        Invoke-SidecarPip -VenvPython $py -Arguments @(
+            "nvidia-cublas-cu12", "nvidia-cuda-runtime-cu12", "nvidia-cudnn-cu12")
     }
     Set-Content -LiteralPath $marker -Encoding ASCII -Value $markerText
     Write-Host "[ok] venv $venvName installed ($Profile)"

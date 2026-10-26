@@ -2737,8 +2737,9 @@ fn check_transcribe_llm(cfg: &Config) -> Check {
     Check::new("transcribe-llm", "ok", title)
 }
 
-/// Есть ли `model.onnx` в HF-кэше GLiNER (рекурсивно; `blobs` не интересны —
-/// ONNX лежит в snapshot, но обход простой и без «умных» фильтров).
+/// Есть ли ONNX-веса GLiNER в HF-кэше (рекурсивно). Имя файла не фиксировано:
+/// `knowledgator/gliner-pii-large-v1.0` публикует квантованный
+/// `onnx/model_quint8.onnx`, поэтому принимаем любой `*.onnx`.
 fn has_gliner_onnx(dir: &Path) -> bool {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(d) = stack.pop() {
@@ -2750,7 +2751,12 @@ fn has_gliner_onnx(dir: &Path) -> bool {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()) == Some("model.onnx") {
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("onnx"))
+                .unwrap_or(false)
+            {
                 return true;
             }
         }

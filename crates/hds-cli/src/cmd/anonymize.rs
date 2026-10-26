@@ -392,7 +392,14 @@ fn has_gliner_weights(dir: &Path) -> bool {
             let p = e.path();
             if p.is_dir() {
                 stack.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()) == Some("model.onnx") {
+            } else if p
+                .extension()
+                .and_then(|x| x.to_str())
+                .map(|x| x.eq_ignore_ascii_case("onnx"))
+                .unwrap_or(false)
+            {
+                // Имя не фиксировано: GLiNER PII публикует квантованный
+                // onnx/model_quint8.onnx (и fp32 onnx/model.onnx).
                 return true;
             }
         }
