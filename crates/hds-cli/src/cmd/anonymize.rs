@@ -324,7 +324,8 @@ fn cmd_warmup(cfg: &Config) -> i32 {
     }
 }
 
-/// `hds anon check` — venv/модели/БД (lease — P3, пока печатается как off).
+/// `hds anon check` — venv/модели/БД + адрес lease (`anonymize.gpu`,
+/// `anonymize.llm_host_url`).
 fn cmd_check(cfg: &Config) -> i32 {
     let root = project_root();
     let settings = Settings::from_config(cfg);
@@ -368,8 +369,8 @@ fn cmd_check(cfg: &Config) -> i32 {
     }
 
     println!(
-        "[..] gpu: {} (lease у llm_host — фаза P3; сейчас CPU)",
-        settings.gpu
+        "[..] gpu: {} (lease у llm_host: {}; недоступен — CPU fallback)",
+        settings.gpu, settings.llm_host_url
     );
 
     if failed {

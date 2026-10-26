@@ -4,7 +4,8 @@
 > (он самодостаточен) и отправить первым сообщением. Этот документ — «карта» состояния:
 > его можно читать целиком, но промт в §9 уже содержит главное.
 >
-> **Дата среза:** 26.10.2026. **Ветка:** `anonymizer-sidecar`, HEAD `5ba55d3`.
+> **Дата среза:** 26.10.2026. **Ветка:** `anonymizer-sidecar`, HEAD `60755a8`
+> (этот handoff-коммит; последний код-коммит — `5ba55d3`).
 > Сделано и закоммичено: **P1, P1b, P2, P3, P4** (план `PLAN_ANONYMIZER_SIDECAR.md`,
 > tracked). Осталось: **P5 (UI), P6 (установщики+веса), P7 (приёмка/доки)**.
 > Другое изменение в дереве — `M sidecar/hds_transcribe/glossary.example.yaml` —
@@ -41,9 +42,10 @@
    текущий воркер (см. §2 ниже).
 3. `crates/hds-anonymize/src/{client,protocol,error,settings,folder,lease}.rs`.
 4. `crates/hds-llama/src/{dispatch,host,facade}.rs` — фрагменты lease: `plan_anon_enter`,
-   `internal_anon_enter/exit`, маршруты `/internal/anon/*` (§2.4 ниже).
-5. Образцы для P5: `crates/hds-ui/src/transcribe.rs` + `page.rs` (карточка задачи),
-   существующие HTTP-эндпоинты `hds ui` (как `/api/transcribe/*`).
+   `internal_anon_enter/exit`, маршруты `/internal/anon/*` (см. §2, P3).
+5. Образцы для P5: `crates/hds-ui/src/transcribe.rs` (модуль карточки) + `page.rs`
+   (страницы) + **`crates/hds-ui/src/lib.rs`** — маршруты `/api/transcribe/*`,
+   аудит `admin_op`; новый `/api/anonymize/*` регистрируется там же.
 6. Источник переноса (если нужен оригинал): `C:\Test\anonymizer_proxy\anonymizer_proxy\`.
 
 ## 2. Что уже сделано (не переделывать)
@@ -96,7 +98,7 @@
   `settings.rs` (§2.6: `output_dir, db_path, models_dir(HDS_MODELS_DIR/anonymize),
   model, threshold 0.3, max_input_chars 1500, chunk_overlap 200, timeout_sec 300,
   natasha, max_file_mb, gpu, llm_host_url, gpu_reserve_mb, lease_timeout_sec,
-  request_timeout_sec 600, idle_timeout_sec 60` → `worker_args[_for]`),
+  request_timeout_sec 600, idle_timeout_sec 60, notices` → `worker_args[_for]`),
   `folder.rs` (`list_files` — верхний уровень по `hello.formats`),
   `client.rs` (`Client::spawn` проверяет cap `anonymize`).
 * ВАЖНО: `values=Some` → отдельный RPC `anonymize_values` (не `anonymize` с values!),
@@ -170,10 +172,17 @@
   `<models>/anonymize/hf-home`, `navec_news_v1_1B_250K_300d_100q.tar`,
   `slovnet_ner_news_v1.tar`, манифест с sha256 — по образцу
   `fetch_transcribe_models.ps1`); `build_sidecar.ps1` += `hds_anonymize`;
-  `hds check` += пункты venv/моделей/БД/lease (заготовка CLI — `hds anon check`).
-* **P7 — приёмка + документация**: README «Анонимизация», `sidecar/README.md`
-  (состав воркера), `STATUS.md`, `RELEASE_NOTES.md` (факт переезда из
-  anonymizer_proxy; `MIGRATION_PLAN_RUST.md` не править); живой сценарий:
+  `hds check` += пункты venv/моделей/БД (+ lease, только если хост доступен):
+  логика — `hds_index::diag::run_checks` (общий код с `GET /api/diagnostics`),
+  форматирование — `crates/hds-cli/src/cmd/check.rs`; `hds-index` уже зависит от
+  `hds-transcribe` — по той же схеме добавить `hds-anonymize` (для проверки
+  `discover_python`/весов); быстрая заготовка тех же проверок уже есть в
+  `hds anon check`.
+* **P7 — приёмка + документация**: раздел «Анонимизация» в `README.md`,
+  `sidecar/README.md` (состав воркера), `STATUS.md`, новый
+  `RELEASE_NOTES_vX.Y.Z.md` (по образцу `RELEASE_NOTES_v0.22.0.md`; факт
+  переезда из anonymizer_proxy; `MIGRATION_PLAN_RUST.md` не править);
+  обновить этот handoff; живой сценарий:
   UI → файлы → отчёт; **golden-паритет NER** (сущности/тип/спан против
   `anonymizer_proxy`, порог 0.3) — ждёт весов из P6; полный `anonymize` по NER
   и живой GPU-спайк (lease + RTX 3060, замер VRAM, источник CUDA-DLL) — тоже
@@ -245,6 +254,7 @@ crates/hds-extract/src/{worker,protocol}.rs — пропуск нотифика�
 ## 8. Коммиты ветки `anonymizer-sidecar`
 
 ```
+60755a8 docs(anonymize): handoff-промпт обновлён под срез P1-P4
 5ba55d3 feat(anonymize): P3 — GPU-lease 'anon' у llm_host + --gpu-mem-limit-mb в ORT
 dafe04a feat(anonymize): P4 — CLI hds anon + доводка kind-ошибок
 23943f1 feat(anonymize): P1b — XML (MS Project) + P2 — Rust-клиент hds-anonymize
@@ -255,7 +265,8 @@ c4f4bc5 docs(anonymize): план P1-P7 и handoff-промпт переноса
 ## 9. Промт для нового чата (скопировать отсюда до конца файла целиком)
 
 Ты — Cline в режиме Act. Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка
-`anonymizer-sidecar`, HEAD `5ba55d3`. Ядро — Rust (`crates/`), Python — только
+`anonymizer-sidecar`, HEAD `60755a8` (последний код-коммит — `5ba55d3`).
+Ядро — Rust (`crates/`), Python — только
 sidecar. План: `PLAN_ANONYMIZER_SIDECAR.md` (tracked) — прочитай целиком перед
 работой; также `ANONYMIZER_SIDECAR_HANDOFF_PROMPT.md` §§0–8 (карта состояния) и
 файлы, перечисленные там в §1. В дереве есть чужое изменение
@@ -282,9 +293,12 @@ gpu_busy. Имена выходов: `<stem>.anonymized.<ext>` / `<stem>.deanon.
 
 1. P5 (`crates/hds-ui/src/anonymize.rs` + страница по образцу `transcribe.rs`
    и `page.rs`):
+   - маршруты — в `crates/hds-ui/src/lib.rs` (рядом с `/api/transcribe/*`,
+     аудит `admin_op`), модуль карточки — новый `anonymize.rs`;
    - серверный обзор **`/api/anonymize/ls`**: путь из запроса → файлы верхнего
      уровня, отфильтрованные по форматам из `hello.formats` воркера
-     (`hds_anonymize::{list_files}`, `discover_python`, `Client::hello`);
+     (`hds_anonymize::list_files`, `hds_anonymize::discover_python`,
+     `Client::hello`);
    - карточка: текстовое поле пути + список найденных файлов; 4 кнопки:
      «Скрыть» (RPC anonymize), «Показать» (deanonymize), «Скрыть указанное»
      (values списком), «Показать указанное» (tokens списком); выходной каталог —
@@ -308,9 +322,11 @@ gpu_busy. Имена выходов: `<stem>.anonymized.<ext>` / `<stem>.deanon.
      с ревизиями и sha256 — по образцу `fetch_transcribe_models.ps1`;
      загрузчик НЕ должен требовать HF-токен, если модель публична;
    - `build_sidecar.ps1` += копирование `hds_anonymize` в поставку;
-   - `hds check` (`crates/hds-index/src/diag.rs` или CLI check) += пункты:
-     venv-anonymize, веса (`models\anonymize\...`), БД `data/anonymize.db`,
-     lease (`/internal/anon/enter` доступен) — заготовка в `hds anon check`.
+   - `hds check` += пункты venv-anonymize, веса (`models\anonymize\...`), БД
+     `data/anonymize.db`, lease (`/internal/anon/enter` доступен) — логика в
+     `hds_index::diag::run_checks` (общий код с `GET /api/diagnostics`), вывод —
+     `crates/hds-cli/src/cmd/check.rs`; зависимость `hds-anonymize` в
+     `hds-index` добавить по образцу `hds-transcribe`; заготовка — `hds anon check`.
 3. После P6 (если получится и есть GPU): golden-паритет NER (сущности/тип/спан
    против `anonymizer_proxy` на тех же файлах, порог 0.3) и живой GPU-спайк
    (lease → chat выгружен/дождался → NER на GPU → exit → роли вернулись);
