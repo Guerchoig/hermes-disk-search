@@ -59,6 +59,10 @@ pub enum Route {
     InternalStop,
     /// W3: транскрибация через владельца GPU (роль whisper).
     InternalTranscribe,
+    /// P3: lease анонимизации (роль `anon`) — вход.
+    InternalAnonEnter,
+    /// P3: lease анонимизации — выход (идемпотентный).
+    InternalAnonExit,
     /// Не нашли — 404 с понятным текстом.
     NotFound,
 }
@@ -84,6 +88,7 @@ impl Route {
                 | Route::InternalLoad
                 | Route::InternalUnload
                 | Route::InternalTranscribe
+                | Route::InternalAnonEnter
         )
     }
 
@@ -101,6 +106,8 @@ impl Route {
                 | Route::InternalDevices
                 | Route::InternalStop
                 | Route::InternalTranscribe
+                | Route::InternalAnonEnter
+                | Route::InternalAnonExit
         )
     }
 
@@ -135,6 +142,12 @@ pub fn route(method: &str, path: &str) -> Route {
         ("POST", "/internal/stop") | ("POST", "/v1/internal/stop") => Route::InternalStop,
         ("POST", "/internal/transcribe") | ("POST", "/v1/internal/transcribe") => {
             Route::InternalTranscribe
+        }
+        ("POST", "/internal/anon/enter") | ("POST", "/v1/internal/anon/enter") => {
+            Route::InternalAnonEnter
+        }
+        ("POST", "/internal/anon/exit") | ("POST", "/v1/internal/anon/exit") => {
+            Route::InternalAnonExit
         }
         _ => Route::NotFound,
     }
@@ -1087,6 +1100,21 @@ pub trait Backend: Send + Sync {
         ))
     }
 
+    /// P3: lease анонимизации — вход (роль `anon`, §2.2).
+    fn internal_anon_enter(&self, body: &Value) -> Result<Value> {
+        let _ = body;
+        Err(crate::error::EngineError::Other(
+            "lease анонимизации недоступен: владелец GPU не умеет роль 'anon'".to_string(),
+        ))
+    }
+
+    /// P3: lease анонимизации — выход (идемпотентный).
+    fn internal_anon_exit(&self) -> Result<Value> {
+        Err(crate::error::EngineError::Other(
+            "lease анонимизации недоступен: владелец GPU не умеет роль 'anon'".to_string(),
+        ))
+    }
+
     /// Базовый URL внешнего владельца для режима `llm_server.mode: facade`
     /// (`http://host:port/v1`). `None` — режим `embedded` (работаем через кластер).
     ///
@@ -1220,6 +1248,34 @@ fn handle_internal(
                 Err(e) => Response::error(501, &e.to_string(), "not_implemented"),
             }
         }
+        Route::InternalAnonEnter => {
+            let body = match crate::http::parse_body(req) {
+                Ok(v) => v,
+                Err(e) => return Response::error(400, &e.to_string(), "invalid_request_error"),
+            };
+            match backend.internal_anon_enter(&body) {
+                Ok(v) => Response::ok(v),
+                // Владелец не умеет роль — не реализовано; занятый GPU — gpu_busy
+                // (машина-код для lease-клиента: повторить позже).
+                Err(e) => {
+                    if e.to_string().contains("не умеет роль 'anon'") {
+                        Response::error(501, &e.to_string(), "not_implemented")
+                    } else {
+                        Response::error(503, &e.to_string(), "gpu_busy")
+                    }
+                }
+            }
+        }
+        Route::InternalAnonExit => match backend.internal_anon_exit() {
+            Ok(v) => Response::ok(v),
+            Err(e) => {
+                if e.to_string().contains("не умеет роль 'anon'") {
+                    Response::error(501, &e.to_string(), "not_implemented")
+                } else {
+                    Response::error(409, &e.to_string(), "server_error")
+                }
+            }
+        },
         _ => Response::error(
             400,
             "маршрут не является внутренним",
@@ -1313,7 +1369,9 @@ pub fn handle(
         | Route::InternalUnload
         | Route::InternalDevices
         | Route::InternalStop
-        | Route::InternalTranscribe => Response::error(
+        | Route::InternalTranscribe
+        | Route::InternalAnonEnter
+        | Route::InternalAnonExit => Response::error(
             400,
             "внутренний маршрут не обслуживается здесь",
             "invalid_request_error",

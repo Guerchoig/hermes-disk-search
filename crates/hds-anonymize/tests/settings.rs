@@ -27,6 +27,38 @@ fn defaults_match_plan() {
 }
 
 #[test]
+fn worker_args_for_carries_device_and_gpu_limit() {
+    let s = Settings::from_config(&Config::Null);
+    let root = std::env::temp_dir();
+    // CPU (P2-совместимость): без лимита
+    let cpu = s.worker_args(&root);
+    let val = |args: &[String], name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    assert_eq!(val(&cpu, "--device").as_deref(), Some("cpu"));
+    assert_eq!(val(&cpu, "--gpu-mem-limit-mb"), None);
+    // GPU (P3, lease): --device cuda + лимит ORT из lease
+    let gpu = s.worker_args_for(&root, "cuda", 4096);
+    assert_eq!(val(&gpu, "--device").as_deref(), Some("cuda"));
+    assert_eq!(val(&gpu, "--gpu-mem-limit-mb").as_deref(), Some("4096"));
+    // лимит 0 — флаг не ставится (размер аренды контролирует ORT)
+    let no_limit = s.worker_args_for(&root, "cuda", 0);
+    assert_eq!(val(&no_limit, "--gpu-mem-limit-mb"), None);
+}
+
+#[test]
+fn gpu_settings_have_defaults() {
+    let s = Settings::from_config(&Config::Null);
+    assert_eq!(s.gpu, "auto");
+    assert_eq!(s.llm_host_url, "http://127.0.0.1:8010");
+    assert_eq!(s.gpu_reserve_mb, 2048);
+    assert_eq!(s.lease_timeout_sec, 120);
+}
+
+#[test]
 fn values_are_carried_to_worker_args() {
     let s = Settings::from_config(&cfg(
         "anonymize:\n  threshold: 0.35\n  natasha: false\n  timeout_sec: 120\n",

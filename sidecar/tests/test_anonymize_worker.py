@@ -28,6 +28,9 @@ def run(payload_lines: list[str], root: str, db: str, models: str, timeout=120):
         "--db", db,
         "--models-dir", models,
         "--natasha", "0",
+        # P3: args GPU-режима доходят до воркера (hello не зависит от весов)
+        "--device", "cuda",
+        "--gpu-mem-limit-mb", "4096",
         "--idle-timeout", "10",
     ]
     proc = subprocess.Popen(

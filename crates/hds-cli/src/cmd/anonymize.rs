@@ -111,6 +111,39 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
         Some(d) => PathBuf::from(d),
         None => settings.output_dir_abs(&root),
     };
+
+    // P3 (§2.2): lease у llm_host (`anonymize.gpu: auto`); `off` — всегда CPU.
+    // llm_host недоступен → fallback CPU с предупреждением; gpu_busy (бюджет
+    // ожидания chat истёк) → акт отклоняется, повтор решает пользователь.
+    let mut device = "cpu";
+    let mut gpu_limit = 0u64;
+    let mut _lease_guard: Option<hds_anonymize::lease::LeaseGrant> = None;
+    if settings.gpu != "off" {
+        match hds_anonymize::lease::acquire(
+            &settings.llm_host_url,
+            settings.lease_timeout_sec,
+            settings.gpu_reserve_mb,
+            std::time::Duration::from_secs(10),
+        ) {
+            Ok(grant) => {
+                println!(
+                    "[..] lease 'anon' выдан (лимит ORT {} МиБ) — GLiNER на GPU",
+                    grant.gpu_mem_limit_mb
+                );
+                device = "cuda";
+                gpu_limit = grant.gpu_mem_limit_mb;
+                _lease_guard = Some(grant); // Drop → /internal/anon/exit
+            }
+            Err(hds_anonymize::lease::LeaseError::Unavailable(m)) => {
+                println!("[warn] lease недоступен ({m}) — GLiNER на CPU (fallback)");
+            }
+            Err(busy) => {
+                let err = hds_anonymize::lease::to_anonymize_error(&busy);
+                eprintln!("[!!] lease: {} ({})", err, err.kind.as_str());
+                return 1;
+            }
+        }
+    }
     // значения/токены — позиционные аргументы после пути (значения флагов
     // вида `--out-dir DIR` не попадают в список)
     let mut items: Vec<String> = Vec::new();
@@ -152,7 +185,11 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
             return 1;
         }
     };
-    let client_cfg = ClientConfig::from_settings(&python, &root, &settings);
+    let client_cfg = {
+        let mut c = ClientConfig::from_settings(&python, &root, &settings);
+        c.extra_args = settings.worker_args_for(&root, device, gpu_limit);
+        c
+    };
     let mut client = match Client::spawn(client_cfg) {
         Ok(c) => c,
         Err(e) => {

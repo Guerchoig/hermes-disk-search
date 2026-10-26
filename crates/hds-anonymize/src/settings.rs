@@ -55,8 +55,13 @@ pub struct Settings {
     pub natasha: bool,
     /// Пропуск гигантов с warning (§2.6).
     pub max_file_mb: i64,
-    /// `anonymize.gpu: auto|off` — в P2 всегда CPU (lease — P3).
+    /// `anonymize.gpu: auto|off` — в P3 `auto` берёт lease у `llm_host`
+    /// (fallback CPU при недоступности/отказе), `off` — всегда CPU.
     pub gpu: String,
+    /// `anonymize.llm_host_url` — куда ходить за lease (порт роли `chat`).
+    pub llm_host_url: String,
+    /// `anonymize.gpu_reserve_mb` — NVML-резерв GLiNER (~2 ГБ: модель ~1 ГБ + активации).
+    pub gpu_reserve_mb: u64,
     pub lease_timeout_sec: u64,
     /// RPC на файл (`WorkerConfig.request_timeout`).
     pub request_timeout_sec: u64,
@@ -102,6 +107,12 @@ impl Settings {
             natasha: flag(cfg, "anonymize.natasha", true),
             max_file_mb: integer(cfg, "anonymize.max_file_mb", 200),
             gpu: text(cfg, "anonymize.gpu", "auto"),
+            llm_host_url: text(
+                cfg,
+                "anonymize.llm_host_url",
+                crate::lease::DEFAULT_LLM_HOST_URL,
+            ),
+            gpu_reserve_mb: integer(cfg, "anonymize.gpu_reserve_mb", 2048).max(256) as u64,
             lease_timeout_sec: integer(cfg, "anonymize.lease_timeout_sec", 120).max(1) as u64,
             request_timeout_sec: integer(cfg, "anonymize.request_timeout_sec", 600).max(60) as u64,
             idle_timeout_sec: integer(cfg, "anonymize.idle_timeout_sec", 60).max(5) as u64,
@@ -130,8 +141,15 @@ impl Settings {
     }
 
     /// Аргументы воркера (в `WorkerConfig.extra_args`, §3: параметры —
-    /// только из аргументов).
+    /// только из аргументов). CPU-вариант (P2-совместимость).
     pub fn worker_args(&self, root: &Path) -> Vec<String> {
+        self.worker_args_for(root, "cpu", 0)
+    }
+
+    /// Аргументы воркера с явным устройством и лимитом VRAM ORT
+    /// (`--device cuda --gpu-mem-limit-mb N` — P3, lease у `llm_host`).
+    /// `gpu_mem_limit_mb = 0` — лимит не выставляется.
+    pub fn worker_args_for(&self, root: &Path, device: &str, gpu_mem_limit_mb: u64) -> Vec<String> {
         let mut args = vec![
             "--model".to_string(),
             self.model.clone(),
@@ -150,12 +168,11 @@ impl Settings {
             "--db".to_string(),
             self.db_abs(root).to_string_lossy().into_owned(),
             "--device".to_string(),
-            // P2: всегда CPU; P3 (lease) включит cuda
-            "cpu".to_string(),
+            device.to_string(),
         ];
-        if self.gpu == "off" {
+        if gpu_mem_limit_mb > 0 {
             args.push("--gpu-mem-limit-mb".into());
-            args.push("0".into());
+            args.push(gpu_mem_limit_mb.to_string());
         }
         args
     }

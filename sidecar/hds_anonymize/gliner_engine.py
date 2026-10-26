@@ -176,6 +176,34 @@ class GlinerEngine:
         if not detected_providers:
             raise ImportError("onnxruntime не установлен")
 
+        # P3 (§2.2): --device задаёт контур. cpu — только CPUExecutionProvider;
+        # cuda без CUDA EP — предупреждение и честный CPU-фоллбек (провайдер
+        # подставляется ниже); лимит аренды (--gpu-mem-limit-mb от lease) —
+        # в provider_options CUDA EP, иначе ORT растит аренну без ограничений.
+        device = str(NER_ENGINE.get("device", "auto")).strip().lower()
+        providers = detected_providers
+        if device == "cpu":
+            providers = ["CPUExecutionProvider"]
+        elif device == "cuda" and detected_providers[0] != "CUDAExecutionProvider":
+            logger.warning(
+                "anon: запрошен device=cuda, но CUDAExecutionProvider недоступен "
+                "(%s) — работа на CPU",
+                detected_providers,
+            )
+        limit_mb = int(NER_ENGINE.get("gpu_mem_limit_mb") or 0)
+        provider_options = None
+        if limit_mb > 0 and "CUDAExecutionProvider" in providers:
+            provider_options = [
+                {
+                    "device_id": 0,
+                    "arena_extend_strategy": "kSameAsRequested",
+                    "gpu_mem_limit": int(limit_mb) * 1024 * 1024,
+                }
+            ] + [{}] * (len(providers) - 1)
+            logger.info(
+                "anon: CUDA EP с gpu_mem_limit=%d МиБ (lease 'anon')", limit_mb
+            )
+
         # ONNX Runtime при создании CUDA/DirectML-сессии сыплет безвредными
         # предупреждениями (Memcpy-трансформер, ScatterND) — они засоряют
         # вывод прокси и пугают пользователя. Глушим ОБА канала логов ORT:
@@ -195,6 +223,7 @@ class GlinerEngine:
         # инициализировался (например, драйвер), сессия пересоздаётся на CPU.
         # Патч строго ограничен этим методом: finally восстанавливает оригинал.
         original_session = ort.InferenceSession
+        providers_list = providers  # замыкание патча (см. ниже)
 
         def _session_with_providers(path_or_bytes, sess_options=None, providers=None, **kwargs):
             if sess_options is None:
@@ -203,14 +232,14 @@ class GlinerEngine:
             try:
                 return original_session(
                     path_or_bytes, sess_options,
-                    providers=detected_providers, **kwargs,
+                    providers=providers_list, provider_options=provider_options, **kwargs,
                 )
             except Exception:
-                if detected_providers != ["CPUExecutionProvider"]:
+                if providers_list != ["CPUExecutionProvider"]:
                     logger.warning(
                         "NER: GPU-провайдер %s не инициализировался — "
                         "сессия создана на CPU",
-                        detected_providers,
+                        providers_list,
                     )
                     return original_session(
                         path_or_bytes, sess_options,

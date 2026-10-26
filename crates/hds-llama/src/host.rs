@@ -953,6 +953,9 @@ pub struct ClusterBackend {
     /// простоя не вытесняют транскрибатор, пока он работает. Запрос чата/поиска
     /// вытеснить его **может** (приоритет 1 > 2).
     transcribe_active: Arc<AtomicBool>,
+    /// P3 (§2.2 анонимизации): активен lease роли `anon` — anon единственный
+    /// владелец GPU, новые роли не загружаются до `/internal/anon/exit`.
+    anon_lease: Arc<AtomicBool>,
     /// Страж брошенных запросов: порог одного вызова движка в секундах
     /// (`gpu.abandoned_request_sec`; 0 — выключен).
     abandoned_request_sec: u64,
@@ -1544,6 +1547,16 @@ impl ClusterBackend {
     ) -> Result<Option<PauseLease>> {
         if !self.dispatch_enabled {
             return Ok(None);
+        }
+        // P3 (§2.2): пока активен lease анонимизации, anon — единственный
+        // владелец GPU: новые роли не загружаются (иначе chat/индексация
+        // перезаняли бы карту у GLiNER). Роли вернутся по потребности после
+        // /internal/anon/exit.
+        if self.anon_lease.load(Ordering::Relaxed) {
+            return Err(EngineError::Other(format!(
+                "GPU занят анонимизацией (lease 'anon'): роль '{role}' не загружается, \
+                 пока аренда не снята"
+            )));
         }
         if need == 0 {
             return Ok(None);
@@ -2509,6 +2522,115 @@ impl Backend for ClusterBackend {
             out["text"] = json!(tr.raw_text);
         }
         Ok(out)
+    }
+
+    /// P3 (§2.2): вход в lease анонимизации (`/internal/anon/enter`).
+    ///
+    /// Тело: `{"lease_timeout_sec": 120, "reserve_mb": 2048}` (оба необязательны).
+    /// Ответ: `{"granted": true, "gpu_mem_limit_mb": N}` — лимит передаётся
+    /// sidecar'у (`--gpu-mem-limit-mb` → ORT CUDA EP `gpu_mem_limit`), `0` —
+    /// замера нет, размер аренды контролирует ORT.
+    ///
+    /// Ошибки: lease уже выдан; бюджет ожидания busy-chat истёк (503 `gpu_busy`).
+    fn internal_anon_enter(&self, body: &Value) -> Result<Value> {
+        if self.anon_lease.load(Ordering::Relaxed) {
+            return Err(EngineError::Other(
+                "lease 'anon' уже выдан — сначала /internal/anon/exit".to_string(),
+            ));
+        }
+        let budget_sec = body
+            .get("lease_timeout_sec")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(120)
+            .clamp(1, 3600);
+        let need_mib = body
+            .get("reserve_mb")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(2048);
+        let deadline = std::time::Instant::now() + Duration::from_secs(budget_sec);
+
+        // Бюджетное ожидание busy-chat (§2.2): занятые инстансы не выгружаем,
+        // ждём окончания сеанса; не дождались — gpu_busy.
+        loop {
+            let busy: Vec<String> = self
+                .uses()
+                .iter()
+                .filter(|u| u.is_busy())
+                .map(|u| {
+                    format!(
+                        "{} (запросов: {})",
+                        u.role,
+                        u.active_requests + u.queued_requests
+                    )
+                })
+                .collect();
+            if busy.is_empty() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(EngineError::Other(format!(
+                    "GPU занят ({}): бюджет ожидания {} с истёк — lease 'anon' не выдан",
+                    busy.join(", "),
+                    budget_sec
+                )));
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+
+        // План входа (index.pause + вытеснение незанятых) — применяем с бюджетом.
+        let plan = {
+            let uses = self.uses();
+            dispatch::plan_anon_enter(&self.gpu, self.free_mib(), &uses, need_mib)
+        };
+        for line in plan.lines() {
+            self.log.line(&format!("[anon] {line}"));
+        }
+        let applied = self
+            .cl()?
+            .try_with("anon:enter", DISPATCH_BUDGET, |cluster| {
+                dispatch::apply(cluster, &self.pause, &plan)
+            });
+        if let Err(busy) = applied {
+            return Err(EngineError::Other(format!(
+                "движок занят ({busy}) — lease 'anon' не выдан, повторите"
+            )));
+        }
+        let verdict_ok = plan.verdict.is_ok() || matches!(plan.verdict, Verdict::Unknown);
+        if !verdict_ok {
+            // Пауза поставлена действием плана, но lease не выдан — снимаем здесь
+            // же (чужую паузу `resume` не трогает, R30).
+            let _ = self.pause.resume();
+            return Err(EngineError::Other(format!(
+                "не хватает VRAM для анонимизации: {} — повторите после окончания сеанса chat",
+                plan.shortage().unwrap_or("вытеснение не помогло")
+            )));
+        }
+        // Лимит для ORT: свободная VRAM после вытеснения минус системный резерв.
+        let limit = self
+            .free_mib()
+            .map(|f| f.saturating_sub(self.gpu.reserve_mb))
+            .unwrap_or(0);
+        self.anon_lease.store(true, Ordering::Relaxed);
+        self.log.line(&format!(
+            "[anon] lease выдан (резерв {} МиБ, лимит ORT {} МиБ) — ждём /internal/anon/exit",
+            need_mib, limit
+        ));
+        Ok(json!({"granted": true, "gpu_mem_limit_mb": limit}))
+    }
+
+    /// P3 (§2.2): выход из lease (`/internal/anon/exit`) — идемпотентен.
+    ///
+    /// Снимает нашу `index.pause` (чужую не трогает) и флаг блокировки загрузки;
+    /// вытесненные роли возвращаются по потребности (LOAD_ON_DEMAND).
+    fn internal_anon_exit(&self) -> Result<Value> {
+        let was = self.anon_lease.swap(false, Ordering::Relaxed);
+        match self.pause.resume() {
+            Ok(true) => self.log.line("[anon] lease снят: index.pause отпущена"),
+            _ => self.log.line(&format!(
+                "[anon] lease снят (был активен: {was}); index.pause чужая или уже снята"
+            )),
+        }
+        Ok(json!({"ok": true, "was_active": was}))
     }
 }
 
@@ -3579,6 +3701,7 @@ impl Host {
             whisper_cards,
             role_cards,
             transcribe_active: Arc::new(AtomicBool::new(false)),
+            anon_lease: Arc::new(AtomicBool::new(false)),
             abandoned_request_sec: resolved.gpu.abandoned_request_sec,
             diar: diar_settings,
             diar_auto: OnceLock::new(),

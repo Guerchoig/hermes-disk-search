@@ -646,6 +646,112 @@ pub fn plan_transcribe(
     plan
 }
 
+/// P3 (§2.2): роль аренды анонимизации. Приоритет 100 (= chat) в
+/// `gpu.priorities`; инстанса в кластере НЕТ — GLiNER живёт в sidecar.
+pub const ANON_ROLE: &str = "anon";
+
+/// P3 (§2.2): решение по входу в lease анонимизации.
+///
+/// Роль `anon` — приоритет 100 (= chat), но у неё **нет инстанса движка**:
+/// GLiNER работает в sidecar, а его потребность (`anon_need_mib`, NVML-резерв
+/// ~2 ГБ: модель ~1 ГБ + активации) задаёт вызывающий. Вход в lease:
+/// * `index.pause` — индексация стоит, пока GLiNER держит карту;
+/// * вытеснение **всех незанятых** инстансов, включая idle-chat (anon
+///   становится единственным владельцем GPU; занятый chat защищён фильтром
+///   `is_busy` в `evictable` — его ждёт вызывающий с бюджетом `lease_timeout_sec`,
+///   после чего отдаёт `gpu_busy`, а не выгружает работающий сеанс).
+///
+/// Роли возвращаются по потребности после `/internal/anon/exit` (LOAD_ON_DEMAND).
+pub fn plan_anon_enter(
+    gpu: &GpuConfig,
+    free_mib: Option<u64>,
+    instances: &[InstanceUse],
+    anon_need_mib: u64,
+) -> Plan {
+    let free = gpu.effective_free_mib(free_mib);
+    let demand = Demand::new(ANON_ROLE, anon_need_mib);
+    let mut plan = Plan::new(free, anon_need_mib, gpu.reserve_mb);
+    let total = plan.total_mib();
+
+    let Some(free_u) = free else {
+        // Замера нет — не гадаем: паузу ставим, незанятых вытесняем (это
+        // безусловно полезно), а вердикт Unknown — решает сам ORT-воркер.
+        plan.verdict = Verdict::Unknown;
+        plan.actions.push(Action::PauseIndex {
+            reason: "lease анонимизации: замера VRAM нет — освобождаем карту".to_string(),
+        });
+        for inst in eviction_order_multi(gpu, instances, &[]) {
+            plan.actions.push(Action::Unload {
+                name: inst.name.clone(),
+                role: inst.role.clone(),
+                vram_mib: inst.vram_mib,
+                why: format!(
+                    "уступает анонимизации (lease '{}'): простой {} с",
+                    ANON_ROLE, inst.idle_secs
+                ),
+            });
+        }
+        plan.notes.push(
+            "нет замера свободной VRAM: лимит --gpu-mem-limit-mb не выставляется, \
+             размер аренды контролирует ORT"
+                .to_string(),
+        );
+        return plan;
+    };
+
+    plan.actions.push(Action::PauseIndex {
+        reason: format!(
+            "lease анонимизации: нужно {total} МиБ (GLiNER {} + резерв {}), свободно {free_u} МиБ",
+            anon_need_mib, gpu.reserve_mb
+        ),
+    });
+    let mut freed = 0u64;
+    for inst in eviction_order_multi(gpu, instances, &[]) {
+        if free_u + freed >= total {
+            break;
+        }
+        plan.actions.push(Action::Unload {
+            name: inst.name.clone(),
+            role: inst.role.clone(),
+            vram_mib: inst.vram_mib,
+            why: format!(
+                "уступает анонимизации (lease '{}', приоритет {}): простой {} с, занят запросами: {}",
+                ANON_ROLE,
+                gpu.priority_of(&inst.role),
+                inst.idle_secs,
+                inst.is_busy()
+            ),
+        });
+        freed += inst.vram_mib;
+    }
+    plan.freed_mib = freed;
+    if free_u + freed >= total {
+        plan.verdict = Verdict::FitsAfterEviction;
+        plan.notes.push(format!(
+            "после вытеснения хватает: освободили {freed} МиБ, доступно {} МиБ; \
+             роли вернутся по потребности после /internal/anon/exit",
+            free_u + freed
+        ));
+    } else {
+        let msg = shortage_message(
+            gpu,
+            &demand,
+            free_u,
+            freed,
+            total,
+            "; занятые инстансы не выгружаются — повторите после окончания сеанса chat",
+        );
+        plan.verdict = Verdict::NotEnough {
+            short_mib: total - (free_u + freed),
+        };
+        plan.actions.push(Action::ReportShortage {
+            message: msg.clone(),
+        });
+        plan.notes.push(msg);
+    }
+    plan
+}
+
 /// Действие арбитра. Список действий — это и есть «решение» для лога/`status`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Action {

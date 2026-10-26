@@ -394,6 +394,9 @@ impl Default for GpuConfig {
     fn default() -> Self {
         let mut priorities = BTreeMap::new();
         priorities.insert("chat".to_string(), 100);
+        // P3 (§2.2 анонимизации): роль аренды GLiNER — приоритет chat;
+        // инстанса в кластере нет, lease идёт через /internal/anon/enter|exit.
+        priorities.insert(crate::dispatch::ANON_ROLE.to_string(), 100);
         priorities.insert(TRANSCRIBE_ROLE.to_string(), 60);
         priorities.insert("embedding".to_string(), 40);
         priorities.insert("rerank".to_string(), 30);

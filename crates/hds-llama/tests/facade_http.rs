@@ -452,6 +452,102 @@ fn http_transport_handles_keep_alive_continue_and_chunked() {
     stop.store(true, Ordering::Relaxed);
 }
 
+/// Поднять фасад на эфемерном порту с произвольным backend (для lease-теста).
+fn start_backend(backend: Arc<dyn Backend>) -> (u16, Arc<AtomicBool>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("эфемерный порт");
+    let port = listener.local_addr().unwrap().port();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_thread = Arc::clone(&stop);
+    let cfg = ServerConfig::default();
+    std::thread::spawn(move || {
+        let handler = move |r: &http::Request| handle(r, &cfg, &*backend);
+        let _ = http::serve(listener, stop_thread, handler);
+    });
+    std::thread::sleep(Duration::from_millis(150));
+    (port, stop)
+}
+
+/// Подделка владельца GPU: умеет lease (P3, §2.2) или отвечает busy.
+struct FakeLease {
+    busy: bool,
+}
+
+impl Backend for FakeLease {
+    fn chat(&self, _req: &ChatRequest) -> hds_llama::Result<(String, Usage)> {
+        Ok((
+            "ок".to_string(),
+            Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+            },
+        ))
+    }
+
+    fn embeddings(&self, _body: &str) -> hds_llama::Result<String> {
+        Ok("{}".to_string())
+    }
+
+    fn rerank(&self, _body: &str) -> hds_llama::Result<String> {
+        Ok("{}".to_string())
+    }
+
+    fn props(&self, _role: &str) -> Option<Value> {
+        None
+    }
+
+    fn internal_anon_enter(&self, _body: &Value) -> hds_llama::Result<Value> {
+        if self.busy {
+            Err(hds_llama::error::EngineError::Other(
+                "GPU занят (chat): бюджет ожидания истёк — lease 'anon' не выдан".to_string(),
+            ))
+        } else {
+            Ok(serde_json::json!({"granted": true, "gpu_mem_limit_mb": 4096}))
+        }
+    }
+
+    fn internal_anon_exit(&self) -> hds_llama::Result<Value> {
+        Ok(serde_json::json!({"ok": true, "was_active": true}))
+    }
+}
+
+/// P3 (§2.2): `/internal/anon/enter|exit` — коды и тело.
+///
+/// Подделка backend'а без lease отвечает дефолтными методами трейта →
+/// фасад отдаёт 501 `not_implemented` (а не 503 `gpu_busy`: «не умею» — это
+/// не «GPU занят»). Реализующий backend с busy-ошибкой получает 503 —
+/// машина-код, по которому lease-клиент отличает «повторить позже» от
+/// «fallback CPU».
+#[test]
+fn anon_lease_routes_codes_and_body() {
+    // 1) backend без lease-поддержки → 501 (default трейта)
+    let (port, stop) = start_backend(Arc::new(Fake::new(vec![])));
+    let (code, body) = post(port, "/internal/anon/enter", "{}");
+    assert_eq!(code, 501, "{body}");
+    assert!(body.contains("not_implemented"), "{body}");
+    let (code, _) = post(port, "/internal/anon/exit", "{}");
+    assert_eq!(code, 501);
+    stop.store(true, Ordering::Relaxed);
+
+    // 2) backend, умеющий lease: granted → 200 с лимитом ORT
+    let (port, stop) = start_backend(Arc::new(FakeLease { busy: false }));
+    let (code, body) = post(port, "/internal/anon/enter", r#"{"reserve_mb": 2048}"#);
+    assert_eq!(code, 200, "{body}");
+    assert!(body.contains("\"granted\":true"), "{body}");
+    assert!(body.contains("4096"), "{body}");
+    // exit идемпотентен → 200
+    let (code, body) = post(port, "/internal/anon/exit", "{}");
+    assert_eq!(code, 200, "{body}");
+    stop.store(true, Ordering::Relaxed);
+
+    // 3) GPU занят (бюджет ожидания истёк) → 503 gpu_busy + сообщение
+    let (port, stop) = start_backend(Arc::new(FakeLease { busy: true }));
+    let (code, body) = post(port, "/internal/anon/enter", "{}");
+    assert_eq!(code, 503, "{body}");
+    assert!(body.contains("gpu_busy"), "{body}");
+    assert!(body.contains("бюджет ожидания"), "{body}");
+    stop.store(true, Ordering::Relaxed);
+}
+
 /// CORS-префлайт (OPTIONS): вебвью Cline запрашивает каталог моделей с заголовком
 /// `Authorization` — браузерный контекст требует предварительный OPTIONS. Раньше
 /// OPTIONS падал 404 (нет маршрута) и список моделей в Cline не обновлялся
