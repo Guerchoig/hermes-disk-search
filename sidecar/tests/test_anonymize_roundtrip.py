@@ -261,6 +261,16 @@ class PartialScenariosTest(RoundtripBase):
         self.assertEqual([t["token"] for t in r1["tokens"]], ["[PERSON_1]"])
         self.assertEqual([t["token"] for t in r2["tokens"]], ["[PERSON_2]"])
 
+    def test_out_dir_created_on_first_act(self):
+        """Выходной каталог создаётся при первом акте (data/anonymized)."""
+        src = os.path.join(self.dir, "doc.txt")
+        with open(src, "w", encoding="utf-8", newline="") as f:
+            f.write("Контакт: Иванов Иван\n")
+        out_dir = os.path.join(self.dir, "nested", "out")
+        out = os.path.join(out_dir, "doc.anonymized.txt")
+        res = _run(self.h.anonymize(src, out, values=["Иванов Иван"]))
+        self.assertTrue(os.path.isfile(res["out_path"]))
+
     def test_file_busy(self):
         src = os.path.join(self.dir, "doc.txt")
         with open(src, "w", encoding="utf-8", newline="") as f:

@@ -153,9 +153,15 @@ def _err(mid, exc: BaseException) -> None:
     elif isinstance(exc, (FileBusyError, PermissionError)):
         kind = "file_busy"
         hint = "закройте файл в редакторе (Word/LibreOffice) и повторите"
-    elif isinstance(exc, (ModelMissingError, FileNotFoundError, ImportError)):
+    elif isinstance(exc, ImportError):
         kind = "model_missing"
         hint = MODEL_MISSING_HINT
+    elif isinstance(exc, (ModelMissingError, FileNotFoundError)):
+        # FileNotFoundError бывает РАЗНЫЙ: нет ВЕСОВ (→ model_missing) и
+        # нет файла/каталога данных (→ обычная ошибка, kind не задаём).
+        if "вес" in text or "модел" in text:
+            kind = "model_missing"
+            hint = MODEL_MISSING_HINT
     elif isinstance(exc, OutOfDirError):
         kind = "out_of_dir"
     elif isinstance(exc, LookupError):

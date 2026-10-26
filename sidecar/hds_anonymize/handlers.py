@@ -79,7 +79,10 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     """Атомарная перезапись файла (временный файл + os.replace).
 
     Перенос из anonymizer_proxy/proxy/handlers.py:90 — без правок семантики.
+    Дополнение P1: родительский каталог создаётся (выходной out_dir может
+    ещё не существовать — `data/anonymized` при первом акте).
     """
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".anonymizer-tmp")
     try:
         tmp.write_bytes(data)
@@ -399,8 +402,10 @@ class AnonymizeHandlers:
             "placeholders": [],
             "resolved": [],
         }
-        if not supported or not path.is_file():
+        if not supported:
             return result
+        if not path.is_file():
+            raise FileNotFoundError(f"Файл не найден: {path}")
 
         result["marker_version"] = read_anon_marker(path)
         content = self._read_bytes(path)

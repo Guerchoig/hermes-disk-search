@@ -31,6 +31,7 @@ fn usage() -> String {
      \x20 cline-sync   [--json] [--dry-run] [--server-url URL --token T [--mcp-path /mcp]]\n\
      \x20              (настройки Cline: локально из config.yaml или на внешний сервер с Bearer)\n\
      \x20 ui           [--host H] [--port N] (веб-интерфейс; по умолчанию 127.0.0.1:8765)
+     \x20 anon         anonymize|values|deanon|deanon-values|inspect|warmup|check
      \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
      \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
      \x20 login        --login L --password P [--url http://host:port] (токен на stdout)\n\
@@ -224,6 +225,7 @@ fn run(args: &[String]) -> i32 {
                 2
             }
         },
+        "anon" => cmd::anonymize::cmd_anon(rest),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0

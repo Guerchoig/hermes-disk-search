@@ -16,6 +16,8 @@ hds-index = { path = "../hds-index" }
 hds-extract = { path = "../hds-extract" }
 # P1: `transcribe-check` (probe Python-стека) — типизированный клиент воркера.
 hds-transcribe = { path = "../hds-transcribe" }
+# P4: `hds anon` — клиент воркера анонимизации (PLAN_ANONYMIZER_SIDECAR.md §2.4).
+hds-anonymize = { path = "../hds-anonymize" }
 hds-clip = { path = "../hds-clip" }
 hds-search = { path = "../hds-search" }
 hds-mcp = { path = "../hds-mcp" }

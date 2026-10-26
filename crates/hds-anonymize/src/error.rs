@@ -93,9 +93,15 @@ pub fn from_transport(
         Some("gpu_busy") => ErrorKind::GpuBusy,
         _ => ErrorKind::Internal,
     };
-    let e = AnonymizeError::new(kind, err.to_string());
-    match hint {
-        Some(h) => e.with_hint(h),
-        None => e,
+    let mut e = AnonymizeError::new(kind, err.to_string());
+    // Транспортный текст RPC-ошибки уже содержит hint (`RpcError::Display`) —
+    // отрезаем его из message и кладём в поле `hint` (один раз, структурированно).
+    if let Some(h) = hint {
+        let suffix = format!(" — {h}");
+        if let Some(stripped) = e.message.strip_suffix(&suffix) {
+            e.message = stripped.to_string();
+        }
+        e = e.with_hint(h);
     }
+    e
 }
