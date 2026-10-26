@@ -4,10 +4,15 @@
 > (он самодостаточен) и отправить первым сообщением. Этот документ — «карта» состояния:
 > его можно читать целиком, но промт в §9 уже содержит главное.
 >
-> **Дата среза:** 26.10.2026. **Ветка:** `python-sidecar-transcribe`, HEAD `c832da5`,
-> тег `v0.22.0`. **Код ещё не менялся.** План `PLAN_ANONYMIZER_SIDECAR.md` —
-> **untracked** (`??` в git status), ~300 строк. Другое изменение в дереве —
-> `M sidecar/hds_transcribe/glossary.example.yaml` — **чужое**, не трогать.
+> **Дата среза:** 26.10.2026. **Ветка:** `anonymizer-sidecar`, HEAD `5ba55d3`.
+> Сделано и закоммичено: **P1, P1b, P2, P3, P4** (план `PLAN_ANONYMIZER_SIDECAR.md`,
+> tracked). Осталось: **P5 (UI), P6 (установщики+веса), P7 (приёмка/доки)**.
+> Другое изменение в дереве — `M sidecar/hds_transcribe/glossary.example.yaml` —
+> **чужое**, не трогать.
+>
+> Проверки на срезе: `cargo test --workspace` 110 ok / 0 FAILED; `cargo fmt --check`,
+> `cargo clippy --workspace --all-targets -- -D warnings` — 0; sidecar-тесты
+> (`test_anonymize_*`) 28/28 OK.
 
 ---
 
@@ -19,8 +24,9 @@
 
 * **Python-sidecar** `sidecar/hds_anonymize/` — NER-движки и Office round-trip
   (копия из `anonymizer_proxy` без изменения алгоритмов), БД токенов;
-* **Rust-клиент** `crates/hds-anonymize` — запуск воркера, протокол, lease VRAM;
-* **CLI** `hds anon`; **UI** — карточка «Анонимизация» в `hds ui`.
+* **Rust-клиент** `crates/hds-anonymize` — запуск воркера, типизированный протокол,
+  ошибки `kind`, lease VRAM, обход папки;
+* **CLI** `hds anon` (сделан); **UI** — карточка «Анонимизация» в `hds ui` (P5).
 
 **Не делаем** (решение заказчика): перехват команд агентов, OpenAI-прокси, OpenAI API.
 Оркестратор пока не делаем — протокол готовит к нему (`inspect`), состояние потом будет
@@ -28,224 +34,313 @@
 
 ## 1. Обязательное чтение (в этом порядке)
 
-1. `PLAN_ANONYMIZER_SIDECAR.md` — **весь**, особенно §1 (решения), §2.1 (оркестрация),
-   §2.2 (GPU/lease), §3 (протокол), §4 (фазы), §5 (приёмка), §7 (решения/вопросы).
-2. `sidecar/README.md` — контракт sidecar: stdio/NDJSON/JSON-RPC 2.0, `PROTOCOL 1`,
-   изоляция fd1, UTF-8 stdin, idle-timeout.
-3. `crates/hds-extract/src/{lib.rs,protocol.rs,worker.rs}` — `Worker`, `WorkerConfig`,
-   `discover_python_with` — транспорт, который **переиспользуем**, а не копируем.
-4. `crates/hds-transcribe/src/client.rs` — образец переиспользования `hds_extract::Worker`
-   в другом воркере (то же сделаем в `hds-anonymize`).
-5. `crates/hds-ui/src/transcribe.rs` + `page.rs` — образец задачи-карточки и страниц.
-6. `installers/build_transcribe_sidecar.ps1`, `installers/sidecar_common.ps1`,
-   `installers/build_sidecar.ps1` — образцы venv/профилей и упаковки sidecar.
-7. Источник переноса: `C:\Test\anonymizer_proxy\anonymizer_proxy\` —
-   `anonymizer/{gliner_engine,natasha_engine,ner_service,replacer,file_parser,mapping_store}.py`;
-   `proxy/handlers.py` фрагменты 3360–3532, 2871–2919, 3095–3194, 90–140;
-   `proxy/utils.py` строки 113, 202.
+1. `PLAN_ANONYMIZER_SIDECAR.md` — **весь**: §1 (решения), §2.1 (sidecar), §2.2 (GPU/lease),
+   §2.3 (Rust-клиент), §2.4 (CLI), §2.5 (UI), §2.6 (конфиг `anonymize.*`), §2.7
+   (установщики), §3 (протокол), §4 (фазы), §5 (приёмка), §6 (риски), §7 (решения).
+2. `sidecar/hds_anonymize/{worker,handlers,mapping_store,settings,schemas}.py` —
+   текущий воркер (см. §2 ниже).
+3. `crates/hds-anonymize/src/{client,protocol,error,settings,folder,lease}.rs`.
+4. `crates/hds-llama/src/{dispatch,host,facade}.rs` — фрагменты lease: `plan_anon_enter`,
+   `internal_anon_enter/exit`, маршруты `/internal/anon/*` (§2.4 ниже).
+5. Образцы для P5: `crates/hds-ui/src/transcribe.rs` + `page.rs` (карточка задачи),
+   существующие HTTP-эндпоинты `hds ui` (как `/api/transcribe/*`).
+6. Источник переноса (если нужен оригинал): `C:\Test\anonymizer_proxy\anonymizer_proxy\`.
 
-## 2. Что уже есть в проекте (не дублировать)
+## 2. Что уже сделано (не переделывать)
 
-| Компонент | Что есть | Как использовать |
-|---|---|---|
-| `sidecar/hds_sidecar/` | общий пакет: `stdio` (fd1→stderr, UTF-8 stdin, NDJSON, `reply/ok/err`), `runtime` (reader-thread, idle-timeout, EOF), `progress`, `fs` | импортировать в воркере; `stdio.init()` — **до** тяжёлых импортов |
-| `sidecar/hds_extract/worker.py` | образец воркера (`hello/extract/normalize/shutdown`) | структура цикла, ошибки, capabilities |
-| `sidecar/hds_transcribe/` | тяжёлый воркер + свой venv (профили cuda/cpu/dml), README | образец venv/профилей/загрузки моделей |
-| `sidecar/python/` | портативный CPython **3.12.14** (python-build-standalone) | база для `venv-anonymize` |
-| `crates/hds-extract` | `Worker`, `WorkerConfig`, `discover_python_with`, `protocol` | **переиспользовать транспорт** |
-| `crates/hds-transcribe/src/client.rs` | `use hds_extract::{Worker, WorkerConfig}` | образец клиента |
-| `crates/hds-ui` | карточки задач (`transcribe.rs`), страницы (`page.rs`), конфиг, аудит `admin_op` в server-профиле | образец UI |
-| `config.yaml` / `config.example.yaml` | секции `index`, `auto_transcribe`, `llm`, `gpu` | добавить секцию `anonymize` |
-| `hds check` (`crates/hds-index/src/diag.rs`) | диагностика | добавить пункты venv/модели/БД/lease |
-| `installers/` | `build_sidecar.ps1`, `build_transcribe_sidecar.ps1`, `sidecar_common.ps1`, `fetch_*` | образцы установщиков и манифестов |
-| `crates/hds-llama` | `llm_host`, арбитр VRAM (chat:100 / embedding:40 / rerank:30 / whisper:20), `gate.rs` | расширение ролью `anon` (P3) |
+### P1 — sidecar `sidecar/hds_anonymize/` (коммит 6e4038e)
 
-## 3. Источник переноса — факты, сверенные с кодом
+* Копии из `anonymizer_proxy` **без правок алгоритмов**: `gliner_engine.py`,
+  `natasha_engine.py`, `ner_service.py`, `replacer.py`, `file_parser.py`.
+  Правки: импорты (`..config` → `.settings`), имена логгеров (`hds_anonymize.*`),
+  **offline-first** (сетевые фоллбэки удалены: natasha `_ensure_downloaded` не качает,
+  gliner только `local_files_only=True`).
+* `schemas.py` — `Entity`/`MappingEntry` как dataclasses (pydantic в окружении
+  `sidecar/python` НЕТ).
+* `settings.py` — замена `config.py`: `NER_ENGINE`/`PII_CATEGORIES`; `configure()`
+  из аргументов воркера (`--model --threshold --max-input-chars --chunk-overlap
+  --timeout --natasha --models-dir --db --device --gpu-mem-limit-mb`); `config.yaml`
+  воркер НЕ читает.
+* `mapping_store.py` — SQLite WAL (`data/anonymize.db`): `mappings(token PK, value,
+  type, ts)` + `counters(type PK, last)`, **per-type счётчики + дедуп по
+  (значение, тип)**, `busy_timeout=5000` + выдача номера в `BEGIN IMMEDIATE`.
+* `worker.py` — JSON-RPC 2.0 через `hds_sidecar` (PROTOCOL 1): `hello`
+  (`backend/providers/model/formats=["docx","xlsx","txt","md","xml"]/capabilities`),
+  `warmup`, `inspect`, `anonymize`, `anonymize_values`, `deanonymize`,
+  `deanonymize_values`, `shutdown`; progress-нотификации без `id`; env
+  `HF_HOME=<models-dir>/hf-home`, `HF_HUB_OFFLINE=1`; нет весов → `kind: model_missing`
+  + hint про `installers/fetch_anonymize_models.ps1`.
+* `handlers.py` — оркестрация: parse → NER (или детерминированный список `values`) →
+  split `\n` → `split_entities_by_segments` → построчный `TextReplacer.anonymize` →
+  join → `FileAssembler.assemble` (анон: `strip_hf_images=True, scrub_metadata=True`;
+  деанон: `False/False`) → `_atomic_write_bytes` (создаёт родительский каталог;
+  `PermissionError` → `FileBusyError`).
+* Имена выходов строит **Rust**, но воркер умеет и сам: `<stem>.anonymized.<ext>` /
+  `<stem>.deanon.<ext>` (суффикс `.anonymized` у входа отбрасывается); `..` в
+  out_dir/out_path → `kind: out_of_dir`.
 
-- **`gliner_engine.py`**: модель `knowledgator/gliner-pii-large-v1.0` (ONNX
-  `onnx/model.onnx`); порог **0.3**; `max_input_chars 1500`; `chunk_overlap 200`;
-  `timeout 300`; автопровайдеры CUDA → DirectML → CPU; torch-фоллбек;
-  `_register_nvidia_pip_dlls`; загрузка `GLiNER.from_pretrained(..., local_files_only=True)`
-  и при неудаче — сеть; чанкование с перекрытием.
-- **`natasha_engine.py`**: Slovnet NER + navec + `NamesExtractor` (yargy + pymorphy2);
-  `_ensure_downloaded` качает tar с Yandex Storage при отсутствии (в новом воркере —
-  **offline-first**, без сети).
-- **`ner_service.py`**: regex-слой (PASSPORT/PHONE/PERSON/EMAIL/WEB/INN/MONEY),
-  GLiNER, Natasha, слияние сущностей, расширение всех вхождений, quoted cores;
-  `NERUnavailableError` (отличает «NER упал» от «PII не найдено»).
-- **`replacer.py`**: токены `[TYPE_N]`, `TextReplacer.anonymize` / `deanonymize` /
-  `replace_by_value`, `split_entities_by_segments` (**строка 318**).
-- **`file_parser.py`**: `SUPPORTED_EXTENSIONS = {".docx", ".xlsx", ".xml", ".txt", ".md"}`
-  (**677**); `PARSER_VERSION = "3"` (**669**);
-  `ANON_MARKER_PREFIX = "anonymizer_proxy/parser:"` (**670**); маркер пишется в
-  `doc.core_properties.comments` DOCX (**1294**) и `wb.properties.keywords` XLSX
-  (**1374**); `assemble(strip_hf_images=True, scrub_metadata=True)` (**1119–1126**);
-  `_parse_xml` + автоопределение `xml_type = "msproject"` (**1024–1083**);
-  рендер чисел «как в Excel» (`_render_numeric_cell`, **130**).
-- **`mapping_store.py`**: `add_mapping` дедуп по **значению** (**241–244**),
-  `_next_counter` **глобальный** (**202–211**), INSERT с ретраем при коллизии
-  (**252–270**); сессии/TTL — **не переносим**.
-- **`proxy/handlers.py`**: `handle_anonymize_file` (**3360–3532**) — ядро;
-  `handle_deanonymize_file` (**2871–2919**); `_extra_anonymize_one_file`
-  (**3095–3194**); `_atomic_write_bytes` / `_atomic_write_text` (**90 / 117**).
-- **`proxy/utils.py`**: `PLACEHOLDER_TOKEN_RE = re.compile(r"\[[A-Z_]+_\d+\]")` (**113**);
-  `_result_path_for` (**202**) — не нужен (комплекса файлов больше нет).
-- **Тесты источника**: `tests/test_anonymize_file.py` (ждёт `.anonymized.docx` рядом
-  с исходником, `[PERSON_1]`, review-md, маркер), `test_deanonymize_file.py`,
-  `test_extra_commands.py`, `test_partial_deanon.py` — брать как **сценарии**, но
-  пути/имена адаптировать (у нас `out_dir`, имена из §5).
+### P1b — XML (входит в 23943f1)
 
-## 4. Решения заказчика (не пересматривать без него)
+* `hello.formats` включает `xml`; fixture `sidecar/tests/fixtures/anonymize/msproject.xml`;
+  тесты `test_anonymize_xml.py` (round-trip текст/теги идентичны).
+* **Исправлен баг оригинала**: `_assemble_xml` замена ПОЗИЦИОННАЯ, а не по `path`
+  (пути в structure неуникальны — `Task/Name` коллидировали).
+
+### P2 — Rust-клиент `crates/hds-anonymize` (23943f1)
+
+* `hds-extract`: `Worker::request` **пропускает** progress-нотификации без `id`
+  (общий дедлайн `request_timeout`), `protocol::is_notification`.
+* Крейт: `protocol.rs` (`HelloInfo/TokenCount/AnonymizeResult/DeanonymizeResult/
+  InspectResult/WarmupResult`, `out_path()` — схема имён), `error.rs`
+  (`kind: model_missing|file_busy|unsupported|db_missing|out_of_dir|gpu_busy`),
+  `settings.rs` (§2.6: `output_dir, db_path, models_dir(HDS_MODELS_DIR/anonymize),
+  model, threshold 0.3, max_input_chars 1500, chunk_overlap 200, timeout_sec 300,
+  natasha, max_file_mb, gpu, llm_host_url, gpu_reserve_mb, lease_timeout_sec,
+  request_timeout_sec 600, idle_timeout_sec 60` → `worker_args[_for]`),
+  `folder.rs` (`list_files` — верхний уровень по `hello.formats`),
+  `client.rs` (`Client::spawn` проверяет cap `anonymize`).
+* ВАЖНО: `values=Some` → отдельный RPC `anonymize_values` (не `anonymize` с values!),
+  `tokens=Some` → `deanonymize_values` — воркер различает методы.
+
+### P3 — GPU-lease (5ba55d3)
+
+* `llm_host` (`hds-llama`): роль `anon` (приоритет 100 = chat, инстанса НЕТ);
+  `dispatch::plan_anon_enter` — `index.pause` + вытеснение всех незанятых
+  (idle-chat тоже); занятые защищены; маршруты `POST /internal/anon/enter|exit`
+  (enter: 200 `{granted, gpu_mem_limit_mb}`, 503 `gpu_busy`, 501 если backend
+  не умеет; exit идемпотентен); `gpu_mem_limit_mb` = free_after − `gpu.reserve_mb`
+  (0 — замера нет); на время lease `prepare_demand` отказывает новым ролям;
+  тесты `tests/anon_lease.rs`, `tests/facade_http.rs::anon_lease_routes_codes_and_body`.
+* `hds-anonymize/src/lease.rs` — loopback-клиент (`hds_core::http::request_url`),
+  `LeaseGuard` (Drop → exit), 503 → `GpuBusy`, недоступность → `Unavailable`
+  (fallback CPU); тесты на фейк-TCP-сервере.
+* CLI: `anonymize.gpu: auto` → lease → spawn `--device cuda --gpu-mem-limit-mb N`
+  → акт → shutdown → exit; `off` — CPU; недоступен llm_host → `[warn]` + CPU fallback;
+  `gpu_busy` → акт отклонён.
+* `gliner_engine._load_onnx`: `--device cpu|cuda` (cuda без CUDA EP → warning +
+  CPU), `gpu_mem_limit` в provider_options CUDA EP.
+
+### P4 — CLI `hds anon` (dafe04a)
+
+* `hds-cli/src/cmd/anonymize.rs`: `anonymize|values|deanon|deanon-values|inspect|
+  warmup|check`; папку перечисляет Rust; PII в вывод НЕ печатаются (токены/счётчики);
+  `check` — python/веса/БД; ошибки пофайлово `[!!] … (kind)`.
+
+### Отступления от плана, найденные при реализации (это не «откаты»)
+
+* `_atomic_write_bytes` создаёт родительский каталог выхода (`data/anonymized`
+  при первом акте).
+* `FileNotFoundError` → `model_missing` **только** если речь о весах/моделях
+  (нет файла/каталога данных — без kind).
+* `inspect` отсутствующего файла — ошибка, а не `supported=true`.
+* `hint` RPC-ошибки не дублируется в тексте (поле `hint` всегда заполнено).
+
+## 3. Решения заказчика (не пересматривать без него)
 
 | # | Решение | Следствие |
 |---|---|---|
-| 1 | Сессий нет — единичные акты | SQLite-сессии/TTL не переносим; только входной и выходной файлы |
-| 2 | БД токенов — в sidecar, единый модуль | `mapping_store.py` (WAL, `data/anonymize.db`); Rust к БД не обращается |
-| 3 | Схема токенов: **per-type счётчики + дедуп по (значение, тип)** | токены отличаются от `anonymizer_proxy` → golden сравнивает сущности |
-| 4 | Маркер — как в оригинале + RPC `inspect` | повторный `anonymize` по маркеру/плейсхолдерам → **warning + обработка** |
+| 1 | Сессий нет — единичные акты | SQLite-сессии/TTL не перенесены; только вход/выход |
+| 2 | БД токенов — в sidecar, единый модуль | `mapping_store.py` (WAL); Rust к БД не обращается |
+| 3 | Токены: per-type счётчики + дедуп по (значение, тип) | golden сравнивает СУЩНОСТИ, не текст с токенами |
+| 4 | Маркер `anonymizer_proxy/parser:3` + `inspect` | повторный anon — warning + обработка (TXT/MD/XML — по плейсхолдерам) |
 | 5 | «Потерянные гарантии» частичных сценариев | констатация, не чиним |
-| 6 | Только вход/выход; комплекс [оригинал, анон, результат] уходит | имена: `<stem>.anonymized.<ext>` / `<stem>.deanon.<ext>` |
-| 7 | Модели NER не меняем | GLiNER PII + Natasha/Slovnet + pymorphy2 + regex; копия без правок алгоритмов; порог 0.3 |
-| 8 | Форматы P1: DOCX + XLSX + TXT/MD; XML — P1b | XML-слой уже в копии `file_parser.py`; в P1b — fixture/тесты |
-| 9 | Папка в UI: только верхний уровень | Rust перечисляет файлы (форматы из `hello.formats`) |
-| 10 | UI: карточка в `hds ui`; вход — поле пути + `GET /api/anonymize/ls` | браузер не отдаёт абсолютные пути |
-| 11 | GLiNER на GPU, приоритет как у chat | арбитр управляет только ролями движка → роль `anon` (100) + lease API (P3); fallback CPU |
+| 6 | Только вход/выход | имена `<stem>.anonymized.<ext>` / `<stem>.deanon.<ext>` |
+| 7 | Модели NER не меняем | порог 0.3; копии без правок алгоритмов |
+| 8 | Форматы: DOCX/XLSX/TXT/MD + XML (P1b сделан) | XML/MS Project |
+| 9 | Папку перечисляет Rust (верхний уровень, форматы из hello) | сделано в P4 |
+| 10 | GPU — lease у `llm_host` (P3 сделан) | `anonymize.gpu: auto\|off` |
 
-## 5. Контракт sidecar (кратко; полностью — §3 плана)
+Запрещено: перехват команд агентов, OpenAI-прокси/API, дублировать функции sidecar
+в Rust, переписывать боевые `PLAN_*.md`, трогать чужие правки, печатать PII/секреты
+(в логи/ответы — только токены и счётчики).
 
-| Метод | Запрос | Ответ |
-|---|---|---|
-| `hello` | — | `{protocol, pid, backend, providers[], model, formats[], capabilities}` |
-| `warmup` | `{gpu_mem_limit_mb?}` | `{backend, providers[], load_ms}` |
-| `inspect` | `{in_path}` | `{supported, marker_version, placeholders[], resolved[]}` — **без значений** |
-| `anonymize` | `{in_path, out_dir}` | `{out_path, tokens[], warnings[], elapsed_ms}` |
-| `anonymize_values` | `{in_path, out_dir, values[]}` | `{out_path, matched, unmatched, tokens, warnings[]}` |
-| `deanonymize` | `{in_path, out_dir}` | `{out_path, restored, unmatched[], warnings[]}` |
-| `deanonymize_values` | `{in_path, out_dir, tokens[]}` | `{out_path, restored[], unmatched[], warnings[]}` |
-| `shutdown` | — | `{ok}` |
+## 4. Что осталось (фазы P5–P7)
 
-Правила: `in_path` — один файл; `out_dir` — только запись туда; атомарная запись
-(temp + replace); ошибки `{code, message, hint, kind}` — `file_busy`, `unsupported`,
-`db_missing`, `model_missing`, `out_of_dir`, `gpu_busy`, `internal`; progress-нотификации
-без `id` (клиент пропускает); `config.yaml` воркер **не читает**.
+* **P5 — UI-карточка** `crates/hds-ui/src/anonymize.rs` (+ страница в `page.rs`):
+  по образцу `transcribe.rs`; вход — текстовое поле пути + серверный обзор
+  **`/api/anonymize/ls`** (верхний уровень, фильтр по `hello.formats`); 4 кнопки
+  (анон / деанон / частичная анонимизация списком значений / частичная
+  деанонимизация токенами); выходные файлы в `anonymize.output_dir`; отчёт по
+  файлам (токены, matched/unmatched, warnings); прогресс пофайловый; PII в UI/лог
+  не выводить. Server-профиль: POST-эндпоинты аудируются автоматически (`admin_op`).
+* **P6 — установщики**: `installers/build_anonymize_sidecar.ps1` (venv-anonymize из
+  `sidecar/python`, профили cpu/gpu, по образцу `build_transcribe_sidecar.ps1`,
+  ASCII-only; `requirements.lock` уже есть в `sidecar/hds_anonymize/`);
+  `installers/fetch_anonymize_models.ps1` (GLiNER PII ONNX ~1 ГБ →
+  `<models>/anonymize/hf-home`, `navec_news_v1_1B_250K_300d_100q.tar`,
+  `slovnet_ner_news_v1.tar`, манифест с sha256 — по образцу
+  `fetch_transcribe_models.ps1`); `build_sidecar.ps1` += `hds_anonymize`;
+  `hds check` += пункты venv/моделей/БД/lease (заготовка CLI — `hds anon check`).
+* **P7 — приёмка + документация**: README «Анонимизация», `sidecar/README.md`
+  (состав воркера), `STATUS.md`, `RELEASE_NOTES.md` (факт переезда из
+  anonymizer_proxy; `MIGRATION_PLAN_RUST.md` не править); живой сценарий:
+  UI → файлы → отчёт; **golden-паритет NER** (сущности/тип/спан против
+  `anonymizer_proxy`, порог 0.3) — ждёт весов из P6; полный `anonymize` по NER
+  и живой GPU-спайк (lease + RTX 3060, замер VRAM, источник CUDA-DLL) — тоже
+  после P6.
+* Мелочи из §7 плана: имена выходов подтверждены (`a.anonymized.docx` →
+  `a.deanon.docx`).
 
-## 6. Фазы и приёмка (полностью — §4–§5 плана)
+## 5. Как проверять (точные команды)
 
-| Фаза | Содержание |
-|---|---|
-| **P1** | sidecar: копии движков/парсера + `settings.py` + `mapping_store.py` + `worker.py` + оркестрация; fixtures + golden-сущности; тесты |
-| **P1b** | XML (MS Project): fixture `.xml`, round-trip (текст + структура тегов) |
-| **P2** | Rust-клиент `crates/hds-anonymize`: `client.rs` поверх `hds_extract::Worker` (+ пропуск progress-нотификаций), `settings.rs`, mock/live-тесты, пофайловый обход папки |
-| **P3** | спайк + lease в `llm_host`: роль `anon` (100), `/internal/anon/enter|exit`, `gpu_mem_limit` в ORT, завершение sidecar после акта, fallback CPU |
-| **P4** | CLI `hds anon` (`anonymize/values/deanon/deanon-values/inspect/warmup/check`) |
-| **P5** | UI-карточка `anonymize.rs` + `page.rs` + `/api/anonymize/{run,status,ls}`, audit `admin_op`, пофайловый прогресс |
-| **P6** | установщики: `build_anonymize_sidecar.ps1`, `fetch_anonymize_models.ps1` (+ манифест sha256), `build_sidecar.ps1`, `hds check`, `install_windows.ps1` |
-| **P7** | приёмка + документация: README, `sidecar/README.md`, STATUS.md, RELEASE_NOTES, handoff |
+```powershell
+# Python-тесты sidecar (портативный CPython; НЕ системный python!)
+& 'C:\Users\Sasha\hermes-disk-search\sidecar\python\cpython-3.12.14-windows-x86_64-none\python.exe' `
+  -m unittest discover -s sidecar/tests -t sidecar -p 'test_anonymize_*.py'
+# ВАЖНО: нужен -t sidecar (импорты hds_*). В ПОЛНОМ наборе 4 предсуществующих
+# import-error (test_decode/diar_blocks/llm_patch/postprocess — нужен numpy/torch,
+# это venv-transcribe) — не наши, не «чинить» через смену окружения.
 
-Приёмка: `cargo test --workspace`, fmt, clippy `-D warnings`; sidecar-тесты P1/P1b;
-golden-сущности (порог 0.3); round-trip по форматам (TXT/MD — байт-в-байт;
-DOCX/XLSX — текст по сегментам + структура + маркер; XML — текст + теги);
-GPU-сценарий P3; живой UI-сценарий; `hds check` — новые пункты.
+# Rust
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace        # ~6-8 мин; журнал в tools/parity/out (гитигнор)
 
-## 7. Правила и грабли окружения (платил временем)
+# Живой smoke (веса не нужны)
+cargo run -q -p hds-cli -- anon check
+cargo run -q -p hds-cli -- anon values <файл> 'Значение' --out-dir <каталог>
+cargo run -q -p hds-cli -- anon inspect <файл>
+cargo run -q -p hds-cli -- anon deanon-values <файл> '[PERSON_1]' --out-dir <каталог>
+```
 
-- `git` — всегда `--no-pager`; коммиты атомарные (`feat(anon): …`, `docs(anon): …`).
-- PowerShell 5.1: `*.ps1` — **ASCII-only** (BOM-less читается как ANSI; `${var}`, не `$var:`);
-  `Invoke-WebRequest` — с `-UseBasicParsing`; кириллица в консоли искажается — читать
-  файлы инструментом; первый вывод иногда «клеит» символ — писать в файл
-  (`Out-File -Encoding utf8`) и читать.
-- `HDS_CONFIG`/`HDS_ROOT` переживают между командами — задавать и **очищать**.
-- Резидент `llm_host` держит `target\release\*.exe`, живые службы — `target\debug\hds.exe`:
-  перед полной пересборкой/`cargo test` остановить и **вернуть** (dev-машина позволяет),
-  либо `--exclude hds-cli`.
-- Боевой `index.pause` не снимать; плейн-токены/секреты/PII не печатать.
-- Артефакты — `tools/parity/out/` (гитигнор). Чужие незакоммиченные правки не трогать
-  (сейчас это `sidecar/hds_transcribe/glossary.example.yaml`); боевые `PLAN_*.md` не
-  переписывать.
-- Sidecar: воркер **не читает** `config.yaml` (всё из аргументов/RPC), **не ходит в сеть**
-  (offline-first), stdout — только JSON-RPC (транспорт `hds_sidecar`), логи — stderr.
-  `hds_sidecar` не импортирует тяжёлые библиотеки на уровне модуля (граница пакета).
-- `onnxruntime` и `onnxruntime-gpu` — взаимоисключающие venv (как профили transcribe).
-- Python-тесты sidecar — `unittest`: `python -m unittest discover -s sidecar/tests -v`.
-- Git Bash: `C:\Program Files\Git\bin\bash.exe`; WSL нет.
+## 6. Окружение и грабли (проверено на предыдущем чате)
 
-## 8. Стартовое состояние (P0)
+* Windows, PowerShell 5.1; кириллица в консоли искажается — **читать/писать файлы
+  инструментом (editor), НЕ `Get-Content|Set-Content`**: перезапись PS 5.1 портит
+  кириллицу двойным энкодингом (однажды испортили `tests/facade_http.rs` и
+  восстанавливали из git).
+* `git` — всегда `--no-pager`; чужое `M sidecar/hds_transcribe/glossary.example.yaml`
+  не трогать; коммиты только своих файлов; вслед за изменением крейтов не забыть
+  `Cargo.lock`.
+* `HDS_CONFIG`/`HDS_ROOT` переживают между командами — очищать
+  (`$env:HDS_CONFIG=$null; $env:HDS_ROOT=$null`).
+* Тесты `unittest discover` требуют `-t sidecar`; воркер-тесты поднимают
+  подпроцессы (sys.executable).
+* Резидент `llm_host` держит `target\release\*.exe`; службы —
+  `target\debug\hds.exe`; `cargo test` в debug обычно проходит без остановки
+  (линк тест-бинарей), но при «отказано в доступе» — освободить бинарь.
+* Портативный Python: `sidecar\python\cpython-3.12.14-windows-x86_64-none\python.exe`
+  (есть docx/openpyxl/lxml/sqlite3; НЕТ pydantic/numpy/torch/gliner).
+* Веса NER не установлены (`models\anonymize` пуст): полный `anonymize` и warmup
+  честно отвечают `kind: model_missing` — это ожидаемо до P6.
 
-- **Есть:** план `PLAN_ANONYMIZER_SIDECAR.md` (untracked); `sidecar/hds_sidecar` +
-  `hds_extract` + `hds_transcribe`; `crates/hds-extract` (Worker); клиент transcribe как
-  образец; UI-конвенции; установщики sidecar.
-- **Нет (создаётся в фазах):** `sidecar/hds_anonymize/`, `crates/hds-anonymize`,
-  `venv-anonymize`, модели `<models>/anonymize/`, секция `anonymize` в `config.yaml`,
-  карточка UI, скрипты установки, пункты `hds check`.
-- **Кода по анонимизации в этом проекте ещё нет.**
+## 7. Карта новых файлов
 
----
+```
+sidecar/hds_anonymize/            воркер (P1/P1b/P3-правки)
+  __init__.py schemas.py settings.py mapping_store.py handlers.py worker.py
+  gliner_engine.py natasha_engine.py ner_service.py replacer.py file_parser.py
+  requirements.lock
+sidecar/tests/test_anonymize_{store,roundtrip,worker,xml}.py
+sidecar/tests/fixtures/anonymize/msproject.xml
+crates/hds-anonymize/             Rust-клиент (P2/P3)
+  src/{lib,client,protocol,error,settings,folder,lease}.rs
+  tests/{client,settings}.rs tests/mock_worker.py
+crates/hds-cli/src/cmd/anonymize.rs      P4
+crates/hds-llama: src/{dispatch,host,facade,config}.rs — lease 'anon' (P3)
+  tests/anon_lease.rs; tests/facade_http.rs (+anon-тест)
+crates/hds-extract/src/{worker,protocol}.rs — пропуск нотификаций (P2)
+```
 
-## 9. Промт для нового чата (копировать целиком)
+## 8. Коммиты ветки `anonymizer-sidecar`
+
+```
+5ba55d3 feat(anonymize): P3 — GPU-lease 'anon' у llm_host + --gpu-mem-limit-mb в ORT
+dafe04a feat(anonymize): P4 — CLI hds anon + доводка kind-ошибок
+23943f1 feat(anonymize): P1b — XML (MS Project) + P2 — Rust-клиент hds-anonymize
+c4f4bc5 docs(anonymize): план P1-P7 и handoff-промпт переноса anonymizer_proxy в sidecar
+6e4038e feat(anonymize): P1 — Python-sidecar анонимизации (перенос из anonymizer_proxy)
+```
+
+## 9. Промт для нового чата (скопировать отсюда до конца файла целиком)
 
 Ты — Cline в режиме Act. Репозиторий: `C:\Users\Sasha\hermes-disk-search`, ветка
-`python-sidecar-transcribe`, HEAD `c832da5` (тег v0.22.0). Ядро — Rust (`crates/`),
-Python — только sidecar. План: `PLAN_ANONYMIZER_SIDECAR.md` (untracked) — прочитай
-целиком перед работой; также `sidecar/README.md`, `crates/hds-extract/src/worker.rs`,
-`crates/hds-transcribe/src/client.rs`, `crates/hds-ui/src/transcribe.rs`,
-`installers/build_transcribe_sidecar.ps1`. В дереве есть чужое изменение
+`anonymizer-sidecar`, HEAD `5ba55d3`. Ядро — Rust (`crates/`), Python — только
+sidecar. План: `PLAN_ANONYMIZER_SIDECAR.md` (tracked) — прочитай целиком перед
+работой; также `ANONYMIZER_SIDECAR_HANDOFF_PROMPT.md` §§0–8 (карта состояния) и
+файлы, перечисленные там в §1. В дереве есть чужое изменение
 `sidecar/hds_transcribe/glossary.example.yaml` — не трогать.
 
-Задача этапа **P1 — Python-sidecar анонимизации**:
+Сделано и закоммичено (не переделывать): **P1** — sidecar
+`sidecar/hds_anonymize/` (worker.py/handlers.py/mapping_store.py/settings.py/
+schemas.py + копии движков из `C:\Test\anonymizer_proxy` без правок алгоритмов,
+offline-first); **P1b** — XML/MS Project (позиционная сборка `_assemble_xml`);
+**P2** — крейт `crates/hds-anonymize` (client/protocol/error/settings/folder) +
+`Worker::request` пропускает progress-нотификации без id; **P3** — GPU-lease:
+роль `anon` в `llm_host` (`dispatch::plan_anon_enter`, `POST /internal/anon/
+enter|exit`, 503 gpu_busy / 501 not_implemented), `hds-anonymize/src/lease.rs`,
+`--device cuda --gpu-mem-limit-mb` в ORT; **P4** — CLI `hds anon
+{anonymize,values,deanon,deanon-values,inspect,warmup,check}`. RPC воркера:
+hello/warmup/inspect/anonymize/anonymize_values/deanonymize/deanonymize_values/
+shutdown; kind-ошибки: model_missing/file_busy/unsupported/db_missing/out_of_dir/
+gpu_busy. Имена выходов: `<stem>.anonymized.<ext>` / `<stem>.deanon.<ext>`
+(суффикс `.anonymized` у входа отбрасывается). Веса NER не установлены —
+полный `anonymize` честно отвечает `kind: model_missing` (это норма до P6).
 
-1. Создать `sidecar/hds_anonymize/`:
-   - скопировать из `C:\Test\anonymizer_proxy\anonymizer_proxy\anonymizer\` файлы
-     `gliner_engine.py`, `natasha_engine.py`, `ner_service.py`, `replacer.py`,
-     `file_parser.py` — **без изменения алгоритмов**; правки только импортов
-     (`from ..config import …` → `from .settings import …`) и путей;
-   - `settings.py` — замена `config.py`: `NER_ENGINE`/`PII_CATEGORIES` из аргументов
-     воркера (`--model knowledgator/gliner-pii-large-v1.0`, `--threshold 0.3`,
-     `--max-input-chars 1500`, `--chunk-overlap 200`, `--timeout 300`, `--natasha 1`,
-     `--models-dir`, `--db`, `--device cpu|cuda`, `--gpu-mem-limit-mb`);
-   - `mapping_store.py` — SQLite WAL (`data/anonymize.db`): `mappings(token PK, value,
-     type, ts)` + `counters(type PK, last)`; **per-type счётчики + дедуп по
-     (значение, тип)**; `busy_timeout` + `BEGIN IMMEDIATE` при выдаче номера;
-   - `worker.py` — JSON-RPC 2.0 по stdio через `hds_sidecar` (PROTOCOL 1): `hello`
-     (backend/providers/model/formats), `warmup`, `inspect`, `anonymize`,
-     `anonymize_values`, `deanonymize`, `deanonymize_values`, `shutdown` +
-     progress-нотификации без `id`; stdout — только протокол, логи — stderr;
-   - оркестрация из `handlers.py`: parse → NER → split `\n` →
-     `split_entities_by_segments` (`replacer.py:318`) → построчная замена → join →
-     `FileAssembler.assemble` (анонимизация: `strip_hf_images=True,
-     scrub_metadata=True` + маркер; деанонимизация: `False/False`) → атомарная
-     запись (`_atomic_write_*`). **Не переносить** сессии, reuse-копии, чат-команды,
-     review-md в хранилище.
-2. **Offline-first**: воркер не ходит в сеть; веса — из `--models-dir`
-   (`<models>/anonymize/hf-home`, `navec_*.tar`, `slovnet_ner_news_v1.tar`); нет
-   весов → ошибка `kind: model_missing` с hint про установщик.
-3. Fixtures + тесты (`unittest`, как `sidecar/tests`): DOCX/XLSX/TXT/MD;
-   TXT/MD — байт-в-байт после «анон → деан»; DOCX/XLSX — текст по сегментам +
-   структура + `ANON_MARKER`; частичные сценарии; сквозная нумерация; FILE_BUSY;
-   дедуп; отсутствие PII в логах.
-4. Проверки: `python sidecar/hds_anonymize/worker.py` с `hello`;
-   `python -m unittest discover -s sidecar/tests -v`; `cargo test --workspace`
-   (не ломать), `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`.
+Задача этого чата — этап **P5 — UI-карточка «Анонимизация» в `hds ui`**, затем,
+если останется ресурс, **P6 — установщики**:
 
-Решения (не пересматривать): сессий нет; БД в sidecar; схема токенов per-type +
-дедуп; маркер `anonymizer_proxy/parser:3` + `inspect`; только вход/выход; модели
-не меняем; форматы P1: DOCX/XLSX/TXT/MD (XML — P1b); папку перечисляет Rust (P2);
-UI — карточка (P5); GPU — lease у `llm_host` (P3).
+1. P5 (`crates/hds-ui/src/anonymize.rs` + страница по образцу `transcribe.rs`
+   и `page.rs`):
+   - серверный обзор **`/api/anonymize/ls`**: путь из запроса → файлы верхнего
+     уровня, отфильтрованные по форматам из `hello.formats` воркера
+     (`hds_anonymize::{list_files}`, `discover_python`, `Client::hello`);
+   - карточка: текстовое поле пути + список найденных файлов; 4 кнопки:
+     «Скрыть» (RPC anonymize), «Показать» (deanonymize), «Скрыть указанное»
+     (values списком), «Показать указанное» (tokens списком); выходной каталог —
+     `anonymize.output_dir` (§2.6), флаг `--out-dir` не обязателен;
+   - прогон: spawn клиента (`ClientConfig::from_settings`; при
+     `anonymize.gpu: auto` — lease из `hds_anonymize::lease`, как в CLI
+     `hds-cli/src/cmd/anonymize.rs`), пофайлово RPC, отчёт по файлам: out_path,
+     токены (token/type/count), matched/unmatched, warnings; PII-ЗНАЧЕНИЯ в
+     UI/лог не выводить (inspect/values — только токены);
+   - прогресс пофайловый (как в карточке транскрибации); server-профиль:
+     POST-эндпоинты аудируются автоматически (`admin_op`).
+2. P6 (если P5 готова и проверена):
+   - `installers/build_anonymize_sidecar.ps1` — venv-anonymize из
+     `sidecar/python` (портативный CPython 3.12.14), профили cpu/gpu,
+     `requirements.lock` из `sidecar/hds_anonymize/`, ASCII-only, идемпотентно
+     по маркеру — по образцу `build_transcribe_sidecar.ps1` + `sidecar_common.ps1`;
+   - `installers/fetch_anonymize_models.ps1` — GLiNER PII ONNX (модель
+     `knowledgator/gliner-pii-large-v1.0`) в `<models>/anonymize/hf-home`
+     (структура HF-кэша), `navec_news_v1_1B_250K_300d_100q.tar`,
+     `slovnet_ner_news_v1.tar` рядом; манифест `<models>/anonymize-models.json`
+     с ревизиями и sha256 — по образцу `fetch_transcribe_models.ps1`;
+     загрузчик НЕ должен требовать HF-токен, если модель публична;
+   - `build_sidecar.ps1` += копирование `hds_anonymize` в поставку;
+   - `hds check` (`crates/hds-index/src/diag.rs` или CLI check) += пункты:
+     venv-anonymize, веса (`models\anonymize\...`), БД `data/anonymize.db`,
+     lease (`/internal/anon/enter` доступен) — заготовка в `hds anon check`.
+3. После P6 (если получится и есть GPU): golden-паритет NER (сущности/тип/спан
+   против `anonymizer_proxy` на тех же файлах, порог 0.3) и живой GPU-спайк
+   (lease → chat выгружен/дождался → NER на GPU → exit → роли вернулись);
+   иначе — зафиксировать в отчёте, что это следующий шаг.
+
+Решения (не пересматривать): сессий нет; БД в sidecar (Rust к ней не обращается);
+токены per-type + дедуп по (значение, тип); маркер `anonymizer_proxy/parser:3` +
+`inspect`; только вход/выход; модели NER не меняем; папку перечисляет Rust;
+UI — карточка; GPU — lease у `llm_host`. Форматы: docx/xlsx/txt/md/xml.
 
 Запрещено: перехват команд агентов, OpenAI-прокси/API, дублировать функции
-sidecar в Rust, переписывать боевые `PLAN_*.md`, трогать чужие правки, печатать
-PII/секреты.
+sidecar в Rust, переписывать боевые `PLAN_*.md`, трогать чужие правки
+(`sidecar/hds_transcribe/glossary.example.yaml`), печатать PII/секреты.
 
 Окружение: Windows, PowerShell 5.1 (`.ps1` — ASCII-only; `Invoke-WebRequest
--UseBasicParsing`; кириллица в консоли искажается — читать файлы инструментом);
-`git` — всегда `--no-pager`; резидент `llm_host` держит `target\release\*.exe`,
-службы — `target\debug\hds.exe` (перед полным `cargo test` остановить и вернуть);
-артефакты — `tools/parity/out` (гитигнор); `HDS_CONFIG`/`HDS_ROOT` переживают между
-командами — очищать.
+-UseBasicParsing`); кириллицу в файлах читать/писать ТОЛЬКО инструментом
+редактора — перезапись через PowerShell портит кириллицу; `git` — всегда
+`--no-pager`; резидент `llm_host` держит `target\release\*.exe`, службы —
+`target\debug\hds.exe`; артефакты — `tools/parity/out` (гитигнор);
+`HDS_CONFIG`/`HDS_ROOT` очищать между командами. Python для sidecar-тестов —
+портативный `sidecar\python\cpython-3.12.14-windows-x86_64-none\python.exe`;
+unittest строго с `-t sidecar`.
 
-Начни с: (1) прочитать план и перечисленные файлы; (2) `git status`;
-(3) краткий план P1 (файлы/шаги) и сразу реализация; (4) тесты; (5) отчёт: что
-сделано, чем проверено, что осталось. Вопросы — только если решение противоречит
-плану.
+Проверки перед отчётом: sidecar-тесты `python -m unittest discover -s
+sidecar/tests -t sidecar -p 'test_anonymize_*.py'` (28 тестов); `cargo fmt
+--check`; `cargo clippy --workspace --all-targets -- -D warnings`;
+`cargo test --workspace` (не ломать; 110 ok на срезе); живой smoke UI:
+карточка → обзор папки → акт на TXT → отчёт с токенами без PII.
 
-
-
+Начни с: (1) прочитать план и handoff §§0–8; (2) `git status` и `git --no-pager
+log --oneline -6`; (3) краткий план P5 (файлы/эндпоинты/страницы) и сразу
+реализация; (4) тесты и smoke; (5) отчёт: что сделано, чем проверено, что
+осталось. Вопросы — только если решение противоречит плану.
