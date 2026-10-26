@@ -1,0 +1,30 @@
+# requirements.lock - pinned dependencies of the anonymize sidecar (P1).
+#
+# Same versions as the anonymizer_proxy environment the engines were
+# validated against (golden parity, PLAN_ANONYMIZER_SIDECAR.md 5):
+# do NOT bump without re-running the golden entity tests.
+#
+# Profiles (installers/build_anonymize_sidecar.ps1, P6): exactly ONE
+# onnxruntime distribution per venv - the packages conflict (all provide
+# the `onnxruntime` module):
+#   cpu:  onnxruntime==1.29.0
+#   dml:  onnxruntime-directml==1.24.4
+#   cuda: onnxruntime-gpu==1.24.4 (1.25+ needs CUDA 13, not pip-installable)
+#
+# Offline-first: weights are NOT downloaded at runtime; the installer puts
+# GLiNER PII ONNX into <models>/anonymize/hf-home, navec/slovnet tars next
+# to it (fetch_anonymize_models.ps1).
+gliner==0.2.28
+# gliner imports torch even for the ONNX backend
+torch==2.13.0
+transformers==5.13.1
+natasha==1.6.0
+navec==0.10.0
+pymorphy2==0.9.1
+# pkg_resources is needed by pymorphy2 (removed in setuptools 81+)
+setuptools>=75.0,<81
+python-docx==1.2.0
+openpyxl==3.1.5
+lxml==6.1.2
+numpy==2.4.6
+onnxruntime==1.29.0
