@@ -38,10 +38,19 @@ hds anon check
 
 * Окружение идемпотентно: маркер `.hds-anonymize-profile` хранит профиль, версию Python и sha256
   `requirements.lock`; `-Force` пересобирает venv.
-* В venv **ровно один** `onnxruntime`: профиль `cuda` ставит `onnxruntime-gpu` (CPU-пин из lock
-  отфильтровывается) + `nvidia-cublas-cu12`/`nvidia-cuda-runtime-cu12`/`nvidia-cudnn-cu12`
-  (CUDA 12 DLL для ORT: без них CUDA-провайдер молча падает в CPU), профиль `cpu` — `onnxruntime`
-  из lock.
+* В venv **ровно один** `onnxruntime`: профиль `cuda` сначала удаляет CPU-колесо
+  (`pip uninstall onnxruntime`), затем ставит `onnxruntime-gpu` (CPU-пин из lock отфильтровывается)
+  + `nvidia-cublas-cu12`/`nvidia-cuda-runtime-cu12`/`nvidia-cudnn-cu12`/`nvidia-cufft-cu12`;
+  профиль `cpu` — `onnxruntime` из lock.
+* CUDA-провайдеру ORT нужны **все** CUDA 12 DLL из `nvidia-*-cu12`, включая cuFFT
+  (`cufft64_11.dll`): `onnxruntime_providers_cuda.dll` импортирует её статически, и без
+  `nvidia-cufft-cu12` провайдер целиком не загружается (Windows: «модуль не найден», Error 126),
+  а ORT **молча** работает на `CPUExecutionProvider`. `get_available_providers()` об этом не
+  сигнализирует (он перечисляет скомпилированные, а не загруженные провайдеры), поэтому
+  `-Profile cuda -SelfTest` дополнительно грузит `onnxruntime_providers_cuda.dll` и завершает
+  сборку с ошибкой, если тот не загрузился.
+* Смена профиля (`cpu` ↔ `cuda`) пересобирает venv — иначе в нём остаются два дистрибутива
+  `onnxruntime` (CPU-колесо и `onnxruntime-gpu` дают один и тот же модуль).
 * Размер: окружение ~3–6 ГБ (в lock есть `torch`, его импортирует GLiNER даже для ONNX-пути),
   модели ~1 ГБ. Время установки — десятки минут при медленной сети.
 * Токен Hugging Face **не нужен**: модель `knowledgator/gliner-pii-large-v1.0` публичная.
@@ -163,6 +172,11 @@ hds anon check                                   # venv/модели/база/le
 * `hds check` — пункт `anonymize` со сводкой (интерпретатор, модели, база, lease). Если стек не
   установлен — `warn` (не блокирует остальные проверки). Значения видны и в
   `GET /api/diagnostics`.
+* Фактический контур виден по строкам воркера `lease 'anon' выдан … GLiNER на GPU` и
+  `GLiNER ONNX загружен (провайдеры: …)`. Список провайдеров сам по себе **не доказывает** GPU:
+  если в логе есть `Error loading "...\onnxruntime_providers_cuda.dll" … depends on
+  "cufft64_11.dll"`, CUDA-провайдер не загрузился и акт идёт на CPU. Лечится пересборкой
+  окружения: `build_anonymize_sidecar.ps1 -Profile cuda -SelfTest -Force`.
 
 | Сообщение (kind) | Что значит | Что делать |
 |---|---|---|

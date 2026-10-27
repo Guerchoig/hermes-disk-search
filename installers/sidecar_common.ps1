@@ -4,7 +4,8 @@
 #   . (Join-Path $PSScriptRoot "sidecar_common.ps1")
 #
 # Provides: Get-SidecarRoot / Get-PortablePython / Ensure-PortablePython /
-# New-SidecarVenv / Invoke-SidecarPip / Install-SidecarRequirements /
+# New-SidecarVenv / Invoke-SidecarPip / Uninstall-SidecarPip /
+# Install-SidecarRequirements /
 # Test-SidecarImports / Copy-SidecarTree / Get-GpuVendor / Test-IntegratedGpu /
 # Get-TranscribeProfile / Get-SidecarVenvName / Set-ConfigPath /
 # Set-ConfigPathNested.
@@ -122,6 +123,27 @@ function Invoke-SidecarPip {
         & $VenvPython @a
     }
     if ($LASTEXITCODE -ne 0) { throw ("pip install failed (exit {0}): {1}" -f $LASTEXITCODE, ($Arguments -join " ")) }
+}
+
+function Uninstall-SidecarPip {
+    # pip/uv uninstall for a profile switch (e.g. the CPU onnxruntime wheel that
+    # `pip install onnxruntime-gpu` leaves behind: same module, other dist name).
+    # Returns the exit code; "not installed" is not treated as an error.
+    param(
+        [Parameter(Mandatory = $true)][string]$VenvPython,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    if ($uv) {
+        $a = @("pip", "uninstall", "--python", $VenvPython) + $Arguments
+        Write-Host ("[..] uv " + ($a -join " "))
+        & $uv.Source @a
+    } else {
+        $a = @("-m", "pip", "uninstall", "--disable-pip-version-check") + $Arguments
+        Write-Host ("[..] pip " + ($a -join " "))
+        & $VenvPython @a
+    }
+    return $LASTEXITCODE
 }
 
 function Install-SidecarRequirements {
