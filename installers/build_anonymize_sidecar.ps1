@@ -79,6 +79,12 @@ $py = Join-Path $venv "Scripts\python.exe"
 $lockHash = (Get-FileHash -LiteralPath $lockPath -Algorithm SHA256).Hash.ToLower()
 $marker = Join-Path $venv ".hds-anonymize-profile"
 $markerText = "profile=$Profile`npython=$PythonVersion`nlock=requirements.lock`nsha256=$lockHash`nort=$ortPkg"
+if ($Profile -eq "cuda") {
+    # The dll set is part of the marker: stands built by 0.23.x have a cuda
+    # marker without it (no nvidia-cufft-cu12), so their next build rebuilds the
+    # venv instead of reporting "up to date" and keeping the CPU-only provider.
+    $markerText = $markerText + "`ndlls=" + ($cudaDlls -join ",")
+}
 # A cpu <-> cuda switch must not reuse the venv: `pip install onnxruntime-gpu`
 # does not remove the CPU wheel (different distribution name, same `onnxruntime`
 # module), so the old one kept its dist-info and stray files around.
