@@ -707,6 +707,7 @@ fn page_has_anonymize_tab() {
     for needle in [
         "tab-anonymize",
         "/api/anonymize/ls",
+        "/api/anonymize/browse",
         "/api/anonymize/status",
         "/api/anonymize/run",
         "/api/config/anonymize-dirs",
@@ -716,10 +717,17 @@ fn page_has_anonymize_tab() {
         "Показать указанное",
         "anonitems",
         "anopath",
+        "anbmodal",
+        "anoutcur",
         "anreport",
     ] {
         assert!(body.contains(needle), "в странице нет {needle}");
     }
+    // Внутренний жаргон «активная пачка» не должен попадать в интерфейс.
+    assert!(
+        !body.contains("активная пачка"),
+        "в карточке остался жаргон «активная пачка»"
+    );
 }
 
 /// Статус акта доступен сразу (акта нет — нейтральное состояние, без воркера).

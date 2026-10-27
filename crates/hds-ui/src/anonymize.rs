@@ -408,6 +408,143 @@ pub fn ls_json(path: &str) -> Value {
     out
 }
 
+/// Предел записей в одном каталоге для окна выбора («Обзор…»): защита от
+/// гигантских папок, в ответе есть признак `truncated`.
+const BROWSE_LIMIT: usize = 2000;
+
+/// `GET /api/anonymize/browse?path=…`: серверный выбор файла/папки для кнопки
+/// «Обзор…» (браузер не отдаёт абсолютный путь из `<input type=file>`).
+///
+/// * пустой `path` — список корней (диски Windows, `/` и домашний каталог);
+/// * каталог — подпапки и файлы поддерживаемых форматов;
+/// * файл — его каталог (удобно, если в поле уже стоит путь к файлу).
+///
+/// Файлы неподдерживаемых форматов не показываются: выбрать их для акта нельзя.
+pub fn browse_json(path: &str) -> Value {
+    let cfg = load().unwrap_or(Config::Null);
+    let root = project_root();
+    let settings = Settings::from_config(&cfg);
+    let (formats, source) = worker_formats(&cfg, &root);
+    let mut out = json!({
+        "out_dir": settings.output_dir_abs(&root).display().to_string(),
+        "db_path": settings.db_abs(&root).display().to_string(),
+        "formats": formats,
+        "formats_source": source,
+        "path": Value::Null,
+        "parent": Value::Null,
+        "roots": browse_roots(),
+        "dirs": [],
+        "files": [],
+        "truncated": false,
+    });
+    let raw = path.trim().trim_matches('"');
+    if raw.is_empty() {
+        return out;
+    }
+    let mut p = resolve_path(raw);
+    if p.is_file() {
+        p = p.parent().map(Path::to_path_buf).unwrap_or(p);
+    }
+    out["path"] = json!(p.display().to_string());
+    if !p.is_dir() {
+        out["error"] = json!(format!("путь не найден: {}", p.display()));
+        return out;
+    }
+    out["parent"] = p
+        .parent()
+        .filter(|x| !x.as_os_str().is_empty())
+        .map(|x| json!(x.display().to_string()))
+        .unwrap_or(Value::Null);
+    match browse_entries(&p, &formats) {
+        Ok((dirs, files, truncated)) => {
+            out["dirs"] = Value::Array(dirs);
+            out["files"] = Value::Array(files);
+            out["truncated"] = json!(truncated);
+        }
+        Err(e) => out["error"] = json!(format!("чтение папки: {e}")),
+    }
+    out
+}
+
+/// Корни для начала выбора: диски Windows или `/` (и `$HOME`) на прочих ОС.
+fn browse_roots() -> Vec<Value> {
+    let mut v: Vec<Value> = Vec::new();
+    #[cfg(windows)]
+    {
+        for c in b'A'..=b'Z' {
+            let p = format!("{}:\\", c as char);
+            if Path::new(&p).is_dir() {
+                v.push(json!({ "name": p, "path": p }));
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        v.push(json!({ "name": "/", "path": "/" }));
+        if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+            let p = PathBuf::from(home).display().to_string();
+            v.push(json!({ "name": p, "path": p }));
+        }
+    }
+    v
+}
+
+/// Содержимое каталога для [`browse_json`]: подпапки и файлы форматов акта.
+/// Порядок — по имени без учёта регистра; предел — [`BROWSE_LIMIT`].
+fn browse_entries(
+    dir: &Path,
+    formats: &[String],
+) -> std::io::Result<(Vec<Value>, Vec<Value>, bool)> {
+    let mut dirs: Vec<Value> = Vec::new();
+    let mut files: Vec<Value> = Vec::new();
+    let mut truncated = false;
+    for ent in std::fs::read_dir(dir)?.flatten() {
+        let name = match ent.file_name().into_string() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+        let p = ent.path();
+        let ft = match ent.file_type() {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if ft.is_dir() {
+            dirs.push(json!({
+                "name": name,
+                "path": p.display().to_string(),
+            }));
+        } else if ft.is_file() {
+            let ext = p
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if !formats.iter().any(|f| f == &ext) {
+                continue;
+            }
+            let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+            files.push(json!({
+                "name": name,
+                "path": p.display().to_string(),
+                "size": size,
+                "ext": ext,
+            }));
+        }
+        if dirs.len() + files.len() >= BROWSE_LIMIT {
+            truncated = true;
+            break;
+        }
+    }
+    dirs.sort_by_key(browse_name_key);
+    files.sort_by_key(browse_name_key);
+    Ok((dirs, files, truncated))
+}
+
+/// Ключ сортировки списка выбора: имя без учёта регистра.
+fn browse_name_key(v: &Value) -> String {
+    v["name"].as_str().unwrap_or("").to_lowercase()
+}
+
 /// `POST /api/anonymize/run`: запустить акт в фоне (§2.5).
 ///
 /// Тело: `{path, action, items?}`. Ответ сразу: `{ok, started}` либо ошибка
@@ -779,6 +916,27 @@ mod tests {
         assert!(is_processed_name(Path::new("D:/out/a.anonymized.docx")));
         assert!(is_processed_name(Path::new("D:/out/a.deanon.txt")));
         assert!(!is_processed_name(Path::new("D:/in/a.docx")));
+    }
+
+    #[test]
+    fn browse_entries_lists_dirs_and_supported_files_only() {
+        let dir = std::env::temp_dir().join(format!("hds-anon-browse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Sub")).unwrap();
+        std::fs::write(dir.join("a.docx"), b"x").unwrap();
+        std::fs::write(dir.join("b.txt"), b"x").unwrap();
+        std::fs::write(dir.join("skip.bin"), b"x").unwrap();
+        let formats = vec!["docx".to_string(), "txt".to_string()];
+        let (dirs, files, truncated) = browse_entries(&dir, &formats).unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0]["name"], "Sub");
+        // поддерживаемые форматы — по имени; .bin в список не попал
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0]["name"], "a.docx");
+        assert_eq!(files[1]["name"], "b.txt");
+        assert_eq!(files[0]["ext"], "docx");
+        assert!(!truncated, "маленький каталог не должен обрезаться");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

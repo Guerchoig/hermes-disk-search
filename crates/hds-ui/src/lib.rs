@@ -1947,6 +1947,11 @@ pub fn route_full(
                 let path = qp(query, "path").unwrap_or_default();
                 json_ok(anonymize::ls_json(&path))
             }
+            // P5: выбор файла/папки на сервере для кнопки «Обзор…».
+            ("GET", "/api/anonymize/browse") => {
+                let path = qp(query, "path").unwrap_or_default();
+                json_ok(anonymize::browse_json(&path))
+            }
             ("GET", "/api/anonymize/status") => json_ok(anonymize::status_json()),
             ("GET", "/api/config") => json_ok(config_edit::get_config()),
             ("GET", "/api/access/users") => json_ok(access_users_json(access_path)),

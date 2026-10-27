@@ -228,37 +228,68 @@ pub const PAGE: &str = r#"<!doctype html>
    <div class="row" style="margin-top:8px"><span class="muted" style="min-width:70px">путь</span>
     <input id="anopath" placeholder="D:\in" style="min-width:420px"
      onkeydown="if(event.key==='Enter')loadAnonLs()">
-    <button onclick="loadAnonLs()">Обзор</button>
+    <button onclick="loadAnonLs()">Показать файлы</button>
+    <button onclick="openAnonBrowse()">Обзор…</button>
     <span id="anolsmsg" class="muted"></span></div>
    <div class="row" style="margin-top:6px"><span class="muted" style="min-width:70px">out_dir</span>
     <input id="anoutdir" style="min-width:420px">
     <button onclick="saveAnonOutDir()">Сохранить</button>
     <span id="anoutmsg" class="muted"></span></div>
+   <div class="muted" style="margin-top:4px">каталог выхода: <code id="anoutcur">…</code></div>
    <div id="anoninfo" class="muted">…</div></section>
 
   <section><h2>Найденные файлы</h2>
    <div class="row"><button onclick="loadAnonLs()">Обновить список</button>
     <span id="anoncount" class="muted"></span></div>
    <table class="tr"><thead><tr><th>Файл</th><th>Размер</th><th>Изменён</th><th>Станет</th></tr></thead>
-    <tbody id="anonrows"><tr><td colspan=4 class="muted">введите путь и нажмите «Обзор»</td></tr></tbody></table>
+    <tbody id="anonrows"><tr><td colspan=4 class="muted">введите путь или выберите папку кнопкой «Обзор…»</td></tr></tbody></table>
    <div class="muted">Клик по строке подставляет этот файл в поле входа — обработается только он.
     Файлы с пометкой «уже обработан» — результат прежнего акта (повтор даст warning).</div></section>
 
   <section><h2>Действия</h2>
-   <div class="muted">Значения и токены — по одному на строку. Значения PII в отчёт не выводятся:
-    только токены и счётчики. Одна активная пачка — кнопки блокируются до завершения.</div>
+   <div class="muted">Список ниже используется только кнопками «Скрыть указанное» и
+    «Показать указанное»: для скрытия — значения PII, для показа — токены вида
+    <code>[PERSON_1]</code>, по одному на строку. Кнопки «Скрыть всё» и «Показать всё»
+    этот список не используют. В отчёт попадают только токены и счётчики — значения PII
+    не выводятся.</div>
+   <div class="muted" style="margin-top:4px">Одновременно выполняется только одно действие:
+    пока оно не завершено, все четыре кнопки заблокированы. Следующее можно запустить после
+    завершения.</div>
    <textarea id="anonitems" spellcheck="false"
-    placeholder="значения (скрыть указанное) или токены [PERSON_1] (показать указанное)"></textarea>
+    placeholder="для «скрыть указанное» — значения, для «показать указанное» — токены [PERSON_1]; по одному на строку"></textarea>
    <div class="row" style="margin-top:8px">
-    <button id="anbtn1" onclick="anonRun('anonymize')">Скрыть всё</button>
-    <button id="anbtn2" onclick="anonRun('values')">Скрыть указанное</button>
-    <button id="anbtn3" onclick="anonRun('deanonymize')">Показать всё</button>
-    <button id="anbtn4" onclick="anonRun('deanon-values')">Показать указанное</button>
+    <button id="anbtn1" onclick="anonRun('anonymize')"
+     title="найти PII во всех файлах и заменить токенами (список не нужен)">Скрыть всё</button>
+    <button id="anbtn2" onclick="anonRun('values')"
+     title="заменить только значения из списка">Скрыть указанное</button>
+    <button id="anbtn3" onclick="anonRun('deanonymize')"
+     title="вернуть значения по всем токенам базы (список не нужен)">Показать всё</button>
+    <button id="anbtn4" onclick="anonRun('deanon-values')"
+     title="вернуть только токены из списка">Показать указанное</button>
     <span id="anrunmsg" class="muted"></span></div>
    <div id="anprogress" class="muted">готов к запуску</div></section>
 
   <section><h2>Отчёт</h2>
    <div id="anreport" class="muted">отчёта пока нет</div></section>
+
+  <div class="modal" id="anbmodal">
+   <div class="box">
+    <h3>Выбор файла или папки на сервере</h3>
+    <div class="muted">Показаны папки и файлы поддерживаемых форматов. Клик по папке
+     открывает её, клик по файлу подставляет его в поле входа. Кнопка «Выбрать эту папку»
+     подставляет текущий каталог.</div>
+    <div class="row" style="margin-top:8px">
+     <button id="anbup" onclick="anbUp()" disabled>Вверх</button>
+     <input id="anbpath" style="min-width:320px" onkeydown="if(event.key==='Enter')anbGo()">
+     <button onclick="anbGo()">Перейти</button></div>
+    <div id="anbmsg" class="muted">…</div>
+    <table class="tr"><thead><tr><th>Имя</th><th>Тип</th></tr></thead>
+     <tbody id="anbrows"></tbody></table>
+    <div class="row" style="margin-top:12px">
+     <button id="anbpick" onclick="anbPickDir()" disabled>Выбрать эту папку</button>
+     <button onclick="closeAnonBrowse()">Отмена</button></div>
+   </div>
+  </div>
  </div>
 
 </main>
@@ -277,7 +308,7 @@ async function jpost(u,body){ const r=await fetch(u,{method:'POST',
   body:JSON.stringify(body||{})});
   if(r.status===401) throw new Error('401: нужен админ-токен (откройте страницу с ?token=...)');
   return await r.json(); }
-function esc(s){ return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function esc(s){ return (s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function refresh(){
   try{ const s=await jget('/api/status');
     const idx=s.index||{}, lh=s.llm_host||{};
@@ -486,7 +517,10 @@ function showTab(name){
     b.classList.toggle('active', b.getAttribute('data-tab')===cur); });
   try{ localStorage.setItem('hds.tab', cur); }catch(e){}
   if(cur==='transcribe'){ loadTrList(); loadTrDirs(); loadDaemon(); }
-  if(cur==='anonymize'){ loadAnonLs(); loadAnonStatus(); }
+  if(cur==='anonymize'){
+    if(document.getElementById('anopath').value.trim()) loadAnonLs(); else loadAnonInfo();
+    loadAnonStatus();
+  }
 }
 function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
 function fmtTime(t){ return t? new Date(t*1000).toLocaleString() : '—'; }
@@ -632,15 +666,25 @@ function anonItems(){
   const t=document.getElementById('anonitems').value||'';
   return t.split('\n').map(function(s){ return s.trim(); }).filter(function(s){ return s.length>0; });
 }
+function anonInfoHtml(j){
+  return 'форматы: '+esc((j.formats||[]).join(', '))+
+    (j.formats_source==='fallback'? ' <span class="warnbox">воркер недоступен — форматы по умолчанию</span>':'')+
+    (j.db_path? '<br>БД токенов: <code>'+esc(j.db_path)+'</code>':'');
+}
+async function loadAnonInfo(){
+  // Данные карточки без обзора пути: каталог выхода и форматы (ошибку «путь не задан»
+  // при открытии закладки не показываем).
+  try{ const j=await jget('/api/anonymize/ls?path=');
+    if(j.out_dir){ document.getElementById('anoutdir').value=j.out_dir; anonOutDirLabel(j.out_dir); }
+    document.getElementById('anoninfo').innerHTML=anonInfoHtml(j);
+  }catch(e){}
+}
 async function loadAnonLs(){
   const p=document.getElementById('anopath').value.trim();
   const m=document.getElementById('anolsmsg'); m.textContent='…';
   try{ const j=await jget('/api/anonymize/ls?path='+encodeURIComponent(p));
-    if(j.out_dir) document.getElementById('anoutdir').value=j.out_dir;
-    document.getElementById('anoninfo').innerHTML='каталог выхода: <code>'+esc(j.out_dir||'?')+
-      '</code> · форматы: '+esc((j.formats||[]).join(', '))+
-      (j.formats_source==='fallback'? ' <span class="warnbox">воркер недоступен — форматы по умолчанию</span>':'')+
-      (j.db_path? '<br>БД токенов: <code>'+esc(j.db_path)+'</code>':'');
+    if(j.out_dir){ document.getElementById('anoutdir').value=j.out_dir; anonOutDirLabel(j.out_dir); }
+    document.getElementById('anoninfo').innerHTML=anonInfoHtml(j);
     if(j.error) m.innerHTML='<span class="err">'+esc(j.error)+'</span>';
     else m.textContent='файлов: '+((j.files||[]).length);
     const tb=document.getElementById('anonrows');
@@ -658,11 +702,68 @@ async function loadAnonLs(){
     });
   }catch(e){ m.innerHTML='<span class="err">ошибка: '+esc(''+e)+'</span>'; }
 }
+function anonOutDirLabel(d){
+  const el=document.getElementById('anoutcur');
+  if(el) el.textContent=d||'?';
+}
 async function saveAnonOutDir(){
+  const inp=document.getElementById('anoutdir'), v=inp.value.trim();
   const m=document.getElementById('anoutmsg'); m.textContent='…';
-  try{ const r=await jpost('/api/config/anonymize-dirs',{out_dir:document.getElementById('anoutdir').value.trim()});
+  try{ const r=await jpost('/api/config/anonymize-dirs',{out_dir:v});
     m.textContent=(r.ok?'':'ошибка: ')+(r.msg||r.error||'ok');
+    if(r.ok){ const d=r.out_dir||v; inp.value=d; anonOutDirLabel(d);
+      // «Станет» в списке файлов считается от out_dir — обновляем, если путь уже введён.
+      if(document.getElementById('anopath').value.trim()) loadAnonLs(); }
   }catch(e){ m.textContent='ошибка: '+e; }
+}
+// Выбор файла/папки на сервере: браузер не отдаёт абсолютный путь из <input type=file>,
+// поэтому каталоги листает сервер (`GET /api/anonymize/browse`).
+let anbCur='', anbParent=null;
+async function openAnonBrowse(){
+  document.getElementById('anbmodal').classList.add('open');
+  await loadAnonBrowse(document.getElementById('anopath').value.trim());
+}
+function closeAnonBrowse(){ document.getElementById('anbmodal').classList.remove('open'); }
+async function anbGo(){ await loadAnonBrowse(document.getElementById('anbpath').value.trim()); }
+async function anbUp(){ if(anbParent) await loadAnonBrowse(anbParent); }
+function anonPickPath(p){
+  document.getElementById('anopath').value=p;
+  closeAnonBrowse();
+  loadAnonLs();
+}
+function anbPickDir(){ if(anbCur) anonPickPath(anbCur); }
+async function loadAnonBrowse(p){
+  const m=document.getElementById('anbmsg'), tb=document.getElementById('anbrows');
+  m.textContent='…'; tb.innerHTML='<tr><td colspan=2 class="muted">…</td></tr>';
+  try{ const j=await jget('/api/anonymize/browse?path='+encodeURIComponent(p||''));
+    anbCur=j.path||''; anbParent=j.parent||null;
+    document.getElementById('anbpath').value=anbCur;
+    document.getElementById('anbup').disabled=!anbParent;
+    document.getElementById('anbpick').disabled=!anbCur;
+    if(j.error) m.innerHTML='<span class="err">'+esc(j.error)+'</span>';
+    else if(!anbCur) m.textContent='выберите диск или введите путь';
+    else m.textContent='папок: '+((j.dirs||[]).length)+' · файлов: '+((j.files||[]).length)+
+      (j.truncated?' (список обрезан)':'');
+    const rows=[];
+    (j.roots||[]).forEach(function(r){
+      rows.push('<tr data-dir="'+esc(r.path)+'"><td><b>'+esc(r.name)+'</b></td>'+
+        '<td class="muted">диск</td></tr>');
+    });
+    (j.dirs||[]).forEach(function(d){
+      rows.push('<tr data-dir="'+esc(d.path)+'"><td>&#128193; '+esc(d.name)+'</td>'+
+        '<td class="muted">папка</td></tr>');
+    });
+    (j.files||[]).forEach(function(f){
+      rows.push('<tr data-file="'+esc(f.path)+'"><td>'+esc(f.name)+'</td>'+
+        '<td class="muted">'+esc(f.ext)+' · '+fmtSize(f.size)+'</td></tr>');
+    });
+    tb.innerHTML=rows.join('')||'<tr><td colspan=2 class="muted">пусто</td></tr>';
+    Array.prototype.forEach.call(tb.querySelectorAll('tr'), function(r){
+      const d=r.getAttribute('data-dir'), f=r.getAttribute('data-file');
+      if(!d && !f) return;
+      r.onclick=function(){ if(f){ anonPickPath(f); } else { loadAnonBrowse(d); } };
+    });
+  }catch(e){ m.innerHTML='<span class="err">ошибка: '+esc(''+e)+'</span>'; }
 }
 async function anonRun(action){
   const p=document.getElementById('anopath').value.trim();
