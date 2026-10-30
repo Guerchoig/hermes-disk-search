@@ -162,7 +162,10 @@ fn legacy_config_resolves_roles_from_shared_runtime() {
         "CUDA0"
     );
     assert_eq!(chat_p.spec.allow_cpu, Some(false));
-    assert_eq!(chat_p.spec.retention_mode, Some(retention::KEEP_LOADED));
+    // Смена политики (30.10.2026): чат по умолчанию load_on_demand — не резидент.
+    // Прежнее поведение возвращает явный `llm.chat.retention: keep_loaded`
+    // (проверяется в `new_keys_win_over_legacy_and_gpu_layers_override`).
+    assert_eq!(chat_p.spec.retention_mode, Some(retention::LOAD_ON_DEMAND));
     assert_eq!(chat_p.spec.model_kind, Some(model_kind::TEXT));
     assert_eq!(chat_p.spec.n_ctx, Some(32768));
     assert_eq!(
@@ -246,6 +249,11 @@ llm_server:
         "llm.chat.n_ctx приоритетнее ctx_per_slot"
     );
     assert_eq!(chat.spec.load_on_demand_grace_seconds, Some(111));
+    assert_eq!(
+        chat.spec.retention_mode,
+        Some(retention::KEEP_LOADED),
+        "явный llm.chat.retention: keep_loaded сильнее нового дефолта load_on_demand"
+    );
     assert_eq!(
         chat.spec.n_gpu_layers,
         Some(-1),

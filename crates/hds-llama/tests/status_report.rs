@@ -165,7 +165,8 @@ fn report_merges_plan_cluster_and_vram() {
         .expect("chat");
     assert_eq!(chat.state, "SERVING");
     assert!(chat.running);
-    assert_eq!(chat.retention, "keep");
+    // Смена политики (30.10.2026): дефолт чата — load_on_demand («on_demand»).
+    assert_eq!(chat.retention, "on_demand");
     assert_eq!(chat.n_ctx, 32_768);
     assert_eq!(chat.need_mib, 11_564);
     assert_eq!(chat.base_url, "http://127.0.0.1:8010/v1");

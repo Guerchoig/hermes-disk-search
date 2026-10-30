@@ -3533,14 +3533,28 @@ impl Host {
                     ));
                 }
                 if let Some(chat) = ids.get("chat").copied() {
-                    log.line("загружаю чат-инстанс (KEEP_LOADED)…");
-                    cls.load(chat)?;
-                    let inst = cls.wait_loaded(
-                        chat,
-                        Duration::from_secs(300),
-                        Duration::from_millis(500),
-                    )?;
-                    log.line(&format!("  чат: {}", inst.state_name));
+                    // Смена политики (30.10.2026): чат по умолчанию load_on_demand —
+                    // НЕ предзагружается при старте и не удерживается принудительно
+                    // (движок выгружает его по grace-таймауту простоя). Предзагрузка
+                    // остаётся только при явном `llm.chat.retention: keep_loaded`.
+                    let keep = resolved
+                        .role("chat")
+                        .is_some_and(|r| r.retention_mode == crate::ffi::retention::KEEP_LOADED);
+                    if keep {
+                        log.line("загружаю чат-инстанс (KEEP_LOADED)…");
+                        cls.load(chat)?;
+                        let inst = cls.wait_loaded(
+                            chat,
+                            Duration::from_secs(300),
+                            Duration::from_millis(500),
+                        )?;
+                        log.line(&format!("  чат: {}", inst.state_name));
+                    } else {
+                        log.line(
+                            "чат-инстанс не предзагружается (load_on_demand) — загрузится \
+                             по первому запросу и выгрузится после простоя",
+                        );
+                    }
                 }
                 // F1 (M5 T0.1): прогрев KEEP-ролей сразу после чата — иначе первый
                 // RAG-запрос, дотянувшийся до on-demand роли, платил за её загрузку

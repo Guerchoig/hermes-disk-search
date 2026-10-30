@@ -1038,13 +1038,19 @@ fn build_role(
     // embedding-перезагрузка 299 с). Если роль не выгружать, перезагрузок нет —
     // поэтому в server-профиле embedding/rerank по умолчанию держатся в VRAM
     // (`keep`, прогрев при старте, host.rs); desktop экономит VRAM как раньше.
+    //
+    // Смена политики по запросу владельца (30.10.2026): чат больше НЕ резидент.
+    // По умолчанию в обоих профилях `load_on_demand`: модель чата не
+    // предзагружается при старте llm-host и не удерживается принудительно —
+    // движок выгружает её по grace-таймауту после простоя (по умолчанию 300 с),
+    // а первый после простоя запрос платит за загрузку (секунды-десятки секунд).
+    // Прежнее поведение возвращает явный `llm.chat.retention: keep_loaded`.
     let server = dig_str(root, "profile").as_deref() == Some("server");
-    let default_retention =
-        if base == "chat" || (server && (base == "embedding" || base == "rerank")) {
-            retention::KEEP_LOADED
-        } else {
-            retention::LOAD_ON_DEMAND
-        };
+    let default_retention = if server && (base == "embedding" || base == "rerank") {
+        retention::KEEP_LOADED
+    } else {
+        retention::LOAD_ON_DEMAND
+    };
     let retention_mode = match dig_str(root, &format!("llm.{role}.retention")).as_deref() {
         Some("keep_loaded") | Some("keep-loaded") | Some("keep") => retention::KEEP_LOADED,
         Some("load_on_demand") | Some("load-on-demand") | Some("ondemand") => {
@@ -1341,7 +1347,8 @@ llm_server:
         let chat = cfg.role("chat").expect("chat");
         assert_eq!(chat.model_spec, "shared:chat");
         assert_eq!(chat.n_ctx, 32768);
-        assert_eq!(chat.retention_mode, retention::KEEP_LOADED);
+        // Смена политики (30.10.2026): чат по умолчанию load_on_demand — не резидент.
+        assert_eq!(chat.retention_mode, retention::LOAD_ON_DEMAND);
         assert_eq!(chat.model_kind, model_kind::TEXT);
         assert_eq!(chat.legacy_n_gpu_layers, Some(99));
 
@@ -1481,7 +1488,8 @@ llm_server:
     }
 
     /// M6 T2 (§3.5): чат-реплика `chat-2` — своя роль с портом/контекстом; модель
-    /// наследуется от базовой роли (`shared:chat`), retention `keep` как у чата.
+    /// наследуется от базовой роли (`shared:chat`), retention — как у чата (дефолт
+    /// `load_on_demand`; явный `llm.chat-2.retention` тоже работает).
     #[test]
     fn chat_replica_is_parsed_like_base_role() {
         let yaml = r#"
@@ -1508,8 +1516,8 @@ llm_server:
         assert_eq!(chat2.model_kind, model_kind::TEXT);
         assert_eq!(
             chat2.retention_mode,
-            retention::KEEP_LOADED,
-            "чат-реплика держится в VRAM как чат"
+            retention::LOAD_ON_DEMAND,
+            "чат-реплика наследует новый дефолт load_on_demand"
         );
         assert_eq!(cfg.replicas_of("chat").len(), 2, "chat + chat-2");
     }
