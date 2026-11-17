@@ -99,12 +99,35 @@ Rust ищет интерпретатор так: `HDS_ANONYMIZE_PYTHON` → `sid
 `navec_news_v1_1B_250K_300d_100q.tar`, `slovnet_ner_news_v1.tar`; манифест с ревизиями и
 sha256 — `<models>\anonymize-models.json`.
 
-Методы: `hello` (в т.ч. `formats`), `warmup`, `inspect` (метки/маркер — **без значений**),
-`anonymize`, `anonymize_values`, `deanonymize`, `deanonymize_values`, `shutdown`; прогресс —
-notifications без `id`. База меток (`mapping_store.py`, SQLite WAL) — единственный модуль доступа:
-нумерация per-type, дедуп по (значение, тип). Rust к базе не обращается и передаёт все параметры
-аргументами (`--model/--db/--models-dir/--device/--gpu-mem-limit-mb/…`), `config.yaml` воркер не
-читает. Проверки воркера — `sidecar/tests/test_anonymize_*.py` (модели не нужны).
+Методы: `hello` (в т.ч. `formats`, `capabilities`, `schema_version`), `warmup`,
+`inspect` (метки/маркер — **без значений**), `anonymize`, `anonymize_values`,
+`deanonymize`, `deanonymize_values`, `shutdown`; прогресс — notifications без `id`.
+
+База меток v2 — `vault.py` (SQLite WAL, схема TR-1.2): **одна база, два уровня
+меток** (сущности уровня 0 и метки проектов уровня 1), `forms` с граммемами
+(`seen`/`derived`), `aliases` для «Объединить метки», `keep_terms` (D19), `meta.rev`.
+Нумерация уровня 0 — per-type с дедупом по `norm_key`, поэтому словоформы
+(«Иванову Ивану Ивановичу») получают одну метку; уровень 1 — счётчики проекта,
+номера не выводятся из глобальных. Старая база схемы v1 при первом открытии
+переименовывается в `anonymize.db.v1-<YYYYMMDD-HHMMSS>.bak` (миграции нет, D4).
+Rust к базе не обращается и передаёт все параметры аргументами
+(`--model/--db/--keep-terms/--models-dir/--device/--gpu-mem-limit-mb/…`);
+`config.yaml` воркер не читает. Проверки воркера — `sidecar/tests/test_anonymize_*.py`
+(модели не нужны).
+
+RPC уровня 1 (анонимная зона, TR-1.6/1.7, TR-3.5, TR-7.4, D18):
+
+| RPC | Что делает |
+|---|---|
+| `anonymize` + `project_id`, `mode: "agent"`, `artifact_id` | образ анонимной зоны: метки проекта с падежными суффиксами, картинки → `[IMAGE_n]`, метаданные вычищены, маркер `hds-agent/<P>/<id>`, оригинал не меняется |
+| `deanonymize` + `project_id` | обратная подстановка по формам проекта: `[PERSON_3|дат]` → дательная форма, сомнительные падежи — «проверить» |
+| `anonymize_text` | реплики/вложения и текстовые образы: NER + regex + `keep_terms`, метки проекта |
+| `text_image` | `pdf`/`pptx`/`mpp` → `<имя>.<ext>.md` (текст из `hds_extract` или PyMuPDF/python-pptx) |
+| `label_for_value` | «Скрыть ещё…»: метка проекта для значения |
+| `vault_snapshot` / `vault_rev` | снимок для фильтра исходящего `{rev, labels[{label,type,forms}], others, keep}` — только в памяти Rust |
+| `merge_entities` / `vault_drop_project` | «Объединить метки» (псевдонимы) и удаление проекта (сущности остаются) |
+| `office_read` / `office_edit` / `office_create` | `docx`/`xlsx`/`pptx`: абзацы/таблицы/листы/слайды, правки и создание (TR-3.5) |
+| `keep_terms` | список «не анонимизировать» (`list`) и добавление (`add`) |
 
 ## MS Project (.mpp)
 
