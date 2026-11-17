@@ -181,6 +181,7 @@ class AnonymizeHandlers:
         project_id: Optional[str] = None,
         mode: str = "classic",
         artifact_id: Optional[str] = None,
+        images_mode: str = "strip",
     ) -> dict:
         """Анонимизировать файл: NER (или детерминированный список `values`)
         → построчная замена → сборка (strip_hf_images=True, scrub_metadata=True)
@@ -193,6 +194,9 @@ class AnonymizeHandlers:
         меняется** (в т.ч. исправление «слипшихся» ФИО — только в образе).
         """
         agent = mode == "agent"
+        images_mode = (images_mode or "strip").strip().lower()
+        if images_mode not in ("strip", "keep"):
+            images_mode = "strip"
         if agent and not (project_id or "").strip():
             raise ValueError("mode=agent требует project_id")
         path = Path(in_path)
@@ -212,10 +216,11 @@ class AnonymizeHandlers:
             )
 
         # Режим agent: картинки тела вырезаются ДО парсинга, на их месте —
-        # метки [IMAGE_n], поэтому текст и структура остаются согласованными
+        # метки [IMAGE_n], поэтому текст и структура остаются согласованными.
+        # `agent.images: keep` оставляет картинки (не рекомендуется: риск утечки).
         content = self._read_bytes(path)
         images = 0
-        if agent:
+        if agent and images_mode == "strip":
             content, images = strip_body_images(content, path.name)
             if images:
                 warnings.append(

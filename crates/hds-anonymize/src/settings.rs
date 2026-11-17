@@ -231,6 +231,9 @@ impl Settings {
                 args.push("1".into());
             }
         }
+        // TR-7.4: что делать с картинками тела в режиме agent
+        args.push("--agent-images".into());
+        args.push(self.agent_images.clone());
         args
     }
 }

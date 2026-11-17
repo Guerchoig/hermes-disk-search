@@ -170,6 +170,19 @@ class AgentModeTest(unittest.TestCase):
         self.assertIn(PERSON_NOMN, text)
         self.assertIn(PERSON_DATV, text)
 
+    def test_agent_images_keep_leaves_media(self):
+        """`agent.images: keep` — картинки тела остаются (не рекомендуется)."""
+        out = os.path.join(self.dir, "keep", "ТЗ.docx")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        res = asyncio.run(self.handlers.anonymize(
+            self.src, out, values=[PERSON_NOMN], project_id="P0001",
+            mode="agent", artifact_id="1", images_mode="keep",
+        ))
+        self.assertEqual(res["images"], 0)
+        with zipfile.ZipFile(out) as package:
+            media = [n for n in package.namelist() if n.startswith("word/media/")]
+        self.assertTrue(media, "при keep картинки тела должны остаться")
+
     def test_agent_requires_project(self):
         out = os.path.join(self.dir, "bad.docx")
         with self.assertRaises(ValueError):

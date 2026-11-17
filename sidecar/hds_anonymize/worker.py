@@ -70,6 +70,12 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="файл списка «не анонимизировать» (D19): YAML-список или строки",
     )
+    p.add_argument(
+        "--agent-images",
+        default="strip",
+        choices=["strip", "keep"],
+        help="mode=agent: вырезать картинки тела в [IMAGE_n] (strip) или оставить",
+    )
     p.add_argument("--device", default=None, choices=[None, "cpu", "cuda", "dml"])
     p.add_argument("--gpu-mem-limit-mb", type=int, default=None)
     p.add_argument("--idle-timeout", type=float, default=60.0)
@@ -233,6 +239,9 @@ class Worker:
         self.models_dir = models_dir
         db_path = args.db or os.path.join(ROOT, "data", "anonymize.db")
         keep_terms = _load_keep_terms(getattr(args, "keep_terms", None))
+        self.agent_images = str(
+            getattr(args, "agent_images", "strip") or "strip"
+        ).strip().lower()
         self.store = Vault(db_path, keep_terms=keep_terms)
         self.handlers = AnonymizeHandlers(self.store)
         self.loop = asyncio.new_event_loop()
@@ -328,6 +337,7 @@ class Worker:
                         project_id=project_id or None,
                         mode=mode,
                         artifact_id=params.get("artifact_id"),
+                        images_mode=str(params.get("images") or self.agent_images),
                     ))
                 elif method in ("deanonymize", "deanonymize_values"):
                     out_path = _build_out_path(in_path, params, "deanonymize")

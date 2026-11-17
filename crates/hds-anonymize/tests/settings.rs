@@ -54,6 +54,17 @@ fn keep_terms_file_and_agent_images_from_config() {
 }
 
 #[test]
+fn agent_images_flag_goes_to_worker() {
+    let default = Settings::from_config(&Config::Null);
+    let args = default.worker_args(&std::env::temp_dir());
+    let index = args
+        .iter()
+        .position(|a| a == "--agent-images")
+        .expect("флаг --agent-images должен уходить воркеру");
+    assert_eq!(args[index + 1], "strip");
+}
+
+#[test]
 fn worker_args_for_carries_device_and_gpu_limit() {
     let s = Settings::from_config(&Config::Null);
     let root = std::env::temp_dir();
