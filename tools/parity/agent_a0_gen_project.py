@@ -17,6 +17,7 @@ import argparse
 import json
 import os
 import random
+import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_OUT = os.path.join(REPO, "tools", "parity", "out", "agent_a0", "s10", "project")
@@ -183,17 +184,21 @@ def add_xlsx(path: str, title: str, header: list[str], rows: list[list[str]]) ->
 def add_pdf(path: str, title: str, paragraphs: list[str]) -> None:
     import pymupdf
 
+    # Arial нужен для кириллицы; если его нет (не Windows) — падаем на helv и
+    # предупреждаем: стенд останется валидным, но текст будет без кириллицы.
+    font_file = ARIAL if os.path.exists(ARIAL) else None
+    font_name = "arial" if font_file else "helv"
+    if not font_file:
+        print("WARNING: Arial не найден, PDF без кириллицы", file=sys.stderr)
+
     doc = pymupdf.open()
     page = doc.new_page()
     y = 60
-    page.insert_text((50, y), title, fontsize=16, fontname="helv")
+    page.insert_text((50, y), title, fontsize=16, fontname=font_name, **({"fontfile": font_file} if font_file else {}))
     y += 30
     for text in paragraphs:
-        # helv не содержит кириллицу — используем встроенный "china-s"? нет:
-        # PyMuPDF 1.28 умеет подставлять шрифт по имени файла; для кириллицы
-        # берём системный Arial.
         for line in wrap_text(text, 95):
-            page.insert_text((50, y), line, fontsize=10, fontname="arial", fontfile=ARIAL)
+            page.insert_text((50, y), line, fontsize=10, fontname=font_name, **({"fontfile": font_file} if font_file else {}))
             y += 14
         y += 6
         if y > 780:

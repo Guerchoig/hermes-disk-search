@@ -17,12 +17,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 DEFAULT_LIMIT = 30
+LABEL_RE = re.compile(r"\[[A-Z_]+_\d+(?:\|[а-яё,]+)?\]")
 
 
 def run_search(hds: str, config: str, query: str, limit: int) -> tuple[list[dict], float, str]:
@@ -30,12 +32,16 @@ def run_search(hds: str, config: str, query: str, limit: int) -> tuple[list[dict
     env["HDS_CONFIG"] = config
     env.pop("HDS_ROOT", None)
     started = time.time()
-    proc = subprocess.run(
-        [hds, "search", query, "--limit", str(limit), "--json"],
-        cwd=REPO,
-        env=env,
-        capture_output=True,
-    )
+    try:
+        proc = subprocess.run(
+            [hds, "search", query, "--limit", str(limit), "--json"],
+            cwd=REPO,
+            env=env,
+            capture_output=True,
+            timeout=180,
+        )
+    except subprocess.TimeoutExpired:
+        return [], (time.time() - started) * 1000, "timeout 180s"
     elapsed = (time.time() - started) * 1000
     out = proc.stdout.decode("utf-8", errors="replace")
     if proc.returncode != 0:
@@ -49,6 +55,19 @@ def run_search(hds: str, config: str, query: str, limit: int) -> tuple[list[dict
 
 def basename_of(path: str) -> str:
     return os.path.basename(path.replace("\\", "/"))
+
+
+def count_label_hits(results: list[dict], question: str) -> int | None:
+    """Сколько из выданных фрагментов действительно содержат метку из вопроса."""
+    labels = set(LABEL_RE.findall(question))
+    if not labels:
+        return None
+    hits = 0
+    for item in results:
+        text = f"{item.get('snippet') or ''}\n{item.get('text') or ''}"
+        if any(label in text for label in labels):
+            hits += 1
+    return hits
 
 
 def first_rank(result_paths: list[str], expected: list[str]) -> int | None:
@@ -97,13 +116,8 @@ def main() -> int:
                 "mrr": round(1.0 / rank, 4) if rank else 0.0,
                 "ms": round(elapsed, 1),
                 "error": error,
-                # содержат ли выдачи метку из вопроса (для вопросов по меткам)
-                "snippetsWithLabel": sum(
-                    1
-                    for item in results[:10]
-                    if any(label in (item.get("snippet") or item.get("text") or "") for label in question["expected"] if label.startswith("["))
-                    or any(label in (item.get("snippet") or "") for label in question["question"].split() if label.startswith("["))
-                ),
+                # сколько из топ-10 фрагментов содержат метку из вопроса (для вопросов по меткам)
+                "snippetsWithLabel": count_label_hits(results[:10], question["question"]),
             }
         )
         print(

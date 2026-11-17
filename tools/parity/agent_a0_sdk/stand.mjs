@@ -95,8 +95,11 @@ export function startMock({ script, scriptPath, logPath, name = 'mock' } = {}) {
     scriptFile,
     ready,
     async stop() {
+      // процесс мог уже завершиться (упал или убит) — иначе once('exit') не сработает
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = new Promise((resolve) => child.once('exit', resolve));
       child.kill();
-      await new Promise((r) => child.once('exit', r));
+      await exited;
     },
   };
 }
@@ -113,13 +116,24 @@ export async function mockStats(baseUrl) {
  */
 export function makeEgressFetch(logFile) {
   const calls = [];
+
+  // Headers/Request не перебираются через Object.keys — приводим к массиву имён
+  const headerNames = (init, input) => {
+    const source = init?.headers ?? (typeof input === 'object' ? input?.headers : undefined);
+    try {
+      return source ? [...new Headers(source).keys()] : [];
+    } catch {
+      return [];
+    }
+  };
+
   const fn = async (input, init) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
     const entry = {
       at: new Date().toISOString(),
       url,
       method: init?.method ?? (typeof input === 'object' && input?.method) ?? 'GET',
-      headers: Object.keys(init?.headers ?? (typeof input === 'object' ? input?.headers ?? {} : {})),
+      headers: headerNames(init, input),
       bodyBytes: typeof init?.body === 'string' ? init.body.length : undefined,
     };
     calls.push(entry);
@@ -207,6 +221,7 @@ export async function runSession(opts = {}) {
   const row = { name, baseUrl, baseUrlUsed: baseUrlOverride ?? `${baseUrl}${pathSuffix}`, errors: [] };
   const events = [];
   const types = [];
+  let finishWait = () => {};
 
   try {
     const cline = await ClineCore.create({
@@ -243,26 +258,40 @@ export async function runSession(opts = {}) {
     row.messagesPath = started.messagesPath;
     row.pluginIssues = started.pluginIssues;
 
+    // Подписка и таймаут живут до первого терминального события; при ошибке
+    // `send` их надо снять, иначе процесс висит до timeoutMs.
     const ended = new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        unsub();
-        resolve({ done: false, timeout: true });
-      }, timeoutMs);
+      let timer;
       const unsub = cline.subscribe(
         (event) => {
           const copy = JSON.parse(JSON.stringify(event, (k, v) => (typeof v === 'function' ? undefined : v)));
           copy.type === 'agent_event'
             ? types.push(`agent:${event.payload?.event?.type}`)
             : types.push(event.type);
+          if (event.type !== 'chunk') events.push(copy);
           if (event.type === 'ended') {
-            clearTimeout(timer);
-            unsub();
+            cleanup();
             resolve({ done: true, reason: event.payload?.reason });
           }
-          if (event.type !== 'chunk') events.push(copy);
         },
         { sessionId: started.sessionId },
       );
+      const cleanup = () => {
+        clearTimeout(timer);
+        try {
+          unsub();
+        } catch {
+          /* уже отписан */
+        }
+      };
+      timer = setTimeout(() => {
+        cleanup();
+        resolve({ done: false, timeout: true });
+      }, timeoutMs);
+      finishWait = (value) => {
+        cleanup();
+        resolve(value);
+      };
     });
 
     const result = await cline.send({ sessionId: started.sessionId, prompt });
@@ -287,6 +316,8 @@ export async function runSession(opts = {}) {
     await cline.dispose();
   } catch (error) {
     row.errors.push(String(error?.stack ?? error));
+    // снимаем висящую подписку/таймер, иначе процесс доживает до timeoutMs
+    finishWait({ done: false, cancelled: true });
   } finally {
     await mock.stop();
   }

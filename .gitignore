@@ -51,6 +51,8 @@ sidecar/hds/
 # installers\build_transcribe_sidecar.ps1, 1.5-6 GB)
 sidecar/venv-transcribe/
 sidecar/venv-transcribe-dml/
+# P6: venv анонимизации (installers\build_anonymize_sidecar.ps1, 3-6 GB)
+sidecar/venv-anonymize/
 # Eval-набор качества поиска (персональные пути/содержимое — в репозиторий не коммитится)
 eval/
 

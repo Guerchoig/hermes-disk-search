@@ -187,14 +187,11 @@ if (diskSearchToken) {
     });
   }
 } else {
-  result.stages.push({ stage: 'd-disk-search', skipped: 'нет токена disk-search в ~/.cline/mcp.json' });
+  result.stages.push({ stage: 'd-disk-search', skipped: 'токен disk-search не найден в настройках владельца' });
 }
 
 // --- проверка «секреты не утекли в артефакты» ------------------------------
 const filesToScan = [];
-for (const stage of result.stages) {
-  if (!stage.stage) continue;
-}
 const scanDirs = [path.join(OUT_ROOT, 's7')];
 let leaks = 0;
 for (const dir of scanDirs) {

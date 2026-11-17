@@ -8,8 +8,9 @@
     "node": ">=22"
   },
   "scripts": {
-    "mock": "node mock-provider.mjs",
-    "s1": "node s1_isolation.mjs",
+    "mock": "node mock_provider.mjs",
+    "s0": "node s0_smoke.mjs",
+    "s1": "node --import ./fs_trace.mjs s1_isolation.mjs",
     "s2": "node s2_fetch.mjs",
     "s3": "node s3_hooks.mjs",
     "s4": "node s4_toolpolicies.mjs",
