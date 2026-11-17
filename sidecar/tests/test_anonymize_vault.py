@@ -258,9 +258,34 @@ class KeepTermsTest(VaultBase):
     def test_default_list_seeded(self):
         """D19/П-14: стартовый список терминов 1С загружен."""
         keep = set(self.vault.keep_list())
-        for term in ("1С", "1С:ERP", "ЗУП", "Документооборот", "ДиректБанк",
-                     "ГИС МТ", "ТЗ", "HTTP-сервис"):
+        for term in ("1С", "1С:ERP", "1С:ЗУП", "ЗУП", "Документооборот",
+                     "ДиректБанк", "ГИС МТ", "ТЗ", "HTTP-сервис"):
             self.assertIn(term, keep)
+
+    def test_product_abbreviations_are_kept(self):
+        """Состав продуктов 1С согласован владельцем 17.11.2026."""
+        for term in ("1С:БП", "БП", "1С:ЗУП", "ЗУП", "1С:УТ", "УТ", "1С:УНФ",
+                     "УНФ", "1С:КА", "1С:ERP", "ЕРП", "1С:УПП", "1С:ДО",
+                     "1С:УХ", "1С:ERP УХ", "1С:Розница", "1С:WMS", "1С:TMS",
+                     "1С:ТОИР", "1С:ИТС", "1С:ЭДО", "1С:БСП", "1С:Fresh"):
+            self.assertIn(term, self.vault.keep_list(), term)
+            self.assertTrue(self.vault.is_kept(term), term)
+            self.assertIsNone(self.vault.global_label(term, "ORG"), term)
+
+    def test_short_abbrev_case_sensitive(self):
+        """`cs:` — короткие аббревиатуры не «слепляются» с русскими словами."""
+        self.assertTrue(self.vault.is_kept("ДО"))
+        self.assertFalse(self.vault.is_kept("до"))
+        self.assertTrue(self.vault.is_kept("КА"))
+        self.assertFalse(self.vault.is_kept("ка"))
+        # прочие короткие термины — без учёта регистра, как раньше
+        self.assertTrue(self.vault.is_kept("тз"))
+        self.assertTrue(self.vault.is_kept("зуп"))
+
+    def test_composite_components_are_kept(self):
+        """NER режет «1С:ERP» на «ERP» — компонент не должен получать метку."""
+        for value in ("ERP", "ЗУП", "WMS", "TMS", "ИТС", "ЭДО", "БСП", "ТОИР"):
+            self.assertTrue(self.vault.is_kept(value), value)
 
     def test_exact_and_regex_terms(self):
         self.assertTrue(self.vault.is_kept("1С:ERP"))
@@ -356,6 +381,52 @@ class MigrationTest(unittest.TestCase):
         try:
             self.assertIsNone(vault.backup_path)
             self.assertEqual(vault.stats()["schema_version"], 2)
+        finally:
+            vault.close()
+
+
+class KeepTermsFileTest(unittest.TestCase):
+    """Файл `keep_terms.example.yaml` — тот же состав, что стартовый список."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="hds-keep-file-")
+        self.db = os.path.join(self.tmp.name, "anonymize.db")
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def test_example_file_loads(self):
+        from hds_anonymize import vault as vault_mod
+        from hds_anonymize.worker import _load_keep_terms
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "hds_anonymize",
+            "keep_terms.example.yaml",
+        )
+        terms = _load_keep_terms(path)
+        self.assertIn("1С:БП", terms)
+        self.assertIn("cs:ДО", terms)
+        self.assertIn("re:REQ-\\d+", terms)
+        # файл покрывает стартовый список (расширение, а не замена)
+        for term in vault_mod.DEFAULT_KEEP_TERMS:
+            self.assertIn(term, terms, term)
+        self.assertIn("1С:Fresh", terms)
+
+    def test_loaded_file_keeps_products(self):
+        from hds_anonymize.worker import _load_keep_terms
+
+        path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "hds_anonymize",
+            "keep_terms.example.yaml",
+        )
+        vault = Vault(self.db, keep_terms=_load_keep_terms(path))
+        try:
+            self.assertIsNone(vault.global_label("1С:УПП", "ORG"))
+            self.assertIsNone(vault.global_label("1С:БСП", "ORG"))
+            self.assertTrue(vault.is_kept("ЕРП"))
+            self.assertFalse(vault.is_kept("Иванов Иван Иванович"))
         finally:
             vault.close()
 

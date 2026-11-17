@@ -55,19 +55,38 @@ TOLERANT_LABEL_RE = re.compile(
 
 # Префикс регулярных выражений в keep_terms (`re:REQ-\d+`), см. §3.3 карты A1
 KEEP_REGEX_PREFIX = "re:"
+# Префикс «с учётом регистра»: короткие аббревиатуры, совпадающие с русскими
+# словами («ДО» ↔ «до», «КА» ↔ «ка»), иначе keep_terms не даёт их маскировать
+KEEP_CASE_PREFIX = "cs:"
 
-# Стартовый список «не анонимизировать» (D19, П-14): продукты и термины 1С,
-# которые NER иначе метит как ORG/LOC/INN (факт A0 §3.9), и коды требований.
+# Стартовый список «не анонимизировать» (D19; состав продуктов 1С согласован
+# владельцем 17.11.2026). NER иначе метит их как ORG/LOC/INN (факт A0 §3.9).
 DEFAULT_KEEP_TERMS = (
-    # фирма и платформа
-    "1С", "1С:Предприятие", "1С:ERP", "1С:ERP 2.5", "1С:Бухгалтерия",
-    "1С:ЗУП", "1С:Документооборот", "1С:УТ", "1С:УНФ",
-    # короткие имена продуктов (в текстах — без префикса «1С:»)
-    "ЗУП", "УТ", "УТ 11", "УНФ", "Документооборот", "ДиректБанк", "ГИС МТ",
-    # термины проекта
+    # ── платформа и фирма ────────────────────────────────────────────────
+    "1С", "1С:Предприятие", "1С:Fresh", "1С:Фреш",
+    # ── прикладные продукты 1С (короткие имена — как их пишут в проектах) ─
+    "1С:БП", "БП",                       # Бухгалтерия предприятия
+    "1С:ЗУП", "ЗУП",                     # Зарплата и управление персоналом
+    "1С:УТ", "УТ", "УТ 11",              # Управление торговлей
+    "1С:УНФ", "УНФ",                     # Управление нашей фирмой
+    "1С:КА", "cs:КА",                    # Комплексная автоматизация
+    "1С:ERP", "1С:ERP 2.5", "ЕРП",       # ERP Управление предприятием 2
+    "1С:УПП",                            # Управление производственным предприятием
+    "1С:ДО", "cs:ДО", "1С:Документооборот", "Документооборот",
+    "1С:УХ",                             # Управление холдингом
+    "1С:ERP УХ",
+    "1С:Розница", "РТ",
+    "1С:WMS",
+    "1С:TMS",
+    "1С:ТОИР",
+    "1С:ИТС",
+    "1С:ЭДО",
+    "1С:БСП",                            # Библиотека стандартных подсистем
+    # ── прочие продукты и сервисы проекта ────────────────────────────────
+    "ДиректБанк", "ГИС МТ", "ERPLY", "СБИС",
+    # ── термины проекта внедрения ────────────────────────────────────────
     "ТЗ", "ТЭО", "ФТТ", "HTTP-сервис", "RLS", "регламентное задание",
-    "ERPLY", "СБИС",
-    # коды требований — регулярка, а не значение
+    # ── коды требований — шаблон, а не значение ──────────────────────────
     r"re:REQ-\d+",
 )
 
@@ -491,16 +510,20 @@ class Vault:
             for row in self._conn.execute("SELECT value FROM keep_terms ORDER BY value")
         ]
 
-    def _keep_matchers(self) -> tuple[frozenset[str], tuple[re.Pattern, ...]]:
-        """Точные значения и шаблоны keep_terms (+ компоненты составных терминов).
+    def _keep_matchers(
+        self,
+    ) -> tuple[frozenset[str], frozenset[str], tuple[re.Pattern, ...]]:
+        """Точные значения, регистрозависимые значения и шаблоны keep_terms.
 
         NER режет составные названия: «1С:ERP» он метит как `ERP`,
         «1С:ЗУП» — как `ЗУП`. Поэтому компоненты составных терминов
         (`ERP`, `ЗУП`, `Документооборот`) считаются «своими» и не получают
-        меток — иначе агент теряет предметную область (D19).
+        меток — иначе агент теряет предметную область (D19). Записи `cs:`
+        сверяются с учётом регистра (`ДО` ≠ «до», `КА` ≠ «ка»).
         """
         if self._keep_cache is None:
             exact: set[str] = set()
+            exact_cs: set[str] = set()
             patterns: list[re.Pattern] = []
             for entry in self.keep_list():
                 if entry.startswith(KEEP_REGEX_PREFIX):
@@ -511,20 +534,27 @@ class Vault:
                     except re.error as exc:
                         logger.warning("keep_terms: битый шаблон %r (%s)", entry, exc)
                     continue
+                if entry.startswith(KEEP_CASE_PREFIX):
+                    value = entry[len(KEEP_CASE_PREFIX):].strip()
+                    if value:
+                        exact_cs.add(value)
+                    continue
                 exact.add(entry.casefold())
                 for part in re.split(r"[^\w]+", entry):
                     if len(part) >= 3:
                         exact.add(part.casefold())
-            self._keep_cache = (frozenset(exact), tuple(patterns))
+            self._keep_cache = (frozenset(exact), frozenset(exact_cs), tuple(patterns))
         return self._keep_cache
 
     def is_kept(self, value: str) -> bool:
-        """Входит ли значение в «не анонимизировать» (точное или `re:`-совпадение)."""
+        """Входит ли значение в «не анонимизировать» (точное, `cs:` или `re:`)."""
         value = (value or "").strip()
         if not value:
             return False
-        exact, patterns = self._keep_matchers()
+        exact, exact_cs, patterns = self._keep_matchers()
         if value.casefold() in exact:
+            return True
+        if value in exact_cs:
             return True
         return any(pattern.fullmatch(value) for pattern in patterns)
 
