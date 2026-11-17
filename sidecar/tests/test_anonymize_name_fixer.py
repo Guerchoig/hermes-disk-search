@@ -17,7 +17,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from hds_anonymize.mapping_store import MappingStore  # noqa: E402
+from hds_anonymize.vault import Vault  # noqa: E402
 from hds_anonymize.handlers import AnonymizeHandlers  # noqa: E402
 from hds_anonymize.name_fixer import fix_glued_full_names  # noqa: E402
 
@@ -97,7 +97,7 @@ class NameFixerHandlerTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="hds-anon-nf-")
         self.dir = self.tmp.name
         self.db = os.path.join(self.dir, "anonymize.db")
-        self.store = MappingStore(self.db)
+        self.store = Vault(self.db)
         self.h = AnonymizeHandlers(self.store)
 
     def tearDown(self) -> None:

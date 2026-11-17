@@ -25,6 +25,8 @@ pymorphy2==0.9.1
 setuptools>=75.0,<81
 python-docx==1.2.0
 openpyxl==3.1.5
+# office_create(pptx) / office_edit(pptx) — TR-3.5 (A1)
+python-pptx==1.0.2
 lxml==6.1.2
 numpy==2.4.6
 onnxruntime==1.29.0

@@ -1113,6 +1113,77 @@ class FileParser:
         )
 
 
+def _paragraph_image_nodes(para_el) -> list:
+    """Узлы картинок (w:drawing/w:pict с изображением) внутри абзаца."""
+    nodes = []
+    for el in para_el.iter():
+        if el.tag == qn("w:drawing"):
+            if (el.find(f".//{_PIC_TAG}") is not None
+                    or el.find(f".//{_BLIP_TAG}") is not None):
+                nodes.append(el)
+        elif el.tag == qn("w:pict"):
+            if el.find(f".//{_IMAGEDATA_TAG}") is not None:
+                nodes.append(el)
+    return nodes
+
+
+def strip_body_images(content: bytes, filename: str) -> tuple[bytes, int]:
+    """Вырезать картинки тела DOCX, оставив метки `[IMAGE_n]` (TR-7.4).
+
+    Вызывается **до** парсинга в режиме `mode: "agent"`: текст документа
+    получает метку на месте картинки, поэтому структура абзацев и сборка
+    остаются согласованными, а байты изображений вымываются из пакета
+    (`_drop_orphan_media`). Оригинал не меняется — функция работает на
+    копии в памяти.
+    """
+    if Path(filename).suffix.lower() != ".docx":
+        return content, 0
+    doc = Document(io.BytesIO(content))
+    counter = 0
+
+    def handle(paragraph) -> None:
+        nonlocal counter
+        nodes = _paragraph_image_nodes(paragraph._p)
+        if not nodes:
+            return
+        rids: set[str] = set()
+        for node in nodes:
+            for element in node.iter():
+                for attr in (qn("r:embed"), qn("r:id"), qn("r:link")):
+                    rid = element.get(attr)
+                    if rid:
+                        rids.add(rid)
+            parent = node.getparent()
+            if parent is not None:
+                parent.remove(node)
+            counter += 1
+            paragraph.add_run(f"[IMAGE_{counter}]")
+        # Связи удалённых картинок чистим — иначе media-файлы остаются
+        # «используемыми» и `_drop_orphan_media` их не вымывает
+        for rid in rids:
+            try:
+                paragraph.part.drop_rel(rid)
+            except (KeyError, AttributeError):
+                logger.debug("Не удалось удалить связь картинки %s", rid)
+
+    targets = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                targets.extend(cell.paragraphs)
+    for paragraph in targets:
+        handle(paragraph)
+    if counter == 0:
+        return content, 0
+    output = io.BytesIO()
+    doc.save(output)
+    result, dropped = _drop_orphan_media(output.getvalue())
+    logger.info(
+        "Картинки тела заменены метками: %s (media-файлов из пакета: %s)",
+        counter, dropped)
+    return result, counter
+
+
 class FileAssembler:
     """Сборщик файлов обратно из анонимизированного текста"""
     
@@ -1124,6 +1195,7 @@ class FileAssembler:
         structure: dict,
         strip_hf_images: bool = True,
         scrub_metadata: bool = True,
+        marker: Optional[str] = None,
     ) -> bytes:
         """
         Собрать файл обратно с анонимизированным содержимым
@@ -1138,22 +1210,26 @@ class FileAssembler:
                 файл должен остаться с оригинальным оформлением
             scrub_metadata: Обезличивать метаданные пакета DOCX
                 (автор, компания, HLinks); False — для де-анонимизации
+            marker: маркер копии в свойствах файла; None — прежний
+                `ANON_MARKER` (режим `agent` пишет `hds-agent/<P>/<id>`)
 
         Returns:
             Бинарное содержимое файла с заменённым текстом
         """
         ext = Path(original_filename).suffix.lower()
-        
+
         if ext == ".docx":
             return self._assemble_docx(
                 original_content, anonymized_text, structure,
                 strip_hf_images=strip_hf_images,
                 scrub_metadata=scrub_metadata,
+                marker=marker,
             )
         elif ext == ".xlsx":
             return self._assemble_xlsx(
                 original_content, anonymized_text, structure,
                 scrub_metadata=scrub_metadata,
+                marker=marker,
             )
         elif ext == ".xml":
             return self._assemble_xml(original_content, anonymized_text, structure)
@@ -1169,6 +1245,7 @@ class FileAssembler:
         structure: dict,
         strip_hf_images: bool = True,
         scrub_metadata: bool = True,
+        marker: Optional[str] = None,
     ) -> bytes:
         """Сборка DOCX файла: текст записывается обратно по координатам,
         сохранённым при парсинге (абзацы тела, ячейки таблиц, колонтитулы,
@@ -1291,7 +1368,7 @@ class FileAssembler:
             _scrub_docx_metadata(doc)
             # Маркер версии парсера: повторная анонимизация по неизменённому
             # исходнику переиспользует копию только при совпадении версии
-            doc.core_properties.comments = ANON_MARKER
+            doc.core_properties.comments = marker or ANON_MARKER
         else:
             # финальный (де-анонимизированный) файл не несёт служебный маркер
             doc.core_properties.comments = ""
@@ -1334,7 +1411,7 @@ class FileAssembler:
                 "пакета: %s)", removed_images, dropped)
         return result
 
-    def _assemble_xlsx(self, original_content: bytes, anonymized_text: str, structure: dict, scrub_metadata: bool = True) -> bytes:
+    def _assemble_xlsx(self, original_content: bytes, anonymized_text: str, structure: dict, scrub_metadata: bool = True, marker: Optional[str] = None) -> bytes:
         """Сборка XLSX файла: значения записываются обратно по координатам,
         сохранённым при парсинге. Ячейки, чей текст не изменился, не
         затрагиваются — это сохраняет формулы, числа и даты. Комментарии
@@ -1371,7 +1448,7 @@ class FileAssembler:
         if scrub_metadata:
             # Маркер версии парсера в свойствах копии (см. PARSER_VERSION)
             try:
-                wb.properties.keywords = ANON_MARKER
+                wb.properties.keywords = marker or ANON_MARKER
                 buf = io.BytesIO()
                 wb.save(buf)
                 result = buf.getvalue()

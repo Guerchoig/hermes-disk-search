@@ -24,18 +24,27 @@ from .file_parser import (
     FileAssembler,
     FileParser,
     read_anon_marker,
+    strip_body_images,
 )
-from .mapping_store import MappingStore, TOKEN_PATTERN
 from .name_fixer import fix_glued_full_names
+from .office_ops import OfficeError, office_create, office_edit, office_read
 from .replacer import TextReplacer, split_entities_by_segments
 from .schemas import Entity
+from .text_image import (
+    ExtractRequired,
+    build_text_image,
+    extract_text,
+    image_path as text_image_path,
+    write_text_image,
+)
+from .vault import LABEL_RE, MAX_WARNINGS, Vault
 
 # Форматы P1 + XML/MS Project (P1b; слой парсера уже готов)
 FORMATS = ["docx", "xlsx", "txt", "md", "xml"]
 
 # Маска существующих плейсхолдеров при детерминированном поиске значений
-# (из anonymizer_proxy/proxy/utils.py — не переименовываем)
-PLACEHOLDER_TOKEN_RE = re.compile(r"\[[A-Z_]+_\d+\]")
+# (из anonymizer_proxy/proxy/utils.py — не переименовываем; с v2 — с суффиксом)
+PLACEHOLDER_TOKEN_RE = LABEL_RE
 
 # Число-подобное значение из списка «скрой указанное»: цифры, разрядные
 # пробелы, точка/запятая (десятичный разделитель), знак
@@ -53,7 +62,7 @@ def is_name_like(item: str) -> bool:
 
 def _token_sort_key(token: str) -> tuple[str, int]:
     """Стабильный порядок токенов: по типу, затем по номеру."""
-    m = TOKEN_PATTERN.match(token)
+    m = LABEL_RE.match(token)
     if m:
         return (m.group(1), int(m.group(2)))
     return (token, 0)
@@ -117,10 +126,10 @@ ProgressFn = Callable[[str, str, int, int], None]
 
 
 class AnonymizeHandlers:
-    """Обработчики RPC: anonymize / anonymize_values / deanonymize /
-    deanonymize_values / inspect."""
+    """Обработчики RPC: файловые акты, `anonymize_text`, база меток,
+    Office-операции и текстовые образы (TR-1.7, TR-3.5, TR-7.4)."""
 
-    def __init__(self, store: MappingStore, ner=None) -> None:
+    def __init__(self, store: Vault, ner=None) -> None:
         self.store = store
         self._ner = ner  # NERService (ленивый); None → создаётся при первом NER
         self.file_parser = FileParser()
@@ -169,11 +178,23 @@ class AnonymizeHandlers:
         out_path: str,
         values: Optional[list[str]] = None,
         progress: Optional[ProgressFn] = None,
+        project_id: Optional[str] = None,
+        mode: str = "classic",
+        artifact_id: Optional[str] = None,
     ) -> dict:
         """Анонимизировать файл: NER (или детерминированный список `values`)
         → построчная замена → сборка (strip_hf_images=True, scrub_metadata=True)
         → атомарная запись. Уже анонимизированный вход — warning + обработка
-        (решение №2 плана)."""
+        (решение №2 плана).
+
+        `mode="agent"` (TR-7.4): метки проекта с падежными суффиксами,
+        картинки тела заменяются `[IMAGE_n]`, метаданные чистятся, в свойства
+        файла пишется маркер `hds-agent/<P>/<artifact_id>`, **оригинал не
+        меняется** (в т.ч. исправление «слипшихся» ФИО — только в образе).
+        """
+        agent = mode == "agent"
+        if agent and not (project_id or "").strip():
+            raise ValueError("mode=agent требует project_id")
         path = Path(in_path)
         if not path.is_file():
             raise FileNotFoundError(f"Файл не найден: {path}")
@@ -185,30 +206,46 @@ class AnonymizeHandlers:
             progress(path.name, "parse", 0, 4)
 
         marker = read_anon_marker(path)
-        if marker:
+        if marker and not agent:
             warnings.append(
                 f"файл уже анонимизирован (маркер {marker}) — обработка продолжается"
             )
 
-        content, parsed = await self._load_parsed(path)
+        # Режим agent: картинки тела вырезаются ДО парсинга, на их месте —
+        # метки [IMAGE_n], поэтому текст и структура остаются согласованными
+        content = self._read_bytes(path)
+        images = 0
+        if agent:
+            content, images = strip_body_images(content, path.name)
+            if images:
+                warnings.append(
+                    f"картинки тела заменены метками [IMAGE_n]: {images}"
+                )
+        parsed = await self.file_parser.parse(content, path.name)
 
         # «Слипшиеся» ФИО («ВолодинВ.В.») чинятся ДО NER: без границы
         # фамилия/инициалы модель и regex-слой фамилию не видят.
-        # Исправления вносятся и в исходный файл (требование владельца),
-        # поэтому акт продолжает работу по исправленному тексту — он же
-        # уйдёт в замену и в БД маппингов (деанон вернёт исправленное ФИО).
+        # В classic исправления вносятся и в исходный файл (требование
+        # владельца); в режиме agent оригинал не меняется никогда (TR-7.4) —
+        # правка живёт только в образе.
         fixed_text, name_fixes = fix_glued_full_names(parsed.text)
         if name_fixes:
             parsed.text = fixed_text
-            fixed_content = await self.file_assembler.assemble(
-                content, path.name, fixed_text, parsed.structure,
-                strip_hf_images=False, scrub_metadata=False,
-            )
-            _atomic_write_bytes(path, fixed_content)
-            warnings.append(
-                f"исправлено «слипшихся» ФИО: {name_fixes} — "
-                "исходный файл обновлён до анонимизации"
-            )
+            if agent:
+                warnings.append(
+                    f"исправлено «слипшихся» ФИО: {name_fixes} — только в образе "
+                    "(оригинал не изменён)"
+                )
+            else:
+                fixed_content = await self.file_assembler.assemble(
+                    content, path.name, fixed_text, parsed.structure,
+                    strip_hf_images=False, scrub_metadata=False,
+                )
+                _atomic_write_bytes(path, fixed_content)
+                warnings.append(
+                    f"исправлено «слипшихся» ФИО: {name_fixes} — "
+                    "исходный файл обновлён до анонимизации"
+                )
 
         if progress:
             progress(path.name, "ner", 1, 4)
@@ -236,12 +273,38 @@ class AnonymizeHandlers:
                 )
             matched, unmatched = [], []
 
+        # D19: keep_terms не получают меток вовсе (список «не анонимизировать»)
+        skipped = 0
+        filtered: list[Entity] = []
+        for entity in entities:
+            if self.store.is_kept(entity.text):
+                skipped += 1
+                continue
+            filtered.append(entity)
+        if skipped:
+            warnings.append(
+                f"оставлено без метки (keep_terms): {skipped} вхождений"
+            )
+        entities = filtered
+
         # Анонимизируем ПОСЕГМЕНТНО: NER-сущность может пересекать границу
         # строк склеенного текста (багрепорт 2026-09-08) — перенос без правок.
         # add_mapping у TextReplacer — async (интерфейс оригинала); store
         # синхронный, оборачиваем.
+        verify: list[str] = []
+
         async def add_mapping(value: str, entity_type: str) -> str:
-            return self.store.get_or_create_token(value, entity_type)
+            if agent:
+                label, confident = self.store.project_label_ex(
+                    project_id, value, entity_type
+                )
+                if label is None:
+                    return value  # keep_terms (страховка: уже отфильтровано)
+                if not confident:
+                    verify.append(label)
+                return label
+            token = self.store.global_label(value, entity_type)
+            return token or value
 
         segments = parsed.text.split("\n")
         segment_entities = split_entities_by_segments(entities, segments, separator="\n")
@@ -260,11 +323,24 @@ class AnonymizeHandlers:
 
         if progress:
             progress(path.name, "assemble", 3, 4)
+        marker_value = None
+        if agent:
+            marker_value = f"hds-agent/{project_id}"
+            if artifact_id:
+                marker_value = f"{marker_value}/{artifact_id}"
         anon_content = await self.file_assembler.assemble(
             content, path.name, anon_text, parsed.structure,
             strip_hf_images=True, scrub_metadata=True,
+            marker=marker_value,
         )
         _atomic_write_bytes(target, anon_content)
+
+        if verify:
+            warnings.append(
+                "падеж не определён однозначно у меток: "
+                + ", ".join(sorted(set(verify))[:MAX_WARNINGS])
+                + " — помечены «проверить»"
+            )
 
         # Счётчики токенов (в ответ и лог — только токены, без значений)
         token_types: dict[str, str] = {}
@@ -283,6 +359,108 @@ class AnonymizeHandlers:
             "tokens": tokens,
             "matched": matched,
             "unmatched": unmatched,
+            "warnings": warnings,
+            "mode": mode,
+            "project_id": project_id,
+            "images": images,
+        }
+
+    def label_for_value(
+        self, project_id: str, value: str, entity_type: str, suffix: bool = True
+    ) -> dict:
+        """«Скрыть ещё…»: метка проекта для значения (TR-1.7)."""
+        label, confident = self.store.project_label_ex(
+            project_id, value, entity_type, suffix=suffix
+        )
+        return {
+            "project_id": project_id,
+            "value_type": entity_type,
+            "label": label,
+            "kept": label is None,
+            "confident": confident,
+        }
+
+    # ── база меток: снимок и операции (TR-1.6/1.7, TR-2.6) ──────────────
+
+    def vault_snapshot(self, project_id: str) -> dict:
+        return self.store.snapshot(project_id)
+
+    def vault_rev(self) -> dict:
+        return {"rev": self.store.rev()}
+
+    def merge_entities(self, project_id: str, keep: str, drop: list[str]) -> dict:
+        return self.store.merge_entities(project_id, keep, drop)
+
+    def vault_drop_project(self, project_id: str) -> dict:
+        return self.store.drop_project(project_id)
+
+    def keep_terms_list(self) -> dict:
+        return {"keep": self.store.keep_list()}
+
+    def keep_term_add(self, value: str) -> dict:
+        return {"value": value, "added": self.store.add_keep_term(value)}
+
+    def vault_stats(self) -> dict:
+        return self.store.stats()
+
+    # ── Office-документы (TR-3.5) ───────────────────────────────────────
+
+    def office_read(self, path: str) -> dict:
+        return office_read(path)
+
+    def office_edit(self, path: str, ops: list[dict]) -> dict:
+        return office_edit(path, ops)
+
+    def office_create(self, path: str, kind: str, content: dict) -> dict:
+        return office_create(path, kind, content)
+
+    # ── текстовые образы pdf/pptx/mpp (D18) ─────────────────────────────
+
+    async def text_image(
+        self,
+        in_path: str,
+        out_path: Optional[str] = None,
+        out_dir: Optional[str] = None,
+        project_id: str = "",
+        artifact_id: Optional[str] = None,
+        text: Optional[str] = None,
+        ner: bool = True,
+    ) -> dict:
+        """Собрать текстовый образ `<имя>.<ext>.md` (D18, TR-7.3a).
+
+        `text` — готовый текст от `hds_extract` (Rust): у `mpp` другого пути
+        нет; без `text` воркер извлекает сам (`pymupdf`/`python-pptx` или
+        портативный CPython). Текст анонимизируется `anonymize_text` с
+        метками проекта, файл помечается `hds-agent/<P>/<artifact_id>`.
+        """
+        project_id = (project_id or "").strip()
+        if not project_id:
+            raise ValueError("text_image: не задан project_id")
+        source = Path(in_path)
+        if not source.is_file():
+            raise FileNotFoundError(f"Файл не найден: {source}")
+        if out_path:
+            target = Path(out_path)
+        else:
+            target = text_image_path(out_dir or str(source.parent), in_path)
+
+        if text is None:
+            text = extract_text(str(source))
+        anonymized = await self.anonymize_text(project_id, text, use_llm=ner)
+        body = build_text_image(
+            anonymized["text"], in_path, project_id, artifact_id
+        )
+        write_text_image(str(target), body)
+        warnings = list(anonymized["warnings"])
+        warnings.append(
+            "образ только для чтения (правки — новым документом, TR-7.3a)"
+        )
+        return {
+            "out_path": str(target),
+            "labels": anonymized["labels"],
+            "project_id": project_id,
+            "artifact_id": artifact_id,
+            "marker": body.splitlines()[0],
             "warnings": warnings,
         }
 
@@ -352,10 +530,16 @@ class AnonymizeHandlers:
         out_path: str,
         tokens: Optional[list[str]] = None,
         progress: Optional[ProgressFn] = None,
+        project_id: Optional[str] = None,
     ) -> dict:
         """Деанонимизировать файл: заменить плейсхолдеры на значения из БД
         (все или подмножество `tokens`) → сборка (strip_hf_images=False,
-        scrub_metadata=False) → атомарная запись."""
+        scrub_metadata=False) → атомарная запись.
+
+        `project_id` — подстановка меток проекта с падежными суффиксами
+        (TR-2.4): «[PERSON_3|дат]» → форма в дательном падеже; неизвестные
+        метки уходят в `unmatched`, сомнительные падежи — в `warnings`.
+        """
         path = Path(in_path)
         if not path.is_file():
             raise FileNotFoundError(f"Файл не найден: {path}")
@@ -365,21 +549,32 @@ class AnonymizeHandlers:
         if progress:
             progress(path.name, "parse", 0, 3)
 
-        if tokens is None:
+        content, parsed = await self._load_parsed(path)
+        warnings: list[str] = []
+
+        if project_id:
+            mappings_dict, unmatched, notes = self.store.mappings_for_text(
+                project_id, parsed.text, tokens
+            )
+            if notes:
+                warnings.append(
+                    "проверить при подстановке: "
+                    + "; ".join(sorted(set(notes))[:MAX_WARNINGS])
+                )
+        elif tokens is None:
             mappings_dict = self.store.get_all_mappings()
-            unmatched: list[str] = []
+            unmatched = []
         else:
             # tokens могут прийти как «[PERSON_1]», так и «PERSON_1»
             norm = [t if t.startswith("[") else f"[{t}]" for t in tokens]
             mappings_dict, unmatched_raw = self.store.get_mappings_for_tokens(norm)
             unmatched = [tokens[i] for i, t in enumerate(norm) if t in set(unmatched_raw)]
-        if not mappings_dict and tokens is None:
+        if not mappings_dict and tokens is None and not project_id:
             raise LookupError(
                 "в БД нет маппингов — деанонимизация невозможна "
                 "(БД не мигрируется из anonymizer_proxy)"
             )
 
-        content, parsed = await self._load_parsed(path)
         deanonymized_text = await self.text_replacer.deanonymize(
             parsed.text, mappings_dict
         )
@@ -397,7 +592,7 @@ class AnonymizeHandlers:
 
         # Токены, реально встретившиеся в тексте и найденные в БД
         restored_tokens = sorted(
-            {m.group(0) for m in TOKEN_PATTERN.finditer(parsed.text) if m.group(0) in mappings_dict},
+            {m.group(0) for m in LABEL_RE.finditer(parsed.text) if m.group(0) in mappings_dict},
             key=_token_sort_key,
         )
         if progress:
@@ -406,7 +601,7 @@ class AnonymizeHandlers:
             "out_path": str(target),
             "restored": restored_tokens,
             "unmatched": unmatched,
-            "warnings": [],
+            "warnings": warnings,
         }
 
     async def inspect(self, in_path: str) -> dict:
@@ -432,7 +627,7 @@ class AnonymizeHandlers:
 
         counts: dict[str, int] = {}
         types: dict[str, str] = {}
-        for m in TOKEN_PATTERN.finditer(parsed.text):
+        for m in LABEL_RE.finditer(parsed.text):
             token = m.group(0)
             counts[token] = counts.get(token, 0) + 1
             types.setdefault(token, m.group(1))
@@ -448,3 +643,80 @@ class AnonymizeHandlers:
                 for p in placeholders
             ]
         return result
+
+    # ── текст: реплики и вложения (TR-1.7) ──────────────────────────────
+
+    async def anonymize_text(
+        self,
+        project_id: str,
+        text: str,
+        use_llm: bool = True,
+    ) -> dict:
+        """Анонимизировать произвольный текст метками проекта (TR-1.7).
+
+        Реплики и вложения чата, а также текстовые образы: NER + regex +
+        известные формы проекта (`project_label_ex` переиспользует сущность
+        по `norm_key`) + `keep_terms`. Метки — с падежными суффиксами, если
+        падеж определён однозначно; иначе «проверить» (TR-2.4).
+        """
+        project_id = (project_id or "").strip()
+        if not project_id:
+            raise ValueError("anonymize_text: не задан project_id")
+        text = text or ""
+        entities, _, llm_failed = await self._ner_service().extract_entities_detailed(
+            text, use_llm=use_llm
+        )
+        if llm_failed:
+            raise ModelMissingError(
+                "NER-модель не загрузилась — анонимизация текста не выполнена"
+            )
+        kept = [e for e in entities if self.store.is_kept(e.text)]
+        entities = [e for e in entities if not self.store.is_kept(e.text)]
+
+        verify: list[str] = []
+
+        async def add_mapping(value: str, entity_type: str) -> str:
+            label, confident = self.store.project_label_ex(
+                project_id, value, entity_type
+            )
+            if label is None:
+                return value
+            if not confident:
+                verify.append(label)
+            return label
+
+        segments = text.split("\n")
+        segment_entities = split_entities_by_segments(entities, segments)
+        anon_lines: list[str] = []
+        mappings = []
+        for line, line_ents in zip(segments, segment_entities):
+            anon_line, line_maps = await self.text_replacer.anonymize(
+                line, line_ents, add_mapping
+            )
+            anon_lines.append(anon_line)
+            mappings.extend(line_maps)
+        anon_text = "\n".join(anon_lines)
+
+        token_types: dict[str, str] = {}
+        token_counts: dict[str, int] = {}
+        for entry in mappings:
+            token_types[entry.token] = entry.entity_type
+            token_counts[entry.token] = token_counts.get(entry.token, 0) + 1
+        labels = [
+            {"label": token, "type": token_types[token], "count": token_counts[token]}
+            for token in sorted(token_counts, key=_token_sort_key)
+        ]
+        warnings = []
+        if kept:
+            warnings.append(f"оставлено без метки (keep_terms): {len(kept)}")
+        if verify:
+            warnings.append(
+                "падеж не определён однозначно: "
+                + ", ".join(sorted(set(verify))[:MAX_WARNINGS])
+            )
+        return {
+            "text": anon_text,
+            "labels": labels,
+            "project_id": project_id,
+            "warnings": warnings,
+        }

@@ -29,7 +29,7 @@ from hds_anonymize.handlers import (  # noqa: E402
     AnonymizeHandlers,
     FileBusyError,
 )
-from hds_anonymize.mapping_store import MappingStore  # noqa: E402
+from hds_anonymize.vault import Vault  # noqa: E402
 
 VALUES = ["Иванов Иван", "+7 912 345-67-89", "51 903,14"]
 
@@ -81,7 +81,7 @@ class RoundtripBase(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(prefix="hds-anon-rt-")
         self.dir = self.tmp.name
         self.db = os.path.join(self.dir, "anonymize.db")
-        self.store = MappingStore(self.db)
+        self.store = Vault(self.db)
         self.h = AnonymizeHandlers(self.store)
 
     def tearDown(self) -> None:

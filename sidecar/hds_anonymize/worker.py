@@ -32,6 +32,7 @@ import asyncio
 import os
 import sys
 import time
+from pathlib import Path
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SIDE = os.path.dirname(_HERE)
@@ -64,6 +65,11 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--natasha", default="1")
     p.add_argument("--models-dir", default=None)
     p.add_argument("--db", default=None)
+    p.add_argument(
+        "--keep-terms",
+        default=None,
+        help="файл списка «не анонимизировать» (D19): YAML-список или строки",
+    )
     p.add_argument("--device", default=None, choices=[None, "cpu", "cuda", "dml"])
     p.add_argument("--gpu-mem-limit-mb", type=int, default=None)
     p.add_argument("--idle-timeout", type=float, default=60.0)
@@ -78,6 +84,32 @@ def _parse_args() -> argparse.Namespace:
 def _flag(v: str) -> bool:
     """Строковый флаг 0|1|true|false|yes|no|on|off → bool."""
     return str(v).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+def _load_keep_terms(path: str | None) -> list[str]:
+    """Список «не анонимизировать» из файла (YAML-список или строки).
+
+    Формат `sidecar/hds_anonymize/keep_terms.example.yaml`: элементы списка
+    (`- значение`), записи `re:<шаблон>` — регулярные выражения. Отдельной
+    YAML-зависимости нет: разбор построчный и терпимый к комментариям.
+    """
+    if not path:
+        return []
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"нет файла keep_terms: {source}")
+    terms: list[str] = []
+    for line in source.read_text(encoding="utf-8-sig").splitlines():
+        line = line.split("#", 1)[0].strip()
+        if not line or (line.startswith("keep") and line.endswith(":")):
+            continue
+        if line.startswith("- "):
+            line = line[2:].strip()
+        if line[:1] in ("'", '"'):
+            line = line.strip("'\"")
+        if line:
+            terms.append(line)
+    return terms
 
 
 def _setup_env_and_settings(args: argparse.Namespace) -> str:
@@ -195,12 +227,13 @@ class Worker:
 
     def __init__(self, args: argparse.Namespace, models_dir: str) -> None:
         from hds_anonymize.handlers import AnonymizeHandlers
-        from hds_anonymize.mapping_store import MappingStore
+        from hds_anonymize.vault import Vault
 
         self.args = args
         self.models_dir = models_dir
         db_path = args.db or os.path.join(ROOT, "data", "anonymize.db")
-        self.store = MappingStore(db_path)
+        keep_terms = _load_keep_terms(getattr(args, "keep_terms", None))
+        self.store = Vault(db_path, keep_terms=keep_terms)
         self.handlers = AnonymizeHandlers(self.store)
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
@@ -216,7 +249,7 @@ class Worker:
             backend = "onnx" if providers else "unavailable"
         except Exception:  # noqa: BLE001 — hello не должен падать из-за ORT
             backend = "unavailable"
-        from hds_anonymize import settings
+        from hds_anonymize import morph, settings
 
         return {
             "protocol": PROTOCOL,
@@ -226,8 +259,19 @@ class Worker:
             "providers": providers,
             "model": settings.NER_ENGINE["model"],
             "formats": FORMATS,
-            "capabilities": ["anonymize", "anonymize_values", "deanonymize",
-                             "deanonymize_values", "inspect", "warmup"],
+            "capabilities": [
+                "anonymize", "anonymize_values", "deanonymize",
+                "deanonymize_values", "inspect", "warmup",
+                # v2 (TR-1.6/1.7, TR-3.5, TR-7.4, D18)
+                "anonymize_text", "text_image", "label_for_value",
+                "vault_snapshot", "vault_rev", "vault_drop_project",
+                "merge_entities", "keep_terms",
+                "office_read", "office_edit", "office_create",
+                "mode_agent",
+            ],
+            "schema_version": 2,
+            "morph": morph.backend_info(),
+            "keep_terms": self.store.stats()["keep_terms"],
         }
 
     def _warmup(self) -> dict:
@@ -258,32 +302,103 @@ class Worker:
         })
 
     def _run_act(self, mid, method: str, params: dict) -> None:
-        in_path = params.get("in_path") or params.get("path") or ""
-        if not in_path:
-            raise ValueError("не задан in_path")
-        out_path = _build_out_path(in_path, params, "anonymize")
+        """Один RPC: файловые акты, текст, база меток, Office, образы."""
         t0 = time.time()
+        project_id = (params.get("project_id") or "").strip()
+        mode = str(params.get("mode") or "classic")
+        in_path = params.get("in_path") or params.get("path") or ""
+
+        def run(coro):
+            return self.loop.run_until_complete(coro)
+
         with progress.redirect_stdout():
-            if method == "anonymize":
-                res = self.loop.run_until_complete(self.handlers.anonymize(
-                    in_path, str(out_path), progress=self._progress))
-            elif method == "anonymize_values":
-                values = params.get("values") or []
-                if not values:
-                    raise ValueError("anonymize_values: пустой список values")
-                res = self.loop.run_until_complete(self.handlers.anonymize(
-                    in_path, str(out_path), values=values, progress=self._progress))
-            elif method == "deanonymize":
-                out = _build_out_path(in_path, params, "deanonymize")
-                res = self.loop.run_until_complete(self.handlers.deanonymize(
-                    in_path, str(out), progress=self._progress))
-            elif method == "deanonymize_values":
-                out = _build_out_path(in_path, params, "deanonymize")
-                res = self.loop.run_until_complete(self.handlers.deanonymize(
-                    in_path, str(out), tokens=params.get("tokens") or [],
-                    progress=self._progress))
-            elif method == "inspect":
-                res = self.loop.run_until_complete(self.handlers.inspect(in_path))
+            if method in ("anonymize", "anonymize_values",
+                          "deanonymize", "deanonymize_values", "inspect"):
+                if not in_path:
+                    raise ValueError("не задан in_path")
+                if method in ("anonymize", "anonymize_values"):
+                    values = params.get("values") or []
+                    if method == "anonymize_values" and not values:
+                        raise ValueError("anonymize_values: пустой список values")
+                    out_path = _build_out_path(in_path, params, "anonymize")
+                    res = run(self.handlers.anonymize(
+                        in_path, str(out_path),
+                        values=values or None,
+                        progress=self._progress,
+                        project_id=project_id or None,
+                        mode=mode,
+                        artifact_id=params.get("artifact_id"),
+                    ))
+                elif method in ("deanonymize", "deanonymize_values"):
+                    out_path = _build_out_path(in_path, params, "deanonymize")
+                    res = run(self.handlers.deanonymize(
+                        in_path, str(out_path),
+                        tokens=(params.get("tokens") or []) if method ==
+                        "deanonymize_values" else None,
+                        progress=self._progress,
+                        project_id=project_id or None,
+                    ))
+                else:
+                    res = run(self.handlers.inspect(in_path))
+            elif method == "anonymize_text":
+                text = params.get("text") or ""
+                if not text:
+                    raise ValueError("anonymize_text: пустой text")
+                res = run(self.handlers.anonymize_text(
+                    project_id, text, bool(params.get("ner", True))))
+            elif method == "text_image":
+                if not in_path:
+                    raise ValueError("text_image: не задан in_path")
+                res = run(self.handlers.text_image(
+                    in_path,
+                    out_path=params.get("out_path"),
+                    out_dir=params.get("out_dir"),
+                    project_id=project_id,
+                    artifact_id=params.get("artifact_id"),
+                    text=params.get("text"),
+                    ner=bool(params.get("ner", True)),
+                ))
+            elif method == "label_for_value":
+                if not params.get("value"):
+                    raise ValueError("label_for_value: не задан value")
+                res = self.handlers.label_for_value(
+                    project_id,
+                    str(params["value"]),
+                    str(params.get("type") or params.get("value_type") or "MISC"),
+                    bool(params.get("suffix", True)),
+                )
+            elif method == "vault_snapshot":
+                if not project_id:
+                    raise ValueError("vault_snapshot: не задан project_id")
+                res = self.handlers.vault_snapshot(project_id)
+            elif method == "vault_rev":
+                res = self.handlers.vault_rev()
+            elif method == "merge_entities":
+                res = self.handlers.merge_entities(
+                    project_id,
+                    str(params.get("keep") or ""),
+                    list(params.get("drop") or []),
+                )
+            elif method == "vault_drop_project":
+                res = self.handlers.vault_drop_project(
+                    project_id or str(params.get("project_id") or ""))
+            elif method == "keep_terms":
+                if (params.get("action") or "list") == "add":
+                    res = self.handlers.keep_term_add(str(params.get("value") or ""))
+                else:
+                    res = self.handlers.keep_terms_list()
+            elif method == "vault_stats":
+                res = self.handlers.vault_stats()
+            elif method == "office_read":
+                res = self.handlers.office_read(in_path)
+            elif method == "office_edit":
+                res = self.handlers.office_edit(in_path, list(params.get("ops") or []))
+            elif method == "office_create":
+                res = self.handlers.office_create(
+                    in_path,
+                    str(params.get("kind") or ""),
+                    dict(params.get("content") or {}),
+                )
             else:  # pragma: no cover — dispatch проверяет заранее
                 raise ValueError(method)
         res["elapsed_ms"] = round((time.time() - t0) * 1000, 1)
@@ -304,7 +419,11 @@ class Worker:
                 _err(mid, e)
             return False
         if method in ("anonymize", "anonymize_values",
-                      "deanonymize", "deanonymize_values", "inspect"):
+                      "deanonymize", "deanonymize_values", "inspect",
+                      "anonymize_text", "text_image", "label_for_value",
+                      "vault_snapshot", "vault_rev", "merge_entities",
+                      "vault_drop_project", "keep_terms", "vault_stats",
+                      "office_read", "office_edit", "office_create"):
             try:
                 self._run_act(mid, method, params)
             except Exception as e:  # noqa: BLE001 — акт не должен ронять воркер
