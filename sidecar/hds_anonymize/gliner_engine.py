@@ -38,6 +38,11 @@ DEFAULT_LABEL_MAP: Dict[str, str] = {
     "WEB":        "website address or URL",
     "INN":        "tax identification number",
     "MONEY":      "money amount",
+    # Опциональные категории (скрываются только при --hide-*): метки
+    # запрашиваются у модели ТОЛЬКО когда соответствующий флаг включён
+    # (ner_service фильтрует categories); здесь — только маппинг
+    "DATE":       "date or calendar date",
+    "NUMBER":     "number or numeric value",
 }
 
 # Возможные расположения ONNX-весей в репозитории модели (пробуются по порядку).

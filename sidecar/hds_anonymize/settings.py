@@ -59,6 +59,10 @@ NER_ENGINE: dict = {
     "models_dir": str(MODELS_FALLBACK_DIR),
     # Лимит памяти ORT-сессии (P3: lease у llm_host; в P1 принимается и хранится)
     "gpu_mem_limit_mb": 0,
+    # Опциональные категории скрытия (DATE/NUMBER/PRODUCT/DEPARTMENT):
+    # пустое множество = все открыты (по умолчанию). Заполняется
+    # configure() из флагов --hide-* воркера.
+    "hide_categories": set(),
 }
 
 # Категории PII для детекции (как в anonymizer_proxy/config.py)
@@ -78,6 +82,22 @@ PII_CATEGORIES = {
     "MONEY": "Суммы денег",
 }
 
+# Опциональные категории: скрываются ТОЛЬКО если включён соответствующий
+# флаг воркера (--hide-dates / --hide-numbers / --hide-software /
+# --hide-departments; в конфиге — anonymize.hide_*). По умолчанию ВСЕ
+# перечисленные категории ОТКРЫТЫ (решение владельца):
+# * DATE — даты (детекция появляется только при включённом флаге);
+# * NUMBER — числа, не представляющие денежные суммы (в т.ч. MONEY-спаны
+#   модели без валютного контекста остаются открытыми);
+# * PRODUCT — названия программных продуктов;
+# * DEPARTMENT — названия подразделений компании.
+OPTIONAL_CATEGORIES = ("DATE", "NUMBER", "PRODUCT", "DEPARTMENT")
+
+
+def hidden_categories() -> set:
+    """Множество опциональных категорий, включённых для скрытия."""
+    return set(NER_ENGINE.get("hide_categories") or ())
+
 
 def configure(
     *,
@@ -90,8 +110,16 @@ def configure(
     models_dir: str | None = None,
     device: str | None = None,
     gpu_mem_limit_mb: int | None = None,
+    hide_dates: bool | None = None,
+    hide_numbers: bool | None = None,
+    hide_software: bool | None = None,
+    hide_departments: bool | None = None,
 ) -> None:
-    """Применить аргументы воркера к NER_ENGINE (вызывается один раз при старте)."""
+    """Применить аргументы воркера к NER_ENGINE (вызывается один раз при старте).
+
+    Флаги hide_* управляют опциональными категориями скрытия
+    (OPTIONAL_CATEGORIES); None/False — категория остаётся открытой.
+    """
     if model:
         NER_ENGINE["model"] = model
     if threshold is not None:
@@ -110,3 +138,13 @@ def configure(
         NER_ENGINE["device"] = device
     if gpu_mem_limit_mb:
         NER_ENGINE["gpu_mem_limit_mb"] = int(gpu_mem_limit_mb)
+    hide: set = set()
+    if hide_dates:
+        hide.add("DATE")
+    if hide_numbers:
+        hide.add("NUMBER")
+    if hide_software:
+        hide.add("PRODUCT")
+    if hide_departments:
+        hide.add("DEPARTMENT")
+    NER_ENGINE["hide_categories"] = hide

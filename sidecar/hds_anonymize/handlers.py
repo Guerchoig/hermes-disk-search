@@ -26,6 +26,7 @@ from .file_parser import (
     read_anon_marker,
 )
 from .mapping_store import MappingStore, TOKEN_PATTERN
+from .name_fixer import fix_glued_full_names
 from .replacer import TextReplacer, split_entities_by_segments
 from .schemas import Entity
 
@@ -190,6 +191,24 @@ class AnonymizeHandlers:
             )
 
         content, parsed = await self._load_parsed(path)
+
+        # «Слипшиеся» ФИО («ВолодинВ.В.») чинятся ДО NER: без границы
+        # фамилия/инициалы модель и regex-слой фамилию не видят.
+        # Исправления вносятся и в исходный файл (требование владельца),
+        # поэтому акт продолжает работу по исправленному тексту — он же
+        # уйдёт в замену и в БД маппингов (деанон вернёт исправленное ФИО).
+        fixed_text, name_fixes = fix_glued_full_names(parsed.text)
+        if name_fixes:
+            parsed.text = fixed_text
+            fixed_content = await self.file_assembler.assemble(
+                content, path.name, fixed_text, parsed.structure,
+                strip_hf_images=False, scrub_metadata=False,
+            )
+            _atomic_write_bytes(path, fixed_content)
+            warnings.append(
+                f"исправлено «слипшихся» ФИО: {name_fixes} — "
+                "исходный файл обновлён до анонимизации"
+            )
 
         if progress:
             progress(path.name, "ner", 1, 4)

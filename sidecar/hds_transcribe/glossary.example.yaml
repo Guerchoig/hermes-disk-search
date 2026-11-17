@@ -18,30 +18,41 @@ terms:
   - canonical: "1С"
     variants: ["один эс", "индинес", "индес", "1 эс", "1c"]
     type: product
-    context: ["бухгалтерия", "ERP", "документооборот", "учёт"]
+    context: ["бухгалтерия", "ERP", "документооборот", "ЗУП", "учёт", "фирма", "компания"]
     priority: normal
     case_sensitive: false
     allow_global: false          # «один эс» без контекста НЕ заменяем
-    pronunciations: ["один эс"]
+    pronunciations: ["один эс", "адин эс"]
 
   - canonical: "ERP"
-    variants: ["ерп", "ерпи", "rp система", "ерпи система"]
+    variants: ["ерп", "ерпи", "rp система", "ерпи система", "ирп"]
     type: product
     context: ["система", "внедрение", "проект"]
     priority: normal
+    case_sensitive: false
     allow_global: false
-    pronunciations: ["ерп", "ерпи"]
+    pronunciations: ["ерп", "ерпи", "еэрпи", "иэрпи"]
+
+  - canonical: "ТОиР"
+    variants: ["таир"]
+    type: product
+    context: ["система", "внедрение", "проект"]
+    priority: normal
+    allow_global: true
+    pronunciations: ["таир", "тоир"]
 
   - canonical: "МЧД"
     variants: ["эм че дэ", "мчд"]
     type: abbreviation
     priority: high
+    case_sensitive: false
     allow_global: true           # однозначная аббревиатура
 
   - canonical: "ЗУП"
     variants: ["зуп", "з уп", "зарплата и управление персоналом"]
     type: product
     priority: high
+    case_sensitive: false
     allow_global: true
 
 forbid: []

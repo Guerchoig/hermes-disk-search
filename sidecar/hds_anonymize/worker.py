@@ -13,6 +13,12 @@ deanonymize | deanonymize_values | shutdown + progress-нотификации б
         --threshold 0.3 --max-input-chars 1500 --chunk-overlap 200
         --timeout 300 --natasha 1 --models-dir <models>/anonymize
         --db data/anonymize.db --device cpu --gpu-mem-limit-mb 0
+        [--hide-dates 0|1 --hide-numbers 0|1 --hide-software 0|1
+         --hide-departments 0|1]
+
+Флаги --hide-* включают скрытие опциональных категорий (даты; числа, не
+являющиеся денежными суммами; программные продукты; подразделения).
+По умолчанию все они ОТКРЫТЫ (0).
 
 Offline-first: воркер не ходит в сеть — веса берутся из `--models-dir`
 (`<models>/anonymize/hf-home`, `navec_*.tar`, `slovnet_ner_news_v1.tar`);
@@ -61,7 +67,17 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--device", default=None, choices=[None, "cpu", "cuda", "dml"])
     p.add_argument("--gpu-mem-limit-mb", type=int, default=None)
     p.add_argument("--idle-timeout", type=float, default=60.0)
+    # Опциональные категории скрытия (по умолчанию все ОТКРЫТЫ)
+    p.add_argument("--hide-dates", default="0")
+    p.add_argument("--hide-numbers", default="0")
+    p.add_argument("--hide-software", default="0")
+    p.add_argument("--hide-departments", default="0")
     return p.parse_args()
+
+
+def _flag(v: str) -> bool:
+    """Строковый флаг 0|1|true|false|yes|no|on|off → bool."""
+    return str(v).strip().lower() not in ("", "0", "false", "no", "off")
 
 
 def _setup_env_and_settings(args: argparse.Namespace) -> str:
@@ -85,6 +101,10 @@ def _setup_env_and_settings(args: argparse.Namespace) -> str:
         models_dir=models_dir,
         device=args.device,
         gpu_mem_limit_mb=args.gpu_mem_limit_mb,
+        hide_dates=_flag(args.hide_dates),
+        hide_numbers=_flag(args.hide_numbers),
+        hide_software=_flag(args.hide_software),
+        hide_departments=_flag(args.hide_departments),
     )
     return models_dir
 

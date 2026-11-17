@@ -59,6 +59,39 @@ fn gpu_settings_have_defaults() {
 }
 
 #[test]
+fn optional_hide_categories_default_open() {
+    let s = Settings::from_config(&Config::Null);
+    assert!(!s.hide_dates, "даты по умолчанию открыты");
+    assert!(!s.hide_numbers, "числа по умолчанию открыты");
+    assert!(!s.hide_software, "продукты по умолчанию открыты");
+    assert!(!s.hide_departments, "подразделения по умолчанию открыты");
+    // выключенные флаги не уходят воркеру вообще
+    let args = s.worker_args(&std::env::temp_dir());
+    assert!(
+        !args.iter().any(|a| a.starts_with("--hide-")),
+        "{args:?}"
+    );
+}
+
+#[test]
+fn hide_flags_reach_worker_args() {
+    let s = Settings::from_config(&cfg(
+        "anonymize:\n  hide_dates: true\n  hide_numbers: true\n  hide_software: true\n  hide_departments: true\n",
+    ));
+    let args = s.worker_args(&std::env::temp_dir());
+    let val = |name: &str| -> Option<String> {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    assert_eq!(val("--hide-dates").as_deref(), Some("1"));
+    assert_eq!(val("--hide-numbers").as_deref(), Some("1"));
+    assert_eq!(val("--hide-software").as_deref(), Some("1"));
+    assert_eq!(val("--hide-departments").as_deref(), Some("1"));
+}
+
+#[test]
 fn values_are_carried_to_worker_args() {
     let s = Settings::from_config(&cfg(
         "anonymize:\n  threshold: 0.35\n  natasha: false\n  timeout_sec: 120\n",

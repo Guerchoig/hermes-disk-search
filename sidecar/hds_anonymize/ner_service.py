@@ -12,7 +12,7 @@ import re
 import time
 from typing import Optional
 
-from .settings import NER_ENGINE, PII_CATEGORIES
+from .settings import NER_ENGINE, PII_CATEGORIES, OPTIONAL_CATEGORIES, hidden_categories
 from .gliner_engine import GlinerEngine
 from .natasha_engine import NatashaEngine
 
@@ -138,7 +138,43 @@ REGEX_PATTERNS = {
             0,
         ),
     ],
+    # ── Опциональные категории (скрываются только при --hide-*) ─────────
+    # DATE: даты. Паттерны также используются как страховочный фильтр:
+    # модель иногда маскирует дату под MONEY/INN — если даты открыты
+    # (по умолчанию), такие спаны отбрасываются (_looks_like_date).
+    "DATE": [
+        # 12.05.2023 / 12.05.23 / 12-05-2023 / 12/05/2023
+        r"\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b",
+        # ISO: 2023-05-12
+        r"\b\d{4}-\d{2}-\d{2}\b",
+        # «12 мая 2023», «5 Января 2024 г.», «... года»
+        (r"\b\d{1,2}\s+"
+         r"(?:январ|феврал|март|апрел|ма[йя]|июн|июл|август|"
+         r"сентябр|октябр|ноябр|декабр)\w*\.?\s+\d{4}(?:\s*(?:г\.|года))?"),
+    ],
+    # NUMBER: числа, НЕ являющиеся денежными суммами (опционально).
+    # Lookarounds не дают дробить даты («12.05.2023»), версии («1.2.10»)
+    # и «+7 …» телефонов: внутри таких последовательностей \b\d+ не
+    # матчится. Валютные суммы перекрываются более длинными спанами
+    # MONEY; паспорта/телефоны/ИНН — своими паттернами (пересечения
+    # разрешаются в пользу более длинного спана).
+    "NUMBER": [
+        r"(?<![\w./+])\d+(?:[.,]\d+)?(?![\d/.,])",
+    ],
 }
+
+# Метка валюты в MONEY-значении: если её нет — это «просто число»
+# (остаётся открытым, пока не включён --hide-numbers)
+_CURRENCY_RE = re.compile(r"руб|₽|\$|€|¥|£|usd|eur|cny|долл|евро", re.IGNORECASE)
+
+# Компилированные паттерны дат для страховочного фильтра (fullmatch)
+_DATE_FULLMATCH = []
+for _entry in REGEX_PATTERNS["DATE"]:
+    if isinstance(_entry, tuple):
+        _p, _flags = _entry
+    else:
+        _p, _flags = _entry, re.IGNORECASE
+    _DATE_FULLMATCH.append(re.compile(_p, _flags))
 
 
 class NERService:
@@ -204,8 +240,14 @@ class NERService:
         from .schemas import Entity
 
         entities = []
+        hidden = self._hidden_categories()
+        optional = frozenset(OPTIONAL_CATEGORIES)
 
         for entity_type, patterns in REGEX_PATTERNS.items():
+            # Опциональные категории (DATE/NUMBER/…) при выключенном флаге
+            # не детектируются вовсе — значения остаются открытыми
+            if entity_type in optional and entity_type not in hidden:
+                continue
             for entry in patterns:
                 # Запись может быть кортежем (паттерн, флаги): например,
                 # оргформы ищутся с учётом регистра (флаги=0)
@@ -268,6 +310,57 @@ class NERService:
             resolved.append(ent)
         return resolved
 
+    # ── опциональные категории скрытия (DATE/NUMBER/PRODUCT/DEPARTMENT) ──
+
+    @staticmethod
+    def _hidden_categories() -> set:
+        """Категории, включённые для скрытия флагами --hide-* воркера.
+
+        Пусто (по умолчанию) — все опциональные категории открыты.
+        """
+        return hidden_categories()
+
+    @staticmethod
+    def _looks_like_date(value: str) -> bool:
+        """Значение выглядит датой (dd.mm.yyyy, ISO, «12 мая 2023 г.»).
+
+        Используется как страховка: модель может замаскировать дату под
+        MONEY/INN — если даты открыты (по умолчанию), такой спан
+        отбрасывается, чтобы дата осталась в тексте.
+        """
+        v = value.strip()
+        if not v:
+            return False
+        return any(p.fullmatch(v) for p in _DATE_FULLMATCH)
+
+    def _filter_hidden_entities(self, entities: list) -> list:
+        """Убрать сущности опциональных категорий, которые не скрыаются.
+
+        Применяется ПОСЛЕ объединения regex/модельных сущностей и ДО
+        расширения вхождений: значение, попавшее под отключённую
+        опциональную категорию, не должно попасть ни в замену, ни в БД
+        маппингов. Также снимает ложные маски модели: дата-подобные спаны
+        (даты открыты) и MONEY-спаны без валюты (числа открыты).
+        """
+        hidden = self._hidden_categories()
+        optional = frozenset(OPTIONAL_CATEGORIES)
+        out: list = []
+        for ent in entities:
+            t = ent.type
+            if t in optional and t not in hidden:
+                continue
+            # Числа открыты: MONEY-спан без валютного маркера — «просто
+            # число» (модель вешает «money amount» на любые числа)
+            if "NUMBER" not in hidden and t == "MONEY" \
+                    and not _CURRENCY_RE.search(ent.text):
+                continue
+            # Даты открыты: дата-подобный спан любого типа остаётся открытым
+            if "DATE" not in hidden and t != "DATE" \
+                    and self._looks_like_date(ent.text):
+                continue
+            out.append(ent)
+        return out
+
     def _validate_entity_offsets(self, text: str, ent_text: str, start: int, end: int) -> Optional[tuple[int, int]]:
         """
         Проверить/восстановить корректные оффсеты сущности в тексте.
@@ -300,7 +393,13 @@ class NERService:
         Возвращает (сущности, failed). failed=True, если модель не
         загрузилась или упала — NER-детекция считается невыполненной.
         """
-        categories = list(PII_CATEGORIES.keys())
+        # База — все НЕопциональные категории PII_CATEGORIES; опциональные
+        # (DATE/NUMBER/PRODUCT/DEPARTMENT) опрашиваются моделью только при
+        # включённом флаге скрытия (по умолчанию они открыты)
+        optional = frozenset(OPTIONAL_CATEGORIES)
+        hidden = self._hidden_categories()
+        categories = [c for c in PII_CATEGORIES if c not in optional]
+        categories += [c for c in optional if c in hidden]
         try:
             entities = await self._engine.predict(text, categories)
         except Exception as exc:
@@ -683,10 +782,15 @@ class NERService:
         start_time = time.time()
 
         # Кэш результатов NER по sha256(text): повторная анонимизация того же
-        # текста (файла) не должна снова гонять модель минуту+.
+        # текста (файла) не должна снова гонять модель минуту+. В ключ
+        # входит сигнатура опциональных категорий: один и тот же текст при
+        # разных --hide-* обязан давать разные наборы сущностей.
         cache_key = None
         if use_llm:
-            cache_key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            hide_sig = ",".join(sorted(self._hidden_categories()))
+            cache_key = hashlib.sha256(
+                f"{hide_sig}\x00{text}".encode("utf-8")
+            ).hexdigest()
             cached = self._entities_cache.get(cache_key)
             if cached is not None:
                 logger.info(
@@ -706,6 +810,10 @@ class NERService:
 
         # Объединяем результаты
         merged_entities = self._merge_entities(regex_entities, llm_entities)
+
+        # Уровень 2.25: опциональные категории (DATE/NUMBER/PRODUCT/DEPARTMENT)
+        # без включённого флага скрытия отбрасываются — ДО расширения вхождений
+        merged_entities = self._filter_hidden_entities(merged_entities)
 
         # Уровень 2.5: вывод «ядра» названия организации из оргформы в
         # кавычках (ООО «ИРИС» -> ИРИС), чтобы короткие вхождения названия

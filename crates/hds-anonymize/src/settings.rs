@@ -63,6 +63,12 @@ pub struct Settings {
     /// `anonymize.gpu_reserve_mb` — NVML-резерв GLiNER (~2 ГБ: модель ~1 ГБ + активации).
     pub gpu_reserve_mb: u64,
     pub lease_timeout_sec: u64,
+    /// Опциональные категории скрытия (по умолчанию ВСЕ открыты):
+    /// `anonymize.hide_dates | hide_numbers | hide_software | hide_departments`.
+    pub hide_dates: bool,
+    pub hide_numbers: bool,
+    pub hide_software: bool,
+    pub hide_departments: bool,
     /// RPC на файл (`WorkerConfig.request_timeout`).
     pub request_timeout_sec: u64,
     /// Простой воркера до выгрузки (§2.2: CPU — 60 с).
@@ -114,6 +120,10 @@ impl Settings {
             ),
             gpu_reserve_mb: integer(cfg, "anonymize.gpu_reserve_mb", 2048).max(256) as u64,
             lease_timeout_sec: integer(cfg, "anonymize.lease_timeout_sec", 120).max(1) as u64,
+            hide_dates: flag(cfg, "anonymize.hide_dates", false),
+            hide_numbers: flag(cfg, "anonymize.hide_numbers", false),
+            hide_software: flag(cfg, "anonymize.hide_software", false),
+            hide_departments: flag(cfg, "anonymize.hide_departments", false),
             request_timeout_sec: integer(cfg, "anonymize.request_timeout_sec", 600).max(60) as u64,
             idle_timeout_sec: integer(cfg, "anonymize.idle_timeout_sec", 60).max(5) as u64,
             notices,
@@ -173,6 +183,19 @@ impl Settings {
         if gpu_mem_limit_mb > 0 {
             args.push("--gpu-mem-limit-mb".into());
             args.push(gpu_mem_limit_mb.to_string());
+        }
+        // Опциональные категории скрытия: флаг уходит воркеру ТОЛЬКО когда
+        // включён (по умолчанию категории открыты — аргументов нет)
+        for (name, enabled) in [
+            ("--hide-dates", self.hide_dates),
+            ("--hide-numbers", self.hide_numbers),
+            ("--hide-software", self.hide_software),
+            ("--hide-departments", self.hide_departments),
+        ] {
+            if enabled {
+                args.push(name.into());
+                args.push("1".into());
+            }
         }
         args
     }

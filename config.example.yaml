@@ -426,6 +426,13 @@ anonymize:
   llm_host_url: 'http://127.0.0.1:8010'  # порт роли chat (lease /internal/anon/*)
   lease_timeout_sec: 120                 # ожидание занятого chat-сеанса
   gpu_reserve_mb: 2048                   # NVML-резерв GLiNER (модель ~1 ГБ + активации)
+  # Опциональные категории скрытия — по умолчанию ВСЕ ОТКРЫТЫ (false).
+  # true включает скрытие соответствующей категории (и в regex-слое,
+  # и в моделях GLiNER/Natasha):
+  hide_dates: false                      # даты (12.05.2023, «12 мая 2023 г.»)
+  hide_numbers: false                    # числа, НЕ являющиеся денежными суммами
+  hide_software: false                   # названия программных продуктов
+  hide_departments: false                # названия подразделений компании
   request_timeout_sec: 600               # RPC на файл
   idle_timeout_sec: 60                   # простой воркера до выгрузки
 
