@@ -28,7 +28,8 @@ pub use error::{AnonymizeError, ErrorKind};
 pub use folder::list_files;
 pub use lease::{LeaseError, LeaseGrant, LeaseGuard};
 pub use protocol::{
-    AnonymizeResult, DeanonymizeResult, HelloInfo, InspectResult, Mode, Placeholder, Resolved,
-    TokenCount, WarmupResult,
+    is_label, label_parts, AnonymizeResult, DeanonymizeResult, HelloInfo, InspectResult,
+    LabelForValue, Mode, OfficeResult, Placeholder, Resolved, Snapshot, SnapshotForm,
+    SnapshotLabel, TextImageResult, TextResult, TokenCount, WarmupResult, LABEL_PATTERN,
 };
 pub use settings::Settings;

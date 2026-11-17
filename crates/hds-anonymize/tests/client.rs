@@ -159,6 +159,82 @@ fn partial_deanonymize_reports_unmatched() {
 }
 
 #[test]
+fn agent_and_vault_acts_on_mock() {
+    let cfg = match mock_cfg() {
+        Some(c) => c,
+        None => return,
+    };
+    let dir = tmp_dir("agent");
+    let src = dir.join("ТЗ.txt");
+    std::fs::write(&src, "Исполнитель: Иванов Иван\nПередать Иванову Ивану\n").unwrap();
+
+    let mut client = Client::spawn(cfg).unwrap();
+    // образ анонимной зоны: имя файла сохраняется, метки проекта с суффиксом
+    let res = client
+        .anonymize_agent(&src, &dir, "P0001", Some("42"))
+        .expect("agent-акт должен пройти");
+    assert!(res.out_path.ends_with("ТЗ.txt"), "{}", res.out_path);
+    assert_eq!(res.mode, "agent");
+    assert_eq!(res.images, 1);
+    let anon = std::fs::read_to_string(&res.out_path).unwrap();
+    assert!(anon.contains("[PERSON_1|дат]"), "{anon}");
+    assert!(!anon.contains("Иванов Иван"));
+
+    // текст реплики: метки проекта, значения наружу не отдаются
+    let text = client.anonymize_text("P0001", "Писал Иванов Иван").unwrap();
+    assert_eq!(text.project_id, "P0001");
+    assert!(text.text.contains("[PERSON_1]"));
+    assert!(!format!("{text:?}").contains("Иванов"));
+
+    // снимок: rev/labels/others/keep (в тесте значения не печатаем)
+    let snapshot = client.snapshot("P0001").unwrap();
+    assert_eq!(snapshot.rev, 7);
+    assert_eq!(snapshot.labels.len(), 1);
+    assert_eq!(snapshot.labels[0].label, "[PERSON_1]");
+    assert_eq!(snapshot.labels[0].forms.len(), 2);
+    assert!(snapshot.keep.contains(&"1С:ERP".to_string()));
+    assert_eq!(client.vault_rev().unwrap(), 7);
+
+    // «Скрыть ещё…» и «Объединить метки»
+    let label = client
+        .label_for_value("P0001", "Петров Пётр", "PERSON")
+        .unwrap();
+    assert_eq!(label.label.as_deref(), Some("[PERSON_2]"));
+    assert!(label.confident);
+    let merged = client
+        .merge_entities("P0001", "[PERSON_1]", &["[PERSON_3]".to_string()])
+        .unwrap();
+    assert_eq!(merged["keep"], "[PERSON_1]");
+
+    // keep_terms (D19)
+    let terms = client.keep_terms().unwrap();
+    assert!(terms.iter().any(|t| t == "ТЗ"));
+    assert!(client.add_keep_term("СБИС").unwrap());
+
+    // текстовый образ (D18): <имя>.<ext>.md с маркером
+    let image = client
+        .text_image(&src, &dir, "P0001", Some("42"), None)
+        .unwrap();
+    assert!(image.out_path.ends_with("ТЗ.txt.md"), "{}", image.out_path);
+    assert_eq!(image.marker, "<!-- hds-agent/P0001/42 -->");
+    assert!(std::fs::read_to_string(&image.out_path)
+        .unwrap()
+        .contains("<!-- hds-agent/P0001/42 -->"));
+
+    // office_* (TR-3.5)
+    let read = client.office_read(&src).unwrap();
+    assert_eq!(read.kind, "docx");
+    assert!(read.markdown.contains("mock"));
+    let edited = client
+        .office_edit(&src, &[serde_json::json!({"op": "replace_text"})])
+        .unwrap();
+    assert_eq!(edited.applied, 1);
+
+    client.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn unknown_path_inspect_maps_internal_error() {
     let cfg = match mock_cfg() {
         Some(c) => c,

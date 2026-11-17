@@ -23,7 +23,34 @@ fn defaults_match_plan() {
     assert_eq!(s.gpu, "auto");
     assert_eq!(s.request_timeout_sec, 600);
     assert_eq!(s.idle_timeout_sec, 60);
+    assert_eq!(s.keep_terms_file, None);
+    assert_eq!(s.agent_images, "strip");
     assert!(s.notices.is_empty());
+}
+
+#[test]
+fn keep_terms_file_and_agent_images_from_config() {
+    let s = Settings::from_config(&cfg(
+        "anonymize:\n  keep_terms_file: data/keep.yaml\n  agent:\n    images: keep\n",
+    ));
+    assert_eq!(s.keep_terms_file.as_deref(), Some("data/keep.yaml"));
+    assert_eq!(s.agent_images, "keep");
+    let root = std::env::temp_dir();
+    let args = s.worker_args(&root);
+    let index = args
+        .iter()
+        .position(|a| a == "--keep-terms")
+        .expect("флаг --keep-terms должен уйти воркеру");
+    assert!(
+        args[index + 1].ends_with("keep.yaml"),
+        "{}",
+        args[index + 1]
+    );
+
+    // неизвестное значение agent.images — notice и безопасный strip
+    let bad = Settings::from_config(&cfg("anonymize:\n  agent:\n    images: blur\n"));
+    assert_eq!(bad.agent_images, "strip");
+    assert!(bad.notices.iter().any(|n| n.contains("agent.images")));
 }
 
 #[test]
@@ -67,10 +94,7 @@ fn optional_hide_categories_default_open() {
     assert!(!s.hide_departments, "подразделения по умолчанию открыты");
     // выключенные флаги не уходят воркеру вообще
     let args = s.worker_args(&std::env::temp_dir());
-    assert!(
-        !args.iter().any(|a| a.starts_with("--hide-")),
-        "{args:?}"
-    );
+    assert!(!args.iter().any(|a| a.starts_with("--hide-")), "{args:?}");
 }
 
 #[test]

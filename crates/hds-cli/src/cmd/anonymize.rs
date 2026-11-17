@@ -41,6 +41,11 @@ pub fn cmd_anon_cfg(cfg: &Config, args: &[String]) -> i32 {
         "deanon" => run_act(cfg, rest, Act::Deanon),
         "deanon-values" => run_act(cfg, rest, Act::DeanonValues),
         "inspect" => run_act(cfg, rest, Act::Inspect),
+        "agent" => run_act(cfg, rest, Act::Agent),
+        "text-image" => run_text_image(cfg, rest),
+        "snapshot" => cmd_snapshot(cfg, rest),
+        "keep" => cmd_keep(cfg, rest),
+        "merge" => cmd_merge(cfg, rest),
         "warmup" => cmd_warmup(cfg),
         "check" => cmd_check(cfg),
         "--help" | "-h" | "help" => {
@@ -59,9 +64,17 @@ fn usage() -> String {
     "использование: hds anon <подкоманда>\n\
      \x20 anonymize <путь> [--out-dir DIR]      (скрыть: NER по документу)\n\
      \x20 values <путь> <значение…> [--out-dir DIR]  (скрыть перечисленное, без NER)\n\
-     \x20 deanon <путь> [--out-dir DIR]         (показать: все маппинги БД)\n\
+     \x20 deanon <путь> [--project P] [--out-dir DIR] (показать: маппинги БД/проекта)\n\
      \x20 deanon-values <путь> <токен…>         (показать перечисленные токены)\n\
+     \x20 agent <путь> --project P [--artifact ID] [--out-dir DIR]\n\
+     \x20                                       (образ анонимной зоны: метки проекта,\n\
+     \x20                                        [IMAGE_n], маркер hds-agent/P/ID)\n\
+     \x20 text-image <файл> --project P [--artifact ID] [--out-dir DIR]\n\
+     \x20                                       (pdf/pptx/mpp → <имя>.<ext>.md, D18)\n\
      \x20 inspect <путь>                        (плейсхолдеры/маркер БЕЗ значений)\n\
+     \x20 snapshot <проект>                     (метки проекта: только счётчики)\n\
+     \x20 keep [list|add <значение>]            (список «не анонимизировать», D19)\n\
+     \x20 merge <проект> <метка> <метка…>      («Объединить метки», TR-2.6)\n\
      \x20 warmup                                (прогрев моделей: backend/providers)\n\
      \x20 check                                 (venv/модели/БД)\n\
        путь — файл или папка (папка: верхний уровень, форматы из hello.formats)"
@@ -75,6 +88,7 @@ enum Act {
     Deanon,
     DeanonValues,
     Inspect,
+    Agent,
 }
 
 /// Позиционный аргумент (первый, не начинающийся с `--`).
@@ -111,6 +125,9 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
         Some(d) => PathBuf::from(d),
         None => settings.output_dir_abs(&root),
     };
+    // Уровень 1 (TR-1.5, TR-7.4): проект и id артефакта — необязательные
+    let project = flag_val(args, "--project");
+    let artifact = flag_val(args, "--artifact");
 
     // P3 (§2.2): lease у llm_host (`anonymize.gpu: auto`); `off` — всегда CPU.
     // llm_host недоступен → fallback CPU с предупреждением; gpu_busy (бюджет
@@ -154,7 +171,7 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
             skip_next = false;
             continue;
         }
-        if a == "--out-dir" {
+        if a == "--out-dir" || a == "--project" || a == "--artifact" {
             skip_next = true;
             continue;
         }
@@ -240,9 +257,21 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
                     r.unmatched.len()
                 )
             }),
-            Act::Deanon => client
-                .deanonymize(file, &out_dir, None)
-                .map(|r| format!("-> {} (восстановлено: {})", r.out_path, r.restored.len())),
+            Act::Deanon => match &project {
+                Some(project) => client
+                    .deanonymize_project(file, &out_dir, project, None)
+                    .map(|r| {
+                        format!(
+                            "-> {} (восстановлено: {}, нет в проекте: {})",
+                            r.out_path,
+                            r.restored.len(),
+                            r.unmatched.len()
+                        )
+                    }),
+                None => client
+                    .deanonymize(file, &out_dir, None)
+                    .map(|r| format!("-> {} (восстановлено: {})", r.out_path, r.restored.len())),
+            },
             Act::DeanonValues => client.deanonymize(file, &out_dir, Some(&items)).map(|r| {
                 format!(
                     "-> {} (восстановлено: {}, нет в БД: {})",
@@ -251,6 +280,27 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
                     r.unmatched.len()
                 )
             }),
+            Act::Agent => {
+                let project = match project.clone() {
+                    Some(p) if !p.is_empty() => p,
+                    _ => {
+                        eprintln!("[!!] agent: нужен --project P0001");
+                        return 2;
+                    }
+                };
+                client
+                    .anonymize_agent(file, &out_dir, &project, artifact.as_deref())
+                    .map(|r| {
+                        format!(
+                            "-> {} (режим {}, меток: {}, картинок: {}, предупр.: {})",
+                            r.out_path,
+                            r.mode,
+                            r.tokens.len(),
+                            r.images,
+                            r.warnings.len()
+                        )
+                    })
+            }
             Act::Inspect => client.inspect(file).map(|info| {
                 let mut lines = vec![format!(
                     "supported={} marker={:?} плейсхолдеров: {}",
@@ -287,6 +337,296 @@ fn run_act(cfg: &Config, args: &[String], act: Act) -> i32 {
         return 1;
     }
     0
+}
+
+/// Позиционные аргументы без значений флагов (для новых подкоманд).
+fn positionals(args: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut skip = false;
+    for arg in args {
+        if skip {
+            skip = false;
+            continue;
+        }
+        if arg == "--out-dir" || arg == "--project" || arg == "--artifact" {
+            skip = true;
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
+        out.push(arg.clone());
+    }
+    out
+}
+
+/// Клиент воркера анонимизации (общий запуск для новых подкоманд).
+fn spawn_client(settings: &Settings, root: &Path) -> Option<Client> {
+    let python = match discover_python(root) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "[!!] не найден интерпретатор воркера анонимизации \
+                 (HDS_ANONYMIZE_PYTHON / sidecar\\venv-anonymize / sidecar\\python)"
+            );
+            return None;
+        }
+    };
+    match Client::spawn(ClientConfig::from_settings(&python, root, settings)) {
+        Ok(client) => Some(client),
+        Err(e) => {
+            eprintln!("[!!] воркер: {}", e);
+            None
+        }
+    }
+}
+
+/// Текст pdf/pptx/mpp через `hds_extract` (mpxj/Java, PyMuPDF, python-pptx).
+/// None — извлечение недоступно (воркер попробует сам или отдаст ошибку).
+fn extract_text_by_worker(root: &Path, path: &Path) -> Option<String> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_lowercase())
+        .unwrap_or_default();
+    if !matches!(ext.as_str(), "pdf" | "pptx" | "mpp" | "mpt" | "mpx") {
+        return None;
+    }
+    let python = hds_extract::discover_python(root)?;
+    let mut config = hds_extract::WorkerConfig::new(&python, root);
+    config.idle_timeout = std::time::Duration::from_secs(120);
+    let mut worker = match hds_extract::Worker::spawn(config) {
+        Ok(worker) => worker,
+        Err(err) => {
+            eprintln!(
+                "[warn] hds_extract недоступен ({}): текст извлечёт воркер",
+                err
+            );
+            return None;
+        }
+    };
+    let result = worker.extract(path);
+    worker.shutdown();
+    match result {
+        Ok(parsed) => {
+            let text = parsed
+                .segments
+                .iter()
+                .map(|segment| segment.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text)
+            }
+        }
+        Err(err) => {
+            eprintln!(
+                "[warn] извлечение текста не удалось ({}): пробует воркер",
+                err
+            );
+            None
+        }
+    }
+}
+
+/// `hds anon text-image <файл> --project P` — текстовый образ (D18, TR-7.3a).
+fn run_text_image(cfg: &Config, args: &[String]) -> i32 {
+    let items = positionals(args);
+    let path = match items.first() {
+        Some(p) => PathBuf::from(p),
+        None => {
+            eprintln!("{}", usage());
+            return 2;
+        }
+    };
+    let project = match flag_val(args, "--project") {
+        Some(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("[!!] text-image: нужен --project P0001");
+            return 2;
+        }
+    };
+    let artifact = flag_val(args, "--artifact");
+    let root = project_root();
+    let settings = Settings::from_config(cfg);
+    let out_dir = match flag_val(args, "--out-dir") {
+        Some(dir) => PathBuf::from(dir),
+        None => settings.output_dir_abs(&root),
+    };
+    let mut client = match spawn_client(&settings, &root) {
+        Some(client) => client,
+        None => return 1,
+    };
+    let text = extract_text_by_worker(&root, &path);
+    let result = client.text_image(
+        &path,
+        &out_dir,
+        &project,
+        artifact.as_deref(),
+        text.as_deref(),
+    );
+    client.shutdown();
+    match result {
+        Ok(image) => {
+            println!(
+                "[ok] {} -> {} (меток: {}, маркер: {})",
+                path.display(),
+                image.out_path,
+                image.labels.len(),
+                image.marker
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("[!!] {}: {} ({})", path.display(), err, err.kind.as_str());
+            1
+        }
+    }
+}
+
+/// `hds anon snapshot <проект>` — счётчики меток проекта, БЕЗ значений (TR-1.6).
+fn cmd_snapshot(cfg: &Config, args: &[String]) -> i32 {
+    let items = positionals(args);
+    let project = match items.first() {
+        Some(p) => p.clone(),
+        None => {
+            eprintln!("{}", usage());
+            return 2;
+        }
+    };
+    let root = project_root();
+    let settings = Settings::from_config(cfg);
+    let mut client = match spawn_client(&settings, &root) {
+        Some(client) => client,
+        None => return 1,
+    };
+    let result = client.snapshot(&project);
+    client.shutdown();
+    match result {
+        Ok(snapshot) => {
+            let forms: usize = snapshot.labels.iter().map(|l| l.forms.len()).sum();
+            println!(
+                "[ok] {}: rev={} меток={} форм={} прочих-форм={} keep={}",
+                project,
+                snapshot.rev,
+                snapshot.labels.len(),
+                forms,
+                snapshot.others.len(),
+                snapshot.keep.len()
+            );
+            0
+        }
+        Err(err) => {
+            eprintln!("[!!] snapshot: {} ({})", err, err.kind.as_str());
+            1
+        }
+    }
+}
+
+/// `hds anon keep [list|add <значение>]` — список «не анонимизировать» (D19).
+fn cmd_keep(cfg: &Config, args: &[String]) -> i32 {
+    let items = positionals(args);
+    let action = items.first().map(|s| s.as_str()).unwrap_or("list");
+    let root = project_root();
+    let settings = Settings::from_config(cfg);
+    let mut client = match spawn_client(&settings, &root) {
+        Some(client) => client,
+        None => return 1,
+    };
+    if action == "add" {
+        let value = match items.get(1) {
+            Some(value) => value.clone(),
+            None => {
+                eprintln!("[!!] keep add: нужно значение");
+                client.shutdown();
+                return 2;
+            }
+        };
+        let result = client.add_keep_term(&value);
+        client.shutdown();
+        return match result {
+            Ok(added) => {
+                println!(
+                    "[ok] keep_terms: {} ({})",
+                    value,
+                    if added {
+                        "добавлено"
+                    } else {
+                        "уже был"
+                    }
+                );
+                0
+            }
+            Err(err) => {
+                eprintln!("[!!] keep_terms: {} ({})", err, err.kind.as_str());
+                1
+            }
+        };
+    }
+    if action != "list" {
+        eprintln!("[!!] keep: неизвестное действие {action:?} (list|add)");
+        client.shutdown();
+        return 2;
+    }
+    let result = client.keep_terms();
+    client.shutdown();
+    match result {
+        Ok(terms) => {
+            println!("[ok] keep_terms: {}", terms.len());
+            for term in terms {
+                println!("  {}", term);
+            }
+            0
+        }
+        Err(err) => {
+            eprintln!("[!!] keep_terms: {} ({})", err, err.kind.as_str());
+            1
+        }
+    }
+}
+
+/// `hds anon merge <проект> <метка> <метка…>` — «Объединить метки» (TR-2.6).
+fn cmd_merge(cfg: &Config, args: &[String]) -> i32 {
+    let items = positionals(args);
+    if items.len() < 3 {
+        eprintln!("[!!] merge: нужно <проект> <метка> <метка…>");
+        eprintln!("{}", usage());
+        return 2;
+    }
+    let project = items[0].clone();
+    let keep = items[1].clone();
+    let drop: Vec<String> = items[2..].to_vec();
+    let root = project_root();
+    let settings = Settings::from_config(cfg);
+    let mut client = match spawn_client(&settings, &root) {
+        Some(client) => client,
+        None => return 1,
+    };
+    let result = client.merge_entities(&project, &keep, &drop);
+    client.shutdown();
+    match result {
+        Ok(answer) => {
+            let dropped = answer
+                .get("dropped")
+                .and_then(|d| d.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            println!("[ok] {}: {} (псевдонимы: {})", project, keep, dropped);
+            0
+        }
+        Err(err) => {
+            eprintln!("[!!] merge: {} ({})", err, err.kind.as_str());
+            1
+        }
+    }
 }
 
 /// `hds anon warmup` — прогрев моделей, печатает backend/providers.
@@ -428,5 +768,33 @@ mod tests {
         ];
         assert_eq!(positional(&args).as_deref(), Some("a.txt"));
         assert_eq!(flag_val(&args, "--out-dir").as_deref(), Some("D:/out"));
+    }
+
+    #[test]
+    fn positionals_skip_flag_values() {
+        let args = vec![
+            "add".to_string(),
+            "1С:ERP".to_string(),
+            "--project".to_string(),
+            "P0001".to_string(),
+            "--artifact".to_string(),
+            "42".to_string(),
+        ];
+        assert_eq!(
+            positionals(&args),
+            vec!["add".to_string(), "1С:ERP".to_string()]
+        );
+    }
+
+    #[test]
+    fn new_subcommands_in_usage_and_require_args() {
+        let text = usage();
+        for command in ["agent", "text-image", "snapshot", "keep", "merge"] {
+            assert!(text.contains(command), "нет {command} в usage");
+        }
+        // без обязательных аргументов — код 2 и никаких процессов воркера
+        assert_eq!(cmd_anon_cfg(&Config::Null, &["snapshot".to_string()]), 2);
+        assert_eq!(cmd_anon_cfg(&Config::Null, &["merge".to_string()]), 2);
+        assert_eq!(cmd_anon_cfg(&Config::Null, &["text-image".to_string()]), 2);
     }
 }

@@ -13,8 +13,10 @@ use serde_json::json;
 
 use crate::error::{from_transport, AnonymizeError, ErrorKind};
 use crate::protocol::{
-    anonymize_from, deanonymize_from, hello_from, inspect_from, out_path, warmup_from,
-    AnonymizeResult, DeanonymizeResult, HelloInfo, InspectResult, Mode, WarmupResult,
+    anonymize_from, deanonymize_from, hello_from, image_from, inspect_from, label_from,
+    office_from, out_path, snapshot_from, text_from, warmup_from, AnonymizeResult,
+    DeanonymizeResult, HelloInfo, InspectResult, LabelForValue, Mode, OfficeResult, Snapshot,
+    TextImageResult, TextResult, WarmupResult,
 };
 
 /// Параметры запуска воркера (§2.6: RPC на файл до 600 с, idle 60 с).
@@ -183,6 +185,198 @@ impl Client {
     /// Штатная остановка (закрытие stdin → EOF).
     pub fn shutdown(mut self) {
         self.worker.shutdown();
+    }
+
+    // ── уровень 1: анонимная зона (TR-1.6/1.7, TR-7.4, D18) ─────────────
+
+    /// Образ анонимной зоны: `mode: "agent"` (TR-7.4) — метки проекта,
+    /// картинки `[IMAGE_n]`, маркер `hds-agent/<P>/<artifact_id>`.
+    /// Выход — `out_dir/<имя оригинала>` (имя файла сохраняется).
+    pub fn anonymize_agent(
+        &mut self,
+        in_path: &Path,
+        out_dir: &Path,
+        project_id: &str,
+        artifact_id: Option<&str>,
+    ) -> Result<AnonymizeResult, AnonymizeError> {
+        let out = out_path(in_path, out_dir, Mode::Agent);
+        let mut params = json!({
+            "in_path": path_str(in_path),
+            "out_dir": path_str(out_dir),
+            "out_path": path_str(&out),
+            "project_id": project_id,
+            "mode": "agent",
+        });
+        if let Some(id) = artifact_id {
+            params["artifact_id"] = json!(id);
+        }
+        let value = self.call("anonymize", params)?;
+        Ok(anonymize_from(&value))
+    }
+
+    /// Деанонимизация с метками проекта: `[PERSON_3|дат]` → форма в падеже
+    /// (TR-2.4). Выход — `<stem>.deanon.<ext>`.
+    pub fn deanonymize_project(
+        &mut self,
+        in_path: &Path,
+        out_dir: &Path,
+        project_id: &str,
+        tokens: Option<&[String]>,
+    ) -> Result<DeanonymizeResult, AnonymizeError> {
+        let out = out_path(in_path, out_dir, Mode::Deanonymize);
+        let mut params = json!({
+            "in_path": path_str(in_path),
+            "out_dir": path_str(out_dir),
+            "out_path": path_str(&out),
+            "project_id": project_id,
+        });
+        let method = match tokens {
+            Some(tokens) => {
+                params["tokens"] = json!(tokens);
+                "deanonymize_values"
+            }
+            None => "deanonymize",
+        };
+        let value = self.call(method, params)?;
+        Ok(deanonymize_from(&value))
+    }
+
+    /// `anonymize_text` (TR-1.7): реплики, вложения и текстовые образы.
+    /// Значения PII наружу не отдаются — только текст с метками и счётчики.
+    pub fn anonymize_text(
+        &mut self,
+        project_id: &str,
+        text: &str,
+    ) -> Result<TextResult, AnonymizeError> {
+        let value = self.call(
+            "anonymize_text",
+            json!({"project_id": project_id, "text": text}),
+        )?;
+        Ok(text_from(&value))
+    }
+
+    /// `vault_snapshot` (TR-1.6): метки проекта с формами + «прочие» + keep.
+    /// Ответ содержит исходные значения — Rust держит его только в памяти.
+    pub fn snapshot(&mut self, project_id: &str) -> Result<Snapshot, AnonymizeError> {
+        let value = self.call("vault_snapshot", json!({"project_id": project_id}))?;
+        Ok(snapshot_from(&value))
+    }
+
+    /// `vault_rev` — дешёвая проверка актуальности снимка (TR-1.6).
+    pub fn vault_rev(&mut self) -> Result<i64, AnonymizeError> {
+        let value = self.call("vault_rev", json!({}))?;
+        Ok(value.get("rev").and_then(|r| r.as_i64()).unwrap_or(0))
+    }
+
+    /// `label_for_value` — «Скрыть ещё…» (TR-1.7).
+    pub fn label_for_value(
+        &mut self,
+        project_id: &str,
+        value: &str,
+        entity_type: &str,
+    ) -> Result<LabelForValue, AnonymizeError> {
+        let value = self.call(
+            "label_for_value",
+            json!({"project_id": project_id, "value": value, "type": entity_type}),
+        )?;
+        Ok(label_from(&value))
+    }
+
+    /// `merge_entities` — «Объединить метки» (TR-2.6).
+    pub fn merge_entities(
+        &mut self,
+        project_id: &str,
+        keep: &str,
+        drop: &[String],
+    ) -> Result<serde_json::Value, AnonymizeError> {
+        self.call(
+            "merge_entities",
+            json!({"project_id": project_id, "keep": keep, "drop": drop}),
+        )
+    }
+
+    /// `vault_drop_project` — удалить проект и его метки (глобальные остаются).
+    pub fn drop_project(&mut self, project_id: &str) -> Result<serde_json::Value, AnonymizeError> {
+        self.call("vault_drop_project", json!({"project_id": project_id}))
+    }
+
+    /// `keep_terms` (D19): список «не анонимизировать».
+    pub fn keep_terms(&mut self) -> Result<Vec<String>, AnonymizeError> {
+        let value = self.call("keep_terms", json!({"action": "list"}))?;
+        Ok(value
+            .get("keep")
+            .and_then(|k| k.as_array())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default())
+    }
+
+    /// `keep_terms` action=add — «Не скрывать» (TR-2.6).
+    pub fn add_keep_term(&mut self, value: &str) -> Result<bool, AnonymizeError> {
+        let answer = self.call("keep_terms", json!({"action": "add", "value": value}))?;
+        Ok(answer
+            .get("added")
+            .and_then(|a| a.as_bool())
+            .unwrap_or(false))
+    }
+
+    /// `text_image` (D18): `<имя>.<ext>.md` с метками проекта.
+    /// `text` — текст от `hds_extract` (для `mpp` обязателен).
+    pub fn text_image(
+        &mut self,
+        in_path: &Path,
+        out_dir: &Path,
+        project_id: &str,
+        artifact_id: Option<&str>,
+        text: Option<&str>,
+    ) -> Result<TextImageResult, AnonymizeError> {
+        let mut params = json!({
+            "in_path": path_str(in_path),
+            "out_dir": path_str(out_dir),
+            "project_id": project_id,
+        });
+        if let Some(id) = artifact_id {
+            params["artifact_id"] = json!(id);
+        }
+        if let Some(text) = text {
+            params["text"] = json!(text);
+        }
+        let value = self.call("text_image", params)?;
+        Ok(image_from(&value))
+    }
+
+    /// `office_read` (TR-3.5): абзацы/таблицы/листы/слайды.
+    pub fn office_read(&mut self, path: &Path) -> Result<OfficeResult, AnonymizeError> {
+        let value = self.call("office_read", json!({"path": path_str(path)}))?;
+        Ok(office_from(&value))
+    }
+
+    /// `office_edit`: операции `replace_text`/`set_cell`/… (TR-3.5).
+    pub fn office_edit(
+        &mut self,
+        path: &Path,
+        ops: &[serde_json::Value],
+    ) -> Result<OfficeResult, AnonymizeError> {
+        let value = self.call("office_edit", json!({"path": path_str(path), "ops": ops}))?;
+        Ok(office_from(&value))
+    }
+
+    /// `office_create`: новый docx/xlsx/pptx (TR-3.5).
+    pub fn office_create(
+        &mut self,
+        path: &Path,
+        kind: &str,
+        content: &serde_json::Value,
+    ) -> Result<OfficeResult, AnonymizeError> {
+        let value = self.call(
+            "office_create",
+            json!({"path": path_str(path), "kind": kind, "content": content}),
+        )?;
+        Ok(office_from(&value))
     }
 
     fn call(

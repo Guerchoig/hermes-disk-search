@@ -69,6 +69,12 @@ pub struct Settings {
     pub hide_numbers: bool,
     pub hide_software: bool,
     pub hide_departments: bool,
+    /// `anonymize.keep_terms_file` — файл списка «не анонимизировать» (D19);
+    /// стартовый список подмешивается воркером всегда (vault.py).
+    pub keep_terms_file: Option<String>,
+    /// `anonymize.agent.images` — `strip` (по умолчанию) или `keep`: что
+    /// делать с картинками тела в режиме `mode: "agent"` (TR-7.4).
+    pub agent_images: String,
     /// RPC на файл (`WorkerConfig.request_timeout`).
     pub request_timeout_sec: u64,
     /// Простой воркера до выгрузки (§2.2: CPU — 60 с).
@@ -124,6 +130,21 @@ impl Settings {
             hide_numbers: flag(cfg, "anonymize.hide_numbers", false),
             hide_software: flag(cfg, "anonymize.hide_software", false),
             hide_departments: flag(cfg, "anonymize.hide_departments", false),
+            keep_terms_file: dig(cfg, "anonymize.keep_terms_file")
+                .and_then(|v| v.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+            agent_images: {
+                let value = text(cfg, "anonymize.agent.images", "strip").to_lowercase();
+                if value == "strip" || value == "keep" {
+                    value
+                } else {
+                    notices.push(format!(
+                        "anonymize.agent.images={value} — используется strip"
+                    ));
+                    "strip".to_string()
+                }
+            },
             request_timeout_sec: integer(cfg, "anonymize.request_timeout_sec", 600).max(60) as u64,
             idle_timeout_sec: integer(cfg, "anonymize.idle_timeout_sec", 60).max(5) as u64,
             notices,
@@ -180,6 +201,19 @@ impl Settings {
             "--device".to_string(),
             device.to_string(),
         ];
+        // D19: файл списка «не анонимизировать» (стартовый список — в воркере)
+        if let Some(path) = &self.keep_terms_file {
+            let abs = {
+                let p = PathBuf::from(path);
+                if p.is_absolute() {
+                    p
+                } else {
+                    root.join(p)
+                }
+            };
+            args.push("--keep-terms".into());
+            args.push(abs.to_string_lossy().into_owned());
+        }
         if gpu_mem_limit_mb > 0 {
             args.push("--gpu-mem-limit-mb".into());
             args.push(gpu_mem_limit_mb.to_string());
