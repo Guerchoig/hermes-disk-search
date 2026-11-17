@@ -1,0 +1,25 @@
+{
+  "name": "agent-a0-sdk-stand",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A0 spikes for PLAN_AGENT_PRIVACY_ZONE: @cline/sdk isolation, egress fetch, hooks, MCP",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "mock": "node mock-provider.mjs",
+    "s1": "node s1_isolation.mjs",
+    "s2": "node s2_fetch.mjs",
+    "s3": "node s3_hooks.mjs",
+    "s4": "node s4_toolpolicies.mjs",
+    "s5": "node s5_subagents.mjs",
+    "s6": "node s6_history.mjs",
+    "s7": "node s7_mcp.mjs"
+  },
+  "dependencies": {
+    "@cline/sdk": "0.2.0",
+    "tavily-mcp": "0.2.22",
+    "undici": "8.12.4"
+  }
+}
