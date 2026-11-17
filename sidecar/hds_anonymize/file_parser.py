@@ -1127,17 +1127,8 @@ def _paragraph_image_nodes(para_el) -> list:
     return nodes
 
 
-def strip_body_images(content: bytes, filename: str) -> tuple[bytes, int]:
-    """Вырезать картинки тела DOCX, оставив метки `[IMAGE_n]` (TR-7.4).
-
-    Вызывается **до** парсинга в режиме `mode: "agent"`: текст документа
-    получает метку на месте картинки, поэтому структура абзацев и сборка
-    остаются согласованными, а байты изображений вымываются из пакета
-    (`_drop_orphan_media`). Оригинал не меняется — функция работает на
-    копии в памяти.
-    """
-    if Path(filename).suffix.lower() != ".docx":
-        return content, 0
+def _strip_docx_images(content: bytes) -> tuple[bytes, int]:
+    """Вырезать картинки тела DOCX, оставив метки `[IMAGE_n]` (TR-7.4)."""
     doc = Document(io.BytesIO(content))
     counter = 0
 
@@ -1179,9 +1170,220 @@ def strip_body_images(content: bytes, filename: str) -> tuple[bytes, int]:
     doc.save(output)
     result, dropped = _drop_orphan_media(output.getvalue())
     logger.info(
-        "Картинки тела заменены метками: %s (media-файлов из пакета: %s)",
+        "Картинки тела DOCX заменены метками: %s (media-файлов из пакета: %s)",
         counter, dropped)
     return result, counter
+
+
+# ── картинки XLSX (уровень пакета: Pillow не нужен) ─────────────────────
+
+_XDR_NS = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+_A_NS = "http://schemas.openxmlformats.org/drawingml/2006/main"
+_R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+_XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+_XDR_ANCHORS = {
+    f"{{{_XDR_NS}}}oneCellAnchor",
+    f"{{{_XDR_NS}}}twoCellAnchor",
+    f"{{{_XDR_NS}}}absoluteAnchor",
+}
+
+
+def _xlsx_sheet_names(data: dict[str, bytes]) -> dict[str, str]:
+    """Часть листа (`xl/worksheets/sheetN.xml`) → имя листа."""
+    if "xl/workbook.xml" not in data:
+        return {}
+    try:
+        root = _lxml.fromstring(data["xl/workbook.xml"])
+    except Exception:  # noqa: BLE001 — битый workbook не роняет акт
+        return {}
+    targets: dict[str, str] = {}
+    rels = data.get("xl/_rels/workbook.xml.rels")
+    if rels:
+        try:
+            for rel in _lxml.fromstring(rels):
+                targets[rel.get("Id") or ""] = rel.get("Target") or ""
+        except Exception:  # noqa: BLE001
+            targets = {}
+    out: dict[str, str] = {}
+    for sheet in root.iter(f"{{{_XLSX_MAIN_NS}}}sheet"):
+        target = targets.get(sheet.get(f"{{{_R_NS}}}id") or "")
+        if target:
+            out[posixpath.normpath(posixpath.join("xl", target))] = sheet.get("name") or ""
+    return out
+
+
+def _xlsx_drawing_sheets(data: dict[str, bytes]) -> dict[str, str]:
+    """Часть рисунка (`xl/drawings/drawingN.xml`) → часть листа."""
+    out: dict[str, str] = {}
+    prefix = "xl/worksheets/_rels/"
+    for name, blob in data.items():
+        if not name.startswith(prefix) or not name.endswith(".rels"):
+            continue
+        sheet = "xl/worksheets/" + name[len(prefix):-len(".rels")]
+        try:
+            root = _lxml.fromstring(blob)
+        except Exception:  # noqa: BLE001
+            continue
+        for rel in root:
+            target = rel.get("Target") or ""
+            if target.endswith(".xml") and "drawings/" in target:
+                out[posixpath.normpath(posixpath.join("xl/worksheets", target))] = sheet
+    return out
+
+
+def _strip_xlsx_drawing(
+    xml: bytes,
+) -> tuple[list[tuple[int, int]], set[str], int, bytes]:
+    """Удалить якоря с картинками из `xl/drawings/*.xml`.
+
+    Возвращает `(позиции 0-based, rId картинок, сколько вырезано, новые байты)`.
+    Якорь удаляется целиком вместе с рамкой.
+    """
+    root = _lxml.fromstring(xml)
+    positions: list[tuple[int, int]] = []
+    rids: set[str] = set()
+    removed = 0
+    for parent in list(root.iter()):
+        for anchor in list(parent):
+            if anchor.tag not in _XDR_ANCHORS:
+                continue
+            pics = [node for node in anchor.iter()
+                    if node.tag == f"{{{_XDR_NS}}}pic"]
+            if not pics:
+                continue
+            col = row = None
+            start = anchor.find(f"{{{_XDR_NS}}}from")
+            if start is not None:
+                col_node = start.find(f"{{{_XDR_NS}}}col")
+                row_node = start.find(f"{{{_XDR_NS}}}row")
+                if col_node is not None and col_node.text:
+                    col = int(col_node.text)
+                if row_node is not None and row_node.text:
+                    row = int(row_node.text)
+            for pic in pics:
+                for blip in pic.iter(f"{{{_A_NS}}}blip"):
+                    rid = blip.get(f"{{{_R_NS}}}embed")
+                    if rid:
+                        rids.add(rid)
+                removed += 1
+            if col is not None and row is not None:
+                positions.append((row, col))
+            parent.remove(anchor)
+    if removed == 0:
+        return [], set(), 0, xml
+    return positions, rids, removed, _lxml.tostring(
+        root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _strip_xlsx_image_rids(rels_xml: bytes, rids: set[str]) -> bytes:
+    """Убрать из `.rels` связи вырезанных картинок (иначе media не осиротеет)."""
+    root = _lxml.fromstring(rels_xml)
+    changed = False
+    for rel in list(root):
+        if rel.get("Id") in rids:
+            root.remove(rel)
+            changed = True
+    if not changed:
+        return rels_xml
+    return _lxml.tostring(
+        root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+
+def _put_xlsx_label(ws, row: int, col: int, label: str) -> None:
+    """Поставить метку в свободную ячейку, не перезаписывая данные."""
+    cell = ws.cell(row=row, column=col)
+    if cell.value in (None, ""):
+        cell.value = label
+        return
+    for candidate in range(col + 1, col + 50):
+        cell = ws.cell(row=row, column=candidate)
+        if cell.value in (None, ""):
+            cell.value = label
+            return
+    ws.cell(row=row, column=ws.max_column + 1, value=label)
+
+
+def _write_xlsx_image_labels(
+    content: bytes, labels: list[tuple[str, int, int, str]]
+) -> bytes:
+    """Записать метки `[IMAGE_n]` в ячейки по позициям якорей (1-based)."""
+    from openpyxl import load_workbook  # noqa: PLC0415 — нужен только для xlsx
+
+    wb = load_workbook(io.BytesIO(content))
+    try:
+        for sheet_name, row, col, label in labels:
+            ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.worksheets[0]
+            _put_xlsx_label(ws, row + 1, col + 1, label)
+        output = io.BytesIO()
+        wb.save(output)
+        return output.getvalue()
+    finally:
+        wb.close()
+
+
+def _strip_xlsx_images(content: bytes) -> tuple[bytes, int]:
+    """Вырезать картинки листов XLSX, оставив метки `[IMAGE_n]` (TR-7.4).
+
+    Работа на уровне пакета: якоря с `xdr:pic` удаляются из
+    `xl/drawings/*.xml`, их связи — из `.rels`, осиротевшие media-файлы
+    вымываются `_drop_orphan_media`. Pillow не нужен: метки пишутся в ячейки
+    через openpyxl уже после удаления картинок.
+    """
+    with zipfile.ZipFile(io.BytesIO(content)) as zin:
+        infos = zin.infolist()
+        data = {info.filename: zin.read(info.filename) for info in infos}
+
+    drawing_sheets = _xlsx_drawing_sheets(data)
+    sheet_names = _xlsx_sheet_names(data)
+    labels: list[tuple[str, int, int, str]] = []
+    counter = 0
+    for name in sorted(data):
+        if not name.startswith("xl/drawings/") or not name.endswith(".xml"):
+            continue
+        positions, rids, removed, new_xml = _strip_xlsx_drawing(data[name])
+        if removed == 0:
+            continue
+        data[name] = new_xml
+        rels_name = "xl/drawings/_rels/" + name[len("xl/drawings/"):] + ".rels"
+        if rels_name in data and rids:
+            data[rels_name] = _strip_xlsx_image_rids(data[rels_name], rids)
+        sheet_name = sheet_names.get(drawing_sheets.get(name, ""), "")
+        for row, col in positions:
+            counter += 1
+            labels.append((sheet_name, row, col, f"[IMAGE_{counter}]"))
+
+    if counter == 0:
+        return content, 0
+
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in infos:
+            if info.filename in data:
+                zout.writestr(info, data[info.filename])
+    stripped, dropped = _drop_orphan_media(buffer.getvalue())
+    if labels:
+        stripped = _write_xlsx_image_labels(stripped, labels)
+    logger.info(
+        "Картинки листов XLSX заменены метками: %s (media-файлов из пакета: %s)",
+        counter, dropped)
+    return stripped, counter
+
+
+def strip_body_images(content: bytes, filename: str) -> tuple[bytes, int]:
+    """Вырезать картинки тела документа, оставив метки `[IMAGE_n]` (TR-7.4).
+
+    Поддержаны `docx` (абзацы тела и ячейки таблиц) и `xlsx` (картинки
+    листов). Вызывается **до** парсинга в режиме `mode: "agent"`: текст
+    получает метку на месте картинки, поэтому структура и сборка остаются
+    согласованными, а байты изображений вымываются из пакета. Оригинал не
+    меняется — функция работает на копии в памяти.
+    """
+    ext = Path(filename).suffix.lower()
+    if ext == ".docx":
+        return _strip_docx_images(content)
+    if ext == ".xlsx":
+        return _strip_xlsx_images(content)
+    return content, 0
 
 
 class FileAssembler:
@@ -1448,7 +1650,20 @@ class FileAssembler:
         if scrub_metadata:
             # Маркер версии парсера в свойствах копии (см. PARSER_VERSION)
             try:
-                wb.properties.keywords = marker or ANON_MARKER
+                props = wb.properties
+                # Метаданные пакета — такая же утечка, как текст (TR-7.4):
+                # автор, последний редактор, заголовок, организация в описании
+                props.creator = ""
+                props.lastModifiedBy = ""
+                props.title = ""
+                props.subject = ""
+                props.description = ""
+                props.category = ""
+                props.contentStatus = ""
+                props.identifier = ""
+                props.language = ""
+                props.version = ""
+                props.keywords = marker or ANON_MARKER
                 buf = io.BytesIO()
                 wb.save(buf)
                 result = buf.getvalue()

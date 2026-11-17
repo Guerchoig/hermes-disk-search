@@ -50,7 +50,8 @@ PERSON_DATV = "Иванову Ивану Ивановичу"
 
 
 def _sha256(path: str) -> str:
-    return hashlib.sha256(open(path, "rb").read()).hexdigest()
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()
 
 
 def _make_docx(path: str) -> None:
@@ -69,6 +70,117 @@ def _make_docx(path: str) -> None:
     document.add_paragraph().add_run().add_picture(io.BytesIO(_png_1x1()))
     document.add_paragraph("Система: 1С:ERP, требование REQ-003")
     document.save(path)
+
+
+DRAWING_XML = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+          xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"
+          xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+  <xdr:oneCellAnchor>
+    <xdr:from><xdr:col>1</xdr:col><xdr:colOff>0</xdr:colOff>
+      <xdr:row>1</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
+    <xdr:ext cx="9525" cy="9525"/>
+    <xdr:pic>
+      <xdr:nvPicPr><xdr:cNvPr id="2" name="Picture 1"/><xdr:cNvPicPr/></xdr:nvPicPr>
+      <xdr:blipFill><a:blip r:embed="rId1"/>
+        <a:stretch><a:fillRect/></a:stretch></xdr:blipFill>
+      <xdr:spPr/>
+    </xdr:pic>
+    <xdr:clientData/>
+  </xdr:oneCellAnchor>
+</xdr:wsDr>
+"""
+
+_RELS_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_IMAGE_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"
+_DRAWING_REL = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing"
+
+
+def _make_xlsx_with_image(
+    path: str,
+    pii_text: str = "Иванов Иван Иванович",
+    extra_cells: dict[str, str] | None = None,
+) -> None:
+    """XLSX с картинкой на листе — без Pillow (инъекция на уровне пакета).
+
+    openpyxl не умеет добавлять картинки без Pillow, а в venv анонимизации
+    его нет; поэтому пакет собирается вручную: media + drawing + rels листа.
+    """
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "План"
+    ws["A1"] = "Исполнитель"
+    ws["B1"] = pii_text
+    for address, value in (extra_cells or {}).items():
+        ws[address] = value
+    # Метаданные пакета — как в реальном файле: их обязан вычистить agent-акт
+    wb.properties.creator = pii_text
+    wb.properties.lastModifiedBy = pii_text
+    wb.properties.title = f"План проекта {pii_text}"
+    wb.save(path)
+
+    with zipfile.ZipFile(path) as zin:
+        data = {info.filename: zin.read(info.filename) for info in zin.infolist()}
+
+    data["xl/media/image1.png"] = _png_1x1()
+    data["xl/drawings/drawing1.xml"] = DRAWING_XML.encode("utf-8")
+    data["xl/drawings/_rels/drawing1.xml.rels"] = (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<Relationships xmlns="{_RELS_NS}">'
+        f'<Relationship Id="rId1" Type="{_IMAGE_REL}" Target="../media/image1.png"/>'
+        "</Relationships>"
+    ).encode("utf-8")
+
+    sheet_rels = "xl/worksheets/_rels/sheet1.xml.rels"
+    rel_id = "rId777"
+    rels = data.get(sheet_rels)
+    rel_xml = (
+        rels.decode("utf-8") if rels else
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        f'<Relationships xmlns="{_RELS_NS}"></Relationships>'
+    )
+    rel_xml = rel_xml.replace(
+        "</Relationships>",
+        f'<Relationship Id="{rel_id}" Type="{_DRAWING_REL}"'
+        ' Target="../drawings/drawing1.xml"/></Relationships>',
+    )
+    data[sheet_rels] = rel_xml.encode("utf-8")
+
+    sheet = data["xl/worksheets/sheet1.xml"].decode("utf-8")
+    if "xmlns:r=" not in sheet.split(">", 1)[0]:
+        # openpyxl не всегда объявляет prefix r в корне листа
+        sheet = sheet.replace(
+            "<worksheet ",
+            '<worksheet xmlns:r="http://schemas.openxmlformats.org/'
+            'officeDocument/2006/relationships" ',
+            1,
+        )
+    if "<drawing" not in sheet:
+        sheet = sheet.replace(
+            "</worksheet>", f'<drawing r:id="{rel_id}"/></worksheet>'
+        )
+    data["xl/worksheets/sheet1.xml"] = sheet.encode("utf-8")
+
+    content_types = data["[Content_Types].xml"].decode("utf-8")
+    if 'Extension="png"' not in content_types:
+        content_types = content_types.replace(
+            "<Default ",
+            '<Default Extension="png" ContentType="image/png"/><Default ',
+            1,
+        )
+    if "/xl/drawings/drawing1.xml" not in content_types:
+        content_types = content_types.replace(
+            "</Types>",
+            '<Override PartName="/xl/drawings/drawing1.xml" ContentType='
+            '"application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>',
+        )
+    data["[Content_Types].xml"] = content_types.encode("utf-8")
+
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zout:
+        for name, blob in data.items():
+            zout.writestr(name, blob)
 
 
 class AgentModeTest(unittest.TestCase):
@@ -188,6 +300,86 @@ class AgentModeTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             asyncio.run(self.handlers.anonymize(
                 self.src, out, values=[PERSON_NOMN], mode="agent"))
+
+
+class XlsxAgentModeTest(unittest.TestCase):
+    """Картинки листов XLSX: `[IMAGE_n]` вместо картинки, media вымыты."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="hds-agent-xlsx-")
+        self.dir = self.tmp.name
+        self.vault = Vault(os.path.join(self.dir, "anonymize.db"))
+        self.handlers = AnonymizeHandlers(self.vault)
+        self.src = os.path.join(self.dir, "План.xlsx")
+        _make_xlsx_with_image(self.src)
+        self.sha_before = _sha256(self.src)
+
+    def tearDown(self) -> None:
+        self.vault.close()
+        self.tmp.cleanup()
+
+    def _run(self, **kwargs):
+        out = os.path.join(self.dir, "image", "План.xlsx")
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        res = asyncio.run(self.handlers.anonymize(
+            self.src, out,
+            values=kwargs.pop("values", ["Иванов Иван Иванович"]),
+            project_id="P0001",
+            mode="agent",
+            artifact_id="9",
+            **kwargs,
+        ))
+        return out, res
+
+    def test_image_replaced_with_label_and_media_dropped(self):
+        out, res = self._run()
+        self.assertEqual(res["images"], 1)
+        self.assertEqual(_sha256(self.src), self.sha_before, "оригинал не меняется")
+        with zipfile.ZipFile(out) as package:
+            names = package.namelist()
+        self.assertFalse(
+            [name for name in names if name.startswith("xl/media/")],
+            f"media остались в пакете: {names}",
+        )
+        import openpyxl
+
+        wb = openpyxl.load_workbook(out)
+        try:
+            ws = wb["План"]
+            values = [str(cell.value) for row in ws.iter_rows() for cell in row
+                      if cell.value is not None]
+            self.assertIn("[IMAGE_1]", values)
+            self.assertIn("[PERSON_1]", values)
+            self.assertNotIn("Иванов Иван Иванович", values)
+            self.assertEqual(wb.properties.keywords, "hds-agent/P0001/9")
+            self.assertNotEqual(wb.properties.creator, "Иванов Иван Иванович")
+        finally:
+            wb.close()
+
+    def test_label_does_not_overwrite_data(self):
+        """Метка не затирает значение в ячейке под якорем картинки."""
+        import openpyxl
+
+        # фикстуру собираем сразу с занятой ячейкой B2 (пересохранение
+        # openpyxl без Pillow потеряло бы картинку)
+        _make_xlsx_with_image(
+            self.src, extra_cells={"B2": "важное значение"})
+        self.sha_before = _sha256(self.src)
+        out, res = self._run()
+        self.assertEqual(res["images"], 1)
+        wb = openpyxl.load_workbook(out)
+        try:
+            ws = wb["План"]
+            values = [str(cell.value) for row in ws.iter_rows() for cell in row
+                      if cell.value is not None]
+            self.assertIn("важное значение", values)
+            self.assertIn("[IMAGE_1]", values)
+        finally:
+            wb.close()
+
+    def test_keep_mode_adds_no_labels(self):
+        _out, res = self._run(images_mode="keep")
+        self.assertEqual(res["images"], 0)
 
 
 if __name__ == "__main__":
