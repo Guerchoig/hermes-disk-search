@@ -220,6 +220,16 @@ fn digest_eq_stored(plain_digest: &[u8], stored_hex: &str) -> bool {
     }
 }
 
+/// Совпадает ли plain-токен с сохранённым `token_sha256` (постоянное время).
+///
+/// Нужен маршруту агента `/mcp/agent/<P>` (TR-4.3): токены проектов лежат
+/// отдельно от `access.yaml` — в `data/agent/secrets.json` (`agent.rs` в
+/// `hds-mcp`), но сверка обязана быть такой же, как у пользовательских.
+pub fn token_matches(plain: &str, stored_sha256_hex: &str) -> bool {
+    let digest = Sha256::digest(plain.as_bytes());
+    digest_eq_stored(&digest, stored_sha256_hex)
+}
+
 /// Резолв токена: sha256 + постоянное время сравнения + проверка `expires`
 /// и `disabled`. Истёкший/отозванный/отключённый пользователь → `None`.
 pub fn resolve_token(access: &Access, plain: &str, now_unix: i64) -> Option<AuthCtx> {

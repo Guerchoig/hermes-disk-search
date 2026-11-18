@@ -113,7 +113,16 @@ fn parse_kinds(kinds: &str) -> Option<Vec<String>> {
 /// Инструмент `search_local_files` (ГЛАВНЫЙ — «найди на этом компе/диске…»).
 ///
 /// `auth` (M1 T4): фильтр проектов из токена (`None` = без фильтра).
-pub fn search_local_files(auth: Option<&AuthCtx>, query: &str, limit: i64, kinds: &str) -> String {
+/// `scope` — маршрут (TR-4.4): на маршруте агента выдача дополняется
+/// предупреждением об отставании индекса по проекту (TR-4.7) и не упоминает
+/// `ask_my_files`, которого там нет.
+pub fn search_local_files(
+    auth: Option<&AuthCtx>,
+    scope: &crate::server::Scope,
+    query: &str,
+    limit: i64,
+    kinds: &str,
+) -> String {
     let cfg = match load() {
         Ok(c) => c,
         Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
@@ -141,26 +150,71 @@ pub fn search_local_files(auth: Option<&AuthCtx>, query: &str, limit: i64, kinds
         projects.as_deref(),
         lim,
     );
+    // TR-4.7: предупреждение об отставании индекса — только на маршруте агента:
+    // агент не должен считать выдачу полной, пока часть образов в очереди.
+    let lag = match scope.agent_project.as_deref() {
+        Some(project) => lag_note(&conn, &cfg, project),
+        None => String::new(),
+    };
     if res.is_empty() {
         return format!(
             "Ничего не найдено по запросу: {query}. Если ожидаете файлы — уточните запрос \
-             или проверьте состояние индекса инструментом index_status."
+             или проверьте состояние индекса инструментом index_status.{lag}"
         );
     }
     // Выдача упёрлась в лимит → это заведомо не весь результат: подсказываем
     // повторить поиск шире, иначе модель выдаёт первые N фрагментов за полный ответ.
     let capped = res.len() as i64 >= limit.clamp(1, 30) && res.len() < 30;
+    let next = if scope.is_agent() {
+        // На маршруте агента локальной генерации нет: ответ синтезирует модель.
+        " Ответ синтезируйте сами по фрагментам и укажите путь файла и страницу."
+    } else {
+        " Для готового ответа используй инструмент ask_my_files."
+    };
     format!(
         "Найдено {} фрагментов:\n\n{}\n\nОтвечая пользователю, приводи пути файлов и номера \
          источников [N]. Одна выдача — это фрагменты, а не список файлов: на обзорные вопросы \
          («какие есть…», «есть ли ещё…») повтори поиск другими формулировками и с другими \
-         kinds и объедини результаты.{} Для готового ответа используй инструмент ask_my_files.",
+         kinds и объедини результаты.{} {next}{lag}",
         res.len(),
         format_results(&res),
         if capped {
             " Выдача упёрлась в limit — увеличьте его (до 30) и/или сделайте ещё запросы."
         } else {
             ""
+        }
+    )
+}
+
+/// Предупреждение об отставании индекса проекта (TR-4.7 п.3).
+///
+/// Пусто, когда отставания нет или посчитать его не удалось: сбой подсчёта не
+/// должен превращать поиск в ошибку.
+fn lag_note(conn: &rusqlite::Connection, cfg: &Config, project: &str) -> String {
+    let Ok(lag) = hds_index::lag::project_lag(conn, cfg, project) else {
+        return String::new();
+    };
+    if lag.pending == 0 {
+        return String::new();
+    }
+    let shown: Vec<String> = lag
+        .pending_paths
+        .iter()
+        .map(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| p.clone())
+        })
+        .collect();
+    format!(
+        "\n\n⚠ {} файлов проекта ещё не проиндексированы (в т.ч. недавно изменённые: {}); \
+         для них используйте search_codebase или чтение файла.",
+        lag.pending,
+        if shown.is_empty() {
+            "(список недоступен)".to_string()
+        } else {
+            shown.join(", ")
         }
     )
 }
@@ -289,6 +343,36 @@ pub fn index_status() -> String {
         ));
     }
     lines.join("\n")
+}
+
+/// Инструмент `index_status` на маршруте агента — **по проекту** (TR-4.7 п.2).
+///
+/// Отвечает теми же полями, что требует план: всего образов, проиндексировано,
+/// в очереди, ошибки и признак первичного построения. Формат — JSON: агент
+/// читает его как данные, а не как текст для человека.
+pub fn index_status_for(project: &str) -> String {
+    let cfg = match load() {
+        Ok(c) => c,
+        Err(e) => return format!("Ошибка конфигурации: {}", e.message()),
+    };
+    let conn = match connect_ro(&cfg) {
+        Ok(c) => c,
+        Err(e) => return format!("База данных недоступна: {e}"),
+    };
+    match hds_index::lag::project_lag(&conn, &cfg, project) {
+        Ok(lag) => serde_json::to_string_pretty(&serde_json::json!({
+            "project": lag.project,
+            "total": lag.total,
+            "done": lag.done,
+            "pending": lag.pending,
+            "errors": lag.errors,
+            "building": lag.building,
+            "pending_paths": lag.pending_paths,
+            "error_paths": lag.error_paths,
+        }))
+        .unwrap_or_else(|e| format!("Ошибка сериализации: {e}")),
+        Err(e) => format!("Ошибка чтения индекса: {}", e.message()),
+    }
 }
 
 /// Инструмент `start_indexing` (фоновая индексация корней из конфига).

@@ -4,11 +4,44 @@
 use serde_json::{json, Value};
 
 use crate::auth::admin_required;
+use crate::server::Scope;
 use crate::tools;
 use hds_core::access::AuthCtx;
 
-/// Список инструментов (для `tools/list`).
+/// Инструменты маршрута агента (TR-4.4): только поиск фрагментов и статус.
+///
+/// `ask_my_files` не публикуется: локальная генерация слабой моделью — лишнее
+/// звено, GPU нужен анонимизации. Управление индексацией (`start_indexing`,
+/// `stop_indexing`, `reindex_path`) агенту тоже не даётся.
+pub const AGENT_TOOLS: [&str; 2] = ["search_local_files", "index_status"];
+
+/// Список инструментов (для `tools/list`) — обычный маршрут.
 pub fn tool_list() -> Vec<Value> {
+    tool_list_scoped(&Scope::global())
+}
+
+/// Список инструментов для области маршрута (TR-4.4).
+///
+/// На маршруте агента остаются только [`AGENT_TOOLS`]; на обычном `/mcp`
+/// состав прежний.
+pub fn tool_list_scoped(scope: &Scope) -> Vec<Value> {
+    let all = tool_list_all();
+    if scope.is_agent() {
+        all.into_iter()
+            .filter(|t| {
+                t.get("name")
+                    .and_then(|n| n.as_str())
+                    .map(|n| AGENT_TOOLS.contains(&n))
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        all
+    }
+}
+
+/// Полный список инструментов сервера (как в `mcp_server.py`).
+fn tool_list_all() -> Vec<Value> {
     vec![
         json!({
             "name": "search_local_files",
@@ -68,15 +101,44 @@ pub fn tool_list() -> Vec<Value> {
 /// Диспетчер `tools/call`: имя + аргументы → текст результата.
 ///
 /// `auth` — контекст токена (M1 T4): фильтр проектов для поиска/RAG,
-/// admin-гейтинг для управляющих инструментов.
+/// admin-гейтинг для управляющих инструментов. `scope` — область маршрута
+/// (TR-4.4): на маршруте агента доступны только [`AGENT_TOOLS`].
 pub fn call(name: &str, args: &Value, auth: Option<&AuthCtx>) -> Result<String, String> {
+    call_scoped(name, args, auth, &Scope::global())
+}
+
+/// То же с явной областью маршрута.
+pub fn call_scoped(
+    name: &str,
+    args: &Value,
+    auth: Option<&AuthCtx>,
+    scope: &Scope,
+) -> Result<String, String> {
     let s = |k: &str| args.get(k).and_then(|v| v.as_str()).map(|x| x.to_string());
+    if scope.is_agent() {
+        // Маршрут агента: только поиск фрагментов и статус по своему проекту.
+        let project = scope.agent_project.as_deref().unwrap_or("");
+        return match name {
+            "search_local_files" => {
+                let query = s("query").ok_or("нет аргумента query")?;
+                let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(8);
+                let kinds = s("kinds").unwrap_or_default();
+                Ok(tools::search_local_files(
+                    auth, scope, &query, limit, &kinds,
+                ))
+            }
+            "index_status" => Ok(tools::index_status_for(project)),
+            other => Err(format!("unknown tool: {other}")),
+        };
+    }
     match name {
         "search_local_files" => {
             let query = s("query").ok_or("нет аргумента query")?;
             let limit = args.get("limit").and_then(|v| v.as_i64()).unwrap_or(8);
             let kinds = s("kinds").unwrap_or_default();
-            Ok(tools::search_local_files(auth, &query, limit, &kinds))
+            Ok(tools::search_local_files(
+                auth, scope, &query, limit, &kinds,
+            ))
         }
         "ask_my_files" => {
             let q = s("question").ok_or("нет аргумента question")?;

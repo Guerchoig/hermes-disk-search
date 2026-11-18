@@ -74,6 +74,12 @@ pub fn route(
         ("POST", "/auth/login") if env.enabled => {
             handle_login(body, env, client_ip, std::time::Instant::now())
         }
+        // TR-4.3: маршрут агента проекта `P` — свой токен, всегда `projects=[P]`,
+        // только поиск (TR-4.4). Проверяется ДО обычного `/mcp`: путь другой, но
+        // порядок фиксирован, чтобы «/mcp/agent/P0001» никогда не ушёл в общий.
+        ("POST", p) if crate::agent::project_route(p, mcp_path).is_some() => {
+            handle_agent(p, mcp_path, body, env, auth_header, client_ip)
+        }
         ("POST", mp) if mp == mcp_path.trim_end_matches('/') => {
             let started = std::time::Instant::now();
             let msg: Value = match serde_json::from_str(body.trim()) {
@@ -163,6 +169,139 @@ pub fn route(
             json!({ "error": "not found" }).to_string(),
         ),
     }
+}
+
+/// Ответ 401 маршрута агента (свой токен проекта, не логин владельца).
+fn unauthorized_agent() -> Reply {
+    (
+        401,
+        "application/json",
+        json!({ "error": "unauthorized",
+                "hint": "нужен токен проекта: hds agent token <P>" })
+        .to_string(),
+    )
+}
+
+/// `POST <mcp-path>/agent/<P>` — MCP маршрута агента проекта (TR-4.3, TR-4.4).
+///
+/// Отличия от общего маршрута:
+/// * токен — **проектный** (`data/agent/secrets.json`), не пользовательский;
+///   неверный/просроченный токен или чужой `P` → 401;
+/// * контекст авторизации всегда `projects=[P]`, независимо от
+///   `access.enabled` — инвариант I5;
+/// * публикуются только `search_local_files` и `index_status`, без
+///   `ask_my_files` и управления индексацией.
+fn handle_agent(
+    req_path: &str,
+    mcp_path: &str,
+    body: &str,
+    env: &AuthEnv,
+    auth_header: Option<&str>,
+    client_ip: &str,
+) -> Reply {
+    let started = std::time::Instant::now();
+    let project = match crate::agent::project_route(req_path, mcp_path) {
+        Some(p) => p.to_string(),
+        None => {
+            return (
+                404,
+                "application/json",
+                json!({ "error": "not found" }).to_string(),
+            )
+        }
+    };
+    let cfg = match hds_core::config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            return (
+                503,
+                "application/json",
+                json!({ "error": format!("конфигурация: {}", e.message()) }).to_string(),
+            )
+        }
+    };
+    if !crate::agent::agent_mode(&cfg) {
+        // Вне режима агента маршрута нет: обычная установка ничего не теряет.
+        return (
+            404,
+            "application/json",
+            json!({ "error": "not found" }).to_string(),
+        );
+    }
+    let secrets_path = crate::agent::secrets_path_from(&cfg);
+    let token_ok = crate::agent::load_at(&secrets_path)
+        .map(|s| match auth::bearer_token(auth_header) {
+            Some(t) => crate::agent::token_ok(&s, &project, t, auth::now_unix()),
+            None => false,
+        })
+        .unwrap_or(false);
+    if !token_ok {
+        if let Some(a) = &env.audit {
+            a.record(
+                &hds_core::audit::AuditEvent {
+                    ts: 0,
+                    event: "unauthorized".into(),
+                    user: None,
+                    ip: client_ip.into(),
+                    method: "POST".into(),
+                    path: req_path.into(),
+                    tool: None,
+                    projects: None,
+                    token: None,
+                    status: 401,
+                    ms: started.elapsed().as_millis() as u64,
+                }
+                .now(),
+            );
+        }
+        return unauthorized_agent();
+    }
+    let msg: Value = match serde_json::from_str(body.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                200,
+                "application/json",
+                json!({ "jsonrpc": "2.0", "id": Value::Null,
+                        "error": { "code": -32700, "message": format!("Parse error: {e}") } })
+                .to_string(),
+            )
+        }
+    };
+    let ctx = crate::agent::project_ctx(&project);
+    let scope = server::Scope::agent(&project);
+    let tool = (msg.get("method").and_then(|m| m.as_str()) == Some("tools/call")).then(|| {
+        msg.get("params")
+            .and_then(|p| p.get("name"))
+            .and_then(|n| n.as_str())
+            .unwrap_or("")
+            .to_string()
+    });
+    let reply = match server::handle_scoped(&msg, Some(&ctx), &scope) {
+        Some(resp) => (200, "application/json", resp.to_string()),
+        None => (202, "application/json", String::new()),
+    };
+    if let (Some(a), Some(tool)) = (&env.audit, tool) {
+        if !tool.is_empty() {
+            a.record(
+                &hds_core::audit::AuditEvent {
+                    ts: 0,
+                    event: "tool_call".into(),
+                    user: Some(ctx.user.clone()),
+                    ip: client_ip.into(),
+                    method: "POST".into(),
+                    path: req_path.into(),
+                    tool: Some(tool),
+                    projects: Some(vec![project.clone()]),
+                    token: None,
+                    status: reply.0,
+                    ms: started.elapsed().as_millis() as u64,
+                }
+                .now(),
+            );
+        }
+    }
+    reply
 }
 
 /// `POST /auth/login {login,password}` → `{token,expires,user,projects}` | 401.

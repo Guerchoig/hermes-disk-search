@@ -7,12 +7,14 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod auth;
 pub mod http;
 pub mod schema;
 pub mod server;
 pub mod tools;
 
+pub use agent::{AgentSecrets, AgentToken};
 pub use auth::{resolve_bearer, AuthEnv};
 pub use http::{is_heavy_request, run_http, run_http_listener};
-pub use server::{handle, handle_line, run_stdio};
+pub use server::{handle, handle_line, handle_scoped, run_stdio, Scope, AGENT_INSTRUCTIONS};
