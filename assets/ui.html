@@ -59,7 +59,7 @@ summary{cursor:pointer;user-select:none}
 <div class="row"><label class="muted">Корни индексации (через «;»), сохраняются в настройки:
 <input id="roots-input" class="mono" style="width:340px;background:#111827;color:var(--fg);border:1px solid #2a3a55;border-radius:6px;padding:4px">
 </label>
-<button onclick="saveRoots()">💾 Сохранить корни</button>
+<button id="roots-save" onclick="saveRoots()">💾 Сохранить корни</button>
 <span id="roots-msg" class="muted"></span>
 </div>
 <div class="row"><label class="muted">🔄 Переиндексировать (файл или папка, с переобработкой):
@@ -407,6 +407,18 @@ async function refresh(){
     if (document.activeElement !== vw) vw.value = o.vec_weight ?? 1.0;
     const ri = document.getElementById('roots-input');
     if (document.activeElement !== ri) ri.value = (s.roots || []).join('; ');
+    // TR-4.1: в режиме агента корни заданы агентом — поле только для чтения.
+    const rs = document.getElementById('roots-save');
+    const rm = document.getElementById('roots-msg');
+    if (ri) {
+      ri.readOnly = !!s.agent_roots;
+      ri.title = s.agent_roots ? ('корни заданы агентом: ' + (s.agent_root || '')) : '';
+    }
+    if (rs) rs.disabled = !!s.agent_roots;
+    if (rm && s.agent_roots) {
+      rm.textContent = 'заданы агентом: только ' + (s.agent_root || '<agent.root>') + '\\P*\\workspace';
+      rm.style.color = 'var(--warn)';
+    }
     const ep = document.getElementById('excl-paths');
     if (document.activeElement !== ep) ep.value = (s.exclude_paths || []).join('\n');
     const d = s.db;

@@ -39,8 +39,8 @@ pub mod tools;
 
 pub use access::{
     access_path, authenticate, hash_password, load as load_access, new_token, resolve_token,
-    revoke_token, revoke_tokens_of_user, save as save_access, token_sha256_hex, token_ttl_days,
-    tokens_of_user, user_by_login, verify_password, Access, AuthCtx, Token, User,
+    revoke_token, revoke_tokens_of_user, save as save_access, token_matches, token_sha256_hex,
+    token_ttl_days, tokens_of_user, user_by_login, verify_password, Access, AuthCtx, Token, User,
     DEFAULT_TOKEN_TTL_DAYS,
 };
 pub use audit::{Audit, AuditEvent};
@@ -53,5 +53,8 @@ pub use db::{connect, has_vec, vec_ok, DbError, FileRow, Stats};
 pub use error::{CoreError, Result};
 pub use net::{real_client_ip, request_scheme, trusted_proxy};
 pub use queue::{HeavyQueue, QueueConfig, QueuePolicy, QueueReject, QueueStats, QueueTicket};
-pub use roots::{default_project, project_for_path, roots_from_cfg, roots_paths, Root};
+pub use roots::{
+    agent_enabled, agent_root, agent_roots, default_project, effective_roots, is_agent_project,
+    project_for_path, roots_from_cfg, roots_paths, Root,
+};
 pub use tools::{find_ffmpeg, which};

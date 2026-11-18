@@ -615,16 +615,13 @@ pub fn watch_status() -> Value {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .filter(|_| running);
     let cfg = load().unwrap_or(Config::Null);
-    let roots: Vec<String> = dig(&cfg, "index.roots")
-        .and_then(|v| v.as_sequence())
-        .map(|s| {
-            s.iter()
-                .filter_map(|x| x.as_str())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect()
-        })
-        .unwrap_or_default();
+    // TR-4.1: при `agent.enabled` корни заданы агентом — показываем их и не
+    // даём менять (страница настроек блокирует поле и кнопку сохранения).
+    let agent_roots = hds_core::roots::agent_enabled(&cfg);
+    let roots: Vec<String> = hds_core::roots::effective_roots(&cfg)
+        .into_iter()
+        .map(|r| r.path)
+        .collect();
     json!({
         "running": running,
         "stale": stale,
@@ -634,6 +631,8 @@ pub fn watch_status() -> Value {
         "paused": root.join("index.pause").exists(),
         "indexing": index_running(),
         "roots": roots,
+        "agent_roots": agent_roots,
+        "agent_root": hds_core::roots::agent_root(&cfg),
     })
 }
 
@@ -2024,6 +2023,22 @@ pub fn route_full(
                     "/api/index/pause" => json_ok(index_action("pause", false)),
                     "/api/index/resume" => json_ok(index_action("resume", false)),
                     "/api/roots/save" => {
+                        // TR-4.1: в режиме агента корни заданы агентом (D9) —
+                        // менять их из настроек нельзя, иначе индекс ушёл бы
+                        // за пределы анонимной зоны.
+                        if load()
+                            .map(|c| hds_core::roots::agent_enabled(&c))
+                            .unwrap_or(false)
+                        {
+                            return (
+                                409,
+                                "application/json",
+                                json!({ "ok": false,
+                                        "msg": "корни заданы агентом (agent.enabled: true): \
+                                                индексируется только <agent.root>\\P*\\workspace" })
+                                .to_string(),
+                            );
+                        }
                         let roots = body_list(body, "roots");
                         json_ok(config_edit::set_roots(&roots))
                     }

@@ -19,7 +19,7 @@ use std::time::Duration;
 
 use hds_core::config::{dig, project_root, Config};
 use hds_core::error::Result;
-use hds_core::roots::{project_for_path, roots_from_cfg, roots_paths};
+use hds_core::roots::{effective_roots as cfg_effective_roots, project_for_path};
 use hds_core::{db, EMB_CONTEXT};
 use serde_json::{json, Value};
 
@@ -62,9 +62,30 @@ pub fn clip_for_embedding(text: &str, emb_context: i64) -> String {
     cut
 }
 
+/// `index.exclude_dirs`/`index.exclude_paths` плюс неявные исключения.
+///
+/// Неявные исключения (`implicit_excludes`) действуют и на **обход** дерева
+/// (`collect_files`/`count_files` через эту функцию), и на одиночные пути
+/// (`extract_file`): иначе каталоги анонимной зоны попадали бы в ETA и в
+/// предупреждение об отставании индекса (TR-4.7).
+fn walk_filter(cfg: &Config) -> WalkOptions {
+    let (excludes, _limits) = index_filter(cfg);
+    WalkOptions::new(Vec::new(), excludes)
+}
+
 /// Настройки отбора файлов из конфига (`index.exclude_dirs/paths`, лимиты размеров).
 pub fn index_filter(cfg: &Config) -> (Excludes, IndexLimits) {
-    let dirs = string_list(cfg, "index.exclude_dirs");
+    let mut dirs = string_list(cfg, "index.exclude_dirs");
+    // Служебные каталоги анонимной зоны исключаются по имени (TR-4.1, §4.4):
+    // `.hds-agent` — служебная папка зеркала в зоне пользователя, `_conflicts` —
+    // рабочий каталог разбора конфликтов (A4) внутри workspace.
+    if hds_core::roots::agent_enabled(cfg) {
+        for name in [".hds-agent", "_conflicts"] {
+            if !dirs.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+                dirs.push(name.to_string());
+            }
+        }
+    }
     let mut paths = string_list(cfg, "index.exclude_paths");
     // R2.1 (PLAN_TRANSCRIBE_SERVICE): каталоги конвейера автотранскрибации исключаются
     // **неявно** (рантайм) — «не обходить и не индексировать». Значения видны в
@@ -112,6 +133,24 @@ pub fn implicit_excludes(cfg: &Config) -> Vec<String> {
                     project_root().join(p)
                 };
                 let abs = abs.to_string_lossy().to_string();
+                if !out.iter().any(|x| x == &abs) {
+                    out.push(abs);
+                }
+            }
+        }
+    }
+    // Режим агента (TR-4.1): `agent-config` и `agent-state` — служебные каталоги
+    // процесса агента (ключи провайдеров, история сессий), в индекс не попадают.
+    // `.hds-agent` в папке проекта (зона пользователя) и `_conflicts` в workspace
+    // — служебные для демона зеркалирования (A4), исключаются по имени.
+    if hds_core::roots::agent_enabled(cfg) {
+        for r in hds_core::roots::agent_roots(cfg) {
+            let project_dir = Path::new(&r.path)
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| PathBuf::from(&r.path));
+            for sub in ["agent-config", "agent-state"] {
+                let abs = project_dir.join(sub).to_string_lossy().to_string();
                 if !out.iter().any(|x| x == &abs) {
                     out.push(abs);
                 }
@@ -303,8 +342,10 @@ pub fn extract_file(
     }
 
     // Проект файла — корень с наибольшим совпадающим префиксом (M1 §3.1);
-    // файл вне всех корней → NULL (в server-режиме не виден).
-    let project = project_for_path(&roots_from_cfg(cfg), &p).map(|s| s.to_string());
+    // файл вне всех корней → NULL (в server-режиме не виден). В режиме агента
+    // корни — рабочие каталоги проектов зоны (TR-4.1), поэтому имя проекта
+    // файла совпадает с каталогом `P<NNNN>`.
+    let project = project_for_path(&cfg_effective_roots(cfg), &p).map(|s| s.to_string());
     let fid = db::upsert_file(
         conn,
         &p,
@@ -521,24 +562,38 @@ impl Default for RunIndexArgs {
     }
 }
 
-/// Корни обхода: явные `roots` или `index.roots` из конфига.
+/// Корни обхода: явные `roots` или эффективные корни конфига.
+///
+/// При `agent.enabled` явные `--roots` **игнорируются** (TR-4.1): индексируются
+/// только `<agent.root>\P<NNNN>\workspace`, иначе агент получил бы в индекс
+/// содержимое произвольных папок пользователя.
 fn effective_roots(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
+    if hds_core::roots::agent_enabled(cfg) {
+        if roots.is_some() {
+            println!(
+                "[warn] agent.enabled: явные --roots игнорируются, индексируется только {}",
+                hds_core::roots::agent_root(cfg).unwrap_or_else(|| "<agent.root>".to_string())
+            );
+        }
+        return cfg_effective_roots(cfg)
+            .into_iter()
+            .map(|r| PathBuf::from(r.path))
+            .collect();
+    }
     match roots {
         Some(r) => r.to_vec(),
-        None => roots_paths(cfg).iter().map(PathBuf::from).collect(),
+        None => cfg_effective_roots(cfg)
+            .iter()
+            .map(|r| PathBuf::from(&r.path))
+            .collect(),
     }
 }
 
 /// Обход корней в список путей (с сообщениями `[scan]`/`[skip]` как в Python).
 pub fn collect_files(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
-    let opts = WalkOptions::from_parts(
-        &effective_roots(cfg, roots)
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        &string_list(cfg, "index.exclude_dirs"),
-        &string_list(cfg, "index.exclude_paths"),
-    );
+    let mut opts = walk_filter(cfg);
+    opts.roots = effective_roots(cfg, roots);
+
     let mut files = Vec::new();
     walk_files(
         &opts,
@@ -559,14 +614,8 @@ pub fn collect_files(cfg: &Config, roots: Option<&[PathBuf]>) -> Vec<PathBuf> {
 
 /// Пре-подсчёт числа файлов (для ETA) — как `_precount` в Python.
 pub fn count_files(cfg: &Config, roots: Option<&[PathBuf]>) -> usize {
-    let opts = WalkOptions::from_parts(
-        &effective_roots(cfg, roots)
-            .iter()
-            .map(|p| p.to_string_lossy().into_owned())
-            .collect::<Vec<_>>(),
-        &string_list(cfg, "index.exclude_dirs"),
-        &string_list(cfg, "index.exclude_paths"),
-    );
+    let mut opts = walk_filter(cfg);
+    opts.roots = effective_roots(cfg, roots);
     let mut n = 0usize;
     walk_files(&opts, |_| n += 1, |_| {});
     n

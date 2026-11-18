@@ -85,8 +85,11 @@ pub fn roots_from_cfg(cfg: &Config) -> Vec<Root> {
 }
 
 /// Только пути корней (для walker — `WalkOptions::roots`).
+///
+/// С учётом режима агента (TR-4.1): при `agent.enabled` это каталоги
+/// `<agent.root>\P<NNNN>\workspace`, а не `index.roots`.
 pub fn roots_paths(cfg: &Config) -> Vec<String> {
-    roots_from_cfg(cfg).into_iter().map(|r| r.path).collect()
+    effective_roots(cfg).into_iter().map(|r| r.path).collect()
 }
 
 /// Проект файла: корень с наибольшим совпадающим префиксом (компонентно,
@@ -105,4 +108,77 @@ pub fn project_for_path<'a>(roots: &'a [Root], path: &str) -> Option<&'a str> {
         }
     }
     best.map(|(_, r)| r.project.as_str())
+}
+
+/// Включён ли режим анонимной зоны (`agent.enabled`, D9/TR-4.1).
+pub fn agent_enabled(cfg: &Config) -> bool {
+    dig(cfg, "agent.enabled")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Корень анонимной зоны (`agent.root`): строка без пробелов по краям, если задан.
+pub fn agent_root(cfg: &Config) -> Option<String> {
+    dig(cfg, "agent.root")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Имя каталога проекта анонимной зоны: `P` + ровно 4 цифры (D21).
+///
+/// Именно по id, а не по имени проекта: имя проекта само по себе содержит
+/// данные заказчика. Формат совпадает с маршрутом `/mcp/agent/<P>` (TR-4.3).
+pub fn is_agent_project(name: &str) -> bool {
+    match name.strip_prefix('P') {
+        Some(rest) => rest.len() == 4 && rest.chars().all(|c| c.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Корни анонимной зоны: `<agent.root>\P<NNNN>\workspace` (TR-4.1, §4.4).
+///
+/// Берутся только существующие каталоги `P<NNNN>` с непустым `workspace`:
+/// `agent-config` и `agent-state` лежат рядом и корнями не становятся.
+/// Порядок — по имени проекта (детерминированный обход и стабильные тесты).
+pub fn agent_roots(cfg: &Config) -> Vec<Root> {
+    let Some(root) = agent_root(cfg) else {
+        return Vec::new();
+    };
+    let base = std::path::Path::new(&root);
+    let mut projects: Vec<String> = match std::fs::read_dir(base) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
+            .filter(|name| is_agent_project(name))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    projects.sort();
+    let mut out = Vec::new();
+    for project in projects {
+        let ws = base.join(&project).join("workspace");
+        if !ws.is_dir() {
+            continue;
+        }
+        out.push(Root {
+            path: ws.to_string_lossy().to_string(),
+            project,
+        });
+    }
+    out
+}
+
+/// Эффективные корни индексации: при `agent.enabled` — только
+/// `<agent.root>\P<NNNN>\workspace` (TR-4.1), иначе `index.roots`.
+///
+/// Это единственная точка, где режим агента меняет состав корней: её
+/// используют индексатор, watcher, UI и `index_status`.
+pub fn effective_roots(cfg: &Config) -> Vec<Root> {
+    if agent_enabled(cfg) {
+        agent_roots(cfg)
+    } else {
+        roots_from_cfg(cfg)
+    }
 }
