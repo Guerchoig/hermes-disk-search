@@ -1,6 +1,11 @@
 //! FTS-ветка поиска — порт `hds/search.py`: токены запроса, лемматизация тем же
 //! способом, что и `chunks_fts` (через `Lemmatizer`), AND→OR с префиксом хвоста.
+//!
+//! Метки анонимной зоны (TR-4.6): `[PERSON_3]` в запросе нормализуется в единый
+//! токен `xperson3x` — ровно так же, как при индексации (`pipeline::commit_file`).
+//! Лемматизатору токен метки не отдаётся: морфологии в нём нет.
 
+use hds_core::labels::split_labels;
 use hds_index::Lemmatizer;
 use rusqlite::Connection;
 
@@ -45,13 +50,21 @@ pub fn lemmatize_token(lem: &dyn Lemmatizer, token: &str) -> String {
     }
 }
 
-/// `_fts_tokens`: леммы первых 12 токенов запроса.
+/// `_fts_tokens`: леммы первых 12 токенов запроса + токены найденных меток.
+///
+/// Метки (`[PERSON_3]`, `[PERSON_3|дат]`) идут отдельными готовыми токенами
+/// (`xperson3x`), остальной текст — обычным путём через лемматизатор. Порядок:
+/// сначала метки, затем слова запроса — так «что поручено [PERSON_3]» ищется и
+/// по метке, и по смыслу.
 pub fn fts_tokens(lem: &dyn Lemmatizer, q: &str) -> Vec<String> {
-    find_tokens(q)
-        .into_iter()
-        .take(12)
-        .map(|t| lemmatize_token(lem, &t))
-        .collect()
+    let (plain, mut tokens) = split_labels(q);
+    tokens.extend(
+        find_tokens(&plain)
+            .into_iter()
+            .take(12)
+            .map(|t| lemmatize_token(lem, &t)),
+    );
+    tokens
 }
 
 /// `_quoted`: `"token"` с удвоением кавычек внутри.

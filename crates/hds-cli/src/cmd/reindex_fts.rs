@@ -8,23 +8,41 @@
 
 use hds_core::config::project_root;
 use hds_core::error::{CoreError, Result};
+use hds_core::labels::split_labels;
 use hds_index::Lemmatizer;
 
 use crate::support::{build_sidecar, now_epoch, open_conn};
 
 /// Вставка батча лемматизированных текстов в `chunks_fts`; увеличивает счётчик `n`.
+///
+/// Метки проекта (TR-4.6) в лемматизатор не отдаются — вместо них в FTS-текст
+/// дописывается единый токен (`[PERSON_3]`/`[PERSON_3|дат]` → `xperson3x`),
+/// иначе перестройка FTS «потеряла» бы поиск по меткам у уже собранных баз.
 fn flush(
     conn: &rusqlite::Connection,
     lemmatizer: &dyn Lemmatizer,
     items: &[(i64, String)],
     n: &mut u64,
 ) -> Result<()> {
-    let texts: Vec<String> = items.iter().map(|(_, t)| t.clone()).collect();
+    let mut texts: Vec<String> = Vec::with_capacity(items.len());
+    let mut labels: Vec<Vec<String>> = Vec::with_capacity(items.len());
+    for (_, t) in items {
+        let (plain, toks) = split_labels(t);
+        texts.push(plain);
+        labels.push(toks);
+    }
     let norm = lemmatizer.normalize_many(&texts)?;
-    for ((cid, _), ft) in items.iter().zip(norm.iter()) {
+    for (((cid, _), ft), toks) in items.iter().zip(norm.iter()).zip(labels.iter()) {
+        let mut text = ft.clone();
+        for t in toks {
+            if !text.is_empty() {
+                text.push(' ');
+            }
+            text.push_str(t);
+        }
         conn.execute(
             "INSERT INTO chunks_fts(rowid, text) VALUES(?1, ?2)",
-            rusqlite::params![cid, ft],
+            rusqlite::params![cid, text],
         )?;
     }
     *n += items.len() as u64;

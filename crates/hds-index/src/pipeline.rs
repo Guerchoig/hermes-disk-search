@@ -19,6 +19,7 @@ use std::time::Duration;
 
 use hds_core::config::{dig, project_root, Config};
 use hds_core::error::Result;
+use hds_core::labels::split_labels;
 use hds_core::roots::{effective_roots as cfg_effective_roots, project_for_path};
 use hds_core::{db, EMB_CONTEXT};
 use serde_json::{json, Value};
@@ -434,8 +435,18 @@ pub fn commit_file(
         }
     }
 
-    // FTS-текст (лемматизированный) — батчем, результат тот же, что в Python по одному
-    let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
+    // FTS-текст (лемматизированный) — батчем, результат тот же, что в Python по
+    // одному. Метки проекта (TR-4.6) в лемматизатор не отдаются: он разобрал бы
+    // `[PERSON_3]` как `person` + `3`. Вместо них в FTS-текст чанка дописывается
+    // единый токен `xperson3x`; текст чанка (`chunks.text`) и векторная ветка
+    // получают исходный текст с метками как есть.
+    let mut texts: Vec<String> = Vec::with_capacity(total);
+    let mut label_tokens: Vec<Vec<String>> = Vec::with_capacity(total);
+    for c in chunks {
+        let (plain, tokens) = split_labels(&c.text);
+        texts.push(plain);
+        label_tokens.push(tokens);
+    }
     let fts = match lemmatizer.normalize_many(&texts) {
         Ok(f) => f,
         Err(e) => {
@@ -447,7 +458,13 @@ pub fn commit_file(
 
     db::delete_file_data(conn, fid)?;
     for (i, c) in chunks.iter().enumerate() {
-        let fts_i = fts.get(i).cloned().unwrap_or_default();
+        let mut fts_i = fts.get(i).cloned().unwrap_or_default();
+        for t in label_tokens.get(i).map(|v| v.as_slice()).unwrap_or(&[]) {
+            if !fts_i.is_empty() {
+                fts_i.push(' ');
+            }
+            fts_i.push_str(t);
+        }
         let cid = db::add_chunk(
             conn, fid, i as i64, c.page, c.t_start, c.t_end, &c.text, &fts_i,
         )?;

@@ -39,40 +39,17 @@ pub fn out_path(in_path: &Path, out_dir: &Path, mode: Mode) -> PathBuf {
 /// Синтаксис метки (TR-1.4) — единый для Python и Rust:
 /// `\[([A-Z_]+)_(\d+)(?:\|([а-яё,]+))?\]`, то есть `[PERSON_3]` или
 /// `[PERSON_3|дат]` / `[PERSON_3|род,мн]`.
-pub const LABEL_PATTERN: &str = r"\[([A-Z_]+)_(\d+)(?:\|([а-яё,]+))?\]";
-
-/// Разобрать метку: `"[PERSON_3|дат]"` → `("PERSON", 3, Some("дат"))`.
 ///
-/// Ручной разбор (без `regex`): формат фиксированный, а метки приходят в
-/// событиях агента часто — разбор должен быть дешёвым и без паники.
-pub fn label_parts(token: &str) -> Option<(String, u32, Option<String>)> {
-    let inner = token.strip_prefix('[')?.strip_suffix(']')?;
-    let (body, suffix) = match inner.split_once('|') {
-        Some((body, suffix)) if !suffix.is_empty() => (body, Some(suffix.to_string())),
-        Some(_) => return None,
-        None => (inner, None),
-    };
-    let (kind, number) = body.rsplit_once('_')?;
-    if kind.is_empty() || !kind.chars().all(|c| c.is_ascii_uppercase() || c == '_') {
-        return None;
-    }
-    let number: u32 = number.parse().ok()?;
-    if let Some(suffix) = &suffix {
-        // суффикс — русские строчные буквы и запятая: «дат», «род,мн»
-        if !suffix
-            .chars()
-            .all(|c| (c.is_alphabetic() && !c.is_ascii()) || c == ',')
-        {
-            return None;
-        }
-    }
-    Some((kind.to_string(), number, suffix))
-}
+/// Реализация живёт в [`hds_core::labels`] (её же использует индекс: метка
+/// должна быть одним словом в FTS, TR-4.6) — здесь только реэкспорт, чтобы у
+/// разбора не появилось второго варианта.
+pub use hds_core::labels::LABEL_PATTERN;
 
 /// Является ли строка меткой проекта (TR-1.4).
-pub fn is_label(token: &str) -> bool {
-    label_parts(token).is_some()
-}
+pub use hds_core::labels::is_label;
+
+/// Разобрать метку: `"[PERSON_3|дат]"` → `("PERSON", 3, Some("дат"))`.
+pub use hds_core::labels::label_parts;
 
 /// Ответ `hello` воркера (форматы — для пофайлового обхода папки, §3).
 #[derive(Debug, Clone, Default, PartialEq)]

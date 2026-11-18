@@ -30,6 +30,7 @@ pub mod config;
 pub mod db;
 pub mod error;
 pub mod http;
+pub mod labels;
 pub mod net;
 pub mod queue;
 pub mod ratelimit;
@@ -51,6 +52,7 @@ pub use config::{
 };
 pub use db::{connect, has_vec, vec_ok, DbError, FileRow, Stats};
 pub use error::{CoreError, Result};
+pub use labels::{fts_token, is_label, label_parts, normalize_labels, split_labels, LABEL_PATTERN};
 pub use net::{real_client_ip, request_scheme, trusted_proxy};
 pub use queue::{HeavyQueue, QueueConfig, QueuePolicy, QueueReject, QueueStats, QueueTicket};
 pub use roots::{
