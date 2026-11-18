@@ -56,6 +56,19 @@ index:
 # путь к индексной БД; относительный путь считается от корня проекта
 db_path: 'index.db'
 
+# --- Анонимная зона агента (D9, PLAN_AGENT_PRIVACY_ZONE.md §5.4) ---
+# При `enabled: true` индексатор (hds index/hds watch) ИГНОРИРУЕТ index.roots и
+# индексирует только `<root>\P<NNNN>\workspace`; каждый каталог P0001 становится
+# проектом индекса с тем же именем (TR-4.1). Служебные `agent-config` и
+# `agent-state` исключены неявно, страница настроек показывает «корни заданы
+# агентом» и не даёт их менять.
+# Порядок перехода: включить режим → `hds agent init` (сброс индекса и первичное
+# построение, TR-4.2) → `hds agent token P0001` (токен маршрута /mcp/agent/P0001).
+# Внимание: прежний индекс (по index.roots) при этом удаляется (D9).
+agent:
+  enabled: false            # true — поиск только по анонимной зоне
+  root: 'D:\hds-anon'       # корень зоны: P0001\workspace, P0001\agent-config, …
+
 # --- БД под конкурентность (M4, PLAN_M4_CONCURRENCY_SLA.md §3.4) ---
 # Дефолты по профилю: server — busy_timeout 5000, read_only_conns true;
 # desktop — 30000/false (прежнее поведение). Читатели (MCP/UI/CLI-поиск) при
