@@ -59,7 +59,8 @@ pub struct RunOptions {
 }
 
 impl RunOptions {
-    /// Значения по умолчанию: 12 итераций, суб-агенты — из конфига (позже).
+    /// Значения по умолчанию: 12 итераций, суб-агенты выключены (TR-3.7;
+    /// `agent.subagents` в конфиге включает их и без флага).
     pub fn new(prompt: Option<String>) -> RunOptions {
         RunOptions {
             prompt,

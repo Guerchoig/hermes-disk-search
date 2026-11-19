@@ -11,7 +11,8 @@
 >
 > **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
 > `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test); A3.2 — `6ef028af` (feat),
-> `8204e384` (test) плюс docs-коммит с этим файлом. Дерево чистое, push не делался.
+> `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test) плюс docs-коммит с этим
+> файлом. Дерево чистое, push не делался.
 
 ## 1. Что уже сделано и проверено (A3.0, A3.1)
 
@@ -133,6 +134,33 @@
 * `send` без Python-клиента отказывает (`GatewayError::Anonymize`), `send_anonymized`
   отправляет уже обезличенный текст — этот режим (egress-only) нужен стендам и тестам.
 
+### 1.3. A3.3: точка входа CLI (подтверждено фактом)
+
+`cargo test -p hds-cli --test agent_run` — 3 теста, ≈ 3 с (весь воркспейс — 737 тестов,
+было 733; 0 падений). Стенд: `HDS_ROOT` = временный каталог, mock-провайдер, mock-воркер
+анонимизации `crates/hds-anonymize/tests/mock_worker.py`, настоящий `dist/worker.mjs`.
+
+* `hds agent project add P0001 --name … --path DIR [--provider …] [--model …]` пишет
+  `data\agent\projects.json` (путь — из `state_dir`, в тестах `HDS_ROOT`); `project list`
+  и `list --json` печатают реестр (проверено через сам бинарь `hds`);
+* `hds agent run --project P --dry-run` печатает план (JSON) и не запускает ни Node, ни
+  Python: каталоги `workspace|agent-config|agent-state`, node (`agent.node.path` →
+  `sidecar/node` → PATH), `dist/worker.mjs`, провайдер/модель/base_url, файл MCP, фильтр;
+  ключа провайдера и токена проекта в плане нет; `plan()` ничего не создаёт на диске;
+* `agent run` собирает сессию: `env::prepare_dirs`, `rules::write_rules` (privacy.md,
+  1c-domain.md), `mcp::write_settings` (маршрут `/mcp/agent/P0001`), снимок vault через
+  `Client::snapshot`, `Filter` со снимком и `secret_strings`, `env::build`,
+  `Gateway::spawn` → `hello` → `open` → `send`;
+* на mock-провайдере: реплика с «Иванов Иван» ушла модели меткой `[PERSON_1]` (провайдер
+  значения не получил), ответ деанонимизирован («Готово: Иванов Иван прочитан.»),
+  срабатывание фильтра на теле запроса с содержимым файла видно событием `redacted`,
+  успех — по `turn_end {ok: true}`, `tools` содержит `read_files`;
+* ключ провайдера не появился ни в одном файле `agent-config`/`agent-state` (только
+  `secrets.json`); сессии SDK — в `agent-state\.cline\data\sessions`;
+* `run` без `--project` → код 2, неизвестный проект → код 1; `--quiet` печатает только
+  текст ответа, `--json` — NDJSON-события;
+* срабатывания фильтра уходят в журнал `audit.enabled` (desktop-профиль — выключен).
+
 **Ещё НЕ написано:**
 
 * подключение `hds-agent` в `hds-cli` и сборка сессии из конфига;
@@ -150,7 +178,7 @@
 |---|---|---|---|
 | **A3.1** | **Воркер: TR-3.10 на Node-стенде** | **Закрыт.** `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` (карта — §1.1) | закрыт |
 | A3.2 | Rust ↔ настоящий воркер | **Закрыт.** `cargo test -p hds-agent`: интеграционный `tests/gateway_worker.rs` (56 тестов всего): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений; fail-closed = 0 запросов к провайдеру | закрыт |
-| A3.3 | Точка входа CLI | `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль. Тест CLI на mock-провайдере | ~1 чат |
+| A3.3 | Точка входа CLI | **Закрыт.** `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …] [--dry-run]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль (human / `--json` / `--quiet`). Тесты на mock-провайдере — `crates/hds-cli/tests/agent_run.rs` | закрыт |
 | A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем | ~1 чат |
 | A3.5 | Установщик | `installers/build_agent_sidecar.ps1` (портативный Node без пробелов в пути → `sidecar/node/`, `npm ci --omit=dev` по lock, сборка `dist/`, `-SelfTest` = `hello`); образец — `build_anonymize_sidecar.ps1`, `sidecar_common.ps1` | ~0,5 чата |
 | A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
@@ -167,7 +195,8 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 | A3.0 | закрыт 19.11.2026 | `f10a92e8`, `a8dc5b51` | см. §1 |
 | A3.1 | закрыт 19.11.2026 | `2efe8043` (fix), `8e26d0f3` (test) | `npm test` 23/23, ≈ 39 с; карта тестов — §1.1; находки — §4 п.7–12; `Gateway::open` поправить в A3.2 (§4 п.1) |
 | A3.2 | закрыт 19.11.2026 | `6ef028af` (feat), `8204e384` (test) | `cargo test -p hds-agent` = 56 тестов (54 unit + 2 интеграционных), `cargo fmt --check` и `clippy --workspace -D warnings` чистые; факты — §1.2, находки — §4 п.1–3 и 13–16 |
-| A3.3 | следующий | — | CLI: `Gateway::spawn` с Python-клиентом (egress-only — только стенды), успех хода — по `TurnEnd`, `Redacted` — в предупреждения |
+| A3.3 | закрыт 19.11.2026 | `be72b01d` (feat), `74d1aacb` (test) | `cargo test -p hds-cli --test agent_run` = 3 теста, весь воркспейс 737/737; факты — §1.3, находки — §4 п.17–22 |
+| A3.4 | следующий | — | Жизненный цикл: переиспользовать `agent_run::{plan_with, open_client, run}`; CLI `run` перевести на реестр живых процессов; учесть `HDS_ROOT` = и state_dir, и корень поставки (§4 п.18) |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -242,6 +271,31 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 16. **A3.2: интеграционные тесты идут параллельно в одном процессе** — `process::id()` у них
     общий, общий временный каталог приводил к падению (один тест удалял каталог другого).
     Каталог должен включать счётчик (`AtomicU32`), не только pid.
+17. **A3.3: границы CLI-прогона.** `hds agent run` — один проект и один ход на процесс;
+    реестр живых процессов, `max_live_projects`, `idle_unload_min` и возобновление
+    (`initialMessages`) — A3.4. `ask_user` пока `NoAskUser` (модель получает понятный отказ):
+    вопросы пользователю появятся с вкладкой (A5). События печатаются в консоль, `--json` —
+    NDJSON (тот же поток пойдёт в UI).
+18. **A3.3: `HDS_ROOT` переопределяет и `state_dir`, и `project_root()`** (корень поставки:
+    `sidecar/`, портативный Node, Python-воркер). Для изоляции тестов это конфликт: данные
+    хочется в temp, а `dist/worker.mjs` — из репозитория. Поэтому добавлен
+    `agent_run::plan_with(cfg, project, opts, sidecar_root)`; `plan()` = `plan_with(..., &project_root())`.
+    **A3.4/A3.6:** если понадобится развести их в бою — отдельный ключ конфига, а не
+    перегрузка `HDS_ROOT`.
+19. **A3.3: `open_client` создаёт `agent-state` до старта воркера** — иначе `stderr_log`
+    внутри ещё не созданного каталога валит spawn (`os error 3`). `HDS_ANONYMIZE_WORKER`
+    подменяет скрипт воркера анонимизации: диагностика и тесты (стенд проверяет проводку
+    на `crates/hds-anonymize/tests/mock_worker.py`, не поднимая NER-модели). В продукте
+    переменная не задаётся.
+20. **A3.3: `Secrets::provider_for` требует `projects.<P>.provider` в `secrets.json`**, а
+    провайдер/модель A3.3 читает из реестра `projects.json` (TR-8.1). Добавлен
+    `Secrets::provider(name)` — ключ по имени провайдера; `provider_for` оставлен для A2-схемы.
+21. **A3.3: аудит срабатываний фильтра** — `Audit::from_config` (`audit.enabled`; desktop —
+    выключен, desktop-стенды журнал не пишут; на сервере включён по умолчанию). При приёмке
+    A3.6 учитывать профиль: «аудит есть» проверять с `audit.enabled: true`.
+22. **A3.3: `--dry-run` не создаёт каталоги и не запускает процессы** (план печатается до
+    `prepare`): это же точка для A5 — вкладка показывает план до старта воркера. Ключ
+    провайдера и токен проекта в план не попадают (проверяется тестом).
 
 
 
