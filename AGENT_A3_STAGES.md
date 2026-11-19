@@ -286,15 +286,16 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
   бэкапы `.bak` на месте;
 * **профиль `%USERPROFILE%\.cline`** до и после прогона совпадает (путь, размер, mtime).
 
-**Ещё НЕ сделано в фазе A3** (после A3.6):
+**Ещё НЕ сделано в фазе A3** (после A3.6) — всё это подэтап A3.7, чеклист в §6.6:
 
-* документация A3 (`sidecar/README.md`, раздел `README.md`, `RELEASE_NOTES`; A3.7);
-* подключение установщика к релизной сборке (`build_rust_release.ps1`, `install_server.ps1`) и
-  `hds check` про портативный Node — A3.7/A6 (§4 п.32);
+* документация: `sidecar/README.md` (Node-воркер), раздел в `README.md`, `RELEASE_NOTES_0.25.0.md`
+  «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`;
+* подключение `build_agent_sidecar.ps1` к релизной сборке (`build_rust_release.ps1` и macOS),
+  решение по `install_server.ps1` и `hds check` (§4 п.37);
 * стоп-точка «1c-buddy под подменённым HOME» не проверялась: в приёмке сервер выключен
   (`agent.mcp.onec_buddy.enabled: false`), `tavily`-заглушка под подменённым HOME работает;
-* долг A3.4: реестр `AgentRegistry` не подключён к CLI-прогону (один проект на процесс) и
-  не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
+* долг A3.4 (вне A3): реестр `AgentRegistry` не подключён к CLI-прогону (один проект на
+  процесс) и не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
 
 ## 2. Под-этапы (остаток A3)
 
@@ -310,7 +311,7 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 | A3.4 | Жизненный цикл (TR-3.9) | **Закрыт.** Реестр `AgentRegistry` в `hds-agent`: `max_live`/`idle` из `AgentSettings` (В-16: 2 и 30 мин), LRU-выгрузка (процесс завершён), переиспользование процесса на повторный `get_or_open`, переоткрытие упавшего воркера, `reap_idle` по параметру времени. Возобновление `session_id + initialMessages` (`history::read_messages`) — прошлая реплика в первом запросе модели; `session_id` без истории её не грузит. «Очистить историю» end-to-end (`Gateway::clear_history`, бэкапы `.json.bak`). CLI: `run --session`, `history clear [--session]`. Факты — §1.4, находки — §4 п.23–28 | закрыт |
 | A3.5 | Установщик | **Закрыт.** `installers/build_agent_sidecar.ps1`: портативный Node из `runtime-manifests/node-manifest.json` (v24.18.0, официальные sha256) → `sidecar\node` без пробелов (`-NodeSource` — копия существующей установки, офлайн), `npm ci` по lock, сборка `dist\worker.mjs`, `npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` + `tavily-mcp`. Факты — §1.5, находки — §4 п.29–32 | закрыт |
 | A3.6 | Приёмка A3 (e2e) | **Закрыт.** `crates/hds-cli/tests/agent_acceptance.rs`: образ → `office_read` (настоящий Python-воркер в режиме `HDS_A36_REAL_ANON=1`), `disk-search__search_local_files` через живой `hds mcp --http` (`/mcp/agent/P0001`), заглушка `tavily` (`mcp_out`/`mcp_in`), запись `ответ.md` в workspace; I2/I7, профиль `%USERPROFILE%\.cline` не изменён, `run --session`, `history clear`. Факты — §1.6, находки — §4 п.33–37 | закрыт |
-| A3.7 | Документация и закрытие | `sidecar/README.md`, раздел в `README.md`, `RELEASE_NOTES` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`; полный набор проверок (§5 карты); вопросы В-12…В-16 владельцу | ~0,5 чата |
+| A3.7 | Документация и закрытие | `sidecar/README.md` (Node-воркер: сборка, протокол, установщик, тесты), раздел в `README.md` (включение, команды, что уходит/не уходит наружу, ограничения), `RELEASE_NOTES_0.25.0.md` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md` (§5 критерии, §8 В-12…В-16), подключение `build_agent_sidecar.ps1` к `build_rust_release.ps1` (+ macos) и решение по `install_server.ps1`/`hds check`; полный набор проверок §5 карты. **Промт — §7**, чеклист — §6.6 | ~0,5 чата |
 
 Зависимости: A3.1 и A3.2 независимы (A3.1 первым — он проверяет допущения о SDK, на которые
 опирается всё остальное). A3.3 ← A3.2; A3.4 ← A3.3; A3.5 независим и закрыт; **A3.6 ← A3.3 +
@@ -778,100 +779,145 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidec
 | образцы тестов | `crates/hds-agent/tests/gateway_worker.rs`, `crates/hds-agent/tests/lifecycle_worker.rs`, `crates/hds-cli/tests/agent_run.rs` |
 | Node-воркер и его тесты | `sidecar/hds_agent/src/*.ts`, `sidecar/hds_agent/test/*.test.mjs` |
 
-## 7. Промт для A3.4 (выполнен; оставлен для истории)
+### 6.6. Что осталось к A3.7 (чеклист «документация и закрытие фазы»)
+
+Код A3 закрыт (A3.1…A3.6), приёмка зелёная. A3.7 — документация и интеграция установщика;
+новой логики агента не пишется, но полный набор проверок §5 карты прогоняется целиком.
+
+| Что | Где | Что отразить (факты из §1.2–1.6) |
+|---|---|---|
+| Node-воркер | `sidecar/README.md` (159 строк, сейчас только про Python-sidecar) | сборка `npm ci` + `npm run build` → `dist/worker.mjs` (163 KiB, esbuild ESM, `--packages=external`), Node ≥ 22.18; протокол §4.3 (`hello/start/send/abort/stop/shutdown`, события, `host_call` с префиксом `h`); `npm test` = 23/23 (`node --test`); установка `installers/build_agent_sidecar.ps1` (манифест `runtime-manifests/node-manifest.json` v24.18.0, `-SelfTest`, `-NodeSource` для офлайна); в поставке остаются только runtime-зависимости (`npm prune --omit=dev`: `@cline/sdk`, `tavily-mcp`), dev — нет |
+| Раздел README | `README.md`: новый раздел после §19 «Анонимизация документов» (перед §20 «Что ещё почитать») | что такое агент в анонимной зоне и чем отличается от чата; включение (`agent.enabled`, `agent.root`, ключ провайдера — **только** `data/agent/secrets.json`); команды `hds agent project add|list`, `run [--session] [--prompt] [--dry-run] [--json]`, `history clear`; что уходит наружу (метки, не значения; ключи блокируют запрос) и что не читается (`%USERPROFILE%\.cline`, плагины, `run_commands`, `fetch_web_content`); ограничения: `ask_user` = отказ до вкладки A5, `max_live_projects=2`/`idle_unload_min=30`, реестр процессов к CLI не подключён (один проект на процесс); куда класть `dist/worker.mjs` и портативный Node. Плюс строки в §15 «Перечень команд» и §5 «Что где лежит» (`<agent.root>\P0001\{workspace,agent-config,agent-state}`) |
+| Заметки о выпуске | `RELEASE_NOTES_0.25.0.md` (0.24.0 — фазы A1/A2; номер версии уточнить у владельца) | раздел «Фаза A3»: что нового по TR-3.1…3.10, TR-5.x, TR-6.x; «что качать» (архив Windows; агентский sidecar собирается установщиком/`build_agent_sidecar.ps1`); что проверено и чем (§1.2–1.6, файлы тестов: `gateway_worker.rs`, `lifecycle_worker.rs`, `agent_acceptance.rs`, `npm test`); известные ограничения и открытые вопросы |
+| Статус карты | `AGENT_A3_HANDOFF_PROMPT.md` §5 (критерии) и §8 (В-12…В-16) | отметить `[x]` выполненные пункты со ссылкой на §1.x; по В-12…В-16 зафиксировать фактически принятое: В-12 (OpenRouter + `~deepseek/deepseek-flash-latest` по умолчанию), В-13 `label`, В-14 300 с + fail-closed, В-16 (2 / 30 мин / `egress_log=false`); В-15 (`1c-buddy` копией в поставку) — **не проверено**, вопрос остаётся владельцу |
+| Релизная сборка | `installers/build_rust_release.ps1` (блок `$sidecarDst`, после `build_sidecar.ps1`/копии; параметры `-WithSidecar`, `-SidecarDir`, `-TranscribeProfile`) и `build_rust_release_macos.sh` | собрать агентский воркер в `$sidecarDst` (`build_agent_sidecar.ps1 -OutDir $sidecarDst`), переключатель по образцу `-TranscribeProfile` (предложение: `-AgentSidecar none|portable`, по умолчанию `portable` для Windows-архива); на macOS — аналог или явный `[i]` в логе |
+| Серверный установщик | `installers/install_server.ps1` (блок P5, рядом с `build_transcribe_sidecar.ps1`; флаг `-SkipTranscribeStack`) | решить и записать: серверный профиль агент **не** ставит (desktop-функция) либо ставит по флагу `-WithAgent` со строкой в `$summary`; решение — в этом файле (§4) и в `AGENT_A3_HANDOFF_PROMPT.md` |
+| `hds check` | `crates/hds-cli/src/cmd/check.rs` | пункт «портативный Node / `dist/worker.mjs`»: короткий `warn`, если `agent.enabled`, а воркера нет — по решению владельца A3.7 или A6 (§4 п.37) |
+
+Скрипты `installers/*.ps1` — **ASCII-only** (PowerShell 5.1 читает BOM-less `.ps1` как ANSI);
+.markdown-файлы править `[IO.File]::ReadAllText/WriteAllText` с `UTF8Encoding` (§4 п.32).
+
+## 7. Промт для A3.7 (копировать целиком в новый чат, режим Act)
 
 ```text
-Ты продолжаешь этап A3 («агент в анонимной зоне») проекта hermes-disk-search (hds).
-A3 нарезан на подэтапы A3.1…A3.7 (AGENT_A3_STAGES.md §2): A3.1 (Node-воркер на стенде),
-A3.2 (Rust ↔ настоящий воркер), A3.3 (точка входа CLI) закрыты; ты делаешь
-ПОДЭТАП A3.4 — «Жизненный цикл (TR-3.9)». Он разблокирует A3.6 (приёмка e2e) и вкладку A5.
+Ты закрываешь этап A3 («агент в анонимной зоне») проекта hermes-disk-search (hds), под-этап
+A3.7 — «Документация и закрытие фазы». Код A3 готов и проверен: A3.1…A3.6 закрыты
+(AGENT_A3_STAGES.md §2–§3), приёмка e2e зелёная. Твоя задача — довести фазу до выпуска:
+документация, интеграция установщика в релизную сборку, статус карты и вопросы владельцу.
 
 ГРАНИЦЫ
-* Работаешь в crates/hds-agent (src/, tests/) и в AGENT_A3_STAGES.md. В crates/hds-cli —
-  только то, что нужно для возобновления и очистки истории в `hds agent` (agent.rs,
-  agent_run.rs); новых подкоманд сверх заявленных не добавляешь.
-* Не трогаешь: другие крейты, установщик (A3.5), UI/A5, документацию (A3.7), боевые
-  config.yaml, index.db, data/. Новых зависимостей не добавляешь (node --test/cargo — как есть).
-* Контракты A1/A2 (RPC, маршрут /mcp/agent/<P>, метки в FTS) не ломаешь.
+* Пишешь только в: sidecar/README.md, README.md, RELEASE_NOTES_0.25.0.md (новый),
+  AGENT_A3_HANDOFF_PROMPT.md (разделы статуса, критериев, вопросов), AGENT_A3_STAGES.md,
+  installers/build_rust_release.ps1, installers/build_rust_release_macos.sh,
+  installers/install_server.ps1, crates/hds-cli/src/cmd/check.rs (последний — только если
+  владелец подтвердит, что пункт про Node делаем в A3.7, а не в A6).
+* Не меняешь логику агента (crates/hds-agent, sidecar/hds_agent/src, crates/hds-cli/src/cmd/
+  agent*.rs), контракты A1/A2 (RPC, маршрут /mcp/agent/<P>, метки в FTS), фильтр, guard,
+  fail-closed. Новых зависимостей нет. Боевые config.yaml, index.db, data/ не трогаешь.
+* Коммиты — явным списком путей и с identity:
+  git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit -m '…'.
+  Push не делать.
 
 СНАЧАЛА ПРОЧИТАЙ (файлы репо читай через PowerShell
 [System.IO.File]::ReadAllLines(path, [Text.Encoding]::UTF8): read_files отдаёт пустоту)
-1. AGENT_A3_STAGES.md: §1.1–1.3 (что подтверждено фактом), §2 (нарезка A3), §3 (журнал),
-   §4 (долги и грабли — особенно п.4–7, 13, 16–22), §6 (контекст нового чата), этот промт.
-2. AGENT_A3_HANDOFF_PROMPT.md: §3.9 (TR-3.9 — требования и критерий), §3.13 (протокол §4.3),
-   §6 (грабли), §8 (вопрос В-16).
-3. Код: crates/hds-agent/src/{gateway,worker,history,settings,projects,secrets,lib}.rs,
-   crates/hds-cli/src/cmd/agent_run.rs; образцы тестов —
-   crates/hds-agent/tests/gateway_worker.rs, crates/hds-cli/tests/agent_run.rs.
-Затем покажи короткий план (список тестов и что меняется в src) и начинай.
+1. AGENT_A3_STAGES.md целиком, обязательно: §1.2–1.6 (что доказано и чем), §2 (границы
+   подэтапов), §3 (журнал коммитов), §4 (все находки — там грабли PowerShell, приёмки и
+   фильтра), §6 (§6.6 — твой чеклист), §7 (этот промт).
+2. AGENT_A3_HANDOFF_PROMPT.md: §2.3 (контракты, которые нельзя ломать), §3.1…3.13 (требования
+   TR-3.x/5.x/6.x — нужны точные формулировки для заметок о выпуске), §5 (критерии готовности
+   A3), §8 (В-12…В-16).
+3. RELEASING.md — как выпускается релиз: что кладётся в архив, как называются заметки, какие
+   проверки обязательны; RELEASE_NOTES_0.24.0.md — образец оформления «Фазы A1/A2».
+4. README.md — §5 «Что где лежит», §15 «Перечень команд», §19 «Анонимизация документов»,
+   §20 «Что ещё почитать» (новый раздел встаёт между §19 и §20). sidecar/README.md — что там
+   уже сказано про Python-sidecar, чтобы встроить Node-воркер в тот же тон и структуру.
+5. Код и скрипты — только читать, для точности: crates/hds-cli/src/cmd/agent.rs (usage),
+   agent_run.rs (plan_json, команды, TurnReport), crates/hds-agent/src/{registry,gateway,
+   history}.rs, sidecar/hds_agent/src/worker.ts, installers/build_agent_sidecar.ps1,
+   runtime-manifests/node-manifest.json, installers/build_rust_release.ps1 (блок $sidecarDst),
+   installers/install_server.ps1 (блок P5), crates/hds-cli/src/cmd/check.rs.
+Затем покажи короткий план (какие файлы и что именно меняешь) и начинай.
 
 СТАРТ
-* git --no-pager status: ветка agent-privacy-zone, HEAD — docs-коммит A3.3 (76661a7a) или
-  новее, дерево чистое. Чужие правки не трогать; если мешают — остановись и спроси.
-* Прогони до работы: cargo test -p hds-agent; cargo test -p hds-cli --test agent_run;
-  (cd sidecar/hds_agent; npm test) — всё зелёное (737 тестов в воркспейсе на срезе).
+* git --no-pager status: ветка agent-privacy-zone, HEAD ≥ ec296ee6, дерево чистое. Чужие
+  правки не трогать; если мешают — остановись и спроси.
+* Прогони до работы (всё должно быть зелёным): cargo test --workspace -- --test-threads=4;
+  (cd sidecar/hds_agent; npm test); cargo fmt --all --check;
+  cargo clippy --workspace --all-targets -- -D warnings.
 
-ЗАДАЧА: тесты на `node --test`/`cargo test` без новых зависимостей. Каждый тест — отдельный
-проверяемый факт. Сначала тест; красный — правишь src.
- 1. Реестр живых проектов. Новый модуль crates/hds-agent/src/registry.rs (+ экспорт в lib.rs).
-    `AgentRegistry::new(max_live: usize, idle: Duration)`; значения по умолчанию берутся из
-    AgentSettings (`agent.max_live_projects` = 2, `agent.idle_unload_min` = 30 мин). Реестр
-    хранит по проекту (`P0001`) живой `Gateway` (один процесс = один проект) и метку
-    последнего использования. API: `get_or_open(project, now, spawn_fn)`,
-    `get_mut(project)`, `touch(project, now)`, `unload(project)`, `reap_idle(now) ->
-    Vec<String>`, `live() -> Vec<(String, Instant)>`. Выгрузка = `Gateway::stop()` +
-    `Gateway::shutdown()` (дождаться выхода, у Worker это ≤ 5 с), запись реестра удаляется.
-    Время передаётся параметром — без фоновых потоков и без «спящих» тестов.
- 2. `max_live`: при `max_live = 1` открытие второго проекта выгружает первый (его процесс
-    завершён — `Gateway::is_closed()`/PID недоступен, запись ушла); при `max_live = 2` оба живы.
-    Выбор жертвы — LRU по `last_used`.
- 3. Переиспользование: повторный `get_or_open` того же проекта НЕ перезапускает процесс
-    (PID тот же, второго `start` нет); повторного `initialMessages` при переиспользовании
-    не передаётся. Параллельные ходы — домен UI: реестр отдаёт `&mut Gateway`.
- 4. Простой: `reap_idle(now)` выгружает проекты, бездействовавшие дольше `idle`, и не трогает
-    свежие; после выгрузки проект открывается заново.
- 5. Возобновление после перезапуска hds: `start` с тем же `session_id` И `initialMessages`
-    (из `history::read_messages(state_dir, id)`) — на настоящем воркере первый запрос к модели
-    содержит прошлую реплику; `session_id` без `initialMessages` историю не грузит (регресс A0
-    §3.6 зафиксировать тестом).
- 6. «Очистить историю» end-to-end: остановить сессию → `Gateway::clear_history()` (перезапись
-    файлов сессии словарём, бэкапы `.json.bak`) → `start` с тем же id и `initialMessages` из
-    очищенных файлов → маркера значения в файлах нет, метка на месте, в первом запросе к модели
-    — метка. Ошибки: нет файла истории → понятная ошибка (код 1 в CLI).
- 7. CLI (минимум, по образцу agent_run.rs): `hds agent run --project P --session <id>`
-    возобновляет сессию (session_id + read_messages; история читается из `agent-state`);
-    `hds agent history clear --project P [--session <id>]` — чистка истории (печатает число
-    замен и пути бэкапов; `--session` не задан — берётся последняя сессия из
-    `<state>\.cline\data\sessions`, иначе понятная ошибка). Коды возврата: 0 — успех,
-    1 — нет истории/сбой, 2 — использование.
- 8. Документация: §1.4 (что подтверждено фактом), §3 (A3.4 закрыт + коммиты), §4 (находки;
-    что осталось для UI/сервиса), при необходимости уточни A3.5/A3.6.
+ЗАДАЧА (итог — чеклист §6.6; каждый пункт заканчивается коммитом и видимой проверкой)
+1. sidecar/README.md: раздел про Node-воркер `hds_agent` — сборка (`npm ci`, `npm run build` →
+   `dist/worker.mjs`), протокол §4.3, установка (`installers/build_agent_sidecar.ps1`,
+   `-SelfTest`, `-NodeSource` для офлайна, манифест `runtime-manifests/node-manifest.json`),
+   что остаётся в поставке (`@cline/sdk`, `tavily-mcp`; dev-зависимости срезает
+   `npm prune --omit=dev`), `npm test` = 23/23.
+2. README.md: новый раздел «ИИ-агент в анонимной зоне» между §19 и §20 плюс строки в §15
+   «Перечень команд» и §5 «Что где лежит». Обязательно: включение (`agent.enabled`,
+   `agent.root`), ключ провайдера только в `data/agent/secrets.json`, команды
+   `project add|list` / `run [--session] [--dry-run] [--json]` / `history clear`, что уходит
+   наружу (метки, не значения; ключ в тексте блокирует запрос), что не читается (реальный
+   `%USERPROFILE%\.cline`, плагины, `run_commands`, `fetch_web_content`), ограничения
+   (`ask_user` — отказ до вкладки A5; реестр процессов к CLI не подключён;
+   `max_live_projects=2`, `idle_unload_min=30`), где лежат файлы агента
+   (`<agent.root>\P0001\{workspace,agent-config,agent-state}`).
+3. RELEASE_NOTES_0.25.0.md: раздел «Фаза A3» по образцу 0.24.0 — что нового (TR-3.1…3.10,
+   TR-5.x, TR-6.x), таблица «что качать», что и чем проверено (файлы тестов из §1.2–1.6),
+   ограничения и открытые вопросы. Номер версии и дату уточни у владельца, если не очевидны.
+4. AGENT_A3_HANDOFF_PROMPT.md: §5 — отметить выполненные критерии `[x]` со ссылкой на §1.x;
+   §8 — фактически принятые ответы по В-12…В-16 и что осталось владельцу (В-15 «1c-buddy»;
+   «стоп-точка не проверялась» из §4 п.37).
+5. Релизная сборка: в installers/build_rust_release.ps1 собрать агентский воркер в
+   `$sidecarDst` (`build_agent_sidecar.ps1 -OutDir $sidecarDst`) под переключателем по образцу
+   `-TranscribeProfile` (предложение: `-AgentSidecar none|portable`); в
+   build_rust_release_macos.sh — аналог или явное «[i] не собирается» в логе. Скрипты —
+   ASCII-only.
+6. installers/install_server.ps1: решение по серверному профилю (агент не ставим —
+   desktop-функция, либо `-WithAgent`) со строкой в `$summary`; решение и причина —
+   в AGENT_A3_STAGES.md §4.
+7. Проверка интеграции (лог в tools/parity/out/, каталог гитигнорится):
+   powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_rust_release.ps1 `
+       -Version 0.0.0-a37 -SkipBuild -SkipZip        # только staging, без zip
+   Ожидаемо: `dist\hds-0.0.0-a37-windows-x64\sidecar\hds_agent\dist\worker.mjs`,
+   `sidecar\node\node.exe`, в `node_modules` нет `esbuild`/`typescript`; затем удали
+   dist-каталог. Если `-SkipBuild`/staging упрётся в занятый `llm_host.exe` — освободи
+   (dev-машина: резидент можно остановить) и верни его после прогона.
+8. AGENT_A3_STAGES.md: §1.7 (что сделано в A3.7), §2 (A3.7 закрыт), §3 (коммиты), §4 (находки
+   релизной интеграции), §6 — контекст следующей фазы (A5, вкладка UI): что для неё готово
+   (`AgentRegistry`, `Gateway::session_id`, `RunOptions.session`, `TurnReport`, NDJSON-события
+   `session`/`prompt`/`redacted`/`agent`/`turn_end`).
 
 ПРАВИЛА
-* Guard/фильтр/fail-closed не ослаблять; хуки не бросают исключений; таймаут guard (2 с) не менять.
-* Тесты быстрые: реестр — на Node-заглушке (крошечный скрипт в тесте, как ECHO_WORKER в
-  worker.rs; пишет свой PID и полученные команды в файл), плюс ОДИН тест на настоящем
-  `dist/worker.mjs` с mock-провайдером (образец — gateway_worker.rs). Весь
-  `cargo test -p hds-agent` ≤ 60 с, `cargo test --workspace` ≤ 3 мин.
-* Временные каталоги — `os.tmpdir()` + pid + счётчик (AtomicU32): тесты идут параллельно.
-* Env в тестах CLI (`HDS_ROOT`, `HDS_CONFIG`, `HDS_AGENT_SECRETS`, `HDS_ANONYMIZE_WORKER`) —
-  под мьютекс и с восстановлением.
-* Боевые config.yaml, index.db, data/ не трогать; артефакты — tools/parity/out/ (гитигнорится).
-* Пути к node/скрипту чистить от `\\?\` перед передачей в Node (§4 п.13).
-* git — всегда с `--no-pager`; коммиты явным списком путей и с identity:
-  git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit -m '…'
-* Длинные прогоны — Start-Job + Wait-Job -Timeout, лог в tools/parity/out/.
-* Редактор: ≤ 6000 символов на вызов, большие файлы — кусками.
+* `installers/*.ps1` — ASCII-only (PowerShell 5.1 читает BOM-less `.ps1` как ANSI); `.md`
+  править `[IO.File]::ReadAllText/WriteAllText` с `UTF8Encoding` — `Get-Content | Set-Content`
+  в PS 5.1 портит кириллицу (§4 п.32).
+* git всегда с `--no-pager`; длинные прогоны — `Start-Job` + `Wait-Job -Timeout`, лог в
+  `tools/parity/out/`. Артефакты (`dist`, `sidecar/node`, деревья поставки) за собой убирать.
+* В документации не обещать того, чего нет: `ask_user` = отказ до A5; реестр процессов к CLI
+  не подключён; `1c-buddy` не проверен; аудит срабатываний фильтра на desktop выключен
+  (`audit.enabled: false` — включать в примерах явно).
+* Значения PII в документацию не попадают: примеры — только метки (`[PERSON_1]`) и
+  вымышленные реквизиты.
 
 ЗАВЕРШЕНИЕ
-* cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings;
-  cargo test --workspace -- --test-threads=4; npm test в sidecar/hds_agent — зелёные.
-* Коммиты: «feat(agent): A3.4 — …», «test(agent): A3.4 — …» (и отдельный docs-коммит с
-  обновлением AGENT_A3_STAGES.md: §1.4, §3, §4). Push не делать.
-* Сводка: какие пункты 1–8 зелёные, что отложено и почему (например, фоновый reaper для
-  service/UI), что меняется для A3.5, A3.6 и A5.
-* СТОП-ТОЧКИ (остановиться и спросить владельца): реестр требует менять публичный API
-  `Gateway` так, что ломаются A3.2/A3.3; выгрузка не укладывается в 5 с и требует нового
-  контракта протокола; ключ провайдера попадает в файл вне secrets.json; нужны значения
-  `max_live_projects`/`idle_unload_min`, отличные от В-16 (2 и 30 мин).
+* Всё зелёное: `cargo fmt --all --check`;
+  `cargo clippy --workspace --all-targets -- -D warnings`;
+  `cargo test --workspace -- --test-threads=4` (752+ тестов);
+  `(cd sidecar/hds_agent; npm test)` — 23/23;
+  python: `sidecar\venv-anonymize\Scripts\python.exe -m unittest discover -s sidecar/tests
+  -t sidecar`; `installers\build_agent_sidecar.ps1 -SelfTest`;
+  приёмка `cargo test -p hds-cli --test agent_acceptance`.
+* Коммиты: `docs(agent): A3.7 — …`, при необходимости `feat(installer): A3.7 — …`,
+  закрывающий `docs(agent): A3.7 закрыт — фаза A3`.
+* Сводка: что задокументировано, что изменено в установщиках, какие проверки прогнаны (числа),
+  что осталось владельцу (В-15, номер версии, серверный профиль, `hds check`) и что из этого
+  получает вкладка A5.
+
+СТОП-ТОЧКИ (остановиться и спросить владельца)
+* номер версии и дата для `RELEASE_NOTES`, нужно ли менять версионирование;
+* релизная сборка требует остановки резидента `llm_host`, а это сейчас неудобно;
+* для `npm ci` в релизной сборке нет сети (или кэша) — тогда решение: собирать из уже
+  установленного `node_modules` либо оставить шаг установщику;
+* в документацию просится утверждение, которое ничем не подтверждено (например, `1c-buddy`
+  под подменённым HOME) — не выдумывать, вынести в вопросы.
 ```
+
