@@ -20,6 +20,7 @@
 #     -StateDir C:\ProgramData\hermes-disk-search -McpHost 127.0.0.1 -McpPort 8787 `
 #     -UiHost 127.0.0.1 -UiPort 8765 -Parallel 5 -GpuDevice 1 -Roots "D:\;E:\Archive" `
 #     -EnableAccess -AdminLogin admin -AdminPassword <secret> -Fetch
+#   ... -WithAgent   # also build the Node agent worker (desktop feature)
 param(
     [string]$Root = "",
     [string]$Roles = "watch,mcp-http,ui,llm-host,transcribe",
@@ -50,6 +51,8 @@ param(
     [string]$HfToken = "",           # first download of gated models only; never stored
     [switch]$SkipTranscribeStack,    # do not build sidecar\venv-transcribe[-dml]
     [switch]$SkipTranscribeModels,   # do not pre-fetch transcription models
+    # --- A3.7: Node agent worker (desktop feature; opt-in for servers) ---
+    [switch]$WithAgent,              # build sidecar\hds_agent (Node worker) + SelfTest
     # --- 0.20.2 (incident 15.10.2026): services need their config and their deps ---
     [switch]$SkipDeps,               # do NOT install machine-wide deps (Tesseract OCR, ffmpeg)
     [switch]$NoConfigPin,            # keep the root config.yaml and do NOT pin HDS_CONFIG for services
@@ -495,6 +498,30 @@ if ($Fetch -and -not $NoFetch) {
         Set-ConfigPathNested -Path $cfg -Section "transcribe" -Sub "asr" -Key "provider" -Value $tp | Out-Null
         $summary += "[ok] transcribe.asr: backend=onnx provider=$tp"
     }
+}
+
+# --- A3.7: agent worker (desktop feature, opt-in -WithAgent). ----------------
+# The Node agent lives in the desktop profile; a server install skips it unless
+# the administrator asks for it explicitly. The worker is assembled into the
+# same sidecar tree the other roles use, so `hds agent run` finds Node there.
+if ($WithAgent) {
+    $agentBuilder = Join-Path $PSScriptRoot "build_agent_sidecar.ps1"
+    if (-not (Test-Path $agentBuilder)) {
+        $summary += "[!!] build_agent_sidecar.ps1 not found in $PSScriptRoot"
+    } else {
+        try {
+            & powershell -NoProfile -ExecutionPolicy Bypass -File $agentBuilder -OutDir (Join-Path $Root "sidecar") -SelfTest
+            if ($LASTEXITCODE -eq 0) {
+                $summary += "[ok] agent sidecar: $(Join-Path $Root 'sidecar\hds_agent')"
+            } else {
+                $summary += "[!!] agent sidecar failed (exit $LASTEXITCODE): run $agentBuilder manually"
+            }
+        } catch {
+            $summary += "[!!] agent sidecar error: $($_.Exception.Message)"
+        }
+    }
+} else {
+    $summary += "[i] agent not installed (desktop feature, -WithAgent)"
 }
 
 # --- First admin user (access.enabled): hashed password, plain not logged. ---

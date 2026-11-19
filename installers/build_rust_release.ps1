@@ -23,6 +23,11 @@ param(
     # the server fallback). none = code only, the installer builds it later.
     [ValidateSet("none", "cuda", "cpu", "dml")]
     [string]$TranscribeProfile = "none",
+    # A3.7: agent worker (Node) into the staged sidecar tree. "portable" builds
+    # sidecar\hds_agent (dist\worker.mjs + portable Node + pruned node_modules);
+    # "none" leaves the agent out (the server installer adds it with -WithAgent).
+    [ValidateSet("none", "portable")]
+    [string]$AgentSidecar = "portable",
     # P6.2: legacy Nemotron-3 diarizer (hds-diarize + parakeet-rs + ort, and
     # Rust-DirectML.dll) is NOT part of the default package: the python stack
     # (GigaAM/pyannote) does diarization. Opt in only for a legacy-compatible
@@ -116,7 +121,15 @@ if ($WithSidecar) {
     }
     if (-not (Test-Path $SidecarDir)) { throw "sidecar dir not found: $SidecarDir" }
     New-Item -ItemType Directory -Force -Path $sidecarDst | Out-Null
-    Copy-Item (Join-Path $SidecarDir "*") $sidecarDst -Recurse -Force
+    # A3.7: never copy the developer's profile venvs. RELEASING.md says the
+    # archive carries no venv-transcribe* and no venv-anonymize; on a machine
+    # without long-path support the torch tree inside venv-anonymize also
+    # breaks Copy-Item (path too long). Skip them before the copy.
+    Get-ChildItem -Path $SidecarDir -Force | Where-Object {
+        $_.Name -notlike "venv-transcribe*" -and $_.Name -ne "venv-anonymize"
+    } | ForEach-Object {
+        Copy-Item $_.FullName $sidecarDst -Recurse -Force
+    }
     Get-ChildItem -Path $sidecarDst -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue |
         Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
     # Review decision 23.10.2026: never ship the developer's transcription venv.
@@ -146,6 +159,17 @@ if ($TranscribeProfile -ne "none") {
         throw "expected exactly one venv-transcribe* in $sidecarDst, found $($venvs.Count)"
     }
     Write-Host "[p5] transcription venv staged: $($venvs[0].Name)"
+}
+
+# A3.7: agent worker (Node) into the same sidecar tree. The desktop archive
+# carries it; the server profile installs it only with -WithAgent
+# (install_server.ps1), because the agent is a desktop feature.
+if ($AgentSidecar -eq "portable") {
+    Write-Host "[a3.7] building the agent sidecar into $sidecarDst"
+    & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $root "installers\build_agent_sidecar.ps1") -OutDir $sidecarDst
+    if ($LASTEXITCODE -ne 0) { throw "build_agent_sidecar.ps1 failed (exit $LASTEXITCODE)" }
+} else {
+    Write-Host "[i] agent sidecar skipped (-AgentSidecar none)"
 }
 
 # desktop shortcut helper

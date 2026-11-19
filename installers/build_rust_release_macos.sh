@@ -71,6 +71,13 @@ if [ -n "$SIDECAR_DIR" ]; then
     fi
 fi
 
+# --- agent worker (A3.7) ------------------------------------------------------
+# The Node agent worker is assembled by installers/build_agent_sidecar.ps1
+# (PowerShell 5.1), so this macOS script does not build it. The archive ships
+# without sidecar/hds_agent; a server install can add it later by running
+# installers/build_agent_sidecar.ps1 in PowerShell on the target machine.
+echo "[i] agent sidecar not built on macOS (installers/build_agent_sidecar.ps1 is PowerShell)"
+
 # --- docs ---------------------------------------------------------------------
 # README_SERVER_MULTIUSER.md is required: the server administrator installs the
 # system from it. installers/client_readme.md is required too: it is the user memo
