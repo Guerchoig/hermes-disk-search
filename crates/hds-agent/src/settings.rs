@@ -181,6 +181,25 @@ pub fn projects_file(cfg: &Config) -> PathBuf {
         .join("projects.json")
 }
 
+/// Каталог реестров артефактов: `<state_dir>/data/agent/registry` (TR-7.2).
+///
+/// Реестр — зона пользователя: он хранит пути проекта (с настоящими именами),
+/// поэтому в анонимную зону (`<agent.root>`) не попадает.
+pub fn registry_dir(cfg: &Config) -> PathBuf {
+    state_dir(cfg).join("data").join("agent").join("registry")
+}
+
+/// БД реестра артефактов проекта: `.../registry/<P>.db` (TR-7.2).
+///
+/// `None`, если `project` не похож на идентификатор проекта (`P` + 4 цифры,
+/// D21): иначе значение вида `..\..\x` построило бы путь за пределы каталога.
+pub fn registry_db(cfg: &Config, project: &str) -> Option<PathBuf> {
+    if !hds_core::roots::is_agent_project(project) {
+        return None;
+    }
+    Some(registry_dir(cfg).join(format!("{project}.db")))
+}
+
 /// Путь к `secrets.json` (провайдеры, MCP, токены) — `data\agent\secrets.json`.
 /// `HDS_AGENT_SECRETS` перекрывает путь (как в `hds_mcp::agent::secrets_path_from`).
 pub fn secrets_file(cfg: &Config) -> PathBuf {
@@ -277,5 +296,19 @@ agent:
         assert!(workspace_dir(&c, "P0001").unwrap().ends_with("workspace"));
         assert!(config_dir(&c, "P0001").unwrap().ends_with("agent-config"));
         assert!(state_dir_for(&c, "P0001").unwrap().ends_with("agent-state"));
+    }
+
+    #[test]
+    fn registry_path_is_per_project_db_in_user_zone() {
+        let c = cfg("agent:\n  root: 'D:\\hds-anon'\n");
+        let db = registry_db(&c, "P0001").expect("P0001");
+        assert!(db.ends_with("P0001.db"));
+        assert!(db
+            .parent()
+            .unwrap()
+            .ends_with(Path::new("data").join("agent").join("registry")));
+        // Не идентификатор проекта — путь не строится (защита от обхода).
+        assert!(registry_db(&c, "..\\..\\evil").is_none());
+        assert!(registry_db(&c, "P1").is_none());
     }
 }

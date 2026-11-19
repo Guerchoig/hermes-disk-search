@@ -48,6 +48,7 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
         "project" => crate::cmd::agent_run::cmd_project(cfg, rest),
         "run" => crate::cmd::agent_run::cmd_run(cfg, rest),
         "history" => crate::cmd::agent_run::cmd_history(cfg, rest),
+        "sync" => crate::cmd::agent_sync::cmd_sync(cfg, rest),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0
@@ -82,7 +83,10 @@ fn usage() -> String {
      \x20        историей; --dry-run печатает план и не запускает воркер)\n\
      \x20 history clear --project <P> [--session ID]\n\
      \x20       (Очистить историю: значения в файлах сессии заменяются метками,\n\
-     \x20        рядом остаётся бэкап .json.bak; без --session — последняя сессия)"
+     \x20        рядом остаётся бэкап .json.bak; без --session — последняя сессия)\n\
+     \x20 sync --project <P> [--once]\n\
+     \x20       (зеркало папки проекта и <P>\\workspace; A4.1 — реестр\n\
+     \x20        data\\agent\\registry\\<P>.db, обход и правки — A4.2…A4.6)"
         .to_string()
 }
 

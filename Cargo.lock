@@ -597,6 +597,7 @@ dependencies = [
  "aho-corasick",
  "hds-anonymize",
  "hds-core",
+ "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
