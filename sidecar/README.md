@@ -1,9 +1,10 @@
-# sidecar — Python-воркер извлечения и нормализации (B6)
+# sidecar — воркеры извлечения, нормализации и агента
 
-Автономный процесс для того, что по плану остаётся в Python
-(`MIGRATION_PLAN_RUST.md` §2.5, §5): извлечение сегментов (PDF/DOCX/XLSX/PPTX/OCR)
-и лемматизация FTS (`pymorphy3`). Rust-ядро говорит с ним по **stdio + JSON-RPC 2.0**
-(NDJSON), запускает лениво и владеет процессом.
+Автономные процессы, которые Rust-ядро запускает лениво и которыми владеет.
+Python-часть — извлечение сегментов (PDF/DOCX/XLSX/PPTX/OCR) и лемматизация FTS
+(`pymorphy3`), транскрибация и анонимизация (`MIGRATION_PLAN_RUST.md` §2.5, §5).
+Node-часть — агент `hds_agent` в анонимной зоне (фаза A3). Обе части говорят с
+Rust по **stdio + NDJSON**: Python — JSON-RPC 2.0, агент — протокол §4.3.
 
 ## Состав
 
@@ -14,6 +15,8 @@
 | `hds_extract/requirements.lock` | зависимости воркера (вариант A, сняты со спайка 3) |
 | `hds_transcribe/` | воркер транскрибации/диаризации (GigaAM-v3 + pyannote, профили cuda/cpu/dml), см. `hds_transcribe/README.md` |
 | `hds_anonymize/` | воркер анонимизации/деанонимизации (GLiNER PII / Natasha+Slovnet, DOCX/XLSX/TXT/MD/XML, база меток SQLite), см. раздел ниже |
+| `hds_agent/` | **Node-воркер агента** (`@cline/sdk` 0.2.0): `dist/worker.mjs`, протокол §4.3, `hds-guard`, `office_*`/`ask_user` через `host_call`, MCP-настройки; см. раздел «Агент (A3)» |
+| `mcp/` | шаблон внешних MCP-серверов (`mcp.example.json`) и памятка, как подключить `1c-buddy` или другой сервер к `data/agent/secrets.json` |
 
 `hds_sidecar` намеренно **не импортирует** torch/fitz/pymorphy3 на уровне
 модуля: иначе один воркер тянул бы зависимости другого (правило границы §5.1).
@@ -44,6 +47,67 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
 ```
 
 В релизе это делает джоба CI `build-sidecar`; `build-windows` кладёт готовое дерево в пакет.
+
+## Агент (A3): Node-воркер `hds_agent`
+
+`hds_agent/` — TypeScript-воркер на `@cline/sdk` 0.2.0. Rust (`crates/hds-agent`)
+запускает его как `node dist/worker.mjs`, владеет процессом и общается по протоколу
+**§4.3**: `hello` → `ready`, `start`/`send`/`abort`/`stop`/`shutdown`, события
+`session`/`prompt`/`redacted`/`agent`/`turn_end`, `host_call` с префиксом `h`
+(egress_check, office_*, ask_user). stdout — только протокол, диагностика — в stderr.
+
+Воркер держит политики агента: без `run_commands`/`fetch_web_content`, `hds-guard`
+на файловые инструменты, `office_*` через `host_call`, `egressFetch` на каждый
+запрос модели и MCP, плагины профиля выключены, `turn_end {ok, reason, text,
+error, tools}`. MCP-серверы читаются из `CLINE_MCP_SETTINGS_PATH` — файл пишет hds.
+
+### Сборка (разработка)
+
+```powershell
+cd sidecar\hds_agent
+npm ci            # lock-pinned зависимости
+npm run build     # esbuild -> dist\worker.mjs (ESM, --packages=external)
+npm test          # node --test, 23/23
+```
+
+Node ≥ 22.18 (проверено на 24.18.0). `dist/worker.mjs` собирается esbuild из
+`src/worker.ts`; `--packages=external` оставляет импорты `@cline/sdk` в дереве
+`node_modules`, поэтому одного файла `worker.mjs` недостаточно.
+
+### Установка (поставка)
+
+`installers/build_agent_sidecar.ps1` собирает дерево `sidecar\`:
+
+* `node\` — портативный Node из `runtime-manifests/node-manifest.json`
+  (v24.18.0, официальные sha256); путь без пробелов обязателен — SDK не квотирует
+  `command` MCP-сервера. `-NodeSource <путь>` копирует уже установленный Node
+  (офлайн, например `C:\Program Files\nodejs`).
+* `hds_agent\` — исходники, `dist\worker.mjs`, `node_modules\` (lock-pinned).
+* `mcp\` — шаблон внешних MCP-серверов (см. `mcp/README.md`).
+
+В дереве поставки (`-OutDir` ≠ `sidecar\` репозитория) `npm prune --omit=dev`
+срезает dev-зависимости: остаются только runtime — `@cline/sdk` (воркер) и
+`tavily-mcp` (команда MCP-сервера). `-SelfTest` проверяет рукопожатие §4.3
+(`hello` → `ready`), импорт `@cline/sdk` и наличие `tavily-mcp`. Повторный запуск
+идемпотентен (маркеры `.hds-node-version`, `node_modules\.hds-agent-lock`).
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidecar.ps1 -SelfTest
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidecar.ps1 -OutDir dist\hds-1.0-windows-x64\sidecar -SelfTest
+```
+
+Релизная сборка вызывает этот скрипт сама (`installers\build_rust_release.ps1`,
+переключатель `-AgentSidecar none|portable`); серверный установщик ставит агента
+только с флагом `-WithAgent` (`installers\install_server.ps1`) — агент относится к
+desktop-профилю.
+
+### Свои MCP-серверы
+
+Встроенные `disk-search`, `tavily` и `1c-buddy` hds собирает сам. Дополнительные
+серверы администратор описывает в `data/agent/secrets.json` в блоке
+`mcp.servers.<имя>` (stdio или http) — hds вставит их в `cline_mcp_settings.json`
+после встроенных; совпадение имени оставляет встроенный сервер. Готовый шаблон и
+порядок действий — `mcp/README.md` и `mcp/mcp.example.json`.
 
 ## Транскрибация (P5): профили, venv и модели
 

@@ -452,31 +452,31 @@ runtime обычно `undefined`), и проверять, что текст/usag
 
 ## 5. Критерии готовности A3 (план §6 + уточнения)
 
-- [ ] `sidecar/hds_agent` собирается: `npm ci --omit=dev` + `npm run build` → `dist/worker.mjs`;
-      версии `@cline/sdk` и `tavily-mcp` закреплены lock-файлом; `npm test` зелёный.
-- [ ] `hds-agent` (Rust) запускает процесс с очищенным окружением, `cwd = <P>\workspace`,
-      `HOME`/`APPDATA` → `<P>\agent-config`, каталог данных SDK → `<P>\agent-state`.
-- [ ] Прогон на mock-провайдере: реплика → `anonymize_text` → `send` → текст в событиях
-      деанонимизирован; в запросе к модели — только метки.
-- [ ] `hds-guard`: матрица путей TR-3.10 (а) отклонена, путь внутри workspace разрешён;
-      хук не бросает исключений (включая «путь не существует»).
-- [ ] `run_commands` и `fetch_web_content` отсутствуют в `tools`; `editor` по `docx`/`xlsx` и по
-      `*.pdf.md`/`*.pptx.md`/`*.mpp.md` отклонён; `office_*` работают через `host_call`.
-- [ ] MCP: `disk-search` (маршрут `/mcp/agent/<P>`, токен проекта) и заглушки
-      `tavily`/`1c-buddy` видны в `tools`; `ask_my_files` нет.
-- [ ] Фильтр: значение сущности в реплике/инструменте заменено меткой; ключ провайдера в тексте
-      → блокировка с `privacy_filter_unavailable`; аудит `agent_egress_redacted` без значения.
-- [ ] `agent.subagents: false` по умолчанию; при `true` суб-агент проходит через `egressFetch`
-      и хук.
-- [ ] Жизненный цикл: `max_live_projects`, `idle_unload_min`, возобновление через
-      `initialMessages`.
-- [ ] Тесты: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+- [x] `sidecar/hds_agent` собирается: `npm ci --omit=dev` + `npm run build` → `dist/worker.mjs`;
+      версии `@cline/sdk` и `tavily-mcp` закреплены lock-файлом; `npm test` зелёный. — §1.5
+- [x] `hds-agent` (Rust) запускает процесс с очищенным окружением, `cwd = <P>\workspace`,
+      `HOME`/`APPDATA` → `<P>\agent-config`, каталог данных SDK → `<P>\agent-state`. — §1.3
+- [x] Прогон на mock-провайдере: реплика → `anonymize_text` → `send` → текст в событиях
+      деанонимизирован; в запросе к модели — только метки. — §1.3, §1.4
+- [x] `hds-guard`: матрица путей TR-3.10 (а) отклонена, путь внутри workspace разрешён;
+      хук не бросает исключений (включая «путь не существует»). — §1.1
+- [x] `run_commands` и `fetch_web_content` отсутствуют в `tools`; `editor` по `docx`/`xlsx` и по
+      `*.pdf.md`/`*.pptx.md`/`*.mpp.md` отклонён; `office_*` работают через `host_call`. — §1.1, §1.6
+- [x] MCP: `disk-search` (маршрут `/mcp/agent/<P>`, токен проекта) и заглушки
+      `tavily`/`1c-buddy` видны в `tools`; `ask_my_files` нет. — §1.1, §1.6
+- [x] Фильтр: значение сущности в реплике/инструменте заменено меткой; ключ провайдера в тексте
+      → блокировка с `privacy_filter_unavailable`; аудит `agent_egress_redacted` без значения. — §1.2, §1.3
+- [x] `agent.subagents: false` по умолчанию; при `true` суб-агент проходит через `egressFetch`
+      и хук. — §1.1
+- [x] Жизненный цикл: `max_live_projects`, `idle_unload_min`, возобновление через
+      `initialMessages`. — §1.4
+- [x] Тесты: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
       `cargo test --workspace -- --test-threads=4`, python-тесты
       (`sidecar\venv-anonymize\Scripts\python.exe -m unittest discover -s sidecar/tests -t sidecar`),
-      `npm test` в `sidecar/hds_agent` — зелёные.
-- [ ] **Приёмка A3 (e2e, mock-провайдер):** образ docx из стенда A2 → агент читает его
+      `npm test` в `sidecar/hds_agent` — зелёные. — §1.2–§1.6
+- [x] **Приёмка A3 (e2e, mock-провайдер):** образ docx из стенда A2 → агент читает его
       `office_read`, ищет через `disk-search`, вызывает заглушку `tavily`, пишет файл в
-      workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён.
+      workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён. — §1.6
 
 ## 6. Грабли (из A0/A1/A2 — проверено фактом)
 
@@ -534,13 +534,13 @@ runtime обычно `undefined`), и проверять, что текст/usag
 
 ## 8. Вопросы владельцу (В-12…В-16)
 
-| # | Вопрос | Предложение исполнителя |
-|---|---|---|
-| В-12 | какой провайдер и модель ставить в `projects.json` при создании проекта | OpenRouter + `~deepseek/deepseek-flash-latest` (как в дымовом прогоне A0); вкладка A5 даст выбор |
-| В-13 | `agent.filter.unknown`: `label` (новая метка проекта) или `block` | `label` (не терять смысл документа); `block` — для параноидального режима |
-| В-14 | `agent.filter.max_stale_sec` по умолчанию и что видит пользователь при недоступном воркере | 300 с; при недоступном воркере — fail-closed: агент не отвечает, событие «фильтр недоступен» с подсказкой «запустите `llm_host load anon`» |
-| В-15 | `1c-buddy` брать из `%USERPROFILE%\.cline\mcp\1c-buddy\` (каталог программирующего Cline) или ставить копию в поставку | копия в `sidecar/` (иначе зависимость от чужого каталога и его обновлений); путь — ключ `agent.mcp.onec_buddy.command` |
-| В-16 | значения жизненного цикла и журнала: `max_live_projects = 2`, `idle_unload_min = 30`, `egress_log = false`; нужна ли временная точка входа `hds agent run --project <P>` до вкладки A5 | подтвердить значения; временную команду — да (иначе A3 нечего запускать без UI) |
+| # | Вопрос | Предложение исполнителя | Фактический статус на 19.11.2026 |
+|---|---|---|---|
+| В-12 | какой провайдер и модель ставить в `projects.json` при создании проекта | OpenRouter + `~deepseek/deepseek-flash-latest` (как в дымовом прогоне A0); вкладка A5 даст выбор | **Принято**: `DEFAULT_PROVIDER = "openrouter"`, `DEFAULT_MODEL = "~deepseek/deepseek-flash-latest"` (`crates/hds-cli/src/cmd/agent_run.rs`); выбор — в A5 |
+| В-13 | `agent.filter.unknown`: `label` (новая метка проекта) или `block` | `label` (не терять смысл документа); `block` — для параноидального режима | **Принято `label`** (`UnknownPolicy::Label` по умолчанию, `crates/hds-agent/src/settings.rs`) |
+| В-14 | `agent.filter.max_stale_sec` по умолчанию и что видит пользователь при недоступном воркере | 300 с; при недоступном воркере — fail-closed: агент не отвечает, событие «фильтр недоступен» с подсказкой «запустите `llm_host load anon`» | **Принято 300 с + fail-closed** (`filter_max_stale_secs = 300`, ошибка `privacy_filter_unavailable`) |
+| В-15 | `1c-buddy` брать из `%USERPROFILE%\.cline\mcp\1c-buddy\` (каталог программирующего Cline) или ставить копию в поставку | копия в `sidecar/` (иначе зависимость от чужого каталога и его обновлений); путь — ключ `agent.mcp.onec_buddy.command` | **Закрыт решением владельца (§4 п.38):** в поставку идут **настройки** `1c-buddy` без токена (`sidecar/mcp/mcp.example.json` + `README.md`); бинарь и `.env` администратор берёт свои. Копия бинаря в поставку не входит |
+| В-16 | значения жизненного цикла и журнала: `max_live_projects = 2`, `idle_unload_min = 30`, `egress_log = false`; нужна ли временная точка входа `hds agent run --project <P>` до вкладки A5 | подтвердить значения; временную команду — да (иначе A3 нечего запускать без UI) | **Принято**: 2 / 30 мин / `egress_log=false` (`AgentSettings::default`); временная точка входа `hds agent run --project <P>` реализована |
 
 ## 9. Промт для нового чата (копировать целиком)
 
