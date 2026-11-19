@@ -801,3 +801,44 @@ fn history_clear_cli() {
         Some(1)
     );
 }
+
+/// A3.5: план берёт портативный Node из `<root>\sidecar\node` — именно его
+/// ставит `installers/build_agent_sidecar.ps1` (пробелов в пути нет, поэтому
+/// `command` MCP-сервера можно передать без кавычек).
+#[test]
+fn plan_prefers_portable_node() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let stand = Stand::new("node");
+    stand.add_project();
+    stand.write_secrets("https://example.invalid/v1", "sk-a35-key");
+
+    // Заглушки вместо тяжёлых артефактов: портативный интерпретатор и воркер.
+    let sidecar = stand.dir.join("sidecar");
+    let node_dir = sidecar.join("node");
+    fs::create_dir_all(&node_dir).unwrap();
+    let node_name = if cfg!(windows) { "node.exe" } else { "node" };
+    let node = node_dir.join(node_name);
+    fs::write(&node, "stub").unwrap();
+    let worker_dir = sidecar.join("hds_agent").join("dist");
+    fs::create_dir_all(&worker_dir).unwrap();
+    fs::write(worker_dir.join("worker.mjs"), "// stub\n").unwrap();
+
+    let opts = RunOptions::new(Some("привет".to_string()));
+    let plan = agent_run::plan_with(&stand.cfg, "P0001", &opts, &stand.dir.path).expect("план");
+    assert_eq!(
+        plan.node,
+        node,
+        "портативный Node из поставки: {}",
+        plan.node.display()
+    );
+    assert!(
+        plan.worker.ends_with("dist\\worker.mjs") || plan.worker.ends_with("dist/worker.mjs"),
+        "воркер из поставки: {}",
+        plan.worker.display()
+    );
+    assert!(
+        !plan.node.to_string_lossy().contains(' '),
+        "в пути портативного Node не должно быть пробелов: {}",
+        plan.node.display()
+    );
+}
