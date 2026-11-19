@@ -6,7 +6,9 @@
 //!   `TextResult` с метками для предпросмотра.
 //! * **События** (TR-5.3): каждое событие воркера деанонимизируется
 //!   [`DeAnonymizer`] и отдаётся парой `raw` / `text`; пути `<workspace>`
-//!   заменяются путями папки проекта.
+//!   заменяются путями папки проекта. Завершение хода (`turn_end`, A3.1)
+//!   приходит отдельным [`GatewayEvent::TurnEnd`] — с проверкой «успех при
+//!   пустом ответе» и фактическим списком инструментов.
 //! * **Срабатывания фильтра** (TR-6.4): складываются в очередь и отдаются
 //!   [`GatewayEvent::Redacted`] без значений — только метки и источник.
 //! * **«Очистить историю»** (TR-6.6): переписывает файлы сессии SDK через
@@ -35,6 +37,8 @@ use crate::history::{self, HistoryError, HistoryOutcome};
 use crate::paths::{check_within, GuardError};
 use crate::protocol::{Down, EgressPoint, HostCall, Provider, PROTOCOL_VERSION};
 use crate::worker::{HostHandler, Worker, WorkerError, WorkerSpec};
+
+use hds_anonymize::protocol::Snapshot;
 
 /// Вопрос пользователю через UI (TR-3.13: `host_call ask_user`).
 ///
@@ -66,6 +70,20 @@ pub enum GatewayEvent {
         raw: Value,
         text: Value,
         unknown: Vec<String>,
+    },
+    /// Ход завершён (`turn_end` воркера, A3.1). `text` — деанонимизированный
+    /// финальный ответ, `tools` — **фактический** список инструментов запроса
+    /// к модели (из `beforeModel`), `raw` — событие как пришло от воркера.
+    ///
+    /// `ok` проверен здесь же: «успех» с пустым текстом и без usage — сбой
+    /// (грабли §6.1 карты), а не готовый ответ.
+    TurnEnd {
+        ok: bool,
+        reason: String,
+        text: String,
+        error: Option<String>,
+        tools: Vec<String>,
+        raw: Value,
     },
     /// Срабатывания словарного фильтра (TR-6.4): без значений, только метки.
     Redacted { hits: Vec<Hit> },
@@ -358,7 +376,9 @@ pub struct Gateway {
     state_dir: PathBuf,
     filter: Arc<Filter>,
     deanon: Arc<Mutex<DeAnonymizer>>,
-    client: Arc<Mutex<Client>>,
+    /// Python-клиент анонимизации. `None` — egress-only режим (тесты, стенды):
+    /// [`Gateway::send`] недоступен, [`Gateway::send_anonymized`] работает.
+    client: Option<Arc<Mutex<Client>>>,
     session_id: Option<String>,
 }
 
@@ -376,6 +396,49 @@ impl Gateway {
         deanon: Arc<Mutex<DeAnonymizer>>,
         client: Arc<Mutex<Client>>,
     ) -> Result<Gateway, GatewayError> {
+        Self::spawn_inner(
+            spec,
+            host,
+            project,
+            workspace,
+            state_dir,
+            filter,
+            deanon,
+            Some(client),
+        )
+    }
+
+    /// Шлюз без Python-клиента (`GatewayHost::without_client`): фильтр и
+    /// деанонимизация работают по готовому снимку vault, `office_*` отвечают
+    /// ошибкой, [`Gateway::send_anonymized`] отправляет уже обезличенный текст.
+    ///
+    /// Нужен для стендов и тестов A3.2, где снимок собирается без Python, и для
+    /// режима «анонимизатор недоступен → fail-closed» (TR-6.5).
+    pub fn spawn_egress_only(
+        spec: &WorkerSpec,
+        host: Arc<GatewayHost>,
+        project: impl Into<String>,
+        workspace: impl Into<PathBuf>,
+        state_dir: impl Into<PathBuf>,
+        filter: Arc<Filter>,
+        deanon: Arc<Mutex<DeAnonymizer>>,
+    ) -> Result<Gateway, GatewayError> {
+        Self::spawn_inner(
+            spec, host, project, workspace, state_dir, filter, deanon, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_inner(
+        spec: &WorkerSpec,
+        host: Arc<GatewayHost>,
+        project: impl Into<String>,
+        workspace: impl Into<PathBuf>,
+        state_dir: impl Into<PathBuf>,
+        filter: Arc<Filter>,
+        deanon: Arc<Mutex<DeAnonymizer>>,
+        client: Option<Arc<Mutex<Client>>>,
+    ) -> Result<Gateway, GatewayError> {
         let worker = Worker::spawn(spec, Arc::clone(&host) as Arc<dyn HostHandler>)?;
         Ok(Gateway {
             worker,
@@ -388,6 +451,11 @@ impl Gateway {
             client,
             session_id: None,
         })
+    }
+
+    /// Признак egress-only режима (нет Python-клиента).
+    pub fn is_egress_only(&self) -> bool {
+        self.client.is_none()
     }
 
     /// PID процесса воркера.
@@ -447,7 +515,9 @@ impl Gateway {
                     ));
                 }
                 Ok(result
-                    .get("tools")
+                    // A3.1: воркер отдаёт объявленный набор как `declared_tools`
+                    // (старое `tools` снято). Фактический список — в TurnEnd.
+                    .get("declared_tools")
                     .and_then(Value::as_array)
                     .map(|a| {
                         a.iter()
@@ -467,23 +537,38 @@ impl Gateway {
     ///
     /// Блокировка клиента отпускается до `worker.call`, иначе встречный
     /// `host_call egress_check` из потока чтения ждал бы тот же мьютекс.
+    /// В egress-only режиме (без Python) вернёт ошибку — текст, уже прошедший
+    /// анонимизацию, отправляется через [`Gateway::send_anonymized`].
     pub fn send(&mut self, text: &str) -> Result<TextResult, GatewayError> {
         let project = self.project.clone();
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| GatewayError::Anonymize("клиент анонимизации недоступен".to_string()))?;
         let anon = {
-            let mut client = self
-                .client
+            let mut client = client
                 .lock()
                 .map_err(|_| GatewayError::Anonymize("клиент занят".to_string()))?;
             client
                 .anonymize_text(&project, text)
                 .map_err(|e| GatewayError::Anonymize(e.to_string()))?
         };
-        let clean = anon.text.clone();
-        self.worker.call(|id| Down::Send {
-            id: id.to_string(),
-            text: clean,
-        })?;
+        self.send_anonymized(&anon.text)?;
         Ok(anon)
+    }
+
+    /// Отправить текст, который **уже** обезличен (метки и пути образов вместо
+    /// значений). Нужен egress-only режиму (стенды, тесты A3.2) и повторной
+    /// отправке из уже очищенной истории; фильтр исходящего всё равно применяется
+    /// в `egress_check`.
+    pub fn send_anonymized(&mut self, text: &str) -> Result<(), GatewayError> {
+        self.worker
+            .call(|id| Down::Send {
+                id: id.to_string(),
+                text: text.to_string(),
+            })
+            .map(|_| ())
+            .map_err(GatewayError::from)
     }
 
     /// Прервать текущий ход.
@@ -512,7 +597,7 @@ impl Gateway {
             return Ok(GatewayEvent::Redacted { hits });
         }
         match self.worker.next_event(timeout) {
-            Ok(up) => Ok(self.map_up(up)),
+            Ok(up) => self.map_up(up),
             Err(WorkerError::Timeout(_)) => {
                 let hits = self.host.take_redactions();
                 if hits.is_empty() {
@@ -525,39 +610,65 @@ impl Gateway {
         }
     }
 
-    fn map_up(&self, up: crate::protocol::Up) -> GatewayEvent {
+    fn map_up(&self, up: crate::protocol::Up) -> Result<GatewayEvent, GatewayError> {
         use crate::protocol::Up;
         match up {
             Up::Ready {
                 protocol, tools, ..
-            } => GatewayEvent::Ready { protocol, tools },
+            } => Ok(GatewayEvent::Ready { protocol, tools }),
             Up::Event { event, .. } => {
+                if event.get("kind").and_then(Value::as_str) == Some("turn_end") {
+                    return Ok(self.map_turn_end(event));
+                }
                 let text = self
                     .deanon
                     .lock()
                     .map(|d| d.value(&event))
                     .unwrap_or_else(|_| event.clone());
                 let unknown = collect_unknown(&event);
-                GatewayEvent::Agent {
+                Ok(GatewayEvent::Agent {
                     raw: event,
                     text,
                     unknown,
-                }
+                })
             }
             Up::Done {
                 ok, result, error, ..
-            } => GatewayEvent::Done { ok, result, error },
-            Up::HostCall { call, .. } => GatewayEvent::Agent {
-                raw: json!({"host_call": call}),
-                text: json!({"host_call": call}),
-                unknown: Vec::new(),
-            },
-            Up::Error { message, .. } => GatewayEvent::Done {
+            } => Ok(GatewayEvent::Done { ok, result, error }),
+            // host_call обрабатывает поток чтения (`worker::read_loop`), в поток
+            // событий он не попадает. Если всё же попал — это ошибка транспорта,
+            // а не событие агента (раньше здесь было фальшивое «событие»).
+            Up::HostCall { call, .. } => Err(GatewayError::Worker(format!(
+                "host_call {call} попал в поток событий"
+            ))),
+            Up::Error { message, .. } => Ok(GatewayEvent::Done {
                 ok: false,
                 result: Value::Null,
                 error: Some(message),
-            },
+            }),
         }
+    }
+
+    /// `turn_end` воркера → [`GatewayEvent::TurnEnd`]: текст деанонимизируется,
+    /// «успех при пустом ответе» превращается в сбой (грабли §6.1).
+    fn map_turn_end(&self, event: Value) -> GatewayEvent {
+        let (ok, reason, error, tools) = turn_end_status(&event);
+        let raw_text = event.get("text").and_then(Value::as_str).unwrap_or("");
+        GatewayEvent::TurnEnd {
+            ok,
+            reason,
+            text: self.deanon_text(raw_text),
+            error: error.map(|e| self.deanon_text(&e)),
+            tools,
+            raw: event,
+        }
+    }
+
+    fn deanon_text(&self, text: &str) -> String {
+        self.deanon
+            .lock()
+            .map(|d| d.text(text).text)
+            .unwrap_or_else(|_| text.to_string())
     }
 
     /// Пересобрать словарь и деанонимизатор по снимку vault (TR-6.5).
@@ -570,25 +681,42 @@ impl Gateway {
         secrets: &[String],
         project_root: &Path,
     ) -> Result<i64, GatewayError> {
+        let client = self
+            .client
+            .as_ref()
+            .ok_or_else(|| GatewayError::Anonymize("клиент анонимизации недоступен".to_string()))?;
         let snapshot = {
-            let mut client = self
-                .client
+            let mut client = client
                 .lock()
                 .map_err(|_| GatewayError::Anonymize("клиент занят".to_string()))?;
             client
                 .snapshot(&self.project)
                 .map_err(|e| GatewayError::Anonymize(e.to_string()))?
         };
+        Ok(self.refresh_from_snapshot(&snapshot, system, projects, secrets, project_root))
+    }
+
+    /// Применить готовый снимок vault (без Python): фильтр egress_check и
+    /// деанонимизатор событий собираются здесь же, `[SYS_n]` нумеруются
+    /// одинаково (`filter::sys_values`). Возвращает `rev` снимка.
+    pub fn refresh_from_snapshot(
+        &self,
+        snapshot: &Snapshot,
+        system: &[String],
+        projects: &[String],
+        secrets: &[String],
+        project_root: &Path,
+    ) -> i64 {
         let rev = snapshot.rev;
         self.filter
-            .set_snapshot(&snapshot, system, projects, secrets);
+            .set_snapshot(snapshot, system, projects, secrets);
         // Фильтр нумерует `[SYS_n]` по цепочке `system` + `projects`, поэтому
         // деанонимизатор получает тот же список в том же порядке.
         let sys_all = crate::filter::sys_values(system, projects);
         if let Ok(mut d) = self.deanon.lock() {
-            *d = DeAnonymizer::new(&snapshot, &sys_all, &self.workspace, project_root);
+            *d = DeAnonymizer::new(snapshot, &sys_all, &self.workspace, project_root);
         }
-        Ok(rev)
+        rev
     }
 
     /// «Очистить историю» (TR-6.6): переписать файлы сессии через словарь.
@@ -633,6 +761,53 @@ fn collect_unknown_into(value: &Value, out: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+/// Разбор `turn_end` воркера: `(ok, reason, error, tools)`.
+///
+/// Проверка «успех при пустом ответе» (грабли §6.1): если воркер прислал
+/// `ok = true`, но ни текста, ни usage нет — это сбой, а не готовый ответ.
+fn turn_end_status(event: &Value) -> (bool, String, Option<String>, Vec<String>) {
+    let reason = event
+        .get("reason")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let raw_text = event.get("text").and_then(Value::as_str).unwrap_or("");
+    let mut ok = event.get("ok").and_then(Value::as_bool).unwrap_or(false);
+    let mut error = event
+        .get("error")
+        .and_then(Value::as_str)
+        .filter(|e| !e.is_empty())
+        .map(str::to_string);
+    if ok && raw_text.trim().is_empty() && usage_tokens(event) == 0 {
+        ok = false;
+        error = Some("empty_response: модель не вернула ни текста, ни usage".to_string());
+    } else if !ok && error.is_none() {
+        error = Some(reason.clone());
+    }
+    let tools = event
+        .get("tools")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    (ok, reason, error, tools)
+}
+
+/// Токены из `usage` события `turn_end` (camelCase — формат воркера).
+fn usage_tokens(event: &Value) -> u64 {
+    let usage = event.get("usage");
+    let pick = |key: &str| {
+        usage
+            .and_then(|u| u.get(key))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    pick("inputTokens") + pick("outputTokens")
 }
 
 #[cfg(test)]
@@ -704,5 +879,61 @@ mod tests {
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].label, "[PERSON_1]");
         assert!(host.take_redactions().is_empty());
+    }
+
+    #[test]
+    fn turn_end_status_keeps_success_with_text() {
+        let event = json!({
+            "kind": "turn_end",
+            "ok": true,
+            "reason": "completed",
+            "text": "готово",
+            "tools": ["read_files", "office_read"]
+        });
+        let (ok, reason, error, tools) = turn_end_status(&event);
+        assert!(ok);
+        assert_eq!(reason, "completed");
+        assert!(error.is_none());
+        assert_eq!(tools, vec!["read_files", "office_read"]);
+    }
+
+    #[test]
+    fn turn_end_status_turns_empty_success_into_failure() {
+        // Грабли §6.1: «успех» без текста и без usage.
+        for event in [
+            json!({"kind": "turn_end", "ok": true, "reason": "completed", "text": "", "usage": null}),
+            json!({"kind": "turn_end", "ok": true, "reason": "completed", "text": "  ", "usage": {"inputTokens": 0, "outputTokens": 0}}),
+        ] {
+            let (ok, _, error, _) = turn_end_status(&event);
+            assert!(!ok, "{event}");
+            assert!(error.unwrap_or_default().contains("empty_response"));
+        }
+        // usage есть — ответ считается состоявшимся (токены потрачены).
+        let with_usage = json!({
+            "kind": "turn_end", "ok": true, "reason": "completed", "text": "",
+            "usage": {"inputTokens": 10, "outputTokens": 0}
+        });
+        assert!(turn_end_status(&with_usage).0);
+    }
+
+    #[test]
+    fn turn_end_status_keeps_worker_error_and_reason() {
+        let failed = json!({
+            "kind": "turn_end", "ok": false, "reason": "error",
+            "text": "", "error": "privacy_filter_unavailable: нет снимка vault"
+        });
+        let (ok, reason, error, tools) = turn_end_status(&failed);
+        assert!(!ok);
+        assert_eq!(reason, "error");
+        assert!(error
+            .unwrap_or_default()
+            .contains("privacy_filter_unavailable"));
+        assert!(tools.is_empty());
+
+        let aborted = json!({"kind": "turn_end", "ok": false, "reason": "aborted", "text": ""});
+        let (ok, reason, error, _) = turn_end_status(&aborted);
+        assert!(!ok);
+        assert_eq!(reason, "aborted");
+        assert_eq!(error.as_deref(), Some("aborted"));
     }
 }
