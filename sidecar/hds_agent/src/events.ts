@@ -97,7 +97,7 @@ export function mapAgentEvent(event: Json): Json | null {
 }
 
 /** Итог хода: «успех» с пустым текстом и без usage — это сбой (A0 §5.1). */
-export function turnOutcome(done: Json | null, ended: Json | null): Json {
+export function turnOutcome(done: Json | null, ended: Json | null, errorText?: string): Json {
   const reason = String(done?.reason ?? ended?.reason ?? 'unknown');
   const text = String(done?.text ?? '');
   const usage = done?.usage ?? null;
@@ -108,7 +108,9 @@ export function turnOutcome(done: Json | null, ended: Json | null): Json {
     ok = false;
     error = 'empty_response: модель не вернула ни текста, ни usage';
   } else if (!ok) {
-    error = reason;
+    // Причина сбоя — из события error (например, privacy_filter_unavailable),
+    // иначе хотя бы reason из ended/собственный reason.
+    error = errorText && errorText.trim() ? errorText : reason;
   }
   return {
     kind: 'turn_end',

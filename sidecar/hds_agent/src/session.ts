@@ -18,7 +18,21 @@ import { buildToolSpecs } from './tools.ts';
 
 /** Инструменты, которых в запросе к модели быть не должно (TR-4.4, D16). */
 const FORBIDDEN_IN_REQUEST = (name: string) =>
-  (DENIED_TOOLS as readonly string[]).includes(name) || name.endsWith('__ask_my_files');
+  (DENIED_TOOLS as readonly string[]).includes(name) || isForbiddenToolName(name);
+
+/**
+ * Имена, которые beforeModel вырезает из запроса к модели.
+ *
+ * `ask_my_files` приходит с суффиксом `__ask_my_files`, но инструменты из
+ * MCP-серверов Agent Plugin получают ещё и хеш в имени
+ * (`hds-agent-plugin_agentdecoy__ask_my_files_3deb181b`) — поэтому проверка не
+ * только по концу строки, но и по шаблону с суффиксом.
+ */
+export function isForbiddenToolName(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (!lower.includes('ask_my_files')) return false;
+  return /__ask_my_files$/.test(lower) || /__ask_my_files_[0-9a-f]{4,}$/.test(lower);
+}
 
 export const BASE_PROMPT = [
   'Ты — помощник hds в анонимной зоне проекта.',
@@ -123,6 +137,9 @@ export async function buildStart(input: StartInput, deps: SessionDeps): Promise<
       maxIterations: input.max_iterations ?? 12,
       hooks: { ...hooks, beforeModel },
       extraTools,
+      // Явные пути пусты: hds не подключает сторонние плагины. Плагины профиля
+      // (<HOME>\.cline\plugins, <HOME>\.agents\plugins) отсекает политика
+      // `plugins` ниже — одних пустых путей недостаточно (A3.1, тест изоляции).
       pluginPaths: [],
       agentPluginPaths: [],
       checkpoint: { enabled: false },
@@ -131,6 +148,8 @@ export async function buildStart(input: StartInput, deps: SessionDeps): Promise<
     source: 'hds-agent',
     interactive: false,
     toolPolicies: toolPolicies(),
+    // Плагины профиля (включая Agent Plugin из <HOME>\.agents\plugins, чьи MCP
+    // инструменты иначе попадают в сессию) выключаются этой политикой (TR-3.2 п.4).
     plugins: { '*': { enabled: false } },
     ...(history.length ? { initialMessages: history } : {}),
   };

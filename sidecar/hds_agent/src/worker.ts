@@ -2,7 +2,7 @@
 //
 // Запускается hds (crates/hds-agent/src/worker.rs) с очищенным окружением и
 // cwd = <P>\workspace. Протокол — NDJSON §4.3 (src/rpc.ts):
-//   hello → ready; start → done {session_id, tools}; send → done {accepted}
+//   hello → ready; start → done {session_id, declared_tools}; send → done {accepted}
 //   + события, ход завершается событием {kind: "turn_end"}; abort, stop,
 //   shutdown → done.
 
@@ -25,9 +25,14 @@ let sdk: any = null;
 let cline: any = null;
 let sessionId: string | null = null;
 let unsubscribe: (() => void) | null = null;
+/** Вход последнего start — для восстановления сессии после фатальной ошибки. */
+let reviveInput: Json = null;
+let sessionLost = false;
 let busy = false;
 let currentId = 'event';
 let lastDone: Json = null;
+let lastEnded: Json = null;
+let lastError = '';
 let lastTools: string[] = [];
 
 function sdkVersion(): string {
@@ -61,9 +66,16 @@ function onSessionEvent(event: Json): void {
     if (event?.type === 'agent_event') {
       const inner = event.payload?.event;
       if (inner?.type === 'done' && !inner.parentAgentId) lastDone = inner;
+      if (inner?.type === 'error' && !inner.parentAgentId) {
+        lastError = String(inner.error?.message ?? inner.error ?? '');
+      }
       const mapped = mapAgentEvent(inner);
       if (mapped) notify(mapped);
     } else if (event?.type === 'ended') {
+      lastEnded = event.payload ?? null;
+      // Фатальная ошибка прогона уносит сессию SDK: следующий ход начинается
+      // с восстановления (revive), иначе send падает «session not found».
+      if (String(event.payload?.reason ?? '') === 'error') sessionLost = true;
       notify({ kind: 'ended', reason: event.payload?.reason ?? '' });
     } else if (event?.type === 'status') {
       notify({ kind: 'status', status: event.payload?.status ?? '' });
@@ -90,7 +102,47 @@ async function closeSession(): Promise<void> {
     }
   }
   sessionId = null;
+  sessionLost = false;
   busy = false;
+}
+
+/**
+ * Перезапустить сессию с тем же session_id (A0 §3.6: история не грузится —
+ * initialMessages передаются только при первом старте). Нужно потому, что
+ * фатальная ошибка прогона уничтожает сессию SDK, а воркер должен оставаться
+ * работоспособным (TR-3.10 «процесс жив, следующий send работает»).
+ */
+async function revive(): Promise<void> {
+  if (!cline || !reviveInput) throw new Error('session_not_started');
+  const previous = sessionId;
+  const input = previous
+    ? { ...reviveInput, config: { ...reviveInput.config, sessionId: previous } }
+    : reviveInput;
+  const started = await cline.start(input);
+  if (unsubscribe) {
+    try {
+      unsubscribe();
+    } catch {
+      /* уже отписан */
+    }
+  }
+  sessionId = String(started?.sessionId ?? previous ?? '');
+  unsubscribe = cline.subscribe(onSessionEvent, { sessionId });
+  sessionLost = false;
+}
+
+function sessionLostError(text: string): boolean {
+  return /session not found|session_not_found|no such session/i.test(text);
+}
+
+async function runTurn(prompt: string): Promise<void> {
+  lastDone = null;
+  lastEnded = null;
+  lastError = '';
+  await cline.send({ sessionId, prompt });
+  // send резолвится и при сбое (SDK сообщает его событием ended/error):
+  // итог хода собирается из событий, а не из возвращаемого значения.
+  notify({ ...turnOutcome(lastDone, lastEnded, lastError), tools: lastTools });
 }
 
 async function start(message: DownMessage): Promise<void> {
@@ -108,17 +160,23 @@ async function start(message: DownMessage): Promise<void> {
   });
   const started = await cline.start(startInput);
   sessionId = String(started.sessionId);
+  sessionLost = false;
+  // initialMessages нужны только первому старту: при восстановлении истории
+  // уже лежит в сессии SDK, повторная подстановка её удвоит.
+  reviveInput = { ...startInput };
+  delete reviveInput.initialMessages;
   unsubscribe = cline.subscribe(onSessionEvent, { sessionId });
   const servers = await mcpServers(process.env.CLINE_MCP_SETTINGS_PATH);
   channel.done(message.id, true, {
     session_id: sessionId,
-    tools: ['read_files', 'search_codebase', 'editor', 'office_read', 'office_edit', 'office_create', 'ask_user'],
+    // Объявленный набор; фактический список запроса к модели — turn_end.tools.
+    declared_tools: ['read_files', 'search_codebase', 'editor', 'office_read', 'office_edit', 'office_create', 'ask_user'],
     mcp_servers: servers,
     plugin_issues: (started.pluginIssues ?? []).map((p: Json) => String(p?.name ?? '')),
   });
 }
 
-function send(message: DownMessage): void {
+async function send(message: DownMessage): Promise<void> {
   if (!cline || !sessionId) {
     channel.done(message.id, false, {}, 'session_not_started');
     return;
@@ -130,18 +188,29 @@ function send(message: DownMessage): void {
   busy = true;
   currentId = String(message.id ?? 'event');
   lastDone = null;
-  const id = sessionId;
+  lastEnded = null;
+  lastError = '';
+  const prompt = String(message.text ?? '');
   channel.done(message.id, true, { accepted: true });
-  cline
-    .send({ sessionId: id, prompt: String(message.text ?? '') })
-    .then(
-      () => notify({ ...turnOutcome(lastDone, null), tools: lastTools }),
-      (error: unknown) =>
-        notify({ kind: 'turn_end', ok: false, reason: 'error', text: '', error: errorText(error), tools: lastTools }),
-    )
-    .finally(() => {
-      busy = false;
-    });
+  try {
+    if (sessionLost) await revive();
+    await runTurn(prompt);
+  } catch (error) {
+    const text = errorText(error);
+    if (sessionLostError(text)) {
+      // Гонка: сессия умерла между ходами — оживить и повторить ровно один раз.
+      try {
+        await revive();
+        await runTurn(prompt);
+      } catch (retryError) {
+        notify({ kind: 'turn_end', ok: false, reason: 'error', text: '', error: errorText(retryError), tools: lastTools });
+      }
+    } else {
+      notify({ kind: 'turn_end', ok: false, reason: 'error', text: '', error: text, tools: lastTools });
+    }
+  } finally {
+    busy = false;
+  }
 }
 
 async function handle(message: DownMessage): Promise<void> {
