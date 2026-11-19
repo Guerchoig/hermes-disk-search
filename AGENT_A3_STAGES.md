@@ -179,7 +179,7 @@
 | **A3.1** | **Воркер: TR-3.10 на Node-стенде** | **Закрыт.** `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` (карта — §1.1) | закрыт |
 | A3.2 | Rust ↔ настоящий воркер | **Закрыт.** `cargo test -p hds-agent`: интеграционный `tests/gateway_worker.rs` (56 тестов всего): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений; fail-closed = 0 запросов к провайдеру | закрыт |
 | A3.3 | Точка входа CLI | **Закрыт.** `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …] [--dry-run]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль (human / `--json` / `--quiet`). Тесты на mock-провайдере — `crates/hds-cli/tests/agent_run.rs` | закрыт |
-| A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем | ~1 чат |
+| A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем. **Промт — §7** | следующий |
 | A3.5 | Установщик | `installers/build_agent_sidecar.ps1` (портативный Node без пробелов в пути → `sidecar/node/`, `npm ci --omit=dev` по lock, сборка `dist/`, `-SelfTest` = `hello`); образец — `build_anonymize_sidecar.ps1`, `sidecar_common.ps1` | ~0,5 чата |
 | A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
 | A3.7 | Документация и закрытие | `sidecar/README.md`, раздел в `README.md`, `RELEASE_NOTES` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`; полный набор проверок (§5 карты); вопросы В-12…В-16 владельцу | ~0,5 чата |
@@ -196,7 +196,7 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 | A3.1 | закрыт 19.11.2026 | `2efe8043` (fix), `8e26d0f3` (test) | `npm test` 23/23, ≈ 39 с; карта тестов — §1.1; находки — §4 п.7–12; `Gateway::open` поправить в A3.2 (§4 п.1) |
 | A3.2 | закрыт 19.11.2026 | `6ef028af` (feat), `8204e384` (test) | `cargo test -p hds-agent` = 56 тестов (54 unit + 2 интеграционных), `cargo fmt --check` и `clippy --workspace -D warnings` чистые; факты — §1.2, находки — §4 п.1–3 и 13–16 |
 | A3.3 | закрыт 19.11.2026 | `be72b01d` (feat), `74d1aacb` (test) | `cargo test -p hds-cli --test agent_run` = 3 теста, весь воркспейс 737/737; факты — §1.3, находки — §4 п.17–22 |
-| A3.4 | следующий | — | Жизненный цикл: переиспользовать `agent_run::{plan_with, open_client, run}`; CLI `run` перевести на реестр живых процессов; учесть `HDS_ROOT` = и state_dir, и корень поставки (§4 п.18) |
+| A3.4 | следующий | — | Промт — §7: реестр `AgentRegistry` (max_live/idle/LRU) + возобновление `session_id + initialMessages` + «Очистить историю»; CLI — `run --session`, `history clear`; переиспользовать `agent_run::{plan_with, open_client, run}`; учесть `HDS_ROOT` (§4 п.18) |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -385,4 +385,233 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 * СТОП-ТОЧКИ (остановиться и спросить владельца): guard вынужден бросать исключение; SDK
   обходит egressFetch (у mock есть запрос без egress_check); ключ провайдера попал в файл
   вне secrets.json (например, в сессию SDK в agent-state).
+```
+
+## 6. Контекст для нового чата (A3.4 и далее)
+
+> «Памятка входа»: что сделано, где лежит, какие грабли уже оплачены. Промт
+> следующего подэтапа — §7. Требования и критерии фазы — `AGENT_A3_HANDOFF_PROMPT.md`;
+> нарезка фазы A3 на подэтапы — §2 этого файла.
+
+### 6.1. Где мы
+
+* Верхний уровень: фаза **A3** плана `PLAN_AGENT_PRIVACY_ZONE.md` (§5.3, §5.5, §5.6) —
+  «агент в анонимной зоне». Нарезана на подэтапы **A3.1…A3.7** (§2): A3.1 — воркер на
+  Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, **A3.4 — жизненный
+  цикл (TR-3.9)**, A3.5 — установщик, A3.6 — приёмка (e2e), A3.7 — документация.
+* Ветка `agent-privacy-zone`, HEAD ≥ `76661a7a` (docs A3.3), дерево чистое, push не делался.
+* Коммиты: A3.0 — `f10a92e8`, `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test);
+  A3.2 — `6ef028af` (feat), `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test);
+  docs — `7779343b`, `c5c1f57d`, `76661a7a`.
+* Проверки на срезе: `cargo fmt --all --check` и
+  `cargo clippy --workspace --all-targets -- -D warnings` — чисто;
+  `cargo test --workspace -- --test-threads=4` — **737** тестов, 0 падений;
+  `npm test` в `sidecar/hds_agent` — 23/23, ≈ 39 с; чистая копия (`npm ci` + build) собирается.
+
+### 6.2. Что уже работает (точки входа)
+
+**Node-воркер `sidecar/hds_agent`** (TS → `dist/worker.mjs`, `@cline/sdk` 0.2.0): протокол
+§4.3 (`hello`/`start`/`send`/`abort`/`stop`/`shutdown` + события + `host_call`), политики
+(без `run_commands`/`fetch_web_content`), `hds-guard`, `office_*`/`ask_user` через
+`host_call`, `egressFetch` (каждый запрос и повтор — `egress_check`), MCP из
+`CLINE_MCP_SETTINGS_PATH`, плагины профиля выключены политикой, `turn_end {ok, reason, text,
+error, tools}`, восстановление сессии после фатальной ошибки (`revive` с тем же id).
+Тесты: `npm test` (карта — §1.1).
+
+**Крейт `crates/hds-agent`** (lib, без async):
+
+* `worker` — `Worker::spawn(WorkerSpec, Arc<dyn HostHandler>)`, `call`, `next_event`,
+  `write`, `shutdown` (5 с ожидания → kill); `WorkerSpec { program, script, cwd, env,
+  stderr_log, timeout }`;
+* `gateway` — `Gateway::spawn` (с Python-клиентом) / `Gateway::spawn_egress_only`, `hello`,
+  `open(provider, history, session_id, max_iterations, subagents) -> declared_tools`, `send`,
+  `send_anonymized`, `abort`, `stop`, `next_event` → `GatewayEvent::{Ready, Agent, TurnEnd,
+  Redacted, Done}`, `refresh`/`refresh_from_snapshot`, `clear_history`, `shutdown`;
+  `GatewayHost::{new, without_client}` (egress_check через `Filter`, `office_*` → Python,
+  `ask_user`);
+* `filter` — `Filter::new(project, keep, UnknownPolicy, max_stale, Option<Audit>)`,
+  `set_snapshot`, `redact`, `redact_stored`, `sys_values`; срок снимка —
+  `agent.filter.max_stale_sec` (`AgentSettings::filter_max_stale_secs`, дефолт 300 = В-14);
+* `deanon` — `DeAnonymizer::new(snapshot, sys, workspace, project_root)` (метки → значения,
+  пути workspace → пути проекта);
+* `history` — `session_dir`, `session_files`, `clear(state, session, filter)` (бэкапы
+  `.json.bak`), `read_messages(state, session) -> Vec<Value>` (для `initialMessages`);
+* `settings` — `settings(cfg)` → `AgentSettings { root, max_live_projects (2), idle_secs (1800),
+  request_timeout_secs (120), subagents, unknown, keep_terms, proxy, egress_log, node_path,
+  filter_max_stale_secs, mcp.* }`, `project_dir/workspace_dir/config_dir/state_dir_for`,
+  `projects_file`, `secrets_file`;
+* `projects` — `projects.json` (`Project {id, name, path, provider, model, created}`,
+  `add/load/save/get/remove`, проверка D21); `secrets` — `Secrets::{load, provider(name),
+  provider_for, project_model, project_provider, project_token, mcp_*, secret_strings}`;
+* `env` — `build(cfg, config_dir, state_dir, workspace, proxy)` (HOME/USERPROFILE/APPDATA/
+  TEMP → agent-config, `CLINE_DATA_DIR` → agent-state, `CLINE_MCP_SETTINGS_PATH`),
+  `prepare_dirs`; `mcp` — `McpSpec::from_secrets`/`write_settings`/`settings_path`;
+  `rules` — `write_rules`; `paths` — матрица путей; `protocol` — §4.3.
+* Реестра живых процессов **пока нет** — это работа A3.4.
+
+**CLI `hds agent`** (`crates/hds-cli/src/cmd/agent.rs` + `agent_run.rs`): `init|token` (A2),
+`project add|list`, `run --project P [--prompt …] [--max-iterations N] [--subagents] [--json]
+[--quiet] [--dry-run]`; `agent_run::{plan, plan_with, plan_json, prepare, run, open_client,
+TurnReport, RunOptions}`. Успех хода — по `GatewayEvent::TurnEnd`, `Redacted` — предупреждение,
+`ask_user` — `NoAskUser` (отказ). Тесты: `crates/hds-cli/tests/agent_run.rs`.
+
+### 6.3. Грабли, которые уже оплачены (не наступать снова)
+
+* **SDK резолвит `send` и при фатальном сбое** — успех хода только по `GatewayEvent::TurnEnd`;
+  воркер сам восстанавливает сессию с тем же `session_id` (`revive`, §4 п.7). В Rust это не
+  дублировать.
+* **Verbatim-путь `\\?\C:\…` ломает Node** (`realpathSync` → `lstat 'C:'`): чистить перед
+  передачей процесса/скрипта в Node (§4 п.13). В `agent_run::clean_path` это уже сделано.
+* **`HDS_ROOT` переопределяет и `state_dir`, и `project_root()`** (корень поставки). Изоляция
+  тестов — `agent_run::plan_with(..., sidecar_root)` (§4 п.18).
+* **`open_client` создаёт `agent-state` до спавна** (иначе `stderr_log` валит spawn);
+  `HDS_ANONYMIZE_WORKER` подменяет скрипт воркера анонимизации — только для тестов/диагностики
+  (§4 п.19).
+* **Плагины профиля** выключаются политикой `plugins: {'*': {enabled:false}}`, а не пустыми
+  `pluginPaths`; Agent Plugin из `<HOME>\.agents\plugins` приносит MCP-серверы, имена с
+  хеш-суффиксом (`…__ask_my_files_3deb181b`) — вырезаются `isForbiddenToolName` (§4 п.8–9).
+* **`CLINE_MCP_SETTINGS_PATH` читается SDK**, путь по умолчанию —
+  `<CLINE_DATA_DIR>\settings\cline_mcp_settings.json`; MCP-инструменты готовы к первому запросу
+  (§4 п.10).
+* **Повторы и abort**: 429 повторяется через `egressFetch` (каждый повтор — `egress_check`);
+  `abort` → `ended {reason:"aborted"}`, сессия остаётся рабочей (§4 п.11).
+* **Параллельные интеграционные тесты делят `process::id()`** — временный каталог обязан
+  включать счётчик (`AtomicU32`), иначе тесты удаляют каталоги друг друга (§4 п.16).
+* `npm test` использует glob `test/*.test.mjs` (Node 24 не раскрывает каталог, §4 п.4);
+  `npm ci` предупреждает про `allow-scripts` (esbuild/protobufjs) — это ожидаемо (§4 п.5).
+
+### 6.4. Окружение и команды (Windows, PowerShell)
+
+```powershell
+cd c:\Users\Sasha\hermes-disk-search
+git --no-pager status; git --no-pager log -3 --oneline
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace -- --test-threads=4
+cargo test -p hds-agent
+cargo test -p hds-cli --test agent_run
+cd sidecar\hds_agent; npm test
+```
+
+* PowerShell печатает `cargo` в stderr как `NativeCommandError` — ориентироваться на
+  `$LASTEXITCODE`, а не на «красный» вывод.
+* Длинные прогоны — `Start-Job` + `Wait-Job -Timeout` и лог в `tools/parity/out/` (гитигнорится).
+* Файлы читать через `[System.IO.File]::ReadAllLines((Resolve-Path 'path'), [Text.Encoding]::UTF8)`
+  и писать большими кусками ≤ 6000 символов на вызов редактора.
+* В окружении **не настроена git-identity**: коммиты —
+  `git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit …`, пути — явным
+  списком. `git` всегда с `--no-pager`.
+* Каталог `Microsoft/` в корне репозитория — кэш PowerShell (`ModuleAnalysisCache`), не наш;
+  удалять, не коммитить.
+
+### 6.5. Что читать по коду (ориентиры)
+
+| Тема | Файлы |
+|---|---|
+| протокол §4.3, транспорт | `crates/hds-agent/src/protocol.rs`, `worker.rs` |
+| шлюз, события, TurnEnd, clear_history | `crates/hds-agent/src/gateway.rs` |
+| словарь исходящего, fail-closed | `filter.rs`, `deanon.rs` |
+| история сессии | `history.rs` (`read_messages`, `clear`) |
+| настройки, пути, реестр проектов, секреты | `settings.rs`, `projects.rs`, `secrets.rs` |
+| окружение процесса, MCP, правила | `env.rs`, `mcp.rs`, `rules.rs` |
+| сборка сессии в CLI | `crates/hds-cli/src/cmd/agent_run.rs` |
+| образцы тестов | `crates/hds-agent/tests/gateway_worker.rs`, `crates/hds-cli/tests/agent_run.rs` |
+| Node-воркер и его тесты | `sidecar/hds_agent/src/*.ts`, `sidecar/hds_agent/test/*.test.mjs` |
+
+## 7. Промт для A3.4 (копировать целиком в новый чат, режим Act)
+
+```text
+Ты продолжаешь этап A3 («агент в анонимной зоне») проекта hermes-disk-search (hds).
+A3 нарезан на подэтапы A3.1…A3.7 (AGENT_A3_STAGES.md §2): A3.1 (Node-воркер на стенде),
+A3.2 (Rust ↔ настоящий воркер), A3.3 (точка входа CLI) закрыты; ты делаешь
+ПОДЭТАП A3.4 — «Жизненный цикл (TR-3.9)». Он разблокирует A3.6 (приёмка e2e) и вкладку A5.
+
+ГРАНИЦЫ
+* Работаешь в crates/hds-agent (src/, tests/) и в AGENT_A3_STAGES.md. В crates/hds-cli —
+  только то, что нужно для возобновления и очистки истории в `hds agent` (agent.rs,
+  agent_run.rs); новых подкоманд сверх заявленных не добавляешь.
+* Не трогаешь: другие крейты, установщик (A3.5), UI/A5, документацию (A3.7), боевые
+  config.yaml, index.db, data/. Новых зависимостей не добавляешь (node --test/cargo — как есть).
+* Контракты A1/A2 (RPC, маршрут /mcp/agent/<P>, метки в FTS) не ломаешь.
+
+СНАЧАЛА ПРОЧИТАЙ (файлы репо читай через PowerShell
+[System.IO.File]::ReadAllLines(path, [Text.Encoding]::UTF8): read_files отдаёт пустоту)
+1. AGENT_A3_STAGES.md: §1.1–1.3 (что подтверждено фактом), §2 (нарезка A3), §3 (журнал),
+   §4 (долги и грабли — особенно п.4–7, 13, 16–22), §6 (контекст нового чата), этот промт.
+2. AGENT_A3_HANDOFF_PROMPT.md: §3.9 (TR-3.9 — требования и критерий), §3.13 (протокол §4.3),
+   §6 (грабли), §8 (вопрос В-16).
+3. Код: crates/hds-agent/src/{gateway,worker,history,settings,projects,secrets,lib}.rs,
+   crates/hds-cli/src/cmd/agent_run.rs; образцы тестов —
+   crates/hds-agent/tests/gateway_worker.rs, crates/hds-cli/tests/agent_run.rs.
+Затем покажи короткий план (список тестов и что меняется в src) и начинай.
+
+СТАРТ
+* git --no-pager status: ветка agent-privacy-zone, HEAD — docs-коммит A3.3 (76661a7a) или
+  новее, дерево чистое. Чужие правки не трогать; если мешают — остановись и спроси.
+* Прогони до работы: cargo test -p hds-agent; cargo test -p hds-cli --test agent_run;
+  (cd sidecar/hds_agent; npm test) — всё зелёное (737 тестов в воркспейсе на срезе).
+
+ЗАДАЧА: тесты на `node --test`/`cargo test` без новых зависимостей. Каждый тест — отдельный
+проверяемый факт. Сначала тест; красный — правишь src.
+ 1. Реестр живых проектов. Новый модуль crates/hds-agent/src/registry.rs (+ экспорт в lib.rs).
+    `AgentRegistry::new(max_live: usize, idle: Duration)`; значения по умолчанию берутся из
+    AgentSettings (`agent.max_live_projects` = 2, `agent.idle_unload_min` = 30 мин). Реестр
+    хранит по проекту (`P0001`) живой `Gateway` (один процесс = один проект) и метку
+    последнего использования. API: `get_or_open(project, now, spawn_fn)`,
+    `get_mut(project)`, `touch(project, now)`, `unload(project)`, `reap_idle(now) ->
+    Vec<String>`, `live() -> Vec<(String, Instant)>`. Выгрузка = `Gateway::stop()` +
+    `Gateway::shutdown()` (дождаться выхода, у Worker это ≤ 5 с), запись реестра удаляется.
+    Время передаётся параметром — без фоновых потоков и без «спящих» тестов.
+ 2. `max_live`: при `max_live = 1` открытие второго проекта выгружает первый (его процесс
+    завершён — `Gateway::is_closed()`/PID недоступен, запись ушла); при `max_live = 2` оба живы.
+    Выбор жертвы — LRU по `last_used`.
+ 3. Переиспользование: повторный `get_or_open` того же проекта НЕ перезапускает процесс
+    (PID тот же, второго `start` нет); повторного `initialMessages` при переиспользовании
+    не передаётся. Параллельные ходы — домен UI: реестр отдаёт `&mut Gateway`.
+ 4. Простой: `reap_idle(now)` выгружает проекты, бездействовавшие дольше `idle`, и не трогает
+    свежие; после выгрузки проект открывается заново.
+ 5. Возобновление после перезапуска hds: `start` с тем же `session_id` И `initialMessages`
+    (из `history::read_messages(state_dir, id)`) — на настоящем воркере первый запрос к модели
+    содержит прошлую реплику; `session_id` без `initialMessages` историю не грузит (регресс A0
+    §3.6 зафиксировать тестом).
+ 6. «Очистить историю» end-to-end: остановить сессию → `Gateway::clear_history()` (перезапись
+    файлов сессии словарём, бэкапы `.json.bak`) → `start` с тем же id и `initialMessages` из
+    очищенных файлов → маркера значения в файлах нет, метка на месте, в первом запросе к модели
+    — метка. Ошибки: нет файла истории → понятная ошибка (код 1 в CLI).
+ 7. CLI (минимум, по образцу agent_run.rs): `hds agent run --project P --session <id>`
+    возобновляет сессию (session_id + read_messages; история читается из `agent-state`);
+    `hds agent history clear --project P [--session <id>]` — чистка истории (печатает число
+    замен и пути бэкапов; `--session` не задан — берётся последняя сессия из
+    `<state>\.cline\data\sessions`, иначе понятная ошибка). Коды возврата: 0 — успех,
+    1 — нет истории/сбой, 2 — использование.
+ 8. Документация: §1.4 (что подтверждено фактом), §3 (A3.4 закрыт + коммиты), §4 (находки;
+    что осталось для UI/сервиса), при необходимости уточни A3.5/A3.6.
+
+ПРАВИЛА
+* Guard/фильтр/fail-closed не ослаблять; хуки не бросают исключений; таймаут guard (2 с) не менять.
+* Тесты быстрые: реестр — на Node-заглушке (крошечный скрипт в тесте, как ECHO_WORKER в
+  worker.rs; пишет свой PID и полученные команды в файл), плюс ОДИН тест на настоящем
+  `dist/worker.mjs` с mock-провайдером (образец — gateway_worker.rs). Весь
+  `cargo test -p hds-agent` ≤ 60 с, `cargo test --workspace` ≤ 3 мин.
+* Временные каталоги — `os.tmpdir()` + pid + счётчик (AtomicU32): тесты идут параллельно.
+* Env в тестах CLI (`HDS_ROOT`, `HDS_CONFIG`, `HDS_AGENT_SECRETS`, `HDS_ANONYMIZE_WORKER`) —
+  под мьютекс и с восстановлением.
+* Боевые config.yaml, index.db, data/ не трогать; артефакты — tools/parity/out/ (гитигнорится).
+* Пути к node/скрипту чистить от `\\?\` перед передачей в Node (§4 п.13).
+* git — всегда с `--no-pager`; коммиты явным списком путей и с identity:
+  git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit -m '…'
+* Длинные прогоны — Start-Job + Wait-Job -Timeout, лог в tools/parity/out/.
+* Редактор: ≤ 6000 символов на вызов, большие файлы — кусками.
+
+ЗАВЕРШЕНИЕ
+* cargo fmt --all --check; cargo clippy --workspace --all-targets -- -D warnings;
+  cargo test --workspace -- --test-threads=4; npm test в sidecar/hds_agent — зелёные.
+* Коммиты: «feat(agent): A3.4 — …», «test(agent): A3.4 — …» (и отдельный docs-коммит с
+  обновлением AGENT_A3_STAGES.md: §1.4, §3, §4). Push не делать.
+* Сводка: какие пункты 1–8 зелёные, что отложено и почему (например, фоновый reaper для
+  service/UI), что меняется для A3.5, A3.6 и A5.
+* СТОП-ТОЧКИ (остановиться и спросить владельца): реестр требует менять публичный API
+  `Gateway` так, что ломаются A3.2/A3.3; выгрузка не укладывается в 5 с и требует нового
+  контракта протокола; ключ провайдера попадает в файл вне secrets.json; нужны значения
+  `max_live_projects`/`idle_unload_min`, отличные от В-16 (2 и 30 мин).
 ```
