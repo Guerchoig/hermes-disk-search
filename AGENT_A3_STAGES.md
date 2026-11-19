@@ -9,10 +9,11 @@
 > Карта фазы (требования, грабли, критерии §5) остаётся в `AGENT_A3_HANDOFF_PROMPT.md`,
 > здесь — только порядок, границы под-этапов и состояние.
 >
-> **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Код A3.0 — до `a8dc5b51`
-> включительно; поверх него один docs-коммит с этим файлом. Дерево чистое, push не делался.
+> **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
+> `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test) плюс docs-коммит с этим файлом.
+> Дерево чистое, push не делался.
 
-## 1. Что уже сделано и проверено (A3.0)
+## 1. Что уже сделано и проверено (A3.0, A3.1)
 
 | Коммит | Содержание |
 |---|---|
@@ -48,7 +49,7 @@
 * профиль агента: раньше `HOME` указывал на `agent-config\home`, а `cline_mcp_settings.json`
   писался в `agent-config\.cline\…` — MCP не нашёлся бы.
 
-**Ещё НЕ проверено фактом** (код есть, теста нет — это работа A3.1):
+**На срезе A3.0 НЕ было проверено фактом** (закрыто в A3.1 — список ниже):
 
 * `beforeModel` с заменой `tools` (вырезание `*__ask_my_files`);
 * `plugins: {'*': {enabled: false}}` — плагин из `<HOME>\.cline\plugins` не грузится;
@@ -59,6 +60,55 @@
   (`initialMessages`);
 * поле `tools` в ответе `start` — **статический список**, а не фактический. Фактический
   список приходит в `turn_end.tools` (из `beforeModel`).
+
+**Закрыто в A3.1** (всё перечисленное выше проверено тестами, см. §1.1 и §3):
+
+* `npm test` = 23 теста, 0 падений, ≈ 39 с (`node --test`, mock-провайдер, MCP-заглушка);
+* `beforeModel`: в `tools` запроса и в `turn_end.tools` есть `stub__search_local_files`,
+  `stub__leak`, нет `stub__ask_my_files`; имя с хеш-суффиксом
+  (`…__ask_my_files_3deb181b`, так SDK называет MCP-инструменты Agent Plugin) тоже режется;
+* MCP из файла по `CLINE_MCP_SETTINGS_PATH`: `mcp_out` заменил значение меткой **до** вызова
+  заглушки (`[PERSON_1]` в журнале заглушки), `mcp_in` заменил значение в ответе; оба вызова
+  видны в журнале стенда; секрет в аргументах блокирует вызов, секрет в реплике — 0 запросов к
+  модели, `turn_end.ok=false`, `error` содержит `privacy_filter_unavailable`, следующая
+  реплика снова работает;
+* `read_files` по `..\outside`, UNC, `NUL` → «hds-guard: …» в следующем запросе к модели,
+  содержимое outside не ушло; относительный путь читается из workspace;
+  `report.docx` → «используй office_read»; `editor` по `*.pdf.md` → отказ;
+* `office_read/edit/create` и `ask_user` → `host_call` с путём как дал агент, `ops` массивом,
+  результат дошёл до модели; путь вне workspace — `host_call` не вызван;
+* fail-closed: отказ `egress_check {kind:model}` → mock получил 0 запросов, `turn_end.ok=false`,
+  в `error` есть `privacy_filter_unavailable`;
+* `abort` во время хода → `turn_end {ok:false, reason:"aborted"}`, процесс жив;
+* `subagents: false` → нет `spawn_agent`; `true` → есть, запрос суб-агента прошёл
+  `egress_check` (число запросов mock = числу `egress_check` kind=model);
+* `history` + тот же `session_id` → первый запрос к модели содержит прошлую реплику;
+* `start.result` теперь `declared_tools` (старое `tools` снято, см. §4);
+* ключ провайдера (`start.provider.api_key`) и ключ из env родителя не появляются ни в одном
+  файле под `agent-state`/`agent-config`, реальный `<домашний каталог>\.cline` не упоминается
+  ни в запросах, ни в событиях;
+
+### 1.1. Тесты A3.1 (карта: файл → проверяемый факт)
+
+Все — `node --test`, сценарии — `test/fixtures/` (mock-провайдер, MCP-заглушка, стенд
+`harness.mjs` в роли Rust). Провайдер — `127.0.0.1:0`, каталоги проектов — `os.tmpdir()`,
+удаляются в `t.after`.
+
+| Файл | Факт |
+|---|---|
+| `test/e2e_basic.test.mjs` | базовый ход + `start.result.declared_tools` (старое `tools` снято) |
+| `test/mcp.test.mjs` | инструменты заглушки в запросе и `turn_end.tools`, `ask_my_files` вырезан; `mcp_out`/`mcp_in` через `egress_check` |
+| `test/secret.test.mjs` | секрет в аргументах MCP — вызова нет; секрет в реплике — 0 запросов, `turn_end.ok=false`, воркер жив |
+| `test/failclosed.test.mjs` | отказ `egress_check {kind:model}` → 0 запросов к mock, ошибка с `privacy_filter_unavailable` |
+| `test/guard_live.test.mjs` | отказы guard (пути, docx, `*.pdf.md`) доходят до модели текстом; outside не утёк |
+| `test/office.test.mjs` | `office_*`/`ask_user` → `host_call` с верным payload; путь вне workspace — вызова нет |
+| `test/env.test.mjs` | ключ из env родителя не передан; реальный профиль не упоминается; auth — только из `start` |
+| `test/isolation.test.mjs` | плагин профиля найден и отклонён политикой (его инструмента нет), MCP по «умолчанию» и Agent Plugin не загружены; фикстуры валидны (положительный контроль) |
+| `test/retry.test.mjs` | 429 → повтор, число запросов mock = числу `egress_check kind=model` |
+| `test/abort.test.mjs` | `abort` → `turn_end {ok:false, reason:"aborted"}`, процесс жив |
+| `test/subagents.test.mjs` | `subagents` false/true; запрос суб-агента через `egress_check` |
+| `test/history.test.mjs` | `history` + `session_id` → прошлая реплика в первом запросе; api_key нет в файлах |
+| `test/guard.test.mjs` | матрица путей, политика форматов, `collectPaths`, `withTimeout`, `isForbiddenToolName` (все формы `ask_my_files`) |
 
 **Ещё НЕ написано:**
 
@@ -75,7 +125,7 @@
 
 | # | Под-этап | Результат «снаружи» (критерий) | Объём |
 |---|---|---|---|
-| **A3.1** | **Воркер: TR-3.10 на Node-стенде** | `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` | ~1 чат |
+| **A3.1** | **Воркер: TR-3.10 на Node-стенде** | **Закрыт.** `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` (карта — §1.1) | закрыт |
 | A3.2 | Rust ↔ настоящий воркер | `cargo test -p hds-agent` (интеграционный, `#[ignore]` при отсутствии `node`/`dist`): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений | ~1 чат |
 | A3.3 | Точка входа CLI | `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль. Тест CLI на mock-провайдере | ~1 чат |
 | A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем | ~1 чат |
@@ -92,18 +142,22 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 | Под-этап | Состояние | Коммиты | Заметки |
 |---|---|---|---|
 | A3.0 | закрыт 19.11.2026 | `f10a92e8`, `a8dc5b51` | см. §1 |
-| A3.1 | следующий | — | промт — §5 |
+| A3.1 | закрыт 19.11.2026 | `2efe8043` (fix), `8e26d0f3` (test) | `npm test` 23/23, ≈ 39 с; карта тестов — §1.1; находки — §4 п.7–12; `Gateway::open` поправить в A3.2 (§4 п.1) |
+| A3.2 | следующий | — | промт — §5 (поправить: `declared_tools`, `GatewayEvent::TurnEnd`, `Up::HostCall` — мёртвая ветка) |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
-1. `start.result.tools` в воркере — статический список; фактический — из `beforeModel`
-   (`turn_end.tools`). В A3.1 либо снять поле, либо явно назвать его `declared_tools`
-   и поправить `Gateway::open` (сейчас читает `result.tools`).
+1. **Сделано в A3.1:** `start` возвращает `declared_tools` вместо `tools`. **Осталось:**
+   `Gateway::open` (`crates/hds-agent/src/gateway.rs`, около строки 450) всё ещё читает
+   `result.get("tools")` — поправить в A3.2, иначе список объявленных инструментов придёт
+   пустым. `Up::Ready { tools }` (ответ на `hello`) остаётся как есть.
 2. `GatewayEvent::Agent` при `Up::HostCall` — мёртвая ветка: `host_call` перехватывает
    поток чтения. Убрать в A3.2.
 3. `turn_end` — событие воркера, а не `done`. Rust (`Gateway`) об этом пока не знает. В A3.2
    добавить `GatewayEvent::TurnEnd {ok, reason, text, error}` и проверку «успех при пустом
-   ответе» (грабли §6.1 карты).
+   ответе» (грабли §6.1 карты). После A3.1 `turn_end` уже отдаёт корректные `reason`/`error`
+   (в т.ч. `aborted`, `privacy_filter_unavailable`) и фактический `tools` — на них можно
+   опираться.
 4. Скрипт `npm test` — `node --test "test/*.test.mjs"`. Каталог `test/` Node 24 сам не
    раскрывает.
 5. `npm install` предупреждает `allow-scripts` про `esbuild` и `protobufjs`. Бинарник esbuild
@@ -112,10 +166,47 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 6. Терминал агента: `git` без `--no-pager` вешает команду (пейджер). Длинные прогоны
    (`cargo test --workspace`) — через `Start-Job` + `Wait-Job -Timeout` и лог в
    `tools/parity/out/`.
+7. **A3.1: SDK на фатальной ошибке прогона резолвит `send` и уничтожает сессию.** Было:
+   `turn_end {ok:false, reason:"unknown", error:"unknown"}`; следующий `send` падал
+   `session not found: <id>`. Исправлено в воркере: `turn_end` собирается из событий
+   (`done`/`ended`/`error`, причина — текст ошибки, например `privacy_filter_unavailable`),
+   а после фатальной ошибки (`ended.reason == "error"`) воркер перезапускает сессию с **тем
+   же** `session_id` перед следующим ходом (`revive()`; `initialMessages` при этом не
+   передаются, чтобы история не удвоилась). В A3.2 учесть: `start` после ошибки возвращает
+   тот же `session_id`, историю не грузит.
+8. **A3.1: плагины выключаются политикой `plugins: {'*': {enabled: false}}`, а не пустыми
+   `pluginPaths: []`.** Проверено экспериментом: без политики плагин из `<HOME>\.cline\plugins`
+   загружается, и в `tools` появляется его инструмент. Обнаружение идёт по
+   `<workspace>\.cline\plugins`, `<HOME>\.cline\plugins`, `<HOME>\Documents\Cline\Plugins`;
+   **только `.js`/`.ts`** (`PLUGIN_FILE_EXTENSIONS`; `.mjs` не рассматривается). Модуль
+   плагина — `export default {name, manifest: {capabilities: [...]}, setup(api, ctx)}` либо
+   именованный экспорт `plugin`. Отклонённый политикой плагин виден в `start.result.plugin_issues`
+   (сейчас — список имён; A3.3/UI может показать «плагин отключён»).
+9. **A3.1: Agent Plugin (`<HOME>\.agents\plugins`) грузит свои MCP-серверы в сессию по
+   умолчанию** — та же политика `plugins` его отсекает. Формат: `plugin.json`
+   (`$schema: https://agent-plugins.org/schemas/1.0.0/plugin.schema.json`, `name`, `version`) +
+   `mcp.json` (`$schema: .../mcp.schema.json`, `mcpServers: {name: {type: "stdio", command, args}}`
+   — **без** обёртки `transport`). Имена инструментов таких серверов получают хеш-суффикс
+   (`hds-agent-plugin_agentdecoy__ask_my_files_3deb181b`) — прежняя проверка
+   `endsWith("__ask_my_files")` их пропускала; в A3.1 добавлен `isForbiddenToolName`
+   (суффикс + хеш) и тест на все формы.
+10. **A3.1: `CLINE_MCP_SETTINGS_PATH` действительно читается SDK** (`resolveMcpSettingsPath`
+   в `@cline/shared/storage`), путь по умолчанию — `<CLINE_DATA_DIR>\settings\cline_mcp_settings.json`.
+    Файл-обманка в этом месте не загружается (тест изоляции), т.е. Rust достаточно задавать
+    переменную, как сейчас. MCP-инструменты готовы уже к первому запросу — `start` ждать
+    ничего не нужно (проверено: заглушка в первом же `tools`).
+11. **A3.1: 429 повторяется SDK через `egressFetch`** (в тесте — 2 запроса, оба с
+    `egress_check`; пауза ~1–2 с). `abort` даёт `ended {reason:"aborted"}`, сессия остаётся
+    рабочей. Суб-агент на mock-провайдере запускается, его запрос идёт через `egressFetch`.
+12. **A3.1: в стенд добавлено, в продукт — нет.** `mock_provider.mjs`: шаги `{status}` и
+    `{delayMs}`, `authorization` в журнале. `mcp_stub.mjs`: журнал вызовов в файл по
+    `HDS_STUB_LOG`. `harness.mjs`: `writeStubMcp`, `readStubLog`, `filesUnder`, третий
+    аргумент `startWorker(dirs, host, extraEnv)`. Диагностических RPC и env-переключателей в
+    воркер не добавляли — все проверки сделаны через поведение.
 
 
 
-## 5. Промт для A3.1 (копировать целиком в новый чат, режим Act)
+## 5. Промт для A3.1 (выполнен; оставлен для истории)
 
 ```text
 Ты продолжаешь фазу A3 («агент в анонимной зоне») проекта hermes-disk-search (hds), под-этап
