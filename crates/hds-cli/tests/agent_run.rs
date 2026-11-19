@@ -128,6 +128,26 @@ impl Stand {
         fs::write(&path, serde_json::to_string_pretty(&secrets).unwrap()).unwrap();
     }
 
+    /// `secrets.json` с дополнительным блоком `mcp.servers` (A3.7).
+    fn write_secrets_with_mcp(&self, base_url: &str, api_key: &str, servers: Value) {
+        let path = self.secrets_path();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let secrets = json!({
+            "projects": {
+                "P0001": {
+                    "token": "tok-a33-project",
+                    "provider": "openai-compatible",
+                    "model": "mock-model"
+                }
+            },
+            "providers": {
+                "openai-compatible": { "api_key": api_key, "base_url": base_url }
+            },
+            "mcp": { "servers": servers }
+        });
+        fs::write(&path, serde_json::to_string_pretty(&secrets).unwrap()).unwrap();
+    }
+
     fn add_project(&self) {
         let args: Vec<String> = vec![
             "project".to_string(),
@@ -841,4 +861,72 @@ fn plan_prefers_portable_node() {
         "в пути портативного Node не должно быть пробелов: {}",
         plan.node.display()
     );
+}
+
+/// A3.7: внешние MCP-серверы из поставки (`mcp.servers` в `secrets.json`)
+/// попадают в план и в записанные настройки; значения секретов в план не уходят.
+#[test]
+fn external_mcp_servers_from_delivery_template() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let stand = Stand::new("extmcp");
+    stand.add_project();
+    // Берём именно шаблон из поставки: он должен оставаться рабочим.
+    let template_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+        .join("sidecar")
+        .join("mcp")
+        .join("mcp.example.json");
+    let template: Value = serde_json::from_str(
+        &fs::read_to_string(&template_path)
+            .unwrap_or_else(|e| panic!("шаблон {}: {e}", template_path.display())),
+    )
+    .expect("JSON шаблона mcp.example.json");
+    stand.write_secrets_with_mcp(
+        "https://example.invalid/v1",
+        "sk-a37-secret-key",
+        template["mcp"]["servers"].clone(),
+    );
+    let dummy = stand.dir.join("sidecar/hds_agent/dist/worker.mjs");
+    fs::create_dir_all(dummy.parent().unwrap()).unwrap();
+    fs::write(&dummy, "// dummy\n").unwrap();
+
+    let out = run_cli_bin(
+        &stand,
+        &[
+            "agent",
+            "run",
+            "--project",
+            "P0001",
+            "--prompt",
+            "тест",
+            "--dry-run",
+        ],
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let plan: Value = serde_json::from_str(stdout.trim()).expect("план JSON");
+    let servers: Vec<&str> = plan["mcp"]["servers"]
+        .as_array()
+        .expect("mcp.servers")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(servers.contains(&"1c-buddy"), "{servers:?}");
+    assert!(servers.contains(&"example-http"), "{servers:?}");
+    assert!(!stdout.contains("sk-a37-secret-key"), "ключ в плане");
+    assert!(!stdout.contains("tok-a33-project"), "токен проекта в плане");
+
+    // Записанные настройки MCP содержат transport/args нового сервера.
+    let opts = RunOptions::new(Some("тест".to_string()));
+    let plan =
+        agent_run::plan_with(&stand.cfg, "P0001", &opts, &stand.dir.path).expect("план сессии");
+    let mcp_path = agent_run::prepare(&plan).expect("prepare");
+    let settings: Value =
+        serde_json::from_str(&fs::read_to_string(&mcp_path).unwrap()).expect("настройки MCP");
+    let buddy = &settings["mcpServers"]["1c-buddy"];
+    assert_eq!(buddy["type"], "stdio");
+    assert_eq!(buddy["args"][0], "--env-file");
+    let http = &settings["mcpServers"]["example-http"];
+    assert_eq!(http["type"], "streamableHttp");
 }

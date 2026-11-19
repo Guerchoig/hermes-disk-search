@@ -352,6 +352,8 @@ pub fn plan_with(
         timeout: Duration::from_secs(agent.request_timeout_secs.max(30)),
     };
 
+    // Внешние серверы из `secrets.json` (`mcp.servers.<имя>`) попадают в
+    // `extra_servers` внутри `from_secrets`; встроенные имена сильнее (A3.7).
     let mut mcp = McpSpec::from_secrets(
         &project.id,
         mcp_port(cfg),

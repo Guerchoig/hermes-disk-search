@@ -169,6 +169,23 @@ impl Secrets {
             .unwrap_or_default()
     }
 
+    /// Дополнительные MCP-серверы из общего блока `mcp.servers.<имя>` (A3.7):
+    /// готовый элемент `cline_mcp_settings.json` (stdio/http), порядок — по имени.
+    /// Не-объекты пропускаются. Встроенные `disk-search`/`tavily`/`1c-buddy`
+    /// задаются отдельными ключами `mcp.<имя>` и здесь не участвуют.
+    pub fn mcp_servers(&self) -> Vec<(String, Value)> {
+        let Some(map) = self.raw.pointer("/mcp/servers").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, Value)> = map
+            .iter()
+            .filter(|(_, value)| value.is_object())
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
     /// Все секретные строки (ключи провайдеров, MCP, токены проектов) — для
     /// словаря исходящего фильтра (TR-6.2 д).
     pub fn secret_strings(&self) -> Vec<String> {
@@ -306,6 +323,39 @@ mod tests {
             secrets.provider_for("P9999"),
             Err(SecretsError::NoKey(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn mcp_servers_reads_named_block_sorted() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-secrets4-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "mcp": {
+                "servers": {
+                  "z-http": { "type": "streamableHttp", "url": "https://example.invalid/mcp", "headers": { "Authorization": "Bearer secret-token-123" } },
+                  "1c-buddy": { "type": "stdio", "command": "C:\\tools\\1c-buddy.exe", "args": ["--env-file", "C:\\tools\\.env"], "env": { "TOKEN": "secret-token-123" } }
+                },
+                "tavily": { "api_key": "tvly-secret-123456" }
+              }
+            }"#,
+        )
+        .unwrap();
+        let secrets = Secrets::load(&path).unwrap();
+        let servers = secrets.mcp_servers();
+        let names: Vec<&str> = servers.iter().map(|(name, _)| name.as_str()).collect();
+        assert_eq!(names, vec!["1c-buddy", "z-http"]);
+        assert_eq!(servers[0].1["type"], "stdio");
+        assert_eq!(servers[0].1["args"][0], "--env-file");
+        // Секреты новых серверов попадают в словарь фильтра.
+        let strings = secrets.secret_strings();
+        assert!(strings.iter().any(|s| s == "secret-token-123"));
+        assert!(strings.iter().any(|s| s == "Bearer secret-token-123"));
+        assert!(strings.iter().any(|s| s == "tvly-secret-123456"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

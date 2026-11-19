@@ -44,6 +44,10 @@ pub struct McpSpec {
     pub onec_args: Vec<String>,
     /// Переменные окружения `1c-buddy`.
     pub onec_env: Vec<(String, String)>,
+    /// Дополнительные серверы из `secrets.json` (`mcp.servers.<имя>`, A3.7):
+    /// готовый элемент `mcpServers` (stdio/http). Вставляются после встроенных;
+    /// совпадение имени — встроенный сервер сильнее, новый не перетирает его.
+    pub extra_servers: Vec<(String, Value)>,
 }
 
 impl McpSpec {
@@ -67,6 +71,7 @@ impl McpSpec {
             onec_command: secrets.mcp_str("onec_buddy", "command").map(PathBuf::from),
             onec_args: secrets.mcp_list("onec_buddy", "args"),
             onec_env: Vec::new(),
+            extra_servers: secrets.mcp_servers(),
         }
     }
 
@@ -127,6 +132,15 @@ impl McpSpec {
                     "timeoutSeconds": 120
                 }),
             );
+        }
+        // A3.7: дополнительные серверы из `secrets.json` (`mcp.servers`).
+        // Встроенные имена не перетираются: `disk-search`, `tavily`, `1c-buddy`
+        // остаются продуктовыми, даже если в секретах есть запись с тем же именем.
+        for (name, value) in &self.extra_servers {
+            if servers.contains_key(name) {
+                continue;
+            }
+            servers.insert(name.clone(), value.clone());
         }
         json!({ "mcpServers": servers })
     }
@@ -194,6 +208,7 @@ mod tests {
             onec_command: Some(PathBuf::from("C:\\bin\\1c-buddy.exe")),
             onec_args: vec!["--stdio".to_string()],
             onec_env: Vec::new(),
+            extra_servers: Vec::new(),
         }
     }
 
@@ -233,6 +248,53 @@ mod tests {
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("streamableHttp"));
         assert!(text.contains("P0001"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn extra_servers_are_added_and_builtins_win() {
+        let mut s = spec();
+        s.extra_servers = vec![
+            (
+                "1c-buddy".to_string(),
+                json!({ "type": "stdio", "command": "other.exe" }),
+            ),
+            (
+                "custom".to_string(),
+                json!({
+                    "type": "stdio",
+                    "command": "custom-mcp.exe",
+                    "args": ["--env-file", "C:\\tools\\.env"]
+                }),
+            ),
+        ];
+        let json = s.to_json();
+        let servers = json["mcpServers"].as_object().unwrap();
+        // Встроенный 1c-buddy не перетёрт записью из секретов.
+        assert_eq!(
+            servers["1c-buddy"]["transport"]["command"],
+            "C:\\bin\\1c-buddy.exe"
+        );
+        assert_eq!(servers["1c-buddy"]["transport"]["args"][0], "--stdio");
+        // Новый сервер добавлен как есть.
+        assert_eq!(servers["custom"]["type"], "stdio");
+        assert_eq!(servers["custom"]["args"][0], "--env-file");
+    }
+
+    #[test]
+    fn settings_file_includes_extra_server() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-mcp2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut s = spec();
+        s.extra_servers = vec![(
+            "custom".to_string(),
+            json!({ "type": "stdio", "command": "custom-mcp.exe", "args": ["--y"] }),
+        )];
+        let path = write_settings(&dir, &s).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"custom\""));
+        assert!(text.contains("--y"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

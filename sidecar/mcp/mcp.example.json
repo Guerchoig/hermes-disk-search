@@ -1,0 +1,19 @@
+{
+  "mcp": {
+    "servers": {
+      "1c-buddy": {
+        "type": "stdio",
+        "command": "<путь к 1c-buddy-mcp.exe>",
+        "args": ["--env-file", "<путь к .env>"],
+        "env": {}
+      },
+      "example-http": {
+        "type": "streamableHttp",
+        "url": "https://example.com/mcp",
+        "headers": {
+          "Authorization": "Bearer <ваш токен>"
+        }
+      }
+    }
+  }
+}
