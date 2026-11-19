@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "project": "nodejs",
+  "tag": "v24.18.0",
+  "generated_at": "2026-11-19",
+  "release_url": "https://nodejs.org/dist/v24.18.0/",
+  "comment": "Portable Node for sidecar/node (A3.5). sha256 values are copied from the official https://nodejs.org/dist/v24.18.0/SHASUMS256.txt; the installer verifies the downloaded archive against them and fails on a mismatch.",
+  "assets": [
+    {
+      "id": "windows-x64",
+      "platform": "windows-x64",
+      "archive": "zip",
+      "file_name": "node-v24.18.0-win-x64.zip",
+      "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-win-x64.zip",
+      "sha256": "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
+      "root": "node-v24.18.0-win-x64",
+      "exe": "node.exe",
+      "npm": "node_modules/npm/bin/npm-cli.js"
+    },
+    {
+      "id": "macos-arm64",
+      "platform": "macos-arm64",
+      "archive": "tar.gz",
+      "file_name": "node-v24.18.0-darwin-arm64.tar.gz",
+      "url": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz",
+      "sha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+      "root": "node-v24.18.0-darwin-arm64",
+      "exe": "bin/node",
+      "npm": "lib/node_modules/npm/bin/npm-cli.js"
+    }
+  ]
+}
