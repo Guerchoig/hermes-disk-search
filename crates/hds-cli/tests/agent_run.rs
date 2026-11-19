@@ -22,6 +22,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use serde_json::{json, Value};
 
@@ -485,4 +486,318 @@ fn run_turn_on_mock_provider() {
             path.display()
         );
     }
+}
+
+/// Тот же запуск бинаря с дополнительными переменными окружения (воркер
+/// анонимизации: скрипт и интерпретатор).
+fn run_cli_bin_env(stand: &Stand, args: &[&str], envs: &[(&str, String)]) -> std::process::Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_hds"));
+    command
+        .args(args)
+        .env("HDS_CONFIG", &stand.cfg_path)
+        .env("HDS_ROOT", &stand.dir.path);
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    command.output().expect("hds")
+}
+
+/// Окружение воркера-заглушки анонимизации (снимок vault без NER-моделей).
+fn anonymize_env() -> Option<Vec<(&'static str, String)>> {
+    let root = repo_root();
+    let python = root
+        .join("sidecar")
+        .join("venv-anonymize")
+        .join("Scripts")
+        .join("python.exe");
+    if !python.is_file() {
+        eprintln!("A3.4 пропущен: нет интерпретатора воркера анонимизации (venv)");
+        return None;
+    }
+    Some(vec![
+        (
+            "HDS_ANONYMIZE_WORKER",
+            root.join("crates")
+                .join("hds-anonymize")
+                .join("tests")
+                .join("mock_worker.py")
+                .to_string_lossy()
+                .to_string(),
+        ),
+        ("HDS_ANONYMIZE_PYTHON", python.to_string_lossy().to_string()),
+    ])
+}
+
+/// Файл истории сессии с значением — модель угрозы TR-6.6 (текст мог попасть в
+/// файл до фильтра или из результата инструмента).
+fn seed_session(stand: &Stand, session: &str, value: &str) -> PathBuf {
+    let dir = stand
+        .zone
+        .join("P0001")
+        .join("agent-state")
+        .join(".cline")
+        .join("data")
+        .join("sessions")
+        .join(session);
+    fs::create_dir_all(&dir).unwrap();
+    let messages = json!({
+        "messages": [
+            { "role": "user", "content": [{ "type": "text", "text": value }] }
+        ]
+    });
+    let path = dir.join(format!("{session}.messages.json"));
+    fs::write(&path, serde_json::to_string_pretty(&messages).unwrap()).unwrap();
+    path
+}
+
+/// A3.4: `run --session` возобновляет сессию — первый запрос к модели во втором
+/// прогоне содержит прошлую реплику (история читается из `agent-state`).
+#[test]
+fn run_session_resumes_history() {
+    let _env = ENV_LOCK.lock().unwrap();
+    if !node_available() {
+        eprintln!("A3.4 пропущен: node недоступен");
+        return;
+    }
+    let root = repo_root();
+    if !root.join("sidecar/hds_agent/dist/worker.mjs").is_file() {
+        eprintln!("A3.4 пропущен: нет dist/worker.mjs (npm run build)");
+        return;
+    }
+    if hds_anonymize::discover_python(&root).is_none() {
+        eprintln!("A3.4 пропущен: нет интерпретатора воркера анонимизации (venv)");
+        return;
+    }
+
+    let stand = Stand::new("resume");
+    stand.add_project();
+    fs::create_dir_all(stand.workspace()).unwrap();
+    let mock = Mock::start(
+        &stand.dir.path,
+        &[
+            json!({ "text": "ЗАПОМНИЛ-ЭТО" }),
+            json!({ "text": "продолжаем" }),
+        ],
+    );
+    stand.write_secrets(&mock.base_url, "sk-a34-resume");
+
+    std::env::set_var(
+        "HDS_ANONYMIZE_WORKER",
+        root.join("crates/hds-anonymize/tests/mock_worker.py"),
+    );
+    let opts = RunOptions {
+        prompt: Some("первый вопрос".to_string()),
+        max_iterations: 4,
+        json: true,
+        ..Default::default()
+    };
+    let plan = agent_run::plan_with(&stand.cfg, "P0001", &opts, &root).expect("план");
+    let client = agent_run::open_client(&stand.cfg, &plan, &root).expect("воркер анонимизации");
+    std::env::remove_var("HDS_ANONYMIZE_WORKER");
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let first = agent_run::run(&plan, Arc::clone(&client), &opts, &mut out, &mut err)
+        .expect("первый прогон");
+    assert!(
+        first.ok,
+        "первый ход: {first:?}; stderr={}",
+        String::from_utf8_lossy(&err)
+    );
+    let session = first.session_id.clone().expect("session_id новой сессии");
+    assert!(
+        plan.state_dir
+            .join(".cline")
+            .join("data")
+            .join("sessions")
+            .join(&session)
+            .is_dir(),
+        "файлы сессии лежат в agent-state"
+    );
+
+    // Второй прогон — возобновление той же сессии с её историей.
+    let resume = RunOptions {
+        prompt: Some("второй вопрос".to_string()),
+        session: Some(session.clone()),
+        max_iterations: 4,
+        json: true,
+        ..Default::default()
+    };
+    let mut out2 = Vec::new();
+    let mut err2 = Vec::new();
+    let second = agent_run::run(&plan, Arc::clone(&client), &resume, &mut out2, &mut err2)
+        .expect("возобновлённый прогон");
+    assert!(
+        second.ok,
+        "возобновлённый ход: {second:?}; stderr={}",
+        String::from_utf8_lossy(&err2)
+    );
+    assert_eq!(second.session_id.as_deref(), Some(session.as_str()));
+
+    let events: Vec<Value> = String::from_utf8_lossy(&out2)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).expect("NDJSON-событие"))
+        .collect();
+    let session_event = events
+        .iter()
+        .find(|event| event["kind"] == "session")
+        .expect("событие session");
+    assert_eq!(session_event["resumed"], true);
+    assert_eq!(session_event["session_id"], session);
+
+    // Первый запрос второго прогона уже содержит прошлую реплику.
+    let requests: Vec<Value> = mock
+        .raw()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .collect();
+    assert_eq!(requests.len(), 2, "по запросу на прогон");
+    let resumed = requests[1].to_string();
+    assert!(
+        resumed.contains("ЗАПОМНИЛ-ЭТО"),
+        "прошлая реплика в первом запросе после возобновления: {resumed}"
+    );
+    assert!(resumed.contains("второй вопрос"), "{resumed}");
+
+    // Нет файла истории — понятная ошибка, а не пустая сессия.
+    let missing = RunOptions {
+        prompt: Some("третий вопрос".to_string()),
+        session: Some("нет-такой-сессии".to_string()),
+        max_iterations: 4,
+        json: true,
+        ..Default::default()
+    };
+    let mut out3 = Vec::new();
+    let mut err3 = Vec::new();
+    let failed = agent_run::run(&plan, Arc::clone(&client), &missing, &mut out3, &mut err3);
+    let message = failed.expect_err("отсутствующая история — ошибка");
+    assert!(message.contains("история сессии"), "{message}");
+
+    if let Ok(client) = Arc::try_unwrap(client) {
+        if let Ok(client) = client.into_inner() {
+            client.shutdown();
+        }
+    }
+}
+
+/// A3.4: `hds agent history clear` — чистка истории через бинарь: значения
+/// заменяются метками, рядом остаётся бэкап, печатаются число замен и пути
+/// бэкапов; без `--session` берётся последняя сессия.
+#[test]
+fn history_clear_cli() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let Some(envs) = anonymize_env() else {
+        return;
+    };
+    let stand = Stand::new("history");
+    stand.add_project();
+    let old = seed_session(&stand, "S-OLD", "Иванов Иван");
+    let new = seed_session(&stand, "S-NEW", "Иванов Иван");
+    // S-OLD явно старее: без `--session` берётся последняя сессия.
+    fs::OpenOptions::new()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(SystemTime::now() - Duration::from_secs(3600))
+        .unwrap();
+
+    let out = run_cli_bin_env(
+        &stand,
+        &["agent", "history", "clear", "--project", "P0001"],
+        &envs,
+    );
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("S-NEW"), "последняя сессия: {stdout}");
+    assert!(stdout.contains("замен"), "число замен: {stdout}");
+    assert!(stdout.contains("[бэкап]"), "пути бэкапов: {stdout}");
+
+    let cleaned = fs::read_to_string(&new).unwrap();
+    assert!(
+        !cleaned.contains("Иванов Иван"),
+        "значение осталось: {cleaned}"
+    );
+    // Форма с граммемой приходит как `[PERSON_1|nomn]` (метки разбирает
+    // `hds_core::labels`), поэтому проверяем префикс метки.
+    assert!(cleaned.contains("[PERSON_1"), "метки нет: {cleaned}");
+    assert!(
+        new.with_extension("json.bak").is_file(),
+        "бэкап рядом с файлом сессии"
+    );
+    assert!(
+        fs::read_to_string(&old).unwrap().contains("Иванов Иван"),
+        "не последняя сессия не тронута"
+    );
+
+    // Явный `--session`.
+    let out = run_cli_bin_env(
+        &stand,
+        &[
+            "agent",
+            "history",
+            "clear",
+            "--project",
+            "P0001",
+            "--session",
+            "S-OLD",
+        ],
+        &envs,
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        !fs::read_to_string(&old).unwrap().contains("Иванов Иван"),
+        "история S-OLD очищена"
+    );
+
+    // Коды возврата: 1 — нет истории/сбой, 2 — использование.
+    let missing = run_cli_bin_env(
+        &stand,
+        &[
+            "agent",
+            "history",
+            "clear",
+            "--project",
+            "P0001",
+            "--session",
+            "НЕТ-ТАКОЙ",
+        ],
+        &envs,
+    );
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    assert!(
+        String::from_utf8_lossy(&missing.stderr).contains("не найден"),
+        "понятная ошибка: {}",
+        String::from_utf8_lossy(&missing.stderr)
+    );
+    assert_eq!(
+        run_cli_bin_env(&stand, &["agent", "history", "clear"], &envs)
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run_cli_bin_env(&stand, &["agent", "history"], &envs)
+            .status
+            .code(),
+        Some(2)
+    );
+    assert_eq!(
+        run_cli_bin_env(&stand, &["agent", "history", "bogus"], &envs)
+            .status
+            .code(),
+        Some(2)
+    );
+    // Проект не зарегистрирован — код 1.
+    assert_eq!(
+        run_cli_bin_env(
+            &stand,
+            &["agent", "history", "clear", "--project", "P9999"],
+            &envs
+        )
+        .status
+        .code(),
+        Some(1)
+    );
 }
