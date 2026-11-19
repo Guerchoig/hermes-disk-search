@@ -739,8 +739,8 @@ fn history_clear_cli() {
         !cleaned.contains("Иванов Иван"),
         "значение осталось: {cleaned}"
     );
-    // Форма с граммемой приходит как `[PERSON_1|nomn]` (метки разбирает
-    // `hds_core::labels`), поэтому проверяем префикс метки.
+    // Метка приходит с падежным суффиксом по TR-2.3 (`[PERSON_1|дат]`), а
+    // именительный — без него (`[PERSON_1]`); проверяем префикс метки.
     assert!(cleaned.contains("[PERSON_1"), "метки нет: {cleaned}");
     assert!(
         new.with_extension("json.bak").is_file(),
@@ -781,7 +781,7 @@ fn history_clear_cli() {
             "--project",
             "P0001",
             "--session",
-            "НЕТ-ТАКОЙ",
+            "NO-SUCH-SESSION",
         ],
         &envs,
     );

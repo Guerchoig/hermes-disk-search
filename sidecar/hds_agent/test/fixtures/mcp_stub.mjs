@@ -68,7 +68,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (name === 'search_local_files') {
         reply({ content: [{ type: 'text', text: `ECHO:${args.query ?? ''}` }] });
       } else if (name === 'leak') {
-        reply({ content: [{ type: 'text', text: 'Договор подписал Иванов Иван' }] });
+        reply({
+          content: [{ type: 'text', text: 'Договор подписал Иванов Иван' }],
+          // Сторонний сервер может вернуть значение не в `content`: mcp_in
+          // обязан фильтровать весь результат (TR-6.3).
+          structuredContent: { owner: 'Иванов Иван', note: 'ok' },
+        });
       } else {
         reply({ content: [{ type: 'text', text: 'ASK-MY-FILES-SHOULD-NOT-RUN' }] });
       }

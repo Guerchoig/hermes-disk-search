@@ -27,7 +27,7 @@ use serde_json::{json, Value};
 use hds_agent::deanon::DeAnonymizer;
 use hds_agent::env;
 use hds_agent::filter::{sys_values, Filter};
-use hds_agent::gateway::{Gateway, GatewayEvent, GatewayHost, NoAskUser};
+use hds_agent::gateway::{Gateway, GatewayEvent, GatewayHost, NoAskUser, RefreshState};
 use hds_agent::history::{self, HistoryOutcome};
 use hds_agent::mcp::{self, McpSpec};
 use hds_agent::projects::{self, Project};
@@ -336,13 +336,7 @@ pub fn plan_with(
 
     let node = resolve_node(&agent, sidecar_root)?;
     let worker = resolve_worker(sidecar_root)?;
-    let child = env::build(
-        cfg,
-        &config_dir,
-        &state_dir,
-        &workspace,
-        agent.proxy.as_deref(),
-    );
+    let child = env::build(&config_dir, &state_dir, &workspace, agent.proxy.as_deref());
     let spec = WorkerSpec {
         program: node.clone(),
         script: worker.clone(),
@@ -514,13 +508,14 @@ pub fn run(
             .snapshot(&plan.project.id)
             .map_err(|e| format!("снимок vault: {e}"))?
     };
+    let secrets = plan.secrets.secret_strings();
     let filter = Arc::new(build_filter(
         &plan.project.id,
         &plan.settings,
         plan.audit.clone(),
         &plan.system,
         &plan.project_names,
-        &plan.secrets.secret_strings(),
+        &secrets,
         &snapshot,
     ));
     let deanon = Arc::new(Mutex::new(DeAnonymizer::new(
@@ -533,14 +528,28 @@ pub fn run(
         .settings
         .egress_log
         .then(|| plan.state_dir.join("egress"));
-    let host = Arc::new(GatewayHost::new(
-        plan.project.id.clone(),
-        &plan.workspace,
-        Arc::clone(&filter),
-        Arc::clone(&client),
-        Arc::new(NoAskUser),
-        egress_log,
-    ));
+    // TR-6.5: снимок сверяется по `vault_rev` перед каждым запросом. Без этого
+    // метки, созданные репликой этого же хода, не деанонимизируются, а ход
+    // дольше `max_stale` упирается в fail-closed.
+    let refresh = Arc::new(RefreshState {
+        system: plan.system.clone(),
+        projects: plan.project_names.clone(),
+        secrets: secrets.clone(),
+        workspace: plan.workspace.clone(),
+        project_root: PathBuf::from(&plan.project.path),
+        deanon: Arc::clone(&deanon),
+    });
+    let host = Arc::new(
+        GatewayHost::new(
+            plan.project.id.clone(),
+            &plan.workspace,
+            Arc::clone(&filter),
+            Arc::clone(&client),
+            Arc::new(NoAskUser),
+            egress_log,
+        )
+        .with_refresh(refresh),
+    );
     let mut gateway = Gateway::spawn(
         &plan.spec,
         host,
@@ -875,6 +884,13 @@ pub fn cmd_run(cfg: &Config, args: &[String]) -> i32 {
             return 1;
         }
     };
+    if plan.settings.disk_search_enabled && plan.mcp.token.is_none() {
+        eprintln!(
+            "[warn] у проекта {project_id} нет plain-токена (projects.{project_id}.token в \
+             secrets.json): сервер disk-search не будет подключён. Выдайте токен заново \
+             `hds agent token {project_id}` (он сохраняет и хэш, и plain-токен)."
+        );
+    }
     if crate::cmd::agent::has(args, "--dry-run") {
         return match serde_json::to_string_pretty(&plan_json(&plan)) {
             Ok(text) => {
@@ -933,10 +949,8 @@ pub fn open_client_at(
 
 fn run_cli(cfg: &Config, plan: RunPlan, opts: RunOptions) -> i32 {
     let root = project_root();
-    if let Err(e) = prepare(&plan) {
-        eprintln!("agent run: {e}");
-        return 1;
-    }
+    // `prepare` делает `run` (каталоги, правила, MCP-настройки): второй вызов
+    // здесь писал бы те же файлы и вызывал `icacls` дважды.
     let client = match open_client(cfg, &plan, &root) {
         Ok(client) => client,
         Err(e) => {

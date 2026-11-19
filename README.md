@@ -896,8 +896,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_sidecar.ps1
    (`anonymize.output_dir`) удаляется, только если он лежит внутри `<каталог данных>\data` или внутри
    `<agent.root>`; если там указан общий или сетевой каталог, команда откажется удалять его без
    явного `--force`.
-3. `hds agent token P0001` — выдаёт токен проекта (в файл `data\agent\secrets.json` пишется только
-   хэш, сам токен печатается один раз на экран). Без `--ttl-days` токен бессрочный.
+3. `hds agent token P0001` — выдаёт токен проекта. В `data\agent\secrets.json` сохраняются и хэш
+   (его проверяет маршрут), и сам токен: агенту он нужен для заголовка `Authorization` в
+   настройках MCP. Сам токен печатается один раз на экран. Без `--ttl-days` токен бессрочный.
 4. Агент подключается к `POST http://127.0.0.1:8787/mcp/agent/P0001` с заголовком
    `Authorization: Bearer <токен>`. На этом маршруте доступны только `search_local_files` и
    `index_status`; `ask_my_files` и управление индексацией не публикуются, а выдача всегда
@@ -1434,12 +1435,14 @@ hds anon check
 4. Заведите проект и запустите ход:
 
    ```powershell
-   hds agent project add P0001 --name "Пилот" --path "D:\hds-anon\P0001\workspace"
+   hds agent project add P0001 --name "Пилот" --path "D:\Проекты\Внедрение ERP"
    hds agent run --project P0001 --prompt "Собери короткую сводку по договорам"
    ```
 
-   Провайдер по умолчанию — `openrouter`, модель — `~deepseek/deepseek-flash-latest` (решение
-   В-12); их можно переопределить ключами `--provider` и `--model` при `project add`.
+   `--path` — папка проекта **в зоне пользователя** (не `workspace`): по ней hds показывает
+   найденные файлы путями пользователя. Провайдер по умолчанию — `openrouter`, модель —
+   `~deepseek/deepseek-flash-latest` (решение В-12); их можно переопределить ключами
+   `--provider` и `--model` при `project add`.
 
 ### Что уходит наружу
 

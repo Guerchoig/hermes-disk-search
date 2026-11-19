@@ -126,6 +126,7 @@ impl Stand {
                 hds_mcp::AgentToken {
                     token_sha256: hds_core::access::token_sha256_hex(plain),
                     expires: 0,
+                    token: Some(plain.clone()),
                 },
             );
         }

@@ -21,6 +21,85 @@
 /// `[PERSON_3|дат]` / `[PERSON_3|род,мн]`.
 pub const LABEL_PATTERN: &str = r"\[([A-Z_]+)_(\d+)(?:\|([а-яё,]+))?\]";
 
+/// Падеж pymorphy → суффикс метки (TR-2.3). Именительный ед. ч. — без суффикса.
+///
+/// В `forms.gram` базы меток хранятся коды pymorphy (`datv`), а в метке —
+/// русский суффикс (`дат`); [`gram_to_suffix`] переводит одно в другое, чтобы
+/// фильтр исходящего и деанонимизатор не заводили вторую систему граммем.
+pub const CASE_SUFFIX: [(&str, &str); 6] = [
+    ("nomn", ""),
+    ("gent", "род"),
+    ("datv", "дат"),
+    ("accs", "вин"),
+    ("ablt", "твор"),
+    ("loct", "пред"),
+];
+
+/// Граммема множественного числа в суффиксе (`|дат,мн`) и в базе (`datv,мн`).
+pub const PLURAL_GRAM: &str = "мн";
+
+/// Код падежа pymorphy → суффикс метки: `datv` → `дат`, `nomn` → ``.
+///
+/// Уже русский суффикс возвращается как есть (идемпотентность), множественное
+/// число сохраняется: `nomn,мн` → `,мн`, `datv,мн` → `дат,мн` (так же, как
+/// `morph.suffix_for` в Python).
+pub fn gram_to_suffix(gram: &str) -> String {
+    let mut cases: Vec<String> = Vec::new();
+    let mut plural = false;
+    for raw in gram.split(',') {
+        let part = raw.trim();
+        if part.is_empty() {
+            continue;
+        }
+        let mapped = match part {
+            "nomn" => "",
+            "gent" => "род",
+            "datv" => "дат",
+            "accs" => "вин",
+            "ablt" => "твор",
+            "loct" => "пред",
+            "plur" | PLURAL_GRAM => {
+                plural = true;
+                continue;
+            }
+            other => other,
+        };
+        if !mapped.is_empty() && !cases.iter().any(|c| c == mapped) {
+            cases.push(mapped.to_string());
+        }
+    }
+    match (cases.is_empty(), plural) {
+        (true, false) => String::new(),
+        (true, true) => format!(",{PLURAL_GRAM}"),
+        (false, true) => format!("{},{}", cases.join(","), PLURAL_GRAM),
+        (false, false) => cases.join(","),
+    }
+}
+
+/// Допустимый суффикс метки: русские падежи (TR-2.3) и коды pymorphy
+/// (терпимый разбор уже выпущенных меток `[PERSON_1|nomn]`, A3.4).
+fn suffix_valid(suffix: &str) -> bool {
+    if suffix.is_empty() {
+        return false;
+    }
+    let mut seen = false;
+    for part in suffix.split(',') {
+        if part.is_empty() {
+            continue; // `,мн` — именительный множественного
+        }
+        let known = CASE_SUFFIX
+            .iter()
+            .any(|(code, ru)| *code == part || *ru == part)
+            || part == PLURAL_GRAM
+            || part == "plur";
+        if !known {
+            return false;
+        }
+        seen = true;
+    }
+    seen
+}
+
 /// Предел длины метки при сканировании текста: защита от «[» без закрывающей
 /// скобки (иначе сканирование квадратично на длинных строках).
 const MAX_LABEL_CHARS: usize = 80;
@@ -39,11 +118,9 @@ pub fn label_parts(token: &str) -> Option<(String, u32, Option<String>)> {
     }
     let number: u32 = number.parse().ok()?;
     if let Some(suffix) = &suffix {
-        // суффикс — русские строчные буквы и запятая: «дат», «род,мн»
-        if !suffix
-            .chars()
-            .all(|c| (c.is_alphabetic() && !c.is_ascii()) || c == ',')
-        {
+        // суффикс — русские падежи (`дат`, `род,мн`) или уже выпущенные коды
+        // pymorphy (`nomn`, `datv`): оба варианта должны деанонимизироваться.
+        if !suffix_valid(suffix) {
             return None;
         }
     }
@@ -218,5 +295,36 @@ mod tests {
             "что поручено ? xperson3x"
         );
         assert_eq!(normalize_labels("без меток"), "без меток");
+    }
+
+    #[test]
+    fn gram_to_suffix_translates_pymorphy_codes() {
+        assert_eq!(super::gram_to_suffix("nomn"), "");
+        assert_eq!(super::gram_to_suffix("datv"), "дат");
+        assert_eq!(super::gram_to_suffix("gent"), "род");
+        assert_eq!(super::gram_to_suffix("ablt"), "твор");
+        assert_eq!(super::gram_to_suffix("loct"), "пред");
+        assert_eq!(super::gram_to_suffix("datv,мн"), "дат,мн");
+        assert_eq!(super::gram_to_suffix("nomn,мн"), ",мн");
+        // Идемпотентность: русский суффикс остаётся русским.
+        assert_eq!(super::gram_to_suffix("дат"), "дат");
+        assert_eq!(super::gram_to_suffix(""), "");
+    }
+
+    #[test]
+    fn latin_gram_suffix_is_tolerated() {
+        // A3.4 успел выпустить `[PERSON_1|nomn]`: такие метки обязаны
+        // распознаваться (и деанонимизироваться), пока живёт история.
+        assert!(is_label("[PERSON_1|nomn]"));
+        assert!(is_label("[PERSON_1|datv]"));
+        assert!(is_label("[PERSON_1|nomn,мн]"));
+        assert!(is_label("[PERSON_1|,мн]"));
+        assert_eq!(
+            label_parts("[PERSON_1|datv]"),
+            Some(("PERSON".to_string(), 1, Some("datv".to_string())))
+        );
+        // Неизвестный «падеж» — не метка.
+        assert!(!is_label("[PERSON_1|foo]"));
+        assert!(!is_label("[PERSON_1|дат foo]"));
     }
 }

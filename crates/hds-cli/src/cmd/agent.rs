@@ -149,6 +149,15 @@ fn is_within(child: &Path, parent: &Path) -> bool {
     !p.is_empty() && c.len() > p.len() && c[..p.len()] == p[..]
 }
 
+/// Разрешить путь: существующие ссылки/junction раскрываются (`canonicalize`),
+/// иначе — лексическая нормализация. Нужно предохранителю В-10: проверка
+/// вложенности должна видеть реальный каталог, а не ссылку на него.
+fn resolve_path(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p)
+        .or_else(|_| std::path::absolute(p))
+        .unwrap_or_else(|_| p.to_path_buf())
+}
+
 /// Удалить файл или каталог, если он есть.
 fn remove_path(p: &Path) -> Result<(), String> {
     if !p.exists() {
@@ -205,6 +214,9 @@ fn cmd_token(cfg: &Config, rest: &[String]) -> i32 {
         hds_mcp::agent::AgentToken {
             token_sha256: token.token_sha256,
             expires,
+            // Plain-токен нужен агенту для `Authorization` в
+            // `cline_mcp_settings.json` (TR-3.6); файл под ACL (В-1).
+            token: Some(plain.clone()),
         },
     );
     if let Err(e) = hds_mcp::agent::save_at(&path, &secrets) {
@@ -330,8 +342,13 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
     // снёс бы его целиком.
     let force = has(rest, "--force");
     let state_data = config::state_dir(&cfg).join("data");
-    let in_state_data = is_within(&anonymized, &state_data);
-    let in_agent_root = is_within(&anonymized, Path::new(&agent_root));
+    // В-10: вложенность проверяется по РАЗРЕШЁННЫМ путям — junction/симлинк
+    // внутри разрешённого каталога не должен давать удалить чужое дерево.
+    let anonymized_real = resolve_path(&anonymized);
+    let state_data_real = resolve_path(&state_data);
+    let agent_root_real = resolve_path(Path::new(&agent_root));
+    let in_state_data = is_within(&anonymized_real, &state_data_real);
+    let in_agent_root = is_within(&anonymized_real, &agent_root_real);
     if anonymized.exists() && !in_state_data && !in_agent_root && !force {
         eprintln!(
             "каталог выхода анонимизации {} лежит вне {} и вне {}.\n\

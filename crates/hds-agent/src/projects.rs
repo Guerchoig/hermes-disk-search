@@ -101,8 +101,8 @@ pub fn get(cfg: &Config, id: &str) -> Option<Project> {
     load(cfg).ok().and_then(|p| p.get(id).cloned())
 }
 
-/// Добавить проект (с проверкой идентификатора D21 и уникальности пути).
-pub fn add(cfg: &Config, project: Project) -> Result<(), String> {
+/// Проверить запись проекта до записи в реестр.
+fn validate(project: &Project) -> Result<(), String> {
     if !is_agent_project(&project.id) {
         return Err(format!(
             "идентификатор проекта должен быть P + 4 цифры (D21), получено {:?}",
@@ -115,6 +115,20 @@ pub fn add(cfg: &Config, project: Project) -> Result<(), String> {
     if project.path.trim().is_empty() {
         return Err("у проекта должен быть путь папки".to_string());
     }
+    // `path` — папка проекта в зоне пользователя: по ней деанонимизатор
+    // подставляет пути, поэтому относительный путь бессмысленен.
+    if !Path::new(&project.path).is_absolute() {
+        return Err(format!(
+            "путь папки проекта должен быть абсолютным, получено {:?}",
+            project.path
+        ));
+    }
+    Ok(())
+}
+
+/// Добавить проект (с проверкой идентификатора D21 и уникальности пути).
+pub fn add(cfg: &Config, project: Project) -> Result<(), String> {
+    validate(&project)?;
     let mut projects = load(cfg)?;
     if let Some(existing) = projects.get(&project.id) {
         if !existing.path.eq_ignore_ascii_case(&project.path) {
@@ -200,5 +214,20 @@ mod tests {
         assert!(!projects.remove("P0001"));
         assert_eq!(projects.projects.len(), 1);
         assert_eq!(projects.projects[0].id, "P0002");
+    }
+
+    #[test]
+    fn validate_requires_absolute_path_and_pnnnn() {
+        let good = project("P0001", r"C:\work\one");
+        assert!(validate(&good).is_ok());
+        let mut relative = good.clone();
+        relative.path = "work\\one".to_string();
+        assert!(validate(&relative).unwrap_err().contains("абсолютн"));
+        let mut bad_id = good.clone();
+        bad_id.id = "P01".to_string();
+        assert!(validate(&bad_id).is_err());
+        let mut no_name = good.clone();
+        no_name.name = "  ".to_string();
+        assert!(validate(&no_name).is_err());
     }
 }

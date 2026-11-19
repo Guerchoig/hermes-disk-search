@@ -68,6 +68,33 @@ db_path: 'index.db'
 agent:
   enabled: false            # true — поиск только по анонимной зоне
   root: 'D:\hds-anon'       # корень зоны: P0001\workspace, P0001\agent-config, …
+  # ── дальше — значения по умолчанию; раскомментируйте нужное ──────────────
+  # preview_outgoing: true  # печатать в CLI текст, ушедший к модели (метки)
+  # subagents: false        # разрешить суб-агентов (TR-3.7)
+  # keep_terms: ['ЗУП']     # не считать секретом/сущностью (дополняет базу меток)
+  # egress_log: false       # писать тела запросов после фильтра в agent-state\egress
+  # max_live_projects: 2    # одновременно живых процессов агента (LRU-выгрузка)
+  # idle_unload_min: 30     # простой, после которого процесс выгружается
+  # request_timeout_sec: 120  # таймаут команды воркера и события хода
+  # network:
+  #   proxy: ''             # HTTP(S)_PROXY для процесса агента (пусто — без прокси)
+  # filter:
+  #   unknown: label        # label — выдать метку через label_for_value; block — отказ
+  #   max_stale_sec: 300    # снимок vault старше — запрос не уходит (TR-6.5)
+  # node:
+  #   path: ''              # интерпретатор Node; пусто — sidecar\node\node.exe → PATH
+  # mcp:
+  #   disk_search:
+  #     enabled: true       # маршрут /mcp/agent/<P> (токен — `hds agent token`)
+  #   tavily:
+  #     enabled: true
+  #     command: ''         # скрипт tavily-mcp; пусто — node_modules воркера
+  #   onec_buddy:
+  #     enabled: true
+  #     command: ''         # путь к 1c-buddy-mcp.exe (или mcp.onec_buddy в secrets.json)
+  #
+  # Ключи и токены в config.yaml не пишутся: providers/mcp/token — в
+  # data\agent\secrets.json (ACL «только владелец»).
 
 # --- БД под конкурентность (M4, PLAN_M4_CONCURRENCY_SLA.md §3.4) ---
 # Дефолты по профилю: server — busy_timeout 5000, read_only_conns true;

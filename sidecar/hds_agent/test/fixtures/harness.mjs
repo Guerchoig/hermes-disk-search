@@ -59,7 +59,7 @@ export function writeStubMcp(dirs, env = {}) {
         args: [MCP_STUB],
         env: { HDS_STUB_LOG: stubLog, ...env },
       },
-      timeoutSeconds: 60,
+      timeout: 60,
     },
   });
   return stubLog;

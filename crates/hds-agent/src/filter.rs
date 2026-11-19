@@ -22,7 +22,7 @@
 //! Аудит (TR-6.4): `agent_egress_redacted` с меткой и источником, **без
 //! значения**.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
@@ -30,6 +30,7 @@ use serde_json::Value;
 
 use hds_anonymize::protocol::{Snapshot, SnapshotForm};
 use hds_core::audit::{Audit, AuditEvent};
+use hds_core::labels::gram_to_suffix;
 
 /// Точка применения фильтра.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,15 +274,17 @@ fn push_entry(
     });
 }
 
-/// Метка с падежным суффиксом: `[PERSON_3]` + `дат` → `[PERSON_3|дат]`
-/// (TR-2.4; суффикс ставится только при однозначном определении падежа).
+/// Метка с падежным суффиксом: `[PERSON_3]` + `datv` → `[PERSON_3|дат]`
+/// (TR-2.3/TR-2.4). Граммема базы (`forms.gram` — код pymorphy) переводится в
+/// русский суффикс; именительный ед. ч. суффикса не получает. Уже выпущенные
+/// метки с латинским кодом (`[PERSON_1|nomn]`) остаются как есть — их разбирает
+/// `hds_core::labels`.
 fn label_with_gram(label: &str, gram: Option<&str>) -> String {
-    match gram.map(str::trim).filter(|g| !g.is_empty()) {
-        Some(gram) if label.ends_with(']') && !label.contains('|') => {
-            format!("{}|{gram}]", &label[..label.len() - 1])
-        }
-        _ => label.to_string(),
+    let suffix = gram.map(gram_to_suffix).unwrap_or_default();
+    if suffix.is_empty() || !label.ends_with(']') || label.contains('|') {
+        return label.to_string();
     }
+    format!("{}|{suffix}]", &label[..label.len() - 1])
 }
 
 /// Словарный фильтр проекта.
@@ -290,7 +293,7 @@ pub struct Filter {
     keep: Vec<String>,
     unknown: crate::settings::UnknownPolicy,
     max_stale: Duration,
-    dict: Mutex<Option<Dictionary>>,
+    dict: Mutex<Option<Arc<Dictionary>>>,
     audit: Option<Audit>,
 }
 
@@ -322,7 +325,7 @@ impl Filter {
     ) {
         let dict = Dictionary::build(snapshot, &self.keep, system, projects, secrets);
         if let Ok(mut slot) = self.dict.lock() {
-            *slot = Some(dict);
+            *slot = Some(Arc::new(dict));
         }
     }
 
@@ -338,15 +341,19 @@ impl Filter {
     /// без выдачи новых меток и без блокировки. Точка — `mcp_in`, поэтому
     /// секреты заменяются на `[SECRET]`, а не роняют очистку.
     pub fn redact_stored(&self, payload: &Value) -> Result<FilterOutcome, FilterError> {
-        let guard = self.dict.lock().map_err(|_| FilterError::NoSnapshot)?;
-        let dict = guard.as_ref().ok_or(FilterError::NoSnapshot)?;
+        // Снимок берётся под замком и сразу отпускается: словарь — `Arc`,
+        // поэтому долгий проход не блокирует `set_snapshot` (TR-6.5).
+        let dict = {
+            let guard = self.dict.lock().map_err(|_| FilterError::NoSnapshot)?;
+            Arc::clone(guard.as_ref().ok_or(FilterError::NoSnapshot)?)
+        };
         if dict.built_at.elapsed() > self.max_stale {
             return Err(FilterError::Stale(self.max_stale.as_secs()));
         }
         let mut hits = Vec::new();
         let mut error = None;
         let payload = redact_value(
-            dict,
+            &dict,
             crate::settings::UnknownPolicy::Label,
             Point::McpIn,
             payload,
@@ -366,15 +373,20 @@ impl Filter {
         payload: &Value,
         labeler: &mut dyn Labeler,
     ) -> Result<FilterOutcome, FilterError> {
-        let guard = self.dict.lock().map_err(|_| FilterError::NoSnapshot)?;
-        let dict = guard.as_ref().ok_or(FilterError::NoSnapshot)?;
+        // Замок словаря держится только на клонирование `Arc`: `labeler` может
+        // ходить в Python (`label_for_value`), и держать замок всё это время
+        // нельзя — `set_snapshot` (обновление снимка) ждал бы его.
+        let dict = {
+            let guard = self.dict.lock().map_err(|_| FilterError::NoSnapshot)?;
+            Arc::clone(guard.as_ref().ok_or(FilterError::NoSnapshot)?)
+        };
         if dict.built_at.elapsed() > self.max_stale {
             return Err(FilterError::Stale(self.max_stale.as_secs()));
         }
         let mut hits = Vec::new();
         let mut error: Option<FilterError> = None;
         let payload = redact_value(
-            dict,
+            &dict,
             self.unknown,
             point,
             payload,
@@ -532,20 +544,24 @@ fn redact_text(
         if end_char <= start_char {
             continue;
         }
-        // Границы слова: рядом не должно быть букв и цифр.
-        if start_char > 0 {
-            if let Some(prev) = folded.text[..folded.starts[start_char]].chars().next_back() {
-                if prev.is_alphanumeric() {
+        let entry = &dict.entries[m.pattern()];
+        // Границы слова: рядом не должно быть букв и цифр. Для секретов
+        // проверка не применяется — секрет, вклеенный в более длинный токен,
+        // обязан блокировать запрос (fail-closed, TR-6.2 г).
+        if entry.source != Source::Secret {
+            if start_char > 0 {
+                if let Some(prev) = folded.text[..folded.starts[start_char]].chars().next_back() {
+                    if prev.is_alphanumeric() {
+                        continue;
+                    }
+                }
+            }
+            if let Some(next) = folded.text[folded.starts[end_char - 1]..].chars().nth(1) {
+                if next.is_alphanumeric() {
                     continue;
                 }
             }
         }
-        if let Some(next) = folded.text[folded.starts[end_char - 1]..].chars().nth(1) {
-            if next.is_alphanumeric() {
-                continue;
-            }
-        }
-        let entry = &dict.entries[m.pattern()];
         if entry.source == Source::Secret && matches!(point, Point::Model | Point::McpOut) {
             return Err(FilterError::Secret);
         }
@@ -750,6 +766,58 @@ mod tests {
             .redact(Point::McpIn, &json!("sk-live-0123456789"), &mut labeler)
             .unwrap();
         assert_eq!(out.payload, json!("[SECRET]"));
+    }
+
+    #[test]
+    fn pymorphy_gram_becomes_russian_suffix() {
+        // Реальный снимок vault: `forms.gram` — код pymorphy, а метка обязана
+        // получить русский суффикс (TR-2.3). Именительный — без суффикса.
+        let mut snap = snapshot();
+        snap.labels[0].forms = vec![
+            SnapshotForm {
+                value: "Иванов Иван".to_string(),
+                gram: Some("nomn".to_string()),
+                origin: "seen".to_string(),
+            },
+            SnapshotForm {
+                value: "Иванову Ивану".to_string(),
+                gram: Some("datv".to_string()),
+                origin: "derived".to_string(),
+            },
+        ];
+        let f = Filter::new(
+            "P0001",
+            Vec::new(),
+            crate::settings::UnknownPolicy::Label,
+            Duration::from_secs(60),
+            None,
+        );
+        f.set_snapshot(&snap, &[], &[], &[]);
+        let out = f
+            .redact(
+                Point::Model,
+                &json!("Иванов Иван передал Иванову Ивану"),
+                &mut NoLabeler,
+            )
+            .unwrap();
+        assert_eq!(
+            out.payload,
+            json!("[PERSON_1] передал [PERSON_1|дат]"),
+            "метка должна быть с русским суффиксом"
+        );
+    }
+
+    #[test]
+    fn secret_inside_longer_token_blocks() {
+        let f = filter();
+        let err = f
+            .redact(Point::Model, &json!("xsk-live-0123456789y"), &mut NoLabeler)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            FilterError::Secret,
+            "секрет в длинном токене обязан блокировать"
+        );
     }
 
     #[test]

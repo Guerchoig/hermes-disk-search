@@ -15,8 +15,6 @@
 
 use std::path::{Path, PathBuf};
 
-use hds_core::config::Config;
-
 /// Готовое окружение и рабочий каталог процесса.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChildEnv {
@@ -56,13 +54,11 @@ pub fn sdk_data_dir(state_dir: &Path) -> PathBuf {
 /// MCP переехали бы в `agent-state`, поэтому путь к ним тоже задаётся явно
 /// (`CLINE_MCP_SETTINGS_PATH`): его пишет [`crate::mcp::write_settings`].
 pub fn build(
-    cfg: &Config,
     config_dir: &Path,
     state_dir: &Path,
     workspace: &Path,
     proxy: Option<&str>,
 ) -> ChildEnv {
-    let _ = cfg;
     let mut vars: Vec<(String, String)> = Vec::new();
     for name in PASSTHROUGH {
         if let Some(value) = std::env::var_os(name) {
@@ -143,11 +139,6 @@ pub fn prepare_dirs(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_yaml::Value;
-
-    fn cfg() -> Config {
-        Value::Mapping(Default::default())
-    }
 
     #[test]
     fn profile_is_redirected_and_secrets_are_not_inherited() {
@@ -157,7 +148,7 @@ mod tests {
         let state = dir.join("agent-state");
         let ws = dir.join("workspace");
         prepare_dirs(&config, &state, &ws).unwrap();
-        let env = build(&cfg(), &config, &state, &ws, None);
+        let env = build(&config, &state, &ws, None);
         assert_eq!(env.cwd, ws);
         let get = |name: &str| {
             env.vars
@@ -207,7 +198,7 @@ mod tests {
         let state = dir.join("agent-state");
         let ws = dir.join("workspace");
         prepare_dirs(&config, &state, &ws).unwrap();
-        let env = build(&cfg(), &config, &state, &ws, Some("http://127.0.0.1:3128"));
+        let env = build(&config, &state, &ws, Some("http://127.0.0.1:3128"));
         let get = |name: &str| {
             env.vars
                 .iter()

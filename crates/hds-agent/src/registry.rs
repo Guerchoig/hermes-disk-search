@@ -233,9 +233,12 @@ impl Drop for AgentRegistry {
 
 /// Мягкая остановка и выход процесса. Ошибки намеренно проглатываются: процесс
 /// мог умереть сам, а `shutdown` в этом случае добивает его без ожидания.
+///
+/// Ожидание ограничено 2 с (а не 5): выгрузка LRU идёт в вызывающем потоке
+/// (вкладка A5), и полные 5 с на каждый проект «замораживали» бы UI.
 fn shutdown(gateway: Gateway) {
     let _ = gateway.stop();
-    gateway.shutdown();
+    gateway.shutdown_with(Duration::from_secs(2));
 }
 
 #[cfg(test)]
@@ -316,8 +319,7 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
 
     /// Окружение Node: продакшн-набор [`env::build`].
     fn child_env(config: &Path, state: &Path, workspace: &Path) -> Vec<(String, String)> {
-        let cfg = serde_yaml::Value::Mapping(Default::default());
-        env::build(&cfg, config, state, workspace, None).vars
+        env::build(config, state, workspace, None).vars
     }
 
     /// Стенд: каталог с заглушкой, журналами и папками проектов.

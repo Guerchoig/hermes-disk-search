@@ -191,7 +191,7 @@ pub fn search_local_files(
 /// Пусто, когда отставания нет или посчитать его не удалось: сбой подсчёта не
 /// должен превращать поиск в ошибку.
 fn lag_note(conn: &rusqlite::Connection, cfg: &Config, project: &str) -> String {
-    let Ok(lag) = hds_index::lag::project_lag(conn, cfg, project) else {
+    let Ok(lag) = hds_index::lag::project_lag_cached(conn, cfg, project) else {
         return String::new();
     };
     if lag.pending == 0 {

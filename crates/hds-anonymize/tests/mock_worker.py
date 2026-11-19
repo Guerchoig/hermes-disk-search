@@ -24,6 +24,11 @@ MOCK_MAPPINGS = {
 }
 TOKEN_TYPES = {tok: tok.strip("[]").rsplit("_", 1)[0] for tok in MOCK_MAPPINGS}
 
+# Состояние «базы меток» mock-воркера: rev растёт при выдаче новой метки, а
+# снимок включает выданные значения — так проверяется обновление фильтра по
+# `vault_rev` (TR-6.5).
+STATE = {"rev": 7, "extra": []}
+
 
 def _progress(name: str) -> None:
     for i, phase in enumerate(("parse", "ner", "replace", "assemble"), 1):
@@ -129,29 +134,45 @@ def _handle(req):
         return False
 
     if method == "vault_snapshot":
+        labels = [{
+            "label": "[PERSON_1]", "type": "PERSON",
+            "forms": [
+                {"value": "Иванов Иван", "gram": "nomn", "origin": "seen"},
+                {"value": "Иванову Ивану", "gram": "datv", "origin": "seen"},
+            ],
+        }]
+        labels.extend(STATE["extra"])
         stdio.ok(mid, {
-            "rev": 7,
-            "labels": [{
-                "label": "[PERSON_1]", "type": "PERSON",
-                "forms": [
-                    {"value": "Иванов Иван", "gram": "nomn", "origin": "seen"},
-                    {"value": "Иванову Ивану", "gram": "datv", "origin": "seen"},
-                ],
-            }],
+            "rev": STATE["rev"],
+            "labels": labels,
             "others": ["Петров Пётр"],
             "keep": ["ТЗ", "1С:ERP"],
         })
         return False
 
     if method == "vault_rev":
-        stdio.ok(mid, {"rev": 7})
+        stdio.ok(mid, {"rev": STATE["rev"]})
         return False
 
     if method == "label_for_value":
+        value = str(params.get("value") or "")
+        etype = str(params.get("type") or "OTHER")
+        label = "[PERSON_2]"
+        if value and not any(
+            form["value"] == value
+            for item in STATE["extra"]
+            for form in item.get("forms", [])
+        ):
+            STATE["extra"].append({
+                "label": label,
+                "type": etype,
+                "forms": [{"value": value, "gram": "nomn", "origin": "seen"}],
+            })
+            STATE["rev"] += 1
         stdio.ok(mid, {
             "project_id": params.get("project_id"),
-            "value_type": params.get("type"),
-            "label": "[PERSON_2]",
+            "value_type": etype,
+            "label": label,
             "kept": False,
             "confident": True,
         })

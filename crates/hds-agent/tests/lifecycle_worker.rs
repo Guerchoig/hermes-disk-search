@@ -117,8 +117,7 @@ impl Project {
     }
 
     fn spec(&self, node: &Path, script: &Path) -> WorkerSpec {
-        let cfg = serde_yaml::Value::Mapping(Default::default());
-        let child = env::build(&cfg, &self.config, &self.state, &self.workspace, None);
+        let child = env::build(&self.config, &self.state, &self.workspace, None);
         WorkerSpec {
             program: node.to_path_buf(),
             script: script.to_path_buf(),

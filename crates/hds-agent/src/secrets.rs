@@ -188,6 +188,12 @@ impl Secrets {
 
     /// Все секретные строки (ключи провайдеров, MCP, токены проектов) — для
     /// словаря исходящего фильтра (TR-6.2 д).
+    ///
+    /// Собираются только **значения секретных полей** (`api_key`, `token`,
+    /// `password`, `authorization`, все значения `headers`/`env`) и токены
+    /// проектов. Пути (`command`), аргументы (`args`), адреса (`url`,
+    /// `base_url`) и тип транспорта секретами не считаются: иначе безобидная
+    /// строка вроде `--env-file` блокировала бы каждый запрос к модели.
     pub fn secret_strings(&self) -> Vec<String> {
         let mut out = Vec::new();
         for group in ["providers", "mcp"] {
@@ -219,19 +225,50 @@ impl Secrets {
     }
 }
 
+/// Ключ объекта, значение которого — секрет.
+fn is_secret_key(key: &str) -> bool {
+    matches!(
+        key.to_ascii_lowercase().as_str(),
+        "api_key" | "apikey" | "token" | "password" | "authorization"
+    )
+}
+
+fn push_secret(value: &Value, out: &mut Vec<String>) {
+    let Some(text) = value.as_str() else {
+        return;
+    };
+    let text = text.trim();
+    if text.len() >= 8 && !out.iter().any(|s| s == text) {
+        out.push(text.to_string());
+    }
+    // `Authorization: Bearer <token>`: сам токен тоже должен попадать в словарь.
+    if let Some(rest) = text
+        .strip_prefix("Bearer ")
+        .or_else(|| text.strip_prefix("bearer "))
+    {
+        let rest = rest.trim();
+        if rest.len() >= 8 && !out.iter().any(|s| s == rest) {
+            out.push(rest.to_string());
+        }
+    }
+}
+
 fn collect_secret_strings(value: &Value, out: &mut Vec<String>) {
     match value {
-        Value::String(s) if s.len() >= 8 => out.push(s.clone()),
         Value::Object(map) => {
             for (key, item) in map {
-                let secret_key = key == "api_key" || key == "token" || key == "password";
-                if secret_key {
-                    if let Some(s) = item.as_str() {
-                        if s.len() >= 8 {
-                            out.push(s.to_string());
+                let lower = key.to_ascii_lowercase();
+                if is_secret_key(&lower) {
+                    push_secret(item, out);
+                } else if lower == "headers" || lower == "env" {
+                    // Все значения заголовков/переменных окружения MCP —
+                    // потенциальные секреты (Authorization, ключи серверов).
+                    if let Some(inner) = item.as_object() {
+                        for v in inner.values() {
+                            push_secret(v, out);
                         }
                     }
-                } else {
+                } else if item.is_object() || item.is_array() {
                     collect_secret_strings(item, out);
                 }
             }
@@ -323,6 +360,47 @@ mod tests {
             secrets.provider_for("P9999"),
             Err(SecretsError::NoKey(_))
         ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn non_secret_fields_are_not_in_dictionary() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-secrets5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "providers": { "openrouter": { "api_key": "sk-or-secret-123456", "base_url": "https://openrouter.ai/api/v1" } },
+              "mcp": {
+                "servers": {
+                  "1c-buddy": { "type": "stdio", "command": "C:\\tools\\1c-buddy-mcp.exe",
+                                "args": ["--env-file", "C:\\tools\\.env"], "env": {} },
+                  "example-http": { "type": "streamableHttp", "url": "https://example.invalid/mcp",
+                                    "headers": { "Authorization": "Bearer mcp-secret-123456" } }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let secrets = Secrets::load(&path).unwrap();
+        let strings = secrets.secret_strings();
+        assert!(strings.iter().any(|s| s == "sk-or-secret-123456"));
+        assert!(strings.iter().any(|s| s == "mcp-secret-123456"));
+        assert!(strings.iter().any(|s| s == "Bearer mcp-secret-123456"));
+        // Пути, аргументы и адреса — не секреты: иначе ложные блокировки.
+        for needle in [
+            "--env-file",
+            "1c-buddy-mcp.exe",
+            "example.invalid",
+            "/api/v1",
+        ] {
+            assert!(
+                !strings.iter().any(|s| s.contains(needle)),
+                "{needle} не должен попадать в словарь: {strings:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

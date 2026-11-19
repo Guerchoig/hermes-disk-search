@@ -15,7 +15,10 @@
 //! Реестр артефактов (`indexed: pending|done|error`, TR-7.2) — фаза A4; здесь
 //! отставание считается по ФС и `index.db` без записи (вопрос владельцу В-7).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use hds_core::config::{project_root, Config};
 use hds_core::error::Result;
@@ -30,6 +33,16 @@ use crate::walk::{walk_files, WalkOptions};
 
 /// Сколько путей «в очереди» отдавать в предупреждении выдачи (TR-4.7 п.3).
 pub const PENDING_PATHS_LIMIT: usize = 10;
+
+/// Время жизни кэша отставания: агент зовёт поиск несколько раз за ход, а
+/// полный обход дерева на каждый вызов дорог. Предупреждение может отставать
+/// на этот интервал — это допустимо, точный статус даёт `index_status`.
+const LAG_CACHE_TTL: Duration = Duration::from_secs(30);
+
+fn lag_cache() -> &'static Mutex<HashMap<String, (Instant, ProjectLag)>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, (Instant, ProjectLag)>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 /// Отставание индекса проекта.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -138,5 +151,30 @@ pub fn project_lag(conn: &Connection, cfg: &Config, project: &str) -> Result<Pro
         .collect();
     let running = heartbeat::index_running(&HeartbeatFile::new(&project_root()), 30.0);
     lag.building = running || (lag.total > 0 && lag.done == 0);
+    Ok(lag)
+}
+
+/// Отставание с кэшем на [`LAG_CACHE_TTL`] — для выдачи `search_local_files`.
+///
+/// `index_status` зовёт [`project_lag`] напрямую (точный статус), поиск —
+/// этот вариант: агент делает несколько запросов за ход, и полный обход
+/// дерева на каждый вызов был бы заметной задержкой.
+pub fn project_lag_cached(conn: &Connection, cfg: &Config, project: &str) -> Result<ProjectLag> {
+    let key = format!(
+        "{}|{}",
+        hds_core::config::db_abs_path(cfg).display(),
+        project
+    );
+    if let Ok(map) = lag_cache().lock() {
+        if let Some((at, lag)) = map.get(&key) {
+            if at.elapsed() < LAG_CACHE_TTL {
+                return Ok(lag.clone());
+            }
+        }
+    }
+    let lag = project_lag(conn, cfg, project)?;
+    if let Ok(mut map) = lag_cache().lock() {
+        map.insert(key, (Instant::now(), lag.clone()));
+    }
     Ok(lag)
 }

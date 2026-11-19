@@ -149,11 +149,11 @@ export function buildHooks(opts: HookOptions) {
       if (!isMcpTool(tool)) return undefined;
       const result = context?.result ?? {};
       try {
-        const checked = await channel.host('egress_check', {
-          kind: 'mcp_in',
-          body: result.output ?? null,
-        });
-        return { result: { ...result, output: checked?.body ?? null } };
+        // TR-6.3: подменяется ВЕСЬ результат (content, structuredContent,
+        // metadata), а не только `output`: сторонний MCP-сервер может вернуть
+        // значение в любом поле.
+        const checked = await channel.host('egress_check', { kind: 'mcp_in', body: result });
+        return { result: checked?.body ?? result };
       } catch (error) {
         // Результат, который нельзя проверить, модели не показываем.
         return {

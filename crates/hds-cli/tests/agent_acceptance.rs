@@ -80,7 +80,20 @@ fn slash(path: &Path) -> String {
 }
 
 /// Снимок каталога: `(путь, длина, mtime)` для каждого файла — сравнение
-/// профиля `%USERPROFILE%\.cline` до и после прогона.
+/// Файлы, которые IDE-Cline пишет постоянно (сессии, задачи, журналы):
+/// на машине разработчика они меняются во время теста и не должны давать
+/// ложное «профиль изменился» (см. AG-7 ревью A0–A3).
+fn volatile_profile_file(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower == "sessions.db"
+        || lower == "sessions.db-wal"
+        || lower == "sessions.db-shm"
+        || lower.starts_with("tasks.db")
+        || lower.ends_with(".log")
+        || lower.ends_with(".jsonl")
+}
+
+/// Снимок профиля `%USERPROFILE%\.cline` до и после прогона.
 fn snapshot_dir(dir: &Path) -> Vec<(String, u64, u128)> {
     let mut out = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
@@ -92,6 +105,13 @@ fn snapshot_dir(dir: &Path) -> Vec<(String, u64, u128)> {
             let path = entry.path();
             if path.is_dir() {
                 stack.push(path);
+                continue;
+            }
+            if path
+                .file_name()
+                .map(|n| volatile_profile_file(&n.to_string_lossy()))
+                .unwrap_or(false)
+            {
                 continue;
             }
             let meta = match fs::metadata(&path) {
@@ -816,6 +836,15 @@ fn acceptance_a3_end_to_end() {
         "профиль .cline изменился по составу файлов"
     );
     assert_eq!(profile_before, profile_after, "профиль .cline изменился");
+    // Содержательная проверка (AG-7): даже во «волатильных» файлах профиля не
+    // должно появиться пути зоны агента. Значения из теста сюда не годятся:
+    // они встречаются в чатах самого разработчика (и это не утечка агента).
+    let zone = stand.zone.to_string_lossy().to_string();
+    let hits = profile_mentions(profile.as_deref(), &[zone.as_str()]);
+    assert!(
+        hits.is_empty(),
+        "в профиле владельца появились данные агента: {hits:?}"
+    );
 
     // Завершение воркера анонимизации.
     if let Ok(client) = Arc::try_unwrap(client) {
@@ -823,6 +852,24 @@ fn acceptance_a3_end_to_end() {
             client.shutdown();
         }
     }
+}
+
+/// Файлы профиля `~/.cline`, в тексте которых встречается любая из строк.
+fn profile_mentions(profile: Option<&Path>, needles: &[&str]) -> Vec<String> {
+    let Some(home) = profile else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (path, text) in files_under(&home.join(".cline")) {
+        if needles
+            .iter()
+            .any(|needle| !needle.is_empty() && text.contains(needle))
+        {
+            out.push(path.display().to_string());
+        }
+    }
+    out.sort();
+    out
 }
 
 /// Все файлы каталога с текстом (поиск утечек ключа).

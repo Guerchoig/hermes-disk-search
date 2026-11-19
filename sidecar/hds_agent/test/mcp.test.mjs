@@ -108,4 +108,15 @@ test('MCP: mcp_out отдаёт метку заглушке, mcp_in — метк
   const kinds = log.filter((l) => l.call === 'egress_check').map((l) => l.payload?.kind);
   assert.ok(kinds.includes('mcp_out'), `есть egress_check mcp_out: ${kinds}`);
   assert.ok(kinds.includes('mcp_in'), `есть egress_check mcp_in: ${kinds}`);
+  // TR-6.3: на проверку уходит весь результат, а не только `output`.
+  const mcpIn = log.filter((l) => l.call === 'egress_check' && l.payload?.kind === 'mcp_in');
+  assert.ok(
+    mcpIn.some((l) => JSON.stringify(l.payload?.body ?? {}).includes('structuredContent')),
+    `mcp_in получил весь результат: ${JSON.stringify(mcpIn)}`,
+  );
+  const structured = second.indexOf('structuredContent');
+  if (structured >= 0) {
+    const slice = second.slice(structured, structured + 400);
+    assert.ok(!slice.includes('Иванов Иван'), `structuredContent не должен уносить значение: ${slice}`);
+  }
 });

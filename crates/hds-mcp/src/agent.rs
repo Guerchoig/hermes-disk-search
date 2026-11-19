@@ -25,7 +25,12 @@ use hds_core::access::{token_matches, AuthCtx};
 use hds_core::config::{dig, replace_file, Config};
 use hds_core::roots::is_agent_project;
 
-/// Токен проекта анонимной зоны (в файле — только хэш).
+/// Токен проекта анонимной зоны.
+///
+/// В файле лежат **и** хэш (для сверки маршрутом `/mcp/agent/<P>`), **и**
+/// plain-токен: агенту нужен `Authorization: Bearer …` в
+/// `cline_mcp_settings.json`, а собрать его из хэша нельзя. Файл защищён ACL
+/// «только владелец» (В-1), как и остальные секреты.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AgentToken {
     /// hex-строка sha256(plain-токен).
@@ -33,6 +38,10 @@ pub struct AgentToken {
     /// Истечение, unix-секунды; `0` — бессрочный.
     #[serde(default)]
     pub expires: i64,
+    /// Plain-токен для настроек MCP агента (`None` — выдан прежней версией,
+    /// только хэш: маршрут работает, `disk-search` у агента — нет).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 /// Хранилище токенов проектов (`data/agent/secrets.json`).
@@ -160,6 +169,7 @@ mod tests {
         let at = AgentToken {
             token_sha256: token.token_sha256.clone(),
             expires: token.expires,
+            token: None,
         };
         secrets.projects.insert("P0001".into(), at);
         assert!(token_ok(&secrets, "P0001", &plain, 1_700_000_000));
@@ -173,6 +183,7 @@ mod tests {
             AgentToken {
                 token_sha256: token.token_sha256.clone(),
                 expires: 0,
+                token: None,
             },
         );
         assert!(token_ok(&secrets, "P0003", &plain, i64::MAX / 2));
@@ -210,6 +221,7 @@ mod tests {
             AgentToken {
                 token_sha256: "ab".repeat(32),
                 expires: 0,
+                token: None,
             },
         );
         save_at(&path, &s).unwrap();

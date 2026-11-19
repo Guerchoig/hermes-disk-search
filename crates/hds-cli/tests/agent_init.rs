@@ -212,7 +212,16 @@ fn token_is_hashed_and_stored() {
         .get("P0001")
         .expect("токен проекта сохранён");
     assert_eq!(tok.expires, 0, "без --ttl-days токен бессрочный");
-    assert_eq!(tok.token_sha256.len(), 64, "в файл пишется только хэш");
+    assert_eq!(tok.token_sha256.len(), 64, "в файл пишется хэш");
+    let plain = tok
+        .token
+        .as_deref()
+        .expect("plain-токен нужен агенту для MCP-настроек");
+    assert_eq!(
+        hds_core::access::token_sha256_hex(plain),
+        tok.token_sha256,
+        "хэш и plain-токен описывают один токен"
+    );
     // Неверный id проекта — отказ.
     let code = hds_cli::cmd::agent::cmd_agent_cfg(&cfg, &["token".to_string(), "P01".to_string()]);
     assert_eq!(code, 2);

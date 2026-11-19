@@ -33,6 +33,8 @@ pub enum HistoryError {
     Missing(PathBuf),
     /// Файл не разбирается как JSON.
     Invalid(PathBuf, String),
+    /// Недопустимый идентификатор сессии (пути, `..`, слишком длинный).
+    InvalidSession(String),
     /// Словарь недоступен (fail-closed).
     NoDictionary(String),
     /// Ошибка ввода-вывода.
@@ -46,6 +48,10 @@ impl std::fmt::Display for HistoryError {
             HistoryError::Invalid(path, why) => {
                 write!(f, "файл истории не разбирается ({}): {why}", path.display())
             }
+            HistoryError::InvalidSession(id) => write!(
+                f,
+                "недопустимый идентификатор сессии {id:?}: только буквы, цифры, '-' и '_' (до 128)"
+            ),
             HistoryError::NoDictionary(why) => write!(f, "словарь недоступен: {why}"),
             HistoryError::Io(path, why) => {
                 write!(f, "сбой ввода-вывода ({}): {why}", path.display())
@@ -55,6 +61,19 @@ impl std::fmt::Display for HistoryError {
 }
 
 impl std::error::Error for HistoryError {}
+
+/// Идентификатор сессии: только буквы/цифры/`-`/`_`, до 128 символов.
+///
+/// `session_id` приходит из CLI (`--session`) и подставляется в путь файлов
+/// истории: `..`, `/`, `\` и двоеточие вывели бы чтение/перезапись за пределы
+/// каталога сессий.
+pub fn valid_session_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
 
 /// Каталог сессии внутри `agent-state`.
 pub fn session_dir(state_dir: &Path, session_id: &str) -> PathBuf {
@@ -81,6 +100,9 @@ pub fn clear(
     session_id: &str,
     filter: &Filter,
 ) -> Result<HistoryOutcome, HistoryError> {
+    if !valid_session_id(session_id) {
+        return Err(HistoryError::InvalidSession(session_id.to_string()));
+    }
     let mut outcome = HistoryOutcome::default();
     let messages_name = format!("{session_id}.messages.json");
     for path in session_files(state_dir, session_id) {
@@ -119,6 +141,9 @@ pub fn clear(
 /// SDK пишет объект `{ "messages": [...] }`; массив верхнего уровня тоже
 /// принимаем — формат менялся между версиями (A0 §3.6).
 pub fn read_messages(state_dir: &Path, session_id: &str) -> Result<Vec<Value>, HistoryError> {
+    if !valid_session_id(session_id) {
+        return Err(HistoryError::InvalidSession(session_id.to_string()));
+    }
     let path = session_dir(state_dir, session_id).join(format!("{session_id}.messages.json"));
     if !path.is_file() {
         return Err(HistoryError::Missing(path));
@@ -174,4 +199,27 @@ fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_id_is_validated() {
+        assert!(valid_session_id("S-OLD_1"));
+        assert!(valid_session_id("1794925343101_lh7d7"));
+        assert!(!valid_session_id(""));
+        assert!(!valid_session_id("..\\..\\Windows\\evil"));
+        assert!(!valid_session_id("a/b"));
+        assert!(!valid_session_id("a:b"));
+        assert!(!valid_session_id(&"x".repeat(129)));
+    }
+
+    #[test]
+    fn traversal_session_is_rejected_before_touching_files() {
+        let dir = std::env::temp_dir().join(format!("hds-history-{}", std::process::id()));
+        let err = read_messages(&dir, "..\\..\\secret").unwrap_err();
+        assert!(matches!(err, HistoryError::InvalidSession(_)), "{err}");
+    }
 }

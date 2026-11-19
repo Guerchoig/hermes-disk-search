@@ -181,6 +181,34 @@ pub struct GatewayHost {
     ask: Arc<dyn AskUser>,
     egress_log: Option<PathBuf>,
     redactions: Mutex<Vec<Hit>>,
+    /// Обновление снимка vault по `vault_rev` перед каждым запросом (TR-6.5).
+    refresh: Option<Arc<RefreshState>>,
+}
+
+/// Данные для обновления снимка vault из потока `egress_check` (TR-6.5).
+///
+/// Снимок и деанонимизатор должны пересобираться, когда `anonymize_text`
+/// завёл новые метки (первый ход, новое ФИО в реплике), и не реже
+/// `agent.filter.max_stale_sec` — иначе метка, созданная в этом же ходе, не
+/// восстановится в ответе, а долгий ход упрётся в fail-closed.
+pub struct RefreshState {
+    pub system: Vec<String>,
+    pub projects: Vec<String>,
+    pub secrets: Vec<String>,
+    pub workspace: PathBuf,
+    pub project_root: PathBuf,
+    pub deanon: Arc<Mutex<DeAnonymizer>>,
+}
+
+impl std::fmt::Debug for RefreshState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RefreshState")
+            .field("system", &self.system.len())
+            .field("projects", &self.projects.len())
+            .field("secrets", &self.secrets.len())
+            .field("workspace", &self.workspace)
+            .finish()
+    }
 }
 
 impl GatewayHost {
@@ -224,7 +252,38 @@ impl GatewayHost {
             ask,
             egress_log,
             redactions: Mutex::new(Vec::new()),
+            refresh: None,
         }
+    }
+
+    /// Включить сверку снимка по `vault_rev` перед каждым запросом (TR-6.5).
+    ///
+    /// Без неё фильтр живёт снимком, взятым при старте: новые метки этого хода
+    /// не деанонимизируются, а ход дольше `max_stale` упирается в fail-closed.
+    pub fn with_refresh(mut self, state: Arc<RefreshState>) -> Self {
+        self.refresh = Some(state);
+        self
+    }
+
+    /// Пересобрать снимок, если ревизия vault изменилась (TR-6.5).
+    ///
+    /// Клиент уже заблокирован вызывающим: `vault_rev` и `snapshot` — два
+    /// дешёвых RPC, снимок строится только при реальном изменении.
+    fn refresh_if_needed(&self, client: &mut Client, state: &RefreshState) -> Result<(), String> {
+        let rev = client.vault_rev().map_err(|e| format!("vault_rev: {e}"))?;
+        if self.filter.rev() == Some(rev) {
+            return Ok(());
+        }
+        let snapshot = client
+            .snapshot(&self.project)
+            .map_err(|e| format!("снимок vault: {e}"))?;
+        self.filter
+            .set_snapshot(&snapshot, &state.system, &state.projects, &state.secrets);
+        let sys_all = crate::filter::sys_values(&state.system, &state.projects);
+        if let Ok(mut deanon) = state.deanon.lock() {
+            *deanon = DeAnonymizer::new(&snapshot, &sys_all, &state.workspace, &state.project_root);
+        }
+        Ok(())
     }
 
     /// Забрать накопленные срабатывания фильтра (TR-6.4).
@@ -300,6 +359,12 @@ impl GatewayHost {
                 let mut client = client
                     .lock()
                     .map_err(|_| "клиент анонимизации занят".to_string())?;
+                // TR-6.5: перед каждым запросом снимок сверяется по `vault_rev`
+                // и пересобирается, если метки изменились (например, реплика
+                // только что завела новое ФИО).
+                if let Some(state) = self.refresh.as_ref() {
+                    self.refresh_if_needed(&mut client, state)?;
+                }
                 let mut labeler = ClientLabeler {
                     client: &mut client,
                     project: &self.project,
@@ -637,12 +702,11 @@ impl Gateway {
                 if event.get("kind").and_then(Value::as_str) == Some("turn_end") {
                     return Ok(self.map_turn_end(event));
                 }
-                let text = self
+                let (text, unknown) = self
                     .deanon
                     .lock()
-                    .map(|d| d.value(&event))
-                    .unwrap_or_else(|_| event.clone());
-                let unknown = collect_unknown(&event);
+                    .map(|d| (d.value(&event), d.unknown_labels(&event)))
+                    .unwrap_or_else(|_| (event.clone(), Vec::new()));
                 Ok(GatewayEvent::Agent {
                     raw: event,
                     text,
@@ -749,34 +813,10 @@ impl Gateway {
     pub fn shutdown(self) {
         self.worker.shutdown();
     }
-}
 
-fn collect_unknown(value: &Value) -> Vec<String> {
-    let mut out = Vec::new();
-    collect_unknown_into(value, &mut out);
-    out.sort();
-    out.dedup();
-    out
-}
-
-fn collect_unknown_into(value: &Value, out: &mut Vec<String>) {
-    match value {
-        Value::String(s) => {
-            // Пользователю показываются исходные метки (`[PERSON_1]`), а не
-            // FTS-форма: неизвестная метка остаётся в тексте как есть.
-            out.extend(hds_core::labels::find_labels(s));
-        }
-        Value::Array(items) => {
-            for item in items {
-                collect_unknown_into(item, out);
-            }
-        }
-        Value::Object(map) => {
-            for item in map.values() {
-                collect_unknown_into(item, out);
-            }
-        }
-        _ => {}
+    /// Завершить воркер, ожидая выход не дольше `grace` (выгрузка LRU).
+    pub fn shutdown_with(self, grace: Duration) {
+        self.worker.shutdown_with(grace);
     }
 }
 
@@ -831,23 +871,6 @@ fn usage_tokens(event: &Value) -> u64 {
 mod tests {
     use super::*;
     use crate::filter::Source;
-
-    #[test]
-    fn unknown_labels_are_collected() {
-        let v = json!({
-            "text": "видел [PERSON_1] и [ORG_2|род]",
-            "nested": ["[SYS_1]", 7]
-        });
-        let u = collect_unknown(&v);
-        assert_eq!(
-            u,
-            vec![
-                "[ORG_2|род]".to_string(),
-                "[PERSON_1]".to_string(),
-                "[SYS_1]".to_string()
-            ]
-        );
-    }
 
     #[test]
     fn no_ask_user_refuses() {

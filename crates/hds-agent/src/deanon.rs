@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use serde_json::Value;
 
 use hds_anonymize::protocol::{Snapshot, SnapshotForm};
-use hds_core::labels::{is_label, label_parts};
+use hds_core::labels::{find_labels, gram_to_suffix, is_label, label_parts};
 
 /// Результат деанонимизации строки.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,22 +109,62 @@ impl DeAnonymizer {
         if forms.is_empty() {
             return None;
         }
-        if let Some(suffix) = suffix {
-            if let Some(form) = forms.iter().find(|f| {
-                f.gram
-                    .as_deref()
-                    .map(|g| g.split(',').any(|part| part.trim() == suffix))
-                    .unwrap_or(false)
-            }) {
-                return Some(form.value.clone());
-            }
+        // `forms.gram` — код pymorphy (`datv`), суффикс метки — русский
+        // (`дат`); сравниваем в одном пространстве (TR-2.4).
+        let wanted = suffix.as_deref().map(gram_to_suffix).unwrap_or_default();
+        if let Some(form) = forms.iter().find(|f| {
+            let gram = f.gram.as_deref().unwrap_or("");
+            gram_to_suffix(gram) == wanted
+        }) {
+            return Some(form.value.clone());
         }
-        // Без суффикса — именительная форма, иначе первая известная.
+        // Без падежа — именительная форма (TR-2.4), иначе первая известная.
         forms
             .iter()
-            .find(|f| f.gram.as_deref().map(str::is_empty).unwrap_or(true))
+            .find(|f| gram_to_suffix(f.gram.as_deref().unwrap_or("")).is_empty())
             .or_else(|| forms.first())
             .map(|f| f.value.clone())
+    }
+
+    /// Есть ли значение для метки (нужно шлюзу: список неразрешённых меток).
+    pub fn resolves(&self, token: &str) -> bool {
+        self.resolve(token).is_some()
+    }
+
+    /// Метки в JSON-дереве, для которых нет значения (в порядке сортировки).
+    ///
+    /// В отличие от [`hds_core::labels::find_labels`] отдаёт только те, что
+    /// деанонимизатор не смог подставить: UI показывает их пользователю как
+    /// «не удалось восстановить».
+    pub fn unknown_labels(&self, value: &Value) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        self.collect_unknown(value, &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn collect_unknown(&self, value: &Value, out: &mut Vec<String>) {
+        match value {
+            Value::String(text) => {
+                for label in find_labels(text) {
+                    if !self.resolves(&label) && !out.iter().any(|x| x == &label) {
+                        out.push(label);
+                    }
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.collect_unknown(item, out);
+                }
+            }
+            Value::Object(map) => {
+                for item in map.values() {
+                    self.collect_unknown(item, out);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Путь образа → путь папки проекта (TR-5.3).
@@ -192,6 +232,91 @@ mod tests {
         let out = d.text("Метка [ORG_9] без значения");
         assert_eq!(out.text, "Метка [ORG_9] без значения");
         assert_eq!(out.unknown, vec!["[ORG_9]".to_string()]);
+    }
+
+    /// Реальный снимок vault: `forms.gram` — код pymorphy (`nomn`/`datv`),
+    /// а метка — с русским суффиксом. Падеж обязан восстанавливаться.
+    #[test]
+    fn pymorphy_gram_and_russian_suffix_match() {
+        let snapshot = Snapshot {
+            rev: 2,
+            labels: vec![SnapshotLabel {
+                label: "[PERSON_1]".to_string(),
+                entity_type: "PERSON".to_string(),
+                forms: vec![
+                    SnapshotForm {
+                        value: "Иванов Иван".to_string(),
+                        gram: Some("nomn".to_string()),
+                        origin: "seen".to_string(),
+                    },
+                    SnapshotForm {
+                        value: "Иванову Ивану".to_string(),
+                        gram: Some("datv".to_string()),
+                        origin: "derived".to_string(),
+                    },
+                ],
+            }],
+            others: vec![],
+            keep: vec![],
+        };
+        let d = DeAnonymizer::new(
+            &snapshot,
+            &[],
+            Path::new("C:\\anon\\P1\\workspace"),
+            Path::new("C:\\Проект"),
+        );
+        assert_eq!(d.text("[PERSON_1]").text, "Иванов Иван");
+        assert_eq!(d.text("[PERSON_1|дат]").text, "Иванову Ивану");
+        // Терпимый разбор уже выпущенных меток A3.4 с латинским кодом.
+        assert_eq!(d.text("[PERSON_1|datv]").text, "Иванову Ивану");
+        assert_eq!(d.text("[PERSON_1|nomn]").text, "Иванов Иван");
+    }
+
+    /// Без суффикса — именительная форма, даже если первой встретилась
+    /// косвенная (TR-2.4).
+    #[test]
+    fn bare_label_prefers_nominative() {
+        let snapshot = Snapshot {
+            rev: 3,
+            labels: vec![SnapshotLabel {
+                label: "[PERSON_1]".to_string(),
+                entity_type: "PERSON".to_string(),
+                forms: vec![
+                    SnapshotForm {
+                        value: "Иванову Ивану".to_string(),
+                        gram: Some("datv".to_string()),
+                        origin: "seen".to_string(),
+                    },
+                    SnapshotForm {
+                        value: "Иванов Иван".to_string(),
+                        gram: Some("nomn".to_string()),
+                        origin: "derived".to_string(),
+                    },
+                ],
+            }],
+            others: vec![],
+            keep: vec![],
+        };
+        let d = DeAnonymizer::new(
+            &snapshot,
+            &[],
+            Path::new("C:\\anon\\P1\\workspace"),
+            Path::new("C:\\Проект"),
+        );
+        assert_eq!(d.text("[PERSON_1]").text, "Иванов Иван");
+    }
+
+    #[test]
+    fn unknown_labels_lists_only_unresolved() {
+        let d = deanon();
+        let value = serde_json::json!({
+            "text": "[PERSON_1] и [ORG_9]",
+            "nested": ["[SYS_1]", "[PERSON_2]"]
+        });
+        assert_eq!(
+            d.unknown_labels(&value),
+            vec!["[ORG_9]".to_string(), "[PERSON_2]".to_string()]
+        );
     }
 
     #[test]

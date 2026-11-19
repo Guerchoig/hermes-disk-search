@@ -15,7 +15,7 @@
 //! перенаправлен, ключи провайдеров не наследуются. Async нет — только потоки
 //! и блокирующий I/O, как во всём ядре.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -114,6 +114,9 @@ pub struct Worker {
     stdin: Arc<Mutex<ChildStdin>>,
     events: Receiver<Up>,
     pending: Arc<Mutex<HashMap<String, Sender<Up>>>>,
+    /// id команд, ожидание которых снято по таймауту: их поздний ответ
+    /// отбрасывается, а не притворяется событием/завершением хода.
+    timed_out: Arc<Mutex<HashSet<String>>>,
     next_id: AtomicU64,
     timeout: Duration,
     reader: Option<JoinHandle<()>>,
@@ -150,17 +153,21 @@ impl Worker {
 
         let stdin = Arc::new(Mutex::new(stdin));
         let pending: Arc<Mutex<HashMap<String, Sender<Up>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let timed_out: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
         let closed = Arc::new(Mutex::new(false));
         let (events_tx, events_rx) = mpsc::channel::<Up>();
 
         let reader = {
             let stdin = Arc::clone(&stdin);
             let pending = Arc::clone(&pending);
+            let timed_out = Arc::clone(&timed_out);
             let closed = Arc::clone(&closed);
             thread::Builder::new()
                 .name("hds-agent-reader".to_string())
                 .spawn(move || {
-                    read_loop(stdout, stdin, pending, events_tx, closed, handler);
+                    read_loop(
+                        stdout, stdin, pending, timed_out, events_tx, closed, handler,
+                    );
                 })
                 .map_err(|e| WorkerError::Spawn(e.to_string()))?
         };
@@ -178,6 +185,7 @@ impl Worker {
             stdin,
             events: events_rx,
             pending,
+            timed_out,
             next_id: AtomicU64::new(1),
             timeout: spec.timeout,
             reader: Some(reader),
@@ -232,6 +240,10 @@ impl Worker {
                 if let Ok(mut pending) = self.pending.lock() {
                     pending.remove(&id);
                 }
+                // Поздний ответ не должен попасть в поток событий.
+                if let Ok(mut timed) = self.timed_out.lock() {
+                    timed.insert(id);
+                }
                 Err(WorkerError::Timeout(self.timeout.as_secs()))
             }
             Err(RecvTimeoutError::Disconnected) => Err(WorkerError::Closed),
@@ -253,11 +265,17 @@ impl Worker {
     }
 
     /// Корректно завершить процесс. При отказе — убить.
-    pub fn shutdown(mut self) {
+    pub fn shutdown(self) {
+        self.shutdown_with(Duration::from_secs(5));
+    }
+
+    /// То же с явным сроком ожидания выхода: выгрузка LRU в UI не должна
+    /// держать вызывающий поток полные 5 секунд.
+    pub fn shutdown_with(mut self, grace: Duration) {
         let _ = self.write(&Down::Shutdown {
             id: "shutdown".to_string(),
         });
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + grace;
         loop {
             match self.child.try_wait() {
                 Ok(Some(_)) => break,
@@ -291,6 +309,7 @@ fn read_loop(
     stdout: ChildStdout,
     stdin: Arc<Mutex<ChildStdin>>,
     pending: Arc<Mutex<HashMap<String, Sender<Up>>>>,
+    timed_out: Arc<Mutex<HashSet<String>>>,
     events: Sender<Up>,
     closed: Arc<Mutex<bool>>,
     handler: Arc<dyn HostHandler>,
@@ -327,7 +346,10 @@ fn read_loop(
                         let _ = tx.send(up);
                     }
                     None => {
-                        let _ = events.send(up);
+                        let timed = timed_out.lock().map(|mut t| t.remove(&id)).unwrap_or(false);
+                        if !timed {
+                            let _ = events.send(up);
+                        }
                     }
                 }
             }

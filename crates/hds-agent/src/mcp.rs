@@ -96,7 +96,7 @@ impl McpSpec {
                         "url": self.disk_search_url(),
                         "headers": { "Authorization": format!("Bearer {token}") }
                     },
-                    "timeoutSeconds": 60
+                    "timeout": 60
                 }),
             );
         }
@@ -111,7 +111,7 @@ impl McpSpec {
                         "args": [script.to_string_lossy()],
                         "env": { "TAVILY_API_KEY": key }
                     },
-                    "timeoutSeconds": 60
+                    "timeout": 60
                 }),
             );
         }
@@ -129,7 +129,7 @@ impl McpSpec {
                         "args": self.onec_args,
                         "env": env
                     },
-                    "timeoutSeconds": 120
+                    "timeout": 120
                 }),
             );
         }
@@ -225,6 +225,9 @@ mod tests {
             "Bearer tok-123456"
         );
         assert_eq!(server["transport"]["type"], "streamableHttp");
+        // SDK 0.2.0 читает таймаут из `timeout` (секунды), `timeoutSeconds` игнорирует.
+        assert_eq!(server["timeout"], 60);
+        assert!(server.get("timeoutSeconds").is_none(), "{server}");
     }
 
     #[test]
