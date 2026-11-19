@@ -10,8 +10,8 @@
 > здесь — только порядок, границы под-этапов и состояние.
 >
 > **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
-> `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test) плюс docs-коммит с этим файлом.
-> Дерево чистое, push не делался.
+> `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test); A3.2 — `6ef028af` (feat),
+> `8204e384` (test) плюс docs-коммит с этим файлом. Дерево чистое, push не делался.
 
 ## 1. Что уже сделано и проверено (A3.0, A3.1)
 
@@ -110,6 +110,29 @@
 | `test/history.test.mjs` | `history` + `session_id` → прошлая реплика в первом запросе; api_key нет в файлах |
 | `test/guard.test.mjs` | матрица путей, политика форматов, `collectPaths`, `withTimeout`, `isForbiddenToolName` (все формы `ask_my_files`) |
 
+### 1.2. A3.2: Rust ↔ настоящий воркер (подтверждено фактом)
+
+`cargo test -p hds-agent` = **56** тестов (54 unit + 2 интеграционных в
+`crates/hds-agent/tests/gateway_worker.rs`), ≈ 3 с. Предпосылки (node + `dist/worker.mjs`)
+проверяются в тесте: нет — печатается причина и тест выходит (как тесты `worker.rs`).
+
+* `Gateway::spawn` → `hello` → `open` → `send` → события → `turn_end` поверх живого
+  `dist/worker.mjs` (не заглушки);
+* `open` читает **`declared_tools`** (после переименования в A3.1) — ровно 7 объявленных имён;
+* `egress_check` проходит **настоящий `Filter`** со снимком vault, собранным без Python
+  (структура `Snapshot` вручную, `GatewayHost::without_client`): «Иванов Иван» в теле запроса
+  заменён на `[PERSON_1]`, mock-провайдер значения **не получил**;
+* `GatewayEvent::Redacted` содержит только `Hit { label, source }` — значения нет
+  (проверяется по `Debug` и по структуре);
+* события деанонимизированы: `[PERSON_1]` → «Иванов Иван», `[SYS_1]` → `DESKTOP-A32`,
+  путь workspace → путь папки проекта; `TurnEnd` отдаёт `raw` (метки) и `text` (значения)
+  и фактический `tools` (есть `read_files`/`office_read`/`ask_user`, нет `run_commands`);
+* fail-closed на живом воркере: без снимка `egress_check` отвечает
+  `privacy_filter_unavailable`, mock получил **0** запросов, `TurnEnd { ok: false,
+  reason: "error" }`, процесс жив;
+* `send` без Python-клиента отказывает (`GatewayError::Anonymize`), `send_anonymized`
+  отправляет уже обезличенный текст — этот режим (egress-only) нужен стендам и тестам.
+
 **Ещё НЕ написано:**
 
 * подключение `hds-agent` в `hds-cli` и сборка сессии из конфига;
@@ -126,7 +149,7 @@
 | # | Под-этап | Результат «снаружи» (критерий) | Объём |
 |---|---|---|---|
 | **A3.1** | **Воркер: TR-3.10 на Node-стенде** | **Закрыт.** `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` (карта — §1.1) | закрыт |
-| A3.2 | Rust ↔ настоящий воркер | `cargo test -p hds-agent` (интеграционный, `#[ignore]` при отсутствии `node`/`dist`): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений | ~1 чат |
+| A3.2 | Rust ↔ настоящий воркер | **Закрыт.** `cargo test -p hds-agent`: интеграционный `tests/gateway_worker.rs` (56 тестов всего): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений; fail-closed = 0 запросов к провайдеру | закрыт |
 | A3.3 | Точка входа CLI | `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль. Тест CLI на mock-провайдере | ~1 чат |
 | A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем | ~1 чат |
 | A3.5 | Установщик | `installers/build_agent_sidecar.ps1` (портативный Node без пробелов в пути → `sidecar/node/`, `npm ci --omit=dev` по lock, сборка `dist/`, `-SelfTest` = `hello`); образец — `build_anonymize_sidecar.ps1`, `sidecar_common.ps1` | ~0,5 чата |
@@ -143,21 +166,20 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 |---|---|---|---|
 | A3.0 | закрыт 19.11.2026 | `f10a92e8`, `a8dc5b51` | см. §1 |
 | A3.1 | закрыт 19.11.2026 | `2efe8043` (fix), `8e26d0f3` (test) | `npm test` 23/23, ≈ 39 с; карта тестов — §1.1; находки — §4 п.7–12; `Gateway::open` поправить в A3.2 (§4 п.1) |
-| A3.2 | следующий | — | промт — §5 (поправить: `declared_tools`, `GatewayEvent::TurnEnd`, `Up::HostCall` — мёртвая ветка) |
+| A3.2 | закрыт 19.11.2026 | `6ef028af` (feat), `8204e384` (test) | `cargo test -p hds-agent` = 56 тестов (54 unit + 2 интеграционных), `cargo fmt --check` и `clippy --workspace -D warnings` чистые; факты — §1.2, находки — §4 п.1–3 и 13–16 |
+| A3.3 | следующий | — | CLI: `Gateway::spawn` с Python-клиентом (egress-only — только стенды), успех хода — по `TurnEnd`, `Redacted` — в предупреждения |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
-1. **Сделано в A3.1:** `start` возвращает `declared_tools` вместо `tools`. **Осталось:**
-   `Gateway::open` (`crates/hds-agent/src/gateway.rs`, около строки 450) всё ещё читает
-   `result.get("tools")` — поправить в A3.2, иначе список объявленных инструментов придёт
-   пустым. `Up::Ready { tools }` (ответ на `hello`) остаётся как есть.
-2. `GatewayEvent::Agent` при `Up::HostCall` — мёртвая ветка: `host_call` перехватывает
-   поток чтения. Убрать в A3.2.
-3. `turn_end` — событие воркера, а не `done`. Rust (`Gateway`) об этом пока не знает. В A3.2
-   добавить `GatewayEvent::TurnEnd {ok, reason, text, error}` и проверку «успех при пустом
-   ответе» (грабли §6.1 карты). После A3.1 `turn_end` уже отдаёт корректные `reason`/`error`
-   (в т.ч. `aborted`, `privacy_filter_unavailable`) и фактический `tools` — на них можно
-   опираться.
+1. **Сделано в A3.1/A3.2:** `start` возвращает `declared_tools`, `Gateway::open` его читает
+   (интеграционный тест A3.2 это фиксирует). `Up::Ready { tools }` (ответ на `hello`) остаётся
+   как есть — воркер отдаёт там пустой список.
+2. **Сделано в A3.2:** мёртвая ветка `GatewayEvent::Agent` при `Up::HostCall` убрана: `map_up`
+   теперь возвращает `GatewayError::Worker("host_call … попал в поток событий")`.
+3. **Сделано в A3.2:** `turn_end` приходит отдельным `GatewayEvent::TurnEnd {ok, reason, text,
+   error, tools, raw}`; добавлена проверка «успех при пустом ответе» (Rust-сторона, в дополнение
+   к проверке воркера). **A3.3/UI:** успех хода определять по `TurnEnd`, а не по `Done` —
+   `Done` после `send` означает только «принято» (`{accepted: true}`).
 4. Скрипт `npm test` — `node --test "test/*.test.mjs"`. Каталог `test/` Node 24 сам не
    раскрывает.
 5. `npm install` предупреждает `allow-scripts` про `esbuild` и `protobufjs`. Бинарник esbuild
@@ -203,6 +225,23 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
     `HDS_STUB_LOG`. `harness.mjs`: `writeStubMcp`, `readStubLog`, `filesUnder`, третий
     аргумент `startWorker(dirs, host, extraEnv)`. Диагностических RPC и env-переключателей в
     воркер не добавляли — все проверки сделаны через поведение.
+13. **A3.2: `canonicalize()` на Windows даёт verbatim-путь `\\?\C:\…`, а Node его не
+    переваривает** — `node \\?\C:\…\worker.mjs` падает на `realpathSync` → `lstat 'C:'`
+    (EISDIR), воркер закрывает канал, `hello` не отвечает. Перед передачей пути в Node
+    снимать префикс `\\?\` (в тесте — `worker_script()`). **A3.3/A3.5:** так же чистить путь
+    к `dist/worker.mjs`, портативному `node` и каталогу проекта в `projects.json`.
+14. **A3.2: у `Gateway` был обязательный Python-клиент.** Добавлен egress-only режим:
+    `Gateway::spawn_egress_only` (без клиента, `send` → `GatewayError::Anonymize`),
+    `Gateway::send_anonymized` (текст уже обезличен) и `Gateway::refresh_from_snapshot`
+    (снимок применяется без Python). **A3.3:** CLI всегда поднимает `Gateway::spawn` с
+    клиентом; egress-only — стенды/тесты и режим «анонимизатор недоступен → fail-closed».
+15. **A3.2: mock-провайдер для Rust-теста — внутри теста** (`MOCK_JS` + `node`, порт
+    `127.0.0.1:0`, тела запросов в `mock-requests.jsonl`); от `sidecar/hds_agent/test/fixtures`
+    не зависит, интерпретатор переопределяется `HDS_NODE`. Тест сам решает, доступны ли
+    предпосылки (нет `node`/`dist` → печатает причину и выходит).
+16. **A3.2: интеграционные тесты идут параллельно в одном процессе** — `process::id()` у них
+    общий, общий временный каталог приводил к падению (один тест удалял каталог другого).
+    Каталог должен включать счётчик (`AtomicU32`), не только pid.
 
 
 
