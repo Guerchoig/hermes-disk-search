@@ -1,0 +1,213 @@
+# AGENT_A4_STAGES.md — промежуточный план фазы A4 (под-этапы)
+
+> **Зачем.** `AGENT_A4_HANDOFF_PROMPT.md` задаёт требования и методику всей фазы A4
+> (`hds agent sync` — двустороннее зеркало папки проекта и `<P>\workspace`). Этот файл
+> режет фазу на **короткие под-этапы**: один под-этап — один чат — зелёный тест,
+> видимый снаружи, — коммит. Карта требований остаётся в хендоффе и плане, здесь —
+> порядок, границы, решения и состояние.
+>
+> **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`.
+> **HEAD на входе:** `2a8d9585` (docs: код-ревью A0–A3 + контекст A4), правки по ревью —
+> `e161012e`, фазы A0–A3 — `3f34d51d`…`cb635027`. Дерево чистое, push не делался.
+> **Машина:** Windows 11, PowerShell 5.1, Rust 1.99, Node 24.18, Python 3.12
+> (`sidecar\venv-anonymize`); `llm_host` резидент (GPU отдаётся по аренде `anon`).
+
+## 1. Что уже сделано (A0–A3 + ревью) — опора A4
+
+| Что | Где | Чем можно пользоваться в A4 |
+|---|---|---|
+| Клиент анонимизации | `crates/hds-anonymize/src/client.rs` | `anonymize` (mode `agent`, `artifact_id`, `images_mode`), `deanonymize_project`, `anonymize_text`, `text_image`, `snapshot`/`vault_rev`, `vault_drop_project` |
+| Метки | `crates/hds-core/src/labels.rs` | `label_parts`, `gram_to_suffix`, `is_label`, `find_labels` — единственный разбор (AG-1) |
+| Настройки/пути | `crates/hds-agent/src/{settings,projects,paths}.rs` | `project_dir`/`workspace_dir`/`state_dir_for`, `projects.json`, матрица опасных путей, **новые** `registry_dir`/`registry_db` |
+| Реестр процессов | `crates/hds-agent/src/registry.rs` | образец для `registry_db` (LRU, `shutdown_with(2 c)`) — не путать: это реестр живых воркеров |
+| Индекс | `crates/hds-index/src/{watch,pipeline}.rs` | `wait_stable` (порт), `index_filter` с неявными исключениями `.hds-agent`, `_conflicts`; `implicit_excludes` |
+| Node-воркер | `sidecar/hds_agent` | `hds-guard` уже блокирует `editor`/`office_edit` по `*.pdf.md`/`*.pptx.md`/`*.mpp.md` (TR-7.3a) |
+| Python-воркер | `sidecar/hds_anonymize` | `read_anon_marker`, `strip_body_images` (+`_strip_xlsx_images` с якорями), `FileBusyError`, `_atomic_write_*` |
+| CLI | `crates/hds-cli/src/cmd/agent*.rs` | `init`, `token`, `project add|list`, `run`, `history clear`; `sync` — A4.1 |
+
+**Проверки на входе фазы** (`AGENT_A0_A3_CODE_REVIEW.md` §8.1): 121 набор / 767 тестов,
+`npm test` 23/23, python 307 OK (1 skip), fmt/clippy чисто.
+
+## 2. Под-этапы A4
+
+| # | Под-этап | Результат «снаружи» (критерий) | Состояние |
+|---|---|---|---|
+| **A4.1** | **Реестр артефактов** `data\agent\registry\<P>.db` (TR-7.2) + минимальный `hds agent sync --once` | `cargo test -p hds-agent` покрывает схему/статусы/`mark_seen`/`list_pending`/конкурентную запись; `hds agent sync --once` на пустой папке создаёт реестр и не меняет папку проекта; повторный прогон идемпотентен; `--project` не идентификатор (D21) — отказ | **закрыт 19.11.2026** (§3) |
+| A4.2 | **Прямой путь** TR-7.1/7.3: обход дерева, `wait_stable` (2 с/0,5 с/30 с), `anonymize_path` (RPC, метки **без** падежа), docx/xlsx/txt/md/xml → образ, pdf/pptx/mpp → `*.md` через `hds_extract` + `text_image`, `unsupported`/`too_big` по `index.max_file_mb`, удаление/переименование, `_attachments`/`_conflicts` не выпускаются | e2e на стенде 30–50 документов: структура повторена, имена с метками, текстовые образы читаются, повторный прогон — 0 изменений | следующий |
+| A4.3 | **Обратный путь** TR-7.5/7.7: `agent_new` → папка проекта (D5, суффикс ` (агент)`), `agent_changed` → вариант в `.hds-agent\pending` с восстановлением `docProps` и картинок из `.hds-agent\base`, маркер/`artifact_id`, защита от петель (`issued` vs `seen`) | e2e: правка `office_edit` → вариант в `pending`, sha256 оригиналов не изменились (I6); новый файл агента появился в папке; повторный обход не плодит записи | — |
+| A4.4 | **Решения TR-7.6**: «Принять» (backup → `replace_file` → `accepted` → пересоздать образ), три исхода конфликта, «файл занят» (os error 32), «Отклонить», «Сравнить» (данные: пути, для xlsx — ячейки, для md/txt — diff), очередь сообщений агенту `.hds-agent\messages.jsonl` | тесты на копиях: все четыре ситуации + занятый файл (открытый `File` handle), backup и восстановление | — |
+| A4.5 | **Валидатор** TR-7.8: отчёт `pending\<rel>.report.json`, метки вне проекта, несогласованный падеж, непомещённые `[IMAGE_n]`, порог «текст пропал» (40 %) | тест: подделанный вариант ловится, нормальный — нет; отчёт не блокирует выпуск | — |
+| A4.6 | **CLI и документация**: `hds agent sync [--once] [--interval SEC]` (дефолт 5 с), остановка по `index.stop`/Ctrl+C, журнал `agent-state\sync.log` без значений (I8), `README.md` (глава «Анонимная зона агента»), `AGENT_A4_REPORT.md`, `RELEASE_NOTES` | полный набор проверок §6 хендоффа + e2e стенда + I1/I2/I8 | — |
+
+**Зависимости:** A4.2 ← A4.1; A4.3 ← A4.2; A4.4 ← A4.3; A4.5 — параллельно A4.4; A4.6 —
+последним.
+
+**Правило нарезки:** если под-этап разрастается — остановиться на ближайшем зелёном
+
+## 3. Журнал под-этапов
+
+| Под-этап | Состояние | Коммиты | Заметки |
+|---|---|---|---|
+| A4.1 | закрыт 19.11.2026 | `00da7c54` (feat) | `crates/hds-agent`: `registry_db` (10 тестов), `settings::registry_dir/registry_db` (+тест), `rusqlite` в зависимости; `crates/hds-cli`: `agent_sync` + `hds agent sync --once` (4 интеграционных теста). Прогоны: `cargo test --workspace` — **122 набора / 781 passed / 0 failed** (лог `tools/parity/out/a41-cargo-test.log`), fmt/clippy чисто; python 307 OK (skip 1, `a41-python.log`); `npm test` 23/23 (`a41-npm.log`). |
+
+### 3.1. A4.1: что именно сделано (факты)
+
+* **Схема** ровно по TR-7.2: `artifacts(id INTEGER PRIMARY KEY, orig_rel TEXT NOT NULL
+  UNIQUE, anon_rel TEXT NOT NULL, kind, orig_sha256, anon_sha256_issued,
+  anon_sha256_seen, status, ts REAL NOT NULL)` + индексы `anon_rel` и `status`,
+  `PRAGMA user_version = 1`, `journal_mode=WAL`, `busy_timeout=30000`,
+  `synchronous=NORMAL`. `busy_timeout` ставится **первым** — иначе смена
+  `journal_mode` падала бы на блокировке (тот же порядок, что в `hds_core::db`).
+* **API** (`ArtifactRegistry`): `open`, `path`, `schema_version`, `insert` (id выделяется
+  **до** анонимизации — он уходит в маркер `hds-agent/<P>/<id>`), `upsert` (`ON CONFLICT
+  (orig_rel)`, хэши через `COALESCE` — «знаю только часть» не стирает известное),
+  `by_id`/`by_orig`/`by_anon`, `set_status`, `set_status_by_orig`, `set_issued`
+  (issued = seen, статус), `mark_seen`, `set_base`, `rename_orig` (переименование
+  оригинала + образа), `list`, `list_by_status`, `list_pending`, `count`, `delete`.
+* **Ошибка БД не валит демон** (TR-7.2): `RegistryError` — `Open/Sql/NotFound`,
+  вызывающий превращает её в статус `error` и продолжает; CLI возвращает 1.
+* **Совместимость вперёд:** неизвестные `kind`/`status` из более новой версии читаются
+  как `Kind::Unknown`/`Status::Unknown` (демон такой записью не управляет), а не
+  роняют весь обход. Записываются только значения из плана — `as_str` проверен тестом
+  `schema_strings_match_plan`.
+* **Путь реестра — зона пользователя**: `<state_dir>\data\agent\registry\<P>.db`;
+  `<P>` обязан быть `P` + 4 цифры (`hds_core::roots::is_agent_project`, D21), иначе
+  `registry_db` вернёт `None` — `--project ..\..\evil` путь не построит (тест).
+* **`hds agent sync --project <P> [--once]`** (A4.1): проверяет `agent.enabled`,
+  регистрацию проекта в `projects.json`, открывает/создаёт реестр, печатает путь и
+  число записей. Папка проекта не читается и не меняется — обход придёт в A4.2.
+* **Тесты** `registry_db`: схема/строки контракта, открытие (каталог+WAL+busy_timeout+
+  `user_version`), `insert` (id, roundtrip, конфликт уникальности), `upsert` (id
+  стабилен, хэши не стираются), `issued/seen` → `agent_changed`, статусы и
+  `list_pending`, переименование/удаление, переоткрытие и «значения из будущего»,
+  **два потока-писателя** (2×20 `upsert` → 40 записей, без потерь). Временные каталоги
+  — с `AtomicU32`-счётчиком (§5 п.4 хендоффа).
+
+## 4. Решения и долги
+
+### 4.1. Решения по §9 хендоффа (дефолты приняты; владелец может изменить)
+
+Вопросы заданы владельцу в начале работ; ответа в чате не было — работаем по
+предложенным дефолтам, они зафиксированы здесь.
+
+| # | Вопрос | Принято для A4 |
+|---|---|---|
+| 1 | `--once` или демон? | `--once` реализуется в A4.1/A4.6, `--interval` (по умолчанию 5 с) — A4.6; автозапуск службой — A6 |
+| 2 | `wait_stable` | размер+mtime не меняются 2 с, опрос 0,5 с, максимум 30 с (порт `hds_index::watch::wait_stable` не переиспользуется напрямую — там опрос 2 с и только размер; в A4.2 будет свой цикл с тестом) |
+| 3 | Лимит `too_big` | `index.max_file_mb` (дефолт 200), отдельный ключ не вводим |
+| 4 | Восстановление картинок XLSX | A4.3: `strip_body_images`/`_strip_xlsx_images` дополнительно возвращают карту `[IMAGE_n] → якорь/медиа`, карта — в `.hds-agent\base\<rel>.images.json`; docx — по порядку |
+| 5 | Коллизии и длина имён | суффикс ` (2)`, ` (3)`; `> 120` символов → обрезка + 8 hex sha256; метки **без** падежа |
+| 6 | Сообщения агенту | очередь `.hds-agent\messages.jsonl`; A4 только пишет, A5 доставляет |
+| 7 | «Сравнить» docx | A4 отдаёт данные (пути, для xlsx — ячейки, для md/txt — diff); запуск Word — A5 |
+
+### 4.2. Долги и открытые места (передаются по под-этапам)
+
+1. **A4.1: `--once` — единственный режим.** Флаг `--interval` появится в A4.6 вместе с
+   циклом, остановкой по `index.stop`/Ctrl+C и журналом `agent-state\sync.log`. Сейчас
+   команда делает ровно один проход, даже без `--once`.
+2. **A4.1: проект обязателен.** `sync` без `--project` отказывает (код 2): обход всех
+   проектов сразу — A4.6 (там же `--all` или цикл по `projects.json`).
+3. **A4.1: реестр не чистится сам.** Записи `orphan`/`unsupported` живут до решения
+   пользователя (A5) — демон их только помечает. Удаление проекта (TR-8.1) должно
+   удалять `<P>.db` — A5/A6 вместе с кнопкой «удалить проект».
+4. **A4.2: `create_dir_all` в `ArtifactRegistry::open`** создаёт каталог реестра. Если
+   `<state_dir>` недоступен (права), это видно как `RegistryError::Open` — демон
+   останавливать не нужно, но в UI это будет «реестр недоступен».
+5. **A4.2: `rename_orig` не двигает файлы** — только запись реестра. Файловые операции
+   (переименовать образ, обновить снимок основания) делает демон и фиксирует результат
+   этим вызовом; порядок «файлы → реестр» обязателен, иначе реестр укажет на
+   несуществующий путь.
+
+## 5. Контракты A4 (не ломать)
+
+| Контракт | Правило |
+|---|---|
+| **Метки** | разбор — только `hds_core::labels` (`label_parts`, `gram_to_suffix`, `split_labels`); второй регулярки быть не должно. В **именах файлов** `|` запрещён Windows → метка **без** падежного суффикса: `Встреча с [PERSON_3].docx` |
+| **Режим `agent`** | `mode:"agent"` + `project_id` (+ `artifact_id`); имя файла сохраняется, маркер `hds-agent/<P>/<id>` в свойствах, картинки тела `strip` → `[IMAGE_n]`, оригинал не меняется |
+| **Текстовые образы** | `<имя>.<ext>.md`, только чтение; `editor`/`apply_patch`/`office_edit` по ним блокирует `hds-guard` (`READONLY_IMAGE`); правка — новым документом (TR-7.3a/D22) |
+| **Опасные пути** | одна матрица: `paths.rs` (Rust) + `guard.ts` (Node): UNC, `\\?\`, `\\.\`, ADS, устройства, `..`, junction |
+| **Фильтр/токены/проекты** | `RefreshState` по `vault_rev` перед каждым запросом; fail-closed `privacy_filter_unavailable`; `projects.<P>.token` plain + `token_sha256`; `projects.json` — абсолютный путь папки проекта, `id` = `P`+4 цифры |
+| **Индекс** | при `agent.enabled` корни — только `<agent.root>\P*\workspace`; `.hds-agent`, `_conflicts` исключены неявно; образы индексирует **существующий** `hds watch` — очередь не дублировать |
+| **Журналы** | событие `agent_egress_redacted` и `sync.log` — пути/метки/статусы, **без значений** (I8); секреты только в `secrets.json` |
+| **Атомарная замена** | `hds_core::config::replace_file` (ретраи на `PermissionDenied`); между дисками `rename` падает — нужен fallback copy+replace |
+
+## 6. Грабли (оплачены — не наступать)
+
+1. **`canonicalize` на Windows** даёт `\\?\C:\…`: перед передачей пути в Node/реестр
+   снимать префикс (A3 §4 п.13).
+2. **PowerShell 5.1**: `.ps1` — ASCII без BOM, стенды с кириллицей — UTF-8 **с BOM**;
+   файлы править `[IO.File]::ReadAllText/WriteAllText` + `UTF8Encoding`. Команды в
+   терминал — **без кириллицы**: PS 5.1 читает строку команды в ANSI и портит её
+   (проверено на этой доработке: комментарий из here-string пришёл мохнатым; файл
+   правился редактором с UTF-8).
+3. **Тесты идут параллельно в одном процессе** — временные каталоги с
+   `AtomicU32`-счётчиком (не только `process::id()`); CLI-тесты — `common::TempDir`
+   (pid+nanos) и `ENV_LOCK` для env.
+4. **`git` без `--no-pager` вешает терминал**; длинные прогоны — лог в
+   `tools/parity/out/` (`*>`).
+5. **`hds watch` держит `index.db`** — не удалять базу под живым watcher'ом; зеркало
+   пишет только файлы workspace.
+6. **Занятый файл (Word/Excel)** = `os error 32`/`PermissionDenied` — это ситуация 3
+   TR-7.6, а не ошибка демона: backup не создавать, вариант оставить в `pending`.
+7. **Длинные пути**: `LongPathsEnabled=0`; имена ≤ 120 символов, иначе `MAX_PATH`.
+8. **Junction/симлинк**: перед проверкой вложенности — `canonicalize` (AG-11).
+9. **Метки в FTS** — один токен (`xperson3x`), формы `[PERSON_3]`/`[PERSON_3|дат]`
+   различаются только при деанонимизации; сравнивать префикс, а не точное равенство
+   (A3 §4 п.27).
+10. **`cargo` пишет в stderr** → в PowerShell это `NativeCommandError`; ориентир —
+    `$LASTEXITCODE`, а не красный текст.
+
+## 7. Окружение и команды
+
+```powershell
+cd c:\Users\Sasha\hermes-disk-search
+git --no-pager status; git --no-pager log -3 --oneline
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test -p hds-agent
+cargo test -p hds-cli --test agent_sync
+cargo test --workspace -- --test-threads=4 *> tools\parity\out\a4-cargo-test.log
+sidecar\venv-anonymize\Scripts\python.exe -m unittest discover -s sidecar/tests -t sidecar
+npm --prefix sidecar/hds_agent test
+```
+
+* `HDS_CONFIG`/`HDS_ROOT` изолируют прогоны; `HDS_ANONYMIZE_PYTHON`,
+  `HDS_ANONYMIZE_WORKER`, `HDS_EXTRACT_PYTHON` — подмена воркеров в тестах.
+* Артефакты — только `tools/parity/out/` (гитигнорится).
+* В окружении **не настроена git-identity**: коммиты —
+  `git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit …`,
+  пути — явным списком.
+* Машина разработческая: `llm_host`/`hds *` можно останавливать и возвращать.
+
+## 8. Промт для A4.2 (копировать целиком в новый чат, режим Act)
+
+```text
+Ты — ведущий разработчик проекта hermes-disk-search (Rust + Python/Node sidecar).
+Ветка agent-privacy-zone. Фаза A4 идёт по под-этапам: A4.1 (реестр артефактов) закрыт
+коммитом 00da7c54, журнал и решения — в AGENT_A4_STAGES.md (§2, §3, §4).
+
+Задача: под-этап A4.2 — прямой путь зеркала (TR-7.1/7.3): обход папки проекта,
+wait_stable, анонимизация имён (новый RPC anonymize_path), образы docx/xlsx/txt/md/xml
+в mode:"agent", текстовые образы pdf/pptx/mpp через hds_extract + text_image,
+unsupported/too_big, удаление и переименование, служебные каталоги.
+
+1. Прочитай AGENT_A4_STAGES.md целиком (§2 — нарезка, §4 — решения и долги, §5–§7 —
+   контракты, грабли, команды), затем AGENT_A4_HANDOFF_PROMPT.md §4.1/§4.3 и
+   PLAN_AGENT_PRIVACY_ZONE.md §5.7 (TR-7.1, TR-7.3).
+2. Код: crates/hds-agent/src/registry_db.rs (реестр A4.1 — используй, не переписывай),
+   crates/hds-anonymize/src/client.rs (anonymize/text_image), sidecar/hds_anonymize/
+   {worker,handlers,text_image}.py, crates/hds-index/src/{watch,pipeline}.rs
+   (wait_stable, index_filter), hds-extract (клиент), crates/hds-cli/src/cmd/agent_sync.rs.
+3. Сделай обход идемпотентным: повторный прогон — 0 изменений (сравнение по sha256),
+   реестр обновляется через upsert/set_issued/mark_seen, служебные каталоги
+   (.hds-agent, ~$*, *.tmp, Thumbs.db, _attachments, _conflicts) не выпускаются.
+4. Python RPC anonymize_path(project_id, path, suffix=false) — аддитивно, с тестом в
+   sidecar/tests; воркер объявляет capability.
+5. Проверки: cargo fmt --check, clippy -D warnings, cargo test --workspace,
+   npm test в sidecar/hds_agent, python unittest — и e2e на стенде 30–50 документов
+   (tools/parity/agent_a0_gen_project.py), артефакты в tools/parity/out/.
+6. Коммиты: feat(agent): A4.2 — ...; docs(agent): A4.2 закрыт — ...; в сообщении — что
+   проверено. Журнал и долги обнови в AGENT_A4_STAGES.md.
+```
+
+тесте, закоммитить и записать остаток в §4.
