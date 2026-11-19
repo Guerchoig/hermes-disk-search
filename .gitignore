@@ -66,3 +66,7 @@ transcribe.lock
 # Секреты и токены доступа (plain-токены; см. data/access.yaml) — не коммитим
 tokens.txt
 token.txt
+# A3: Node-воркер агента (installers\build_agent_sidecar.ps1): зависимости по lock
+# и портативный Node; dist/ уже игнорируется выше
+sidecar/hds_agent/node_modules/
+sidecar/node/

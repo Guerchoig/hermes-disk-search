@@ -1,0 +1,25 @@
+{
+  "name": "hds-agent-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "hds anonymous-zone agent worker: @cline/sdk behind an NDJSON stdio protocol (PLAN_AGENT_PRIVACY_ZONE §4.3)",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "main": "dist/worker.mjs",
+  "scripts": {
+    "build": "esbuild src/worker.ts --bundle --platform=node --format=esm --target=node22 --packages=external --sourcemap=inline --outfile=dist/worker.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --test-concurrency=1 \"test/*.test.mjs\""
+  },
+  "dependencies": {
+    "@cline/sdk": "0.2.0",
+    "tavily-mcp": "0.2.22"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.25.12",
+    "typescript": "5.9.3"
+  }
+}
