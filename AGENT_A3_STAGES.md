@@ -298,6 +298,43 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 * долг A3.4 (вне A3): реестр `AgentRegistry` не подключён к CLI-прогону (один проект на
   процесс) и не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
 
+### 1.7. A3.7: документация и закрытие фазы (сделано)
+
+- Дата: 2026-11-19.
+- Состав:
+  * `sidecar/README.md` — раздел про Node-воркер `hds_agent`: сборка (`npm ci`,
+    `npm run build` → `dist/worker.mjs`), протокол §4.3, установка
+    (`installers/build_agent_sidecar.ps1`, `-SelfTest`, `-NodeSource`), манифест
+    `runtime-manifests/node-manifest.json`, что остаётся в поставке (`@cline/sdk`,
+    `tavily-mcp`; `npm prune --omit=dev`), `npm test` = 23/23.
+  * `README.md` — новый §20 «ИИ-агент в анонимной зоне» (между §19 и §21), строки в §15
+    «Перечень команд» и §5 «Что где лежит»; подраздел «Свой MCP-сервер (1c-buddy и другие)».
+  * `RELEASE_NOTES_0.25.0.md` — «Фаза A3» по образцу 0.24.0: что нового (TR-3.x, TR-5.x,
+    TR-6.x), «что качать», «что и чем проверено», порядок включения, ограничения и
+    открытые вопросы.
+  * `AGENT_A3_HANDOFF_PROMPT.md` — §5 критерии отмечены `[x]` со ссылкой на §1.x; §8 —
+    фактический статус В-12…В-16 (В-15 закрыт решением владельца).
+  * `installers/build_rust_release.ps1` — `-AgentSidecar none|portable` (по умолчанию
+    `portable`), сборка воркера в `$sidecarDst` через `build_agent_sidecar.ps1 -OutDir`.
+  * `installers/build_rust_release_macos.sh` — явное сообщение, что Node-воркер не
+    собирается на macOS (скрипт PowerShell).
+  * `installers/install_server.ps1` — флаг `-WithAgent`: `build_agent_sidecar.ps1
+    -OutDir <Root>\sidecar -SelfTest` и строка `[ok] agent sidecar: …` в `$summary`; без
+    флага — `[i] agent not installed (desktop feature, -WithAgent)`.
+  * Внешние MCP из поставки (единственная правка кода): `secrets.rs::mcp_servers()`,
+    `McpSpec::external_servers` + вставка в `to_json()` после встроенных, `agent_run::plan_with`,
+    тест `external_mcp_from_delivery_template`; шаблон `sidecar/mcp/mcp.example.json` и
+    `sidecar/mcp/README.md`.
+- Проверки: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
+  `cargo test --workspace -- --test-threads=4` (752 + новый тест), `cargo test -p hds-cli
+  --test agent_run`, `cargo test -p hds-cli --test agent_acceptance`,
+  `(cd sidecar/hds_agent; npm test)` — 23/23, `python -m unittest discover -s sidecar/tests -t sidecar`,
+  `installers\build_agent_sidecar.ps1 -SelfTest`, staging-сборка
+  `build_rust_release.ps1 -Version 0.0.0-a37 -SkipBuild -SkipZip`.
+- Коммиты: `feat(agent): A3.7 — внешние MCP из поставки: mcp.servers и шаблон`,
+  `feat(installer): A3.7 — агентский sidecar в релизной сборке и -WithAgent`,
+  `docs(agent): A3.7 — документация фазы A3`, `docs(agent): A3.7 закрыт — фаза A3`.
+
 ## 2. Под-этапы (остаток A3)
 
 Правило нарезки: под-этап = один чат = один-два коммита = **видимый зелёный результат**. Если
@@ -312,7 +349,7 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 | A3.4 | Жизненный цикл (TR-3.9) | **Закрыт.** Реестр `AgentRegistry` в `hds-agent`: `max_live`/`idle` из `AgentSettings` (В-16: 2 и 30 мин), LRU-выгрузка (процесс завершён), переиспользование процесса на повторный `get_or_open`, переоткрытие упавшего воркера, `reap_idle` по параметру времени. Возобновление `session_id + initialMessages` (`history::read_messages`) — прошлая реплика в первом запросе модели; `session_id` без истории её не грузит. «Очистить историю» end-to-end (`Gateway::clear_history`, бэкапы `.json.bak`). CLI: `run --session`, `history clear [--session]`. Факты — §1.4, находки — §4 п.23–28 | закрыт |
 | A3.5 | Установщик | **Закрыт.** `installers/build_agent_sidecar.ps1`: портативный Node из `runtime-manifests/node-manifest.json` (v24.18.0, официальные sha256) → `sidecar\node` без пробелов (`-NodeSource` — копия существующей установки, офлайн), `npm ci` по lock, сборка `dist\worker.mjs`, `npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` + `tavily-mcp`. Факты — §1.5, находки — §4 п.29–32 | закрыт |
 | A3.6 | Приёмка A3 (e2e) | **Закрыт.** `crates/hds-cli/tests/agent_acceptance.rs`: образ → `office_read` (настоящий Python-воркер в режиме `HDS_A36_REAL_ANON=1`), `disk-search__search_local_files` через живой `hds mcp --http` (`/mcp/agent/P0001`), заглушка `tavily` (`mcp_out`/`mcp_in`), запись `ответ.md` в workspace; I2/I7, профиль `%USERPROFILE%\.cline` не изменён, `run --session`, `history clear`. Факты — §1.6, находки — §4 п.33–37 | закрыт |
-| A3.7 | Документация и закрытие | `sidecar/README.md` (Node-воркер: сборка, протокол, установщик, тесты), раздел в `README.md` (включение, команды, что уходит/не уходит наружу, свой MCP-сервер, ограничения), `RELEASE_NOTES_0.25.0.md` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md` (§5 критерии, §8 В-12…В-16), **внешние MCP из поставки** (`sidecar/mcp/mcp.example.json` + `README.md`, общий `mcp.servers` в `secrets.json`, шаблон 1c-buddy без токена), подключение `build_agent_sidecar.ps1` к `build_rust_release.ps1` (+ macos) и флаг `-WithAgent` в `install_server.ps1`; полный набор проверок §5 карты. Решения владельца и чеклист — §6.6, §4 п.38; **промт — §7** | ~1 чат |
+| A3.7 | Документация и закрытие | `sidecar/README.md` (Node-воркер: сборка, протокол, установщик, тесты), раздел в `README.md` (включение, команды, что уходит/не уходит наружу, свой MCP-сервер, ограничения), `RELEASE_NOTES_0.25.0.md` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md` (§5 критерии, §8 В-12…В-16), **внешние MCP из поставки** (`sidecar/mcp/mcp.example.json` + `README.md`, общий `mcp.servers` в `secrets.json`, шаблон 1c-buddy без токена), подключение `build_agent_sidecar.ps1` к `build_rust_release.ps1` (+ macos) и флаг `-WithAgent` в `install_server.ps1`; полный набор проверок §5 карты. Решения владельца и чеклист — §6.6, §4 п.38; **промт — §7** | **Закрыт 19.11.2026** — §1.7 |
 
 Зависимости: A3.1 и A3.2 независимы (A3.1 первым — он проверяет допущения о SDK, на которые
 опирается всё остальное). A3.3 ← A3.2; A3.4 ← A3.3; A3.5 независим и закрыт; **A3.6 ← A3.3 +
@@ -329,6 +366,7 @@ A3.5 — следующий**; A3.7 — последним.
 | A3.4 | закрыт 19.11.2026 | `55abc33b` (feat), `1b80fc3f` (test) | `cargo test -p hds-agent` = 68 тестов (8 — `registry`, 3 — `lifecycle_worker`), ≈ 11 с; `cargo test -p hds-cli --test agent_run` = 5, весь воркспейс 750/750; `npm test` 23/23; факты — §1.4, находки — §4 п.23–28. Долг: реестр готов, но CLI-прогон по-прежнему один проект на процесс (подключение — вкладка A5) |
 | A3.5 | закрыт 19.11.2026 | `babb2223` (feat), `3e9d61f7` (test) | `installers/build_agent_sidecar.ps1` + `runtime-manifests/node-manifest.json`; 4 прогона (`tools/parity/out/a35-*.log`): репозиторий, дерево поставки с `npm prune`, офлайн `-NodeSource`, `hds agent run` на установленном дереве; воркспейс 751 тест, `npm test` 23/23; факты — §1.5, находки — §4 п.29–32 |
 | A3.6 | закрыт 19.11.2026 | `9db20e55` (test) | `crates/hds-cli/tests/agent_acceptance.rs`; два режима: mock-воркер (28,6 с) и настоящий NER (`HDS_A36_REAL_ANON=1`, 41,7 с); логи — `tools/parity/out/a36-accept*.log`; факты — §1.6, находки — §4 п.33–37 |
+| A3.7 | закрыт 19.11.2026 | см. §1.7 | документация (§1.7), внешние MCP из поставки (`mcp.servers` + шаблон), `-AgentSidecar`/`-WithAgent`; факты — §1.7, находки — §4 п.38–39 |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -534,6 +572,33 @@ A3.5 — следующий**; A3.7 — последним.
       конфликт имён решается в пользу встроенного. **В-15 закрыт этим решением**: бинарь
       `1c-buddy` в поставку не кладём, кладём настройки — токен и сборка сервера у админа.
 
+39. **A3.7: находки релизной интеграции.** Проверено staging-сборкой
+    `build_rust_release.ps1 -Version 0.0.0-a37 -SkipBuild -SkipZip`:
+    * `build_agent_sidecar.ps1` кладёт воркер в `$sidecarDst` **после** `build_sidecar.ps1`
+      и копирования Python-дерева, поэтому `npm prune --omit=dev` не задевает Python-часть;
+      в `node_modules` остаются только `@cline/sdk` и `tavily-mcp` (dev-зависимости
+      `esbuild`/`typescript` срезаны).
+    * `sidecar/mcp/` попадает в архив вместе с `sidecar/` (отдельного шага копирования не
+      нужно), но при `-AgentSidecar none` шаблон остаётся — это осознанно: настройки не
+      зависят от бинаря.
+    * `install_server.ps1 -WithAgent` вызывает `build_agent_sidecar.ps1` с `-OutDir <Root>\sidecar`
+      и `-SelfTest`; без флага агент не ставится, и это видно в `$summary`.
+    * macOS-сборка не может собрать Node-воркер (скрипт PowerShell 5.1) — в логе явное
+      `[i] agent sidecar ...`; администратор macOS собирает воркер вручную или через
+      `-WithAgent` на Windows-машине.
+    * `McpSpec::to_json` вставляет `mcp.servers` **после** встроенных, конфликт имён решается
+      в пользу встроенного (`disk-search`/`tavily`/`1c-buddy`); `Secrets::secret_strings()`
+      уже обходит `mcp.*` целиком, поэтому ключи новых серверов попадают в словарь фильтра
+      без отдельной правки. `plan_json` печатает только имена серверов — токенов в плане нет
+      (закреплено тестом).
+    * **Найдено при проверке:** `build_rust_release.ps1` копировал в стейджинг
+      `venv-anonymize` из репозитория и падал на длинных путях torch
+      (`LongPathsEnabled=0`); исправлено — профильные venv (`venv-transcribe*`,
+      `venv-anonymize`) не копируются вообще, что совпадает с `RELEASING.md`. В самом
+      скрипте остались 9 строк комментариев на кириллице (не из A3.7 — из ранних
+      коммитов); для PS 5.1 это косметика, но правило «ASCII-only» формально нарушено —
+      вынести в отдельную уборку.
+
 ## 5. Промт для A3.1 (выполнен; оставлен для истории)
 
 ```text
@@ -633,8 +698,8 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 * Верхний уровень: фаза **A3** плана `PLAN_AGENT_PRIVACY_ZONE.md` (§5.3, §5.5, §5.6) —
   «агент в анонимной зоне». Нарезана на подэтапы **A3.1…A3.7** (§2): A3.1 — воркер на
   Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, A3.4 — жизненный
-  цикл (TR-3.9), A3.5 — установщик, **A3.6 — приёмка e2e — закрыт**, последний подэтап —
-  **A3.7** (документация и закрытие фазы).
+  цикл (TR-3.9), A3.5 — установщик, A3.6 — приёмка e2e, **A3.7 — документация и закрытие
+  фазы — закрыт 19.11.2026** (§1.7). **Фаза A3 закрыта**, следующая — A5 (вкладка агента).
 * Ветка `agent-privacy-zone`, HEAD ≥ `9db20e55` (test A3.6), дерево чистое, push не делался.
 * Коммиты: A3.0 — `f10a92e8`, `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test);
   A3.2 — `6ef028af` (feat), `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test);
@@ -825,6 +890,27 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidec
 
 Скрипты `installers/*.ps1` — **ASCII-only** (PowerShell 5.1 читает BOM-less `.ps1` как ANSI);
 .markdown-файлы править `[IO.File]::ReadAllText/WriteAllText` с `UTF8Encoding` (§4 п.32).
+
+### 6.7. Что получает вкладка A5 (вкладка агента в UI)
+
+Фаза A3 закрыта, и вкладка A5 может строиться на готовых кирпичах:
+
+* **`AgentRegistry`** (`crates/hds-agent/src/registry.rs`) — реестр живых проектов с
+  выгрузкой по простою (`max_live_projects`, `idle_unload_min`); к CLI ещё не подключён,
+  но готов к использованию службой/вкладкой.
+* **`Gateway::session_id`** — идентификатор сессии SDK; вкладка сможет возобновлять ход
+  (`RunOptions.session`) и показывать историю.
+* **`RunOptions.session`** — возобновление разговора с `initialMessages` из
+  `history::read_messages`; бэкапы `.bak` пишет `Gateway::clear_history`.
+* **`TurnReport`** (`crates/hds-cli/src/cmd/agent_run.rs`) — итог хода (`ok`, `reason`,
+  `text`, `error`, `tools`, `session_id`); готов для панели «что произошло».
+* **NDJSON-события** `session` / `prompt` / `redacted` / `agent` / `turn_end` — вкладка
+  подписывается на них и рисует ход в реальном времени; `redacted` несёт метки, не значения.
+* **Шаблон внешних MCP** (`sidecar/mcp/mcp.example.json` + `README.md`) — вкладка сможет
+  показать «свои MCP-серверы» и подсказать, куда положить настройки.
+* **Открытые задачи A5:** подключить реестр к UI, добавить `ask_user` (сейчас отказ),
+  дать выбор провайдера/модели (В-12), показать `mcp.servers` и состояние `hds check`
+  (A6 — проверка Node-воркера).
 
 ## 7. Промт для A3.7 (копировать целиком в новый чат, режим Act)
 
