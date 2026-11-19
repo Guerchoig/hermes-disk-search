@@ -166,8 +166,7 @@ pub fn latest_session(state_dir: &Path) -> Result<String, HistoryError> {
             best = Some((modified, name));
         }
     }
-    best.map(|(_, name)| name)
-        .ok_or(HistoryError::Missing(dir))
+    best.map(|(_, name)| name).ok_or(HistoryError::Missing(dir))
 }
 
 fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {
