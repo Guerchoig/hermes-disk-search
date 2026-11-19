@@ -12,10 +12,10 @@
 > **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
 > `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test); A3.2 — `6ef028af` (feat),
 > `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test); A3.4 — `55abc33b` (feat),
-> `1b80fc3f` (test); A3.5 — `babb2223` (feat), `3e9d61f7` (test) плюс docs-коммиты. Дерево
-> чистое, push не делался.
+> `1b80fc3f` (test); A3.5 — `babb2223` (feat), `3e9d61f7` (test); A3.6 — `9db20e55` (test) плюс
+> docs-коммиты. Дерево чистое, push не делался.
 
-## 1. Что уже сделано и проверено (A3.0…A3.5)
+## 1. Что уже сделано и проверено (A3.0…A3.6)
 
 | Коммит | Содержание |
 |---|---|
@@ -254,13 +254,45 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 `<root>\sidecar\node\node(.exe)` (и в пути нет пробелов), т.е. установщик кладёт Node туда,
 откуда его действительно берёт `hds-agent`.
 
-**Ещё НЕ сделано в фазе A3** (после A3.5):
+### 1.6. A3.6: приёмка A3 (e2e) — подтверждено фактом
 
-* приёмка e2e на стенде A2 (A3.6) — включая `run --session` и `history clear` на копии
-  `agent-state`;
+Стенд — `crates/hds-cli/tests/agent_acceptance.rs` (+ `tests/fixtures/tavily_stub.mjs`), один
+тест `acceptance_a3_end_to_end`. Два режима: по умолчанию mock-воркер анонимизации
+(28,6 с), `HDS_A36_REAL_ANON=1` — **настоящий** `sidecar\venv-anonymize` с GLiNER-моделью
+(41,7 с). Логи — `tools/parity/out/a36-accept.log`, `a36-accept-real.log`.
+
+**Что входит в прогон** (стенд из A2: образ `tools/parity/fixtures/записка_ртк_полная.docx`,
+индекс и `hds mcp --http`):
+
+* **office_read** по образу: mock-режим — ответ заглушки `[1] mock` дошёл до модели;
+  настоящий Python-воркер — в запросе к модели текст docx («Пояснительная записка»);
+* **disk-search** через живой `hds mcp --http`: маршрут `/mcp/agent/P0001` отвечает
+  `tools/list` = `search_local_files` + `index_status` (без `ask_my_files`), агент вызывает
+  `disk-search__search_local_files` и получает фрагмент своего проекта (`договор.md`);
+* **заглушка `tavily`** (MCP stdio, `crates/hds-cli/tests/fixtures/tavily_stub.mjs`): вызов
+  `tavily__search` проходит `mcp_out` — заглушка получила метку, а не значение; ответ
+  заглушки (в нём значение есть) дошёл до модели уже меткой (`mcp_in`);
+* **запись файла**: `editor` создал `ответ.md` в workspace агента;
+* **инструменты**: `office_read`, `disk-search__search_local_files`, `tavily__search`,
+  `editor`, `ask_user`; нет `run_commands`, `fetch_web_content`, `ask_my_files` (в т.ч. с
+  префиксом сервера: `tavily__ask_my_files` вырезан);
+* **I2**: ни в одном теле запроса к провайдеру нет формы значения («Иванов Иван»), метка
+  есть; ни во внешний MCP (`mcp_out`), ни в файлы `agent-config`/`agent-state` не попал ключ
+  провайдера;
+* **I7**: реплика с ключом провайдера → ход неуспешен (`privacy_filter_unavailable`), к
+  провайдеру не ушло ни одного запроса;
+* **возобновление**: `run --session` — первый запрос содержал прошлый ответ модели;
+* **«Очистить историю»** на копии `agent-state`: значения в файле сессии заменены меткой,
+  бэкапы `.bak` на месте;
+* **профиль `%USERPROFILE%\.cline`** до и после прогона совпадает (путь, размер, mtime).
+
+**Ещё НЕ сделано в фазе A3** (после A3.6):
+
 * документация A3 (`sidecar/README.md`, раздел `README.md`, `RELEASE_NOTES`; A3.7);
 * подключение установщика к релизной сборке (`build_rust_release.ps1`, `install_server.ps1`) и
   `hds check` про портативный Node — A3.7/A6 (§4 п.32);
+* стоп-точка «1c-buddy под подменённым HOME» не проверялась: в приёмке сервер выключен
+  (`agent.mcp.onec_buddy.enabled: false`), `tavily`-заглушка под подменённым HOME работает;
 * долг A3.4: реестр `AgentRegistry` не подключён к CLI-прогону (один проект на процесс) и
   не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
 
@@ -277,7 +309,7 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 | A3.3 | Точка входа CLI | **Закрыт.** `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …] [--dry-run]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль (human / `--json` / `--quiet`). Тесты на mock-провайдере — `crates/hds-cli/tests/agent_run.rs` | закрыт |
 | A3.4 | Жизненный цикл (TR-3.9) | **Закрыт.** Реестр `AgentRegistry` в `hds-agent`: `max_live`/`idle` из `AgentSettings` (В-16: 2 и 30 мин), LRU-выгрузка (процесс завершён), переиспользование процесса на повторный `get_or_open`, переоткрытие упавшего воркера, `reap_idle` по параметру времени. Возобновление `session_id + initialMessages` (`history::read_messages`) — прошлая реплика в первом запросе модели; `session_id` без истории её не грузит. «Очистить историю» end-to-end (`Gateway::clear_history`, бэкапы `.json.bak`). CLI: `run --session`, `history clear [--session]`. Факты — §1.4, находки — §4 п.23–28 | закрыт |
 | A3.5 | Установщик | **Закрыт.** `installers/build_agent_sidecar.ps1`: портативный Node из `runtime-manifests/node-manifest.json` (v24.18.0, официальные sha256) → `sidecar\node` без пробелов (`-NodeSource` — копия существующей установки, офлайн), `npm ci` по lock, сборка `dist\worker.mjs`, `npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` + `tavily-mcp`. Факты — §1.5, находки — §4 п.29–32 | закрыт |
-| A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён; плюс `run --session` (прошлая реплика модели) и `history clear` на **копии** `agent-state`. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
+| A3.6 | Приёмка A3 (e2e) | **Закрыт.** `crates/hds-cli/tests/agent_acceptance.rs`: образ → `office_read` (настоящий Python-воркер в режиме `HDS_A36_REAL_ANON=1`), `disk-search__search_local_files` через живой `hds mcp --http` (`/mcp/agent/P0001`), заглушка `tavily` (`mcp_out`/`mcp_in`), запись `ответ.md` в workspace; I2/I7, профиль `%USERPROFILE%\.cline` не изменён, `run --session`, `history clear`. Факты — §1.6, находки — §4 п.33–37 | закрыт |
 | A3.7 | Документация и закрытие | `sidecar/README.md`, раздел в `README.md`, `RELEASE_NOTES` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`; полный набор проверок (§5 карты); вопросы В-12…В-16 владельцу | ~0,5 чата |
 
 Зависимости: A3.1 и A3.2 независимы (A3.1 первым — он проверяет допущения о SDK, на которые
@@ -294,6 +326,7 @@ A3.5 — следующий**; A3.7 — последним.
 | A3.3 | закрыт 19.11.2026 | `be72b01d` (feat), `74d1aacb` (test) | `cargo test -p hds-cli --test agent_run` = 3 теста, весь воркспейс 737/737; факты — §1.3, находки — §4 п.17–22 |
 | A3.4 | закрыт 19.11.2026 | `55abc33b` (feat), `1b80fc3f` (test) | `cargo test -p hds-agent` = 68 тестов (8 — `registry`, 3 — `lifecycle_worker`), ≈ 11 с; `cargo test -p hds-cli --test agent_run` = 5, весь воркспейс 750/750; `npm test` 23/23; факты — §1.4, находки — §4 п.23–28. Долг: реестр готов, но CLI-прогон по-прежнему один проект на процесс (подключение — вкладка A5) |
 | A3.5 | закрыт 19.11.2026 | `babb2223` (feat), `3e9d61f7` (test) | `installers/build_agent_sidecar.ps1` + `runtime-manifests/node-manifest.json`; 4 прогона (`tools/parity/out/a35-*.log`): репозиторий, дерево поставки с `npm prune`, офлайн `-NodeSource`, `hds agent run` на установленном дереве; воркспейс 751 тест, `npm test` 23/23; факты — §1.5, находки — §4 п.29–32 |
+| A3.6 | закрыт 19.11.2026 | `9db20e55` (test) | `crates/hds-cli/tests/agent_acceptance.rs`; два режима: mock-воркер (28,6 с) и настоящий NER (`HDS_A36_REAL_ANON=1`, 41,7 с); логи — `tools/parity/out/a36-accept*.log`; факты — §1.6, находки — §4 п.33–37 |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -449,9 +482,40 @@ A3.5 — следующий**; A3.7 — последним.
 32. **A3.5: PowerShell 5.1 и кириллица.** Установщики остаются ASCII-only (BOM-less `.ps1`
     читается как ANSI). Проверочный стенд с русскими строками нужно сохранять как UTF-8 **с
     BOM**, иначе парсер падает на «непредвиденной лексеме» (наступил на этом при прогоне
-    `a35-e2e.ps1`). Осталось для A3.7/A6: подключить установщик к `build_rust_release.ps1` и
-    `install_server.ps1`, добавить проверку портативного Node в `hds check` и раздел про
-    `sidecar\node` в `README.md`.
+    `a35-e2e.ps1`). То же и с правкой файлов: `Get-Content -Raw | Set-Content` в PS 5.1
+    читает UTF-8 как ANSI и **портит кириллицу** (наступил на этом с `agent_acceptance.rs` —
+    восстанавливал обратным перекодированием). Файлы править только
+    `[IO.File]::ReadAllText/WriteAllText` с явной `UTF8Encoding`. Осталось для A3.7/A6:
+    подключить установщик к `build_rust_release.ps1` и `install_server.ps1`, добавить
+    проверку портативного Node в `hds check` и раздел про `sidecar\node` в `README.md`.
+33. **A3.6: приёмка — Rust-тест, а не скрипт.** `crates/hds-cli/tests/agent_acceptance.rs`
+    поднимает живой `hds mcp --http` (маршрут A2 с токеном проекта), индекс — строками через
+    `hds_core::db` (FTS, без эмбеддера: `Embedder` недоступен → ключевой поиск), и копирует
+    python-часть воркера извлечения в `<HDS_ROOT>/sidecar`. Без этой копии
+    `search_local_files` отвечает «не найден интерпретатор воркера» (в поставке её кладёт
+    `build_sidecar.ps1`); `HDS_EXTRACT_PYTHON` указывает на venv анонимизации — pymorphy3 там
+    нет, лемматизатор деградирует, выдача FTS от этого не страдает.
+34. **A3.6: журнал заглушки `tavily` — через ключ.** `McpSpec` передаёт в env сервера только
+    `TAVILY_API_KEY`, поэтому стенд кодирует путь журнала в самом ключе
+    (`tvly-a36-stand|<путь>`), а заглушка разбирает его. Это приём стенда, в продукте ключ
+    обычный; если SDK перестанет передавать env, журнал пропадёт и тест это заметит
+    (`mcp_out` проверяется по журналу).
+35. **A3.6: mcp_in не спасает незнакомые значения.** `run` берёт снимок фильтра **до** хода,
+    а настоящий воркер нумерует метки по мере встречи: значение, лежащее в индексе сырым
+    текстом и неизвестное снимку, уходит модели. Стенд заводит метку
+    `client.label_for_value` до прогона (в продукте индекс уже анонимизирован — A2, карточка
+    анонимизации). То есть mcp_in — это «известные формы → метки», а не универсальный
+    детектор; опора I2 — анонимизированный индекс.
+36. **A3.6: приёмочный режим с настоящим NER требует весов** `models/anonymize/hf-home`
+    (в репозитории их нет: `installers/fetch_anonymize_models.ps1`). На машине разработчика
+    сделан junction `models\anonymize\hf-home → %USERPROFILE%\.cache\huggingface`
+    (каталог `models/` гитигнорится). В стенде `anonymize.gpu: cpu` — приёмка не отбирает
+    VRAM у резидента; время: 41,7 с против 28,6 с у mock-воркера.
+37. **A3.6: что осталось для A3.7.** `sidecar/README.md`, раздел в `README.md`,
+    `RELEASE_NOTES` «Фаза A3», подключение `build_agent_sidecar.ps1` к
+    `build_rust_release.ps1`/`install_server.ps1`, `hds check` про портативный Node.
+    Стоп-точка «1c-buddy под подменённым HOME» **не проверялась**: в приёмке сервер выключен
+    (`agent.mcp.onec_buddy.enabled: false`); `tavily`-заглушка под подменённым HOME работает.
 
 ## 5. Промт для A3.1 (выполнен; оставлен для истории)
 
@@ -541,7 +605,7 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
   вне secrets.json (например, в сессию SDK в agent-state).
 ```
 
-## 6. Контекст для нового чата (A3.6 и далее)
+## 6. Контекст для нового чата (A3.7 и далее)
 
 > «Памятка входа»: что сделано, где лежит, какие грабли уже оплачены. Промт
 > следующего подэтапа — §7. Требования и критерии фазы — `AGENT_A3_HANDOFF_PROMPT.md`;
@@ -552,18 +616,20 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 * Верхний уровень: фаза **A3** плана `PLAN_AGENT_PRIVACY_ZONE.md` (§5.3, §5.5, §5.6) —
   «агент в анонимной зоне». Нарезана на подэтапы **A3.1…A3.7** (§2): A3.1 — воркер на
   Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, A3.4 — жизненный
-  цикл (TR-3.9), **A3.5 — установщик воркера — закрыт**, дальше A3.6 — приёмка (e2e), A3.7 —
-  документация.
-* Ветка `agent-privacy-zone`, HEAD ≥ `3e9d61f7` (test A3.5), дерево чистое, push не делался.
+  цикл (TR-3.9), A3.5 — установщик, **A3.6 — приёмка e2e — закрыт**, последний подэтап —
+  **A3.7** (документация и закрытие фазы).
+* Ветка `agent-privacy-zone`, HEAD ≥ `9db20e55` (test A3.6), дерево чистое, push не делался.
 * Коммиты: A3.0 — `f10a92e8`, `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test);
   A3.2 — `6ef028af` (feat), `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test);
   A3.4 — `55abc33b` (feat), `1b80fc3f` (test); A3.5 — `babb2223` (feat), `3e9d61f7` (test);
-  docs — `7779343b`, `c5c1f57d`, `76661a7a` и docs-коммиты A3.4/A3.5.
+  A3.6 — `9db20e55` (test); docs — `7779343b`, `c5c1f57d`, `76661a7a` и docs-коммиты
+  A3.4…A3.6.
 * Проверки на срезе: `cargo fmt --all --check` и
   `cargo clippy --workspace --all-targets -- -D warnings` — чисто;
-  `cargo test --workspace -- --test-threads=4` — **751** тест, 0 падений;
+  `cargo test --workspace -- --test-threads=4` — **752** теста, 0 падений;
   `npm test` в `sidecar/hds_agent` — 23/23, ≈ 39 с; чистая копия (`npm ci` + build) собирается;
-  `installers/build_agent_sidecar.ps1 -SelfTest` — зелёный (портативный Node + `hello`).
+  `installers/build_agent_sidecar.ps1 -SelfTest` — зелёный (портативный Node + `hello`);
+  приёмка `cargo test -p hds-cli --test agent_acceptance` — зелёная (mock и настоящий NER).
 
 ### 6.2. Что уже работает (точки входа)
 
@@ -581,6 +647,13 @@ error, tools}`, восстановление сессии после фатал�
 `npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` +
 наличие `tavily-mcp`. Идемпотентен (маркеры `.hds-node-version`,
 `node_modules\.hds-agent-lock`).
+
+**Приёмка A3.6** (`crates/hds-cli/tests/agent_acceptance.rs`): один тест поднимает стенд из A2
+(образ `tools/parity/fixtures/записка_ртк_полная.docx`, индекс через `hds_core::db`, живой
+`hds mcp --http` на маршруте `/mcp/agent/P0001`) и проходит полный ход: `office_read` →
+`disk-search__search_local_files` → `tavily__search` (заглушка MCP) → `editor`; проверяет
+I2/I7, неизменность `%USERPROFILE%\.cline`, возобновление и «Очистить историю».
+`HDS_A36_REAL_ANON=1` — то же с настоящим воркером анонимизации (NER на CPU).
 
 **Крейт `crates/hds-agent`** (lib, без async):
 
@@ -669,9 +742,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace -- --test-threads=4
 cargo test -p hds-agent
 cargo test -p hds-cli --test agent_run
+cargo test -p hds-cli --test agent_acceptance
 cd sidecar\hds_agent; npm test
 powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidecar.ps1 -SelfTest
 ```
+
+* Приёмка с настоящим NER: `$env:HDS_A36_REAL_ANON='1'; cargo test -p hds-cli --test
+  agent_acceptance -- --nocapture` (нужны веса в `models/anonymize/hf-home`, см. §4 п.36).
 
 * PowerShell печатает `cargo` в stderr как `NativeCommandError` — ориентироваться на
   `$LASTEXITCODE`, а не на «красный» вывод.
@@ -694,6 +771,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidec
 | история сессии | `history.rs` (`read_messages`, `clear`, `latest_session`) |
 | реестр живых процессов (A3.4) | `crates/hds-agent/src/registry.rs` |
 | установщик воркера и портативный Node (A3.5) | `installers/build_agent_sidecar.ps1`, `runtime-manifests/node-manifest.json` |
+| приёмка e2e (A3.6) | `crates/hds-cli/tests/agent_acceptance.rs`, `crates/hds-cli/tests/fixtures/tavily_stub.mjs` |
 | настройки, пути, реестр проектов, секреты | `settings.rs`, `projects.rs`, `secrets.rs` |
 | окружение процесса, MCP, правила | `env.rs`, `mcp.rs`, `rules.rs` |
 | сборка сессии в CLI | `crates/hds-cli/src/cmd/agent_run.rs` |
