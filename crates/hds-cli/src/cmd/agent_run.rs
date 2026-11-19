@@ -28,6 +28,7 @@ use hds_agent::deanon::DeAnonymizer;
 use hds_agent::env;
 use hds_agent::filter::{sys_values, Filter};
 use hds_agent::gateway::{Gateway, GatewayEvent, GatewayHost, NoAskUser};
+use hds_agent::history::{self, HistoryOutcome};
 use hds_agent::mcp::{self, McpSpec};
 use hds_agent::projects::{self, Project};
 use hds_agent::protocol::Provider;
@@ -35,6 +36,7 @@ use hds_agent::rules;
 use hds_agent::secrets::Secrets;
 use hds_agent::settings::{self, AgentSettings};
 use hds_agent::worker::WorkerSpec;
+use hds_anonymize::protocol::Snapshot;
 use hds_anonymize::{Client, ClientConfig, Settings as AnonSettings};
 use hds_core::config::{dig, project_root, Config};
 
@@ -48,6 +50,9 @@ pub const DEFAULT_MODEL: &str = "~deepseek/deepseek-flash-latest";
 pub struct RunOptions {
     /// Реплика; `None` — читается со stdin.
     pub prompt: Option<String>,
+    /// Возобновить сессию (TR-3.9): `session_id` из `start` плюс история из
+    /// `<P>\agent-state\.cline\data\sessions\<id>\<id>.messages.json`.
+    pub session: Option<String>,
     /// Потолок итераций агента (`start.max_iterations`).
     pub max_iterations: u32,
     /// Суб-агенты (`agent.subagents`), по умолчанию выключены (TR-3.7).
@@ -60,10 +65,11 @@ pub struct RunOptions {
 
 impl RunOptions {
     /// Значения по умолчанию: 12 итераций, суб-агенты выключены (TR-3.7;
-    /// `agent.subagents` в конфиге включает их и без флага).
+    /// `agent.subagents` в конфиге включает их и без флага), новая сессия.
     pub fn new(prompt: Option<String>) -> RunOptions {
         RunOptions {
             prompt,
+            session: None,
             max_iterations: 12,
             subagents: false,
             json: false,
@@ -101,6 +107,10 @@ pub struct TurnReport {
     pub text: String,
     pub error: Option<String>,
     pub tools: Vec<String>,
+    /// Сессия, в которой прошёл ход: возобновлённая (`--session`) или выданная
+    /// воркером (`start.result.session_id`, A3.4). Её принимает
+    /// `hds agent history clear --session`.
+    pub session_id: Option<String>,
 }
 
 /// Вид провайдера для SDK: имя из `secrets.json` → `providerId` (TR-3.3).
@@ -460,6 +470,28 @@ fn clip(value: &str, max: usize) -> String {
     }
 }
 
+/// Словарь исходящего проекта по снимку vault: одна сборка на все точки —
+/// `run` (сессия) и `history clear` (очистка сохранённой истории, TR-6.6).
+fn build_filter(
+    project: &str,
+    settings: &AgentSettings,
+    audit: Option<hds_core::audit::Audit>,
+    system: &[String],
+    project_names: &[String],
+    secrets: &[String],
+    snapshot: &Snapshot,
+) -> Filter {
+    let filter = Filter::new(
+        project,
+        settings.keep_terms.clone(),
+        settings.unknown,
+        Duration::from_secs(settings.filter_max_stale_secs.max(1)),
+        audit,
+    );
+    filter.set_snapshot(snapshot, system, project_names, secrets);
+    filter
+}
+
 /// Провести один ход на готовом плане. `client` — поднятый воркер анонимизации
 /// (снимок vault и `anonymize_text`, TR-5.1); события печатаются в `out`,
 /// предупреждения фильтра — в `err`.
@@ -480,19 +512,15 @@ pub fn run(
             .snapshot(&plan.project.id)
             .map_err(|e| format!("снимок vault: {e}"))?
     };
-    let filter = Arc::new(Filter::new(
-        plan.project.id.clone(),
-        plan.settings.keep_terms.clone(),
-        plan.settings.unknown,
-        Duration::from_secs(plan.settings.filter_max_stale_secs.max(1)),
+    let filter = Arc::new(build_filter(
+        &plan.project.id,
+        &plan.settings,
         plan.audit.clone(),
-    ));
-    filter.set_snapshot(
-        &snapshot,
         &plan.system,
         &plan.project_names,
         &plan.secrets.secret_strings(),
-    );
+        &snapshot,
+    ));
     let deanon = Arc::new(Mutex::new(DeAnonymizer::new(
         &snapshot,
         &sys_values(&plan.system, &plan.project_names),
@@ -525,26 +553,52 @@ pub fn run(
 
     let result = (|| -> Result<TurnReport, String> {
         gateway.hello().map_err(|e| format!("hello: {e}"))?;
+        // Возобновление (TR-3.9): один `session_id` историю не грузит (A0 §3.6) —
+        // сообщения читаются из файлов сессии и уходят в `initialMessages`.
+        let (history, session) = match opts.session.as_deref() {
+            Some(id) => {
+                let messages = history::read_messages(&plan.state_dir, id)
+                    .map_err(|e| format!("история сессии {id}: {e}"))?;
+                (messages, Some(id.to_string()))
+            }
+            None => (Vec::new(), None),
+        };
+        let resumed = session.is_some();
         let declared = gateway
             .open(
                 plan.provider.clone(),
-                Vec::new(),
-                None,
+                history,
+                session,
                 opts.max_iterations.max(1),
                 plan.settings.subagents,
             )
             .map_err(|e| format!("start: {e}"))?;
+        let session_id = gateway.session_id().map(str::to_string);
         if !opts.quiet && !opts.json {
             writeln!(
                 out,
-                "[сессия] {} ({}) → {} · {}; инструменты: {}",
+                "[сессия] {} ({}) → {} · {}; инструменты: {}; сессия {}{}",
                 plan.project.id,
                 plan.project.name,
                 plan.provider.kind,
                 plan.provider.model,
-                declared.join(", ")
+                declared.join(", "),
+                session_id.as_deref().unwrap_or("-"),
+                if resumed {
+                    " (возобновлена)"
+                } else {
+                    ""
+                }
             )
             .ok();
+        } else if opts.json {
+            let line = json!({
+                "kind": "session",
+                "session_id": session_id,
+                "resumed": resumed,
+                "tools": declared,
+            });
+            writeln!(out, "{line}").ok();
         }
         let anonymized = gateway.send(&prompt).map_err(|e| e.to_string())?;
         if opts.json {
@@ -565,7 +619,8 @@ pub fn run(
         let timeout = Duration::from_secs(plan.settings.request_timeout_secs.max(30));
         loop {
             let event = gateway.next_event(timeout).map_err(|e| e.to_string())?;
-            if let Some(report) = print_event(event, opts, out, err) {
+            if let Some(mut report) = print_event(event, opts, out, err) {
+                report.session_id = session_id.clone();
                 return Ok(report);
             }
         }
@@ -685,6 +740,8 @@ fn print_event(
                 text,
                 error,
                 tools,
+                // Идентификатор сессии знает `run` (после `start`).
+                session_id: None,
             })
         }
         GatewayEvent::Ready { .. } | GatewayEvent::Done { .. } => None,
@@ -803,6 +860,7 @@ pub fn cmd_run(cfg: &Config, args: &[String]) -> i32 {
     };
     let opts = RunOptions {
         prompt: crate::cmd::agent::flag_val(args, "--prompt"),
+        session: crate::cmd::agent::flag_val(args, "--session"),
         max_iterations: flag_u32(args, "--max-iterations").unwrap_or(12),
         subagents: crate::cmd::agent::has(args, "--subagents"),
         json: crate::cmd::agent::has(args, "--json"),
@@ -841,6 +899,16 @@ pub fn open_client(
     plan: &RunPlan,
     root: &Path,
 ) -> Result<Arc<Mutex<Client>>, String> {
+    open_client_at(cfg, &plan.state_dir, root)
+}
+
+/// То же по каталогу состояния: `history clear` не собирает сессию целиком
+/// (провайдер и модель для очистки истории не нужны).
+pub fn open_client_at(
+    cfg: &Config,
+    state_dir: &Path,
+    root: &Path,
+) -> Result<Arc<Mutex<Client>>, String> {
     let anonymize = AnonSettings::from_config(cfg);
     let Some(python) = hds_anonymize::discover_python(root) else {
         return Err("не найден интерпретатор воркера анонимизации \
@@ -849,8 +917,8 @@ pub fn open_client(
     };
     let mut client_cfg = ClientConfig::from_settings(&python, root, &anonymize);
     // Каталог состояния может быть ещё не создан (open_client зовут до prepare).
-    let _ = std::fs::create_dir_all(&plan.state_dir);
-    client_cfg.stderr_log = Some(plan.state_dir.join("anonymize-stderr.log"));
+    let _ = std::fs::create_dir_all(state_dir);
+    client_cfg.stderr_log = Some(state_dir.join("anonymize-stderr.log"));
     if let Some(script) = std::env::var_os("HDS_ANONYMIZE_WORKER") {
         if !script.is_empty() {
             client_cfg.script = Some(PathBuf::from(script));
@@ -893,4 +961,103 @@ fn run_cli(cfg: &Config, plan: RunPlan, opts: RunOptions) -> i32 {
             1
         }
     }
+}
+
+/// `hds agent history clear --project P [--session ID]` — «Очистить историю»
+/// (TR-6.6) без запуска сессии: словарь строится по снимку vault, файлы сессии
+/// перезаписываются метками с бэкапами `.json.bak`.
+pub fn cmd_history(cfg: &Config, args: &[String]) -> i32 {
+    let Some((sub, rest)) = args.split_first() else {
+        eprintln!("agent history: нужна подкоманда (clear)");
+        return 2;
+    };
+    if sub != "clear" {
+        eprintln!("agent history: неизвестная подкоманда '{sub}' (clear)");
+        return 2;
+    }
+    let Some(project_id) = crate::cmd::agent::flag_val(rest, "--project") else {
+        eprintln!("agent history clear: нужен --project <P>");
+        return 2;
+    };
+    let session = crate::cmd::agent::flag_val(rest, "--session");
+    match clear_history(cfg, &project_id, session.as_deref(), &project_root()) {
+        Ok((session, outcome)) => {
+            println!(
+                "[ok] история сессии {session} очищена: замен {}, файлов {}, бэкапов {}",
+                outcome.replaced,
+                outcome.files.len(),
+                outcome.backups.len()
+            );
+            for backup in &outcome.backups {
+                println!("[бэкап] {}", backup.display());
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("agent history clear: {e}");
+            1
+        }
+    }
+}
+
+/// Почистить историю сессии проекта. `session` не задан — берётся последняя
+/// сессия из `<P>\\agent-state\\.cline\\data\\sessions`.
+///
+/// Провайдер и модель здесь не нужны: очистка — это словарь (снимок vault) и
+/// перезапись файлов, поэтому `plan` не собирается и Node не запускается.
+pub fn clear_history(
+    cfg: &Config,
+    project_id: &str,
+    session: Option<&str>,
+    root: &Path,
+) -> Result<(String, HistoryOutcome), String> {
+    let project = projects::get(cfg, project_id).ok_or_else(|| {
+        format!(
+            "проект {project_id} не зарегистрирован \
+             (hds agent project add {project_id} --path DIR)"
+        )
+    })?;
+    let state_dir = settings::state_dir_for(cfg, &project.id)
+        .ok_or_else(|| "agent.root не задан: анонимная зона не настроена".to_string())?;
+    if !state_dir.is_dir() {
+        return Err(format!(
+            "нет состояния проекта: {} (сессий ещё не было)",
+            state_dir.display()
+        ));
+    }
+    let session = match session.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(id) => id.to_string(),
+        None => history::latest_session(&state_dir)
+            .map_err(|e| format!("{e} — укажите --session <ID>"))?,
+    };
+    // Секреты только расширяют словарь: без secrets.json очистка работает.
+    let secrets = Secrets::load(&settings::secrets_file(cfg))
+        .map(|s| s.secret_strings())
+        .unwrap_or_default();
+    let (system, project_names) = system_values(cfg, &project);
+    let client = open_client_at(cfg, &state_dir, root)?;
+    let snapshot = {
+        let mut client = client
+            .lock()
+            .map_err(|_| "воркер анонимизации занят".to_string())?;
+        client
+            .snapshot(&project.id)
+            .map_err(|e| format!("снимок vault: {e}"))?
+    };
+    let filter = build_filter(
+        &project.id,
+        &settings::settings(cfg),
+        hds_core::audit::Audit::from_config(cfg),
+        &system,
+        &project_names,
+        &secrets,
+        &snapshot,
+    );
+    let outcome = history::clear(&state_dir, &session, &filter).map_err(|e| e.to_string())?;
+    if let Ok(client) = Arc::try_unwrap(client) {
+        if let Ok(client) = client.into_inner() {
+            client.shutdown();
+        }
+    }
+    Ok((session, outcome))
 }

@@ -12,6 +12,8 @@
 //! * [`deanon`] — деанонимизация событий: метки → значения по снимку vault
 //!   (`hds_core::labels`), пути workspace → пути проекта (TR-5.3);
 //! * [`gateway`] — шлюз реплик (TR-5.1…5.2), «Очистить историю» (TR-6.6);
+//! * [`registry`] — реестр живых процессов (TR-3.9): `max_live_projects`,
+//!   выгрузка по простою, переиспользование процесса;
 //! * [`projects`] — `projects.json` (TR-8.1);
 //! * [`mcp`] — `cline_mcp_settings.json` (TR-3.6) с подстановкой токена;
 //! * [`rules`] — `privacy.md` и `1c-domain.md` (TR-3.8, TR-3.8a);
@@ -30,6 +32,7 @@ pub mod mcp;
 pub mod paths;
 pub mod projects;
 pub mod protocol;
+pub mod registry;
 pub mod rules;
 pub mod secrets;
 pub mod settings;
@@ -38,5 +41,6 @@ pub mod worker;
 pub use filter::{Filter, FilterError, FilterOutcome, Point, Source};
 pub use gateway::{Gateway, GatewayEvent};
 pub use projects::{Project, Projects};
+pub use registry::AgentRegistry;
 pub use settings::{AgentSettings, UnknownPolicy};
 pub use worker::{HostHandler, Worker, WorkerEvent, WorkerSpec};

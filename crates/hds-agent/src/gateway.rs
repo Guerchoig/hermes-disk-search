@@ -463,6 +463,15 @@ impl Gateway {
         self.worker.pid()
     }
 
+    /// Идентификатор открытой сессии.
+    ///
+    /// При возобновлении это `session_id` из `start`, при новой сессии —
+    /// `session_id`, который выдал воркер (`start.result.session_id`). Нужен
+    /// «Очистить историю» (TR-6.6) и вкладке A5.
+    pub fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
     /// Признак закрытого канала.
     pub fn is_closed(&self) -> bool {
         self.worker.is_closed()
@@ -513,6 +522,14 @@ impl Gateway {
                     return Err(GatewayError::Worker(
                         error.unwrap_or_else(|| "start завершился ошибкой".to_string()),
                     ));
+                }
+                // Новая сессия: воркер вернул её идентификатор — запоминаем его,
+                // чтобы «Очистить историю» и UI работали без явного `--session`.
+                if self.session_id.is_none() {
+                    self.session_id = result
+                        .get("session_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
                 }
                 Ok(result
                     // A3.1: воркер отдаёт объявленный набор как `declared_tools`

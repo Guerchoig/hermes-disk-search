@@ -115,6 +115,9 @@ pub fn clear(
 }
 
 /// Прочитать массив сообщений из `.messages.json` для `initialMessages`.
+///
+/// SDK пишет объект `{ "messages": [...] }`; массив верхнего уровня тоже
+/// принимаем — формат менялся между версиями (A0 §3.6).
 pub fn read_messages(state_dir: &Path, session_id: &str) -> Result<Vec<Value>, HistoryError> {
     let path = session_dir(state_dir, session_id).join(format!("{session_id}.messages.json"));
     if !path.is_file() {
@@ -124,11 +127,47 @@ pub fn read_messages(state_dir: &Path, session_id: &str) -> Result<Vec<Value>, H
         .map_err(|e| HistoryError::Io(path.clone(), e.to_string()))?;
     let value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
         .map_err(|e| HistoryError::Invalid(path.clone(), e.to_string()))?;
-    Ok(value
-        .get("messages")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default())
+    Ok(match value {
+        Value::Array(items) => items,
+        other => other
+            .get("messages")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    })
+}
+
+/// Последняя (самая свежая) сессия проекта — по времени изменения
+/// `.messages.json` в `<state>\.cline\data\sessions\<id>\`.
+///
+/// Нужна `hds agent history clear` без `--session`: чистить «ту сессию, в
+/// которой пользователь работал последней». Нет ни одной — ошибка
+/// [`HistoryError::Missing`] с путём каталога сессий.
+pub fn latest_session(state_dir: &Path) -> Result<String, HistoryError> {
+    let dir = state_dir.join(".cline").join("data").join("sessions");
+    let entries = std::fs::read_dir(&dir).map_err(|_| HistoryError::Missing(dir.clone()))?;
+    let mut best: Option<(std::time::SystemTime, String)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().map(|n| n.to_string_lossy().to_string()) else {
+            continue;
+        };
+        let messages = path.join(format!("{name}.messages.json"));
+        let Ok(meta) = std::fs::metadata(&messages) else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if best.as_ref().map(|(ts, _)| modified > *ts).unwrap_or(true) {
+            best = Some((modified, name));
+        }
+    }
+    best.map(|(_, name)| name)
+        .ok_or(HistoryError::Missing(dir))
 }
 
 fn atomic_write(path: &Path, text: &str) -> std::io::Result<()> {

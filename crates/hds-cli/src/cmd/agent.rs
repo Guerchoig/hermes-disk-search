@@ -47,6 +47,7 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
         "token" => cmd_token(cfg, rest),
         "project" => crate::cmd::agent_run::cmd_project(cfg, rest),
         "run" => crate::cmd::agent_run::cmd_run(cfg, rest),
+        "history" => crate::cmd::agent_run::cmd_history(cfg, rest),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0
@@ -74,10 +75,14 @@ fn usage() -> String {
      \x20        openrouter, модель — из В-12; имя — имя папки, если не задано)\n\
      \x20 project list [--json]\n\
      \x20       (список проектов зоны)\n\
-     \x20 run --project <P> [--prompt TEXT] [--max-iterations N] [--subagents]\n\
-     \x20     [--json] [--quiet] [--dry-run]\n\
+     \x20 run --project <P> [--prompt TEXT] [--session ID] [--max-iterations N]\n\
+     \x20     [--subagents] [--json] [--quiet] [--dry-run]\n\
      \x20       (сессия агента: снимок vault, env, MCP, правила, Gateway; без --prompt\n\
-     \x20        реплика читается со stdin; --dry-run печатает план и не запускает воркер)"
+     \x20        реплика читается со stdin; --session возобновляет сессию вместе с её\n\
+     \x20        историей; --dry-run печатает план и не запускает воркер)\n\
+     \x20 history clear --project <P> [--session ID]\n\
+     \x20       (Очистить историю: значения в файлах сессии заменяются метками,\n\
+     \x20        рядом остаётся бэкап .json.bak; без --session — последняя сессия)"
         .to_string()
 }
 
