@@ -125,9 +125,32 @@ pub fn normalize_labels(text: &str) -> String {
     out
 }
 
+/// Найти все метки в тексте как есть, в порядке появления, без повторов.
+///
+/// В отличие от [`split_labels`] отдаёт исходные токены (`[PERSON_3|дат]`), а
+/// не FTS-форму: это нужно шлюзу агента, который показывает пользователю
+/// метки, для которых не нашлось значения.
+pub fn find_labels(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find('[') {
+        match label_len_at(&rest[start..]) {
+            Some(len) => {
+                let token = &rest[start..start + len];
+                if !out.iter().any(|t| t == token) {
+                    out.push(token.to_string());
+                }
+                rest = &rest[start + len..];
+            }
+            None => rest = &rest[start + 1..],
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{fts_token, is_label, label_parts, normalize_labels, split_labels};
+    use super::{find_labels, fts_token, is_label, label_parts, normalize_labels, split_labels};
 
     #[test]
     fn label_parts_parse_tr14() {
@@ -176,6 +199,16 @@ mod tests {
         let (plain, toks) = split_labels("массив[0] и [PERSON_1]");
         assert_eq!(plain, "массив[0] и ");
         assert_eq!(toks, vec!["xperson1x".to_string()]);
+    }
+
+    #[test]
+    fn find_labels_keeps_raw_tokens() {
+        assert_eq!(
+            find_labels("видел [PERSON_1] и [ORG_2|род], снова [PERSON_1]"),
+            vec!["[PERSON_1]".to_string(), "[ORG_2|род]".to_string()]
+        );
+        // Не метки и одиночная «[» не попадают в выдачу.
+        assert!(find_labels("массив[0] и [person_1]").is_empty());
     }
 
     #[test]

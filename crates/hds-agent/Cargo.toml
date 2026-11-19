@@ -1,0 +1,21 @@
+# hds-agent — анонимная зона агента (PLAN_AGENT_PRIVACY_ZONE.md §5.3, §5.5, §5.6;
+# фаза A3). Крейт — библиотека: процесс-менеджер Node-воркера `sidecar/hds_agent`,
+# NDJSON-транспорт с `host_call`, шлюз реплик и событий (TR-5.1…5.3), словарный
+# фильтр исходящего (TR-6.1…6.7), деанонимизация событий. Async нет: только
+# потоки и блокирующий I/O (как во всём ядре).
+[package]
+name = "hds-agent"
+description = "Анонимная зона: процесс агента, шлюз реплик/событий и фильтр исходящего"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+hds-core = { path = "../hds-core" }
+hds-anonymize = { path = "../hds-anonymize" }
+aho-corasick.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+serde_yaml.workspace = true

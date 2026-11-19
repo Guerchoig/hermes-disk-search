@@ -591,6 +591,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "hds-agent"
+version = "0.1.0"
+dependencies = [
+ "aho-corasick",
+ "hds-anonymize",
+ "hds-core",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "hds-anonymize"
 version = "0.1.0"
 dependencies = [

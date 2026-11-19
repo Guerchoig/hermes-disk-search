@@ -5,7 +5,7 @@
 # Cargo.lock, свои версии крейтов и они не должны тянуть зависимости продукта.
 [workspace]
 resolver = "2"
-members = ["crates/hds-core", "crates/hds-extract", "crates/hds-transcribe", "crates/hds-anonymize", "crates/hds-index", "crates/hds-llama", "crates/hds-cli", "crates/hds-clip", "crates/hds-diarize", "crates/hds-ort", "crates/hds-search", "crates/hds-mcp", "crates/hds-ui"]
+members = ["crates/hds-core", "crates/hds-extract", "crates/hds-transcribe", "crates/hds-anonymize", "crates/hds-index", "crates/hds-llama", "crates/hds-cli", "crates/hds-clip", "crates/hds-diarize", "crates/hds-ort", "crates/hds-search", "crates/hds-mcp", "crates/hds-ui", "crates/hds-agent"]
 exclude = ["tools/parity/spikes"]
 
 [workspace.package]
@@ -37,6 +37,9 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 sha2 = "0.10"
 subtle = "2"
 getrandom = "0.3"
+# A3 (PLAN_AGENT_PRIVACY_ZONE.md §5.6, TR-6.2): словарный фильтр исходящего.
+# Версия 1.1.5 уже была в Cargo.lock (транзитивно), теперь это явная зависимость.
+aho-corasick = "1"
 
 # M5 T2 (PLAN_M5_EXTERNAL_CHAT.md §3.3): TLS-клиент для внешнего chat-API
 # (chat.provider: remote). Только исходящие; входящие серверы без TLS
