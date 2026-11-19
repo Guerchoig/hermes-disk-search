@@ -36,6 +36,18 @@ test('worker: read_files turn on mock provider, labels only', { timeout: 180_000
   const started = await worker.call('start', { project: 'P0001', provider: provider(base), max_iterations: 4 }, 120_000);
   assert.equal(started.ok, true, started.error);
   assert.ok(started.result.session_id);
+  // Долг §4.1: поле называется declared_tools — это объявленный набор, а
+  // фактический список запроса к модели приходит в turn_end.tools.
+  assert.equal(started.result.tools, undefined, 'старое имя поля снято');
+  assert.deepEqual(started.result.declared_tools, [
+    'read_files',
+    'search_codebase',
+    'editor',
+    'office_read',
+    'office_edit',
+    'office_create',
+    'ask_user',
+  ]);
 
   const sent = await worker.call('send', { text: 'прочитай allowed.txt' });
   assert.equal(sent.ok, true);

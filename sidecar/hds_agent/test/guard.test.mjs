@@ -7,6 +7,7 @@ import { after, before, test } from 'node:test';
 
 import { checkWithin, lexicalReject, withTimeout } from '../src/guard.ts';
 import { collectPaths, formatReject, guardDecision } from '../src/hooks.ts';
+import { isForbiddenToolName } from '../src/session.ts';
 
 let root;
 let workspace;
@@ -106,4 +107,22 @@ test('withTimeout falls back instead of hanging', async () => {
   const slow = new Promise((resolve) => setTimeout(() => resolve('late'), 500));
   assert.equal(await withTimeout(slow, 20, () => 'fallback'), 'fallback');
   assert.equal(await withTimeout(Promise.reject(new Error('x')), 100, () => 'safe'), 'safe');
+});
+
+test('beforeModel cuts ask_my_files in all naming forms', () => {
+  for (const name of [
+    'stub__ask_my_files',
+    'hds-agent-plugin_agentdecoy__ask_my_files_3deb181b',
+    'Disk-Search__Ask_My_Files',
+  ]) {
+    assert.equal(isForbiddenToolName(name), true, `${name} вырезается`);
+  }
+  for (const name of [
+    'stub__search_local_files',
+    'read_files',
+    'office_read',
+    'disk-search__ask_my_files_v2',
+  ]) {
+    assert.equal(isForbiddenToolName(name), false, `${name} остаётся`);
+  }
 });

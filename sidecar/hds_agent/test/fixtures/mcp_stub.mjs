@@ -4,6 +4,19 @@
 // запроса к модели — TR-4.4) и leak (возвращает «известное» значение, которое
 // фильтр mcp_in обязан заменить меткой).
 import { createInterface } from 'node:readline';
+import { appendFileSync } from 'node:fs';
+
+// Журнал вызовов для тестов (HDS_STUB_LOG): что заглушка реально получила.
+const LOG = process.env.HDS_STUB_LOG;
+
+function logCall(name, args) {
+  if (!LOG) return;
+  try {
+    appendFileSync(LOG, `${JSON.stringify({ name, args })}\n`);
+  } catch {
+    /* журнал — вспомогательный, падать из-за него нельзя */
+  }
+}
 
 const TOOLS = [
   {
@@ -51,6 +64,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'tools/call': {
       const name = params?.name;
       const args = params?.arguments ?? {};
+      logCall(name, args);
       if (name === 'search_local_files') {
         reply({ content: [{ type: 'text', text: `ECHO:${args.query ?? ''}` }] });
       } else if (name === 'leak') {

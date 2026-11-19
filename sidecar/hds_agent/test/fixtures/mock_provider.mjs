@@ -3,6 +3,8 @@
 // запросов хранит в памяти — тест проверяет, что ушло «к модели».
 //
 // Шаг сценария: { text } или { toolCalls: [{ name, arguments }] }.
+// Дополнительно: { status: 429 } — ответ ошибкой (проверка повторов, TR-3.10 д),
+// { delayMs: 1500 } — задержка ответа (проверка abort).
 // Запросы сверх сценария повторяют последний шаг.
 import http from 'node:http';
 
@@ -19,10 +21,16 @@ export function startMockProvider(script) {
       } catch {
         body = {};
       }
-      requests.push({ url: req.url, raw, body, auth: Boolean(req.headers.authorization) });
+      const authorization = String(req.headers.authorization ?? '');
+      requests.push({ url: req.url, raw, body, auth: Boolean(authorization), authorization });
       const step = script[Math.min(requests.length - 1, script.length - 1)] ?? { text: 'ok' };
-      if (body.stream === true) serveStream(res, step, requests.length);
-      else serveJson(res, step, requests.length);
+      const respond = () => {
+        if (step.status) serveError(res, step, requests.length);
+        else if (body.stream === true) serveStream(res, step, requests.length);
+        else serveJson(res, step, requests.length);
+      };
+      if (step.delayMs) setTimeout(respond, step.delayMs);
+      else respond();
     });
   });
   const ready = new Promise((resolve) => {
@@ -47,6 +55,21 @@ function toolCallsOf(step, n) {
 }
 
 const USAGE = { prompt_tokens: 100, completion_tokens: 20, total_tokens: 120 };
+
+/** Ошибка провайдера ({status: 429}): формат OpenAI, чтобы SDK увидел retry-able ошибку. */
+function serveError(res, step, n) {
+  res.writeHead(step.status, { 'content-type': 'application/json' });
+  res.end(
+    JSON.stringify({
+      error: {
+        message: `mock status ${step.status}`,
+        type: 'mock_error',
+        code: String(step.status),
+      },
+      id: `chatcmpl-err-${n}`,
+    }),
+  );
+}
 
 function serveJson(res, step, n) {
   const calls = toolCallsOf(step, n);

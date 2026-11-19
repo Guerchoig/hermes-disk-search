@@ -48,6 +48,64 @@ export function writeMcpSettings(dirs, servers) {
   fs.writeFileSync(dirs.mcpSettings, JSON.stringify({ mcpServers: servers }, null, 2));
 }
 
+/** hds-файл настроек с одной stdio-заглушкой `stub`; возвращает путь её журнала. */
+export function writeStubMcp(dirs, env = {}) {
+  const stubLog = path.join(dirs.root, 'stub-calls.jsonl');
+  writeMcpSettings(dirs, {
+    stub: {
+      transport: {
+        type: 'stdio',
+        command: nodeCommand(),
+        args: [MCP_STUB],
+        env: { HDS_STUB_LOG: stubLog, ...env },
+      },
+      timeoutSeconds: 60,
+    },
+  });
+  return stubLog;
+}
+
+/** Журнал заглушки MCP: [{name, args}] — что она реально получила. */
+export function readStubLog(file) {
+  try {
+    return fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } catch {
+    return [];
+  }
+}
+
+/** Все файлы каталога с текстом — для поиска утечек (api_key, реальный профиль). */
+export function filesUnder(dir) {
+  const out = [];
+  const walk = (current) => {
+    let entries = [];
+    try {
+      entries = fs.readdirSync(current, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile()) {
+        let text = '';
+        try {
+          text = fs.readFileSync(full, 'utf8');
+        } catch {
+          text = '';
+        }
+        out.push({ path: full, text });
+      }
+    }
+  };
+  walk(dir);
+  return out;
+}
+
 function redact(value, hits) {
   if (typeof value === 'string') {
     if (value.includes(SECRET)) throw new Error('privacy_filter_unavailable: секрет в исходящем');
@@ -94,7 +152,7 @@ export function provider(baseUrl) {
   };
 }
 
-function childEnv(dirs) {
+function childEnv(dirs, extra = {}) {
   return {
     PATH: process.env.PATH ?? '',
     SystemRoot: process.env.SystemRoot ?? 'C:\\Windows',
@@ -108,14 +166,15 @@ function childEnv(dirs) {
     TMP: path.join(dirs.config, 'Temp'),
     CLINE_DATA_DIR: path.join(dirs.state, '.cline', 'data'),
     CLINE_MCP_SETTINGS_PATH: dirs.mcpSettings,
+    ...extra,
   };
 }
 
 /** Запустить воркер и вернуть клиент протокола (роль crates/hds-agent/src/worker.rs). */
-export function startWorker(dirs, host) {
+export function startWorker(dirs, host, extraEnv = {}) {
   const child = spawn(process.execPath, [WORKER], {
     cwd: dirs.workspace,
-    env: childEnv(dirs),
+    env: childEnv(dirs, extraEnv),
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   const events = [];
