@@ -42,7 +42,7 @@ fn stand(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     touch(&db, "old-db");
     touch(&dir.join("index.db-wal"), "wal");
     touch(&dir.join("index.db-shm"), "shm");
-    let anonymized = dir.join("anonymized");
+    let anonymized = dir.join("data").join("anonymized");
     touch(&anonymized.join("old.docx"), "legacy");
     let cfg = format!(
         "agent:\n  enabled: true\n  root: '{}'\n\
@@ -97,9 +97,66 @@ fn init_resets_index_and_removes_legacy_output() {
     assert!(!dir.join("index.db-wal").exists());
     assert!(!dir.join("index.db-shm").exists());
     // Выход прежней карточки анонимизации удалён.
-    assert!(!dir.join("anonymized").exists());
+    assert!(!dir.join("data/anonymized").exists());
     // Сигналы не оставлены.
     assert!(!dir.join("index.stop").exists());
+
+    cleanup(&dir);
+}
+
+#[test]
+fn init_refuses_output_dir_outside_allowed_roots_unless_forced() {
+    let _env = ENV_LOCK.lock().unwrap();
+    let (dir, cfg_path, _db) = stand("foreign");
+    // Владелец указал в anonymize.output_dir общий каталог вне data/ и вне зоны.
+    let foreign = dir.join("foreign-out");
+    touch(&foreign.join("shared.docx"), "не наш каталог");
+    let text = std::fs::read_to_string(&cfg_path).unwrap();
+    let text = text.replace(
+        &format!(
+            "anonymize:\n  output_dir: '{}'",
+            dir.join("data/anonymized")
+                .to_string_lossy()
+                .replace('\\', "/")
+        ),
+        &format!(
+            "anonymize:\n  output_dir: '{}'",
+            foreign.to_string_lossy().replace('\\', "/")
+        ),
+    );
+    std::fs::write(&cfg_path, text).unwrap();
+    let cfg = load_from(&cfg_path).unwrap();
+
+    // Без --force — отказ (В-10), каталог цел.
+    let code = hds_cli::cmd::agent::cmd_agent_cfg(
+        &cfg,
+        &[
+            "init".to_string(),
+            "--yes".to_string(),
+            "--no-index".to_string(),
+        ],
+    );
+    assert_eq!(code, 1, "чужой каталог без --force удалять нельзя");
+    assert!(
+        foreign.join("shared.docx").exists(),
+        "каталог должен остаться"
+    );
+
+    // С --force — удаляется (владелец подтвердил, что это выход карточки).
+    let code = hds_cli::cmd::agent::cmd_agent_cfg(
+        &cfg,
+        &[
+            "init".to_string(),
+            "--yes".to_string(),
+            "--no-index".to_string(),
+            "--force".to_string(),
+        ],
+    );
+    assert_eq!(code, 0);
+    assert!(
+        !foreign.exists(),
+        "--force должен удалить указанный каталог"
+    );
 
     cleanup(&dir);
 }

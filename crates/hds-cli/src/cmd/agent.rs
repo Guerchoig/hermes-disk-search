@@ -59,9 +59,11 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
 
 fn usage() -> String {
     "использование: hds agent <подкоманда>\n\
-     \x20 init  [--yes] [--root DIR] [--no-index]\n\
+     \x20 init  [--yes] [--root DIR] [--no-index] [--force]\n\
      \x20       (сброс индекса: стоп hds watch, удаление index.db и выхода\n\
-     \x20        анонимизации, пустая база, индексация <agent.root>\\P*\\workspace; TR-4.2)\n\
+     \x20        анонимизации, пустая база, индексация <agent.root>\\P*\\workspace; TR-4.2;\n\
+     \x20        выход анонимизации удаляется, только если он внутри <state_dir>\\data\n\
+     \x20        или <agent.root> — иначе нужен --force)\n\
      \x20 token <P> [--ttl-days N]\n\
      \x20       (токен проекта для /mcp/agent/<P>: в файл — хэш, plain печатается один раз;\n\
      \x20        без --ttl-days токен бессрочный)"
@@ -112,6 +114,23 @@ fn stop_watch(root: &Path, lock: &Path, wait_secs: u64) -> Result<(), String> {
         "демон индексации не остановился за {wait_secs} с: остановите `hds watch` \
          (или службу) вручную и повторите `hds agent init`"
     ))
+}
+
+/// Лежит ли `child` строго внутри `parent` (по компонентам, без регистра).
+///
+/// `std::path::absolute` — лексическая нормализация (`.`/`..`) без обращений к
+/// ФС: для предохранителя от «чужого каталога» этого достаточно, а сбой
+/// канонизации (нет каталога) не должен разрешать удаление.
+fn is_within(child: &Path, parent: &Path) -> bool {
+    fn comps(p: &Path) -> Vec<String> {
+        let abs = std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf());
+        abs.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    }
+    let c = comps(child);
+    let p = comps(parent);
+    !p.is_empty() && c.len() > p.len() && c[..p.len()] == p[..]
 }
 
 /// Удалить файл или каталог, если он есть.
@@ -289,6 +308,26 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
         doomed.push(PathBuf::from(format!("{}{suffix}", db.display())));
     }
     doomed.push(anonymized.clone());
+    // В-10: удаляем выход анонимизации только там, где он заведомо наш —
+    // внутри `<state_dir>\data` или внутри `<agent.root>`. Иначе владелец мог
+    // указать в `anonymize.output_dir` общий/сетевой каталог, и сброс индекса
+    // снёс бы его целиком.
+    let force = has(rest, "--force");
+    let state_data = config::state_dir(&cfg).join("data");
+    let in_state_data = is_within(&anonymized, &state_data);
+    let in_agent_root = is_within(&anonymized, Path::new(&agent_root));
+    if anonymized.exists() && !in_state_data && !in_agent_root && !force {
+        eprintln!(
+            "каталог выхода анонимизации {} лежит вне {} и вне {}.\n\
+             Удалять его по умолчанию отказываюсь: в anonymize.output_dir мог оказаться \
+             общий каталог (стенд, сетевая папка, папка рядом с оригиналами).\n\
+             Если это действительно выход прежней карточки — повторите с --force.",
+            anonymized.display(),
+            state_data.display(),
+            agent_root
+        );
+        return 1;
+    }
     println!("Анонимная зона: {agent_root}");
     println!(
         "Проекты: {}",
