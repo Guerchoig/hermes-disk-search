@@ -18,6 +18,9 @@ hds-extract = { path = "../hds-extract" }
 hds-transcribe = { path = "../hds-transcribe" }
 # P4: `hds anon` — клиент воркера анонимизации (PLAN_ANONYMIZER_SIDECAR.md §2.4).
 hds-anonymize = { path = "../hds-anonymize" }
+# A3.3: `hds agent project|run` — анонимная зона (реестр проектов, env, MCP,
+# правила, Gateway поверх Node-воркера `sidecar/hds_agent`).
+hds-agent = { path = "../hds-agent" }
 hds-clip = { path = "../hds-clip" }
 hds-search = { path = "../hds-search" }
 hds-mcp = { path = "../hds-mcp" }

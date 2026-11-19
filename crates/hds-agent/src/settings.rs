@@ -48,6 +48,9 @@ pub struct AgentSettings {
     pub max_live_projects: usize,
     pub idle_secs: u64,
     pub request_timeout_secs: u64,
+    /// `agent.filter.max_stale_sec`: снимок vault старше — фильтр отказывает
+    /// (fail-closed, TR-6.5). По умолчанию 300 с (В-14).
+    pub filter_max_stale_secs: u64,
     pub node_path: Option<PathBuf>,
     pub disk_search_enabled: bool,
     pub onec_enabled: bool,
@@ -70,6 +73,7 @@ impl Default for AgentSettings {
             max_live_projects: 2,
             idle_secs: 30 * 60,
             request_timeout_secs: 120,
+            filter_max_stale_secs: 300,
             node_path: None,
             disk_search_enabled: true,
             onec_enabled: true,
@@ -134,6 +138,7 @@ pub fn settings(cfg: &Config) -> AgentSettings {
         max_live_projects: u64_at(cfg, "agent.max_live_projects", 2) as usize,
         idle_secs: u64_at(cfg, "agent.idle_unload_min", 30) * 60,
         request_timeout_secs: u64_at(cfg, "agent.request_timeout_sec", 120),
+        filter_max_stale_secs: u64_at(cfg, "agent.filter.max_stale_sec", 300),
         node_path: str_at(cfg, "agent.node.path").map(PathBuf::from),
         disk_search_enabled: bool_at(cfg, "agent.mcp.disk_search.enabled", true),
         onec_enabled: bool_at(cfg, "agent.mcp.onec_buddy.enabled", true),
@@ -251,10 +256,17 @@ agent:
         assert_eq!(s.max_live_projects, 3);
         assert_eq!(s.idle_secs, 300);
         assert_eq!(s.request_timeout_secs, 45);
+        assert_eq!(s.filter_max_stale_secs, 300, "дефолт В-14");
         assert_eq!(s.node_path, Some(PathBuf::from(r"C:\node\node.exe")));
         assert!(!s.disk_search_enabled);
         assert!(!s.tavily_enabled);
         assert!(s.onec_enabled);
+    }
+
+    #[test]
+    fn filter_stale_is_configurable() {
+        let s = settings(&cfg("agent:\n  filter:\n    max_stale_sec: 60\n"));
+        assert_eq!(s.filter_max_stale_secs, 60);
     }
 
     #[test]

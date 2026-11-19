@@ -31,7 +31,8 @@ fn usage() -> String {
      \x20 cline-sync   [--json] [--dry-run] [--server-url URL --token T [--mcp-path /mcp]]\n\
      \x20              (настройки Cline: локально из config.yaml или на внешний сервер с Bearer)\n\
      \x20 ui           [--host H] [--port N] (веб-интерфейс; по умолчанию 127.0.0.1:8765)
-     \x20 anon         anonymize|values|deanon|deanon-values|inspect|warmup|check\n     \x20 agent        init|token (анонимная зона: сброс индекса и токен проекта, TR-4.1/4.2)\n     \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
+     \x20 anon         anonymize|values|deanon|deanon-values|inspect|warmup|check\n     \x20 agent        init|token|project|run (анонимная зона: сброс индекса, токен,\n\
+     \x20              реестр проектов и один ход агента — A3.3)\n     \x20 user         add|list|del|passwd|grant|revoke (M1: доступ — data/access.yaml)
      \x20 token        list|new|revoke [--user U | --sha <префикс хэша>] [--ttl-days N]
      \x20 login        --login L --password P [--url http://host:port] (токен на stdout)\n\
       \x20 service      run|install|uninstall|start|stop|status|root [role] (M2 T4; роли\n\

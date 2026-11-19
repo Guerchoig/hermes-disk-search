@@ -617,6 +617,7 @@ dependencies = [
 name = "hds-cli"
 version = "0.1.0"
 dependencies = [
+ "hds-agent",
  "hds-anonymize",
  "hds-clip",
  "hds-core",

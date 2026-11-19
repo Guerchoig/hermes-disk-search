@@ -94,18 +94,29 @@ impl Secrets {
         let name = self
             .project_str(project, "provider")
             .ok_or_else(|| SecretsError::NoKey(format!("projects.{project}.provider")))?;
+        self.provider(&name)
+    }
+
+    /// Реквизиты провайдера по имени (`providers.<name>`): ключ и `base_url`.
+    ///
+    /// Имя берётся из реестра проектов (`projects.json`), а не только из
+    /// `secrets.json`: CLI A3.3 читает провайдера/модель из реестра и подставляет
+    /// ключ по имени (TR-3.3), поэтому нужен доступ без записи `projects.<p>`.
+    pub fn provider(&self, name: &str) -> Result<ProviderCreds, SecretsError> {
         let key = self
             .raw
             .pointer(&format!("/providers/{name}/api_key"))
             .and_then(Value::as_str)
+            .filter(|k| !k.is_empty())
             .ok_or_else(|| SecretsError::NoKey(format!("providers.{name}.api_key")))?;
         let base_url = self
             .raw
             .pointer(&format!("/providers/{name}/base_url"))
             .and_then(Value::as_str)
-            .map(str::to_string);
+            .map(str::to_string)
+            .filter(|u| !u.trim().is_empty());
         Ok(ProviderCreds {
-            name,
+            name: name.to_string(),
             base_url,
             api_key: key.to_string(),
         })
@@ -114,6 +125,12 @@ impl Secrets {
     /// Модель проекта (`projects.<p>.model`).
     pub fn project_model(&self, project: &str) -> Option<String> {
         self.project_str(project, "model")
+    }
+
+    /// Провайдер проекта из `projects.<p>.provider` (если записан в секретах).
+    pub fn project_provider(&self, project: &str) -> Option<String> {
+        self.project_str(project, "provider")
+            .filter(|name| !name.trim().is_empty())
     }
 
     /// Токен проекта в открытом виде (для `cline_mcp_settings.json`).

@@ -45,6 +45,8 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
     match sub {
         "init" => cmd_init(cfg, rest),
         "token" => cmd_token(cfg, rest),
+        "project" => crate::cmd::agent_run::cmd_project(cfg, rest),
+        "run" => crate::cmd::agent_run::cmd_run(cfg, rest),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0
@@ -66,17 +68,26 @@ fn usage() -> String {
      \x20        или <agent.root> — иначе нужен --force)\n\
      \x20 token <P> [--ttl-days N]\n\
      \x20       (токен проекта для /mcp/agent/<P>: в файл — хэш, plain печатается один раз;\n\
-     \x20        без --ttl-days токен бессрочный)"
+     \x20        без --ttl-days токен бессрочный)\n\
+     \x20 project add <P> --name NAME --path DIR [--provider NAME] [--model M]\n\
+     \x20       (реестр проектов data\\agent\\projects.json; провайдер по умолчанию\n\
+     \x20        openrouter, модель — из В-12; имя — имя папки, если не задано)\n\
+     \x20 project list [--json]\n\
+     \x20       (список проектов зоны)\n\
+     \x20 run --project <P> [--prompt TEXT] [--max-iterations N] [--subagents]\n\
+     \x20     [--json] [--quiet] [--dry-run]\n\
+     \x20       (сессия агента: снимок vault, env, MCP, правила, Gateway; без --prompt\n\
+     \x20        реплика читается со stdin; --dry-run печатает план и не запускает воркер)"
         .to_string()
 }
 
-/// Есть ли флаг `name` среди аргументов.
-fn has(args: &[String], name: &str) -> bool {
+/// Есть ли флаг `name` среди аргументов (те же правила, что у `hds agent init`).
+pub(crate) fn has(args: &[String], name: &str) -> bool {
     args.iter().any(|a| a == name)
 }
 
-/// Значение флага `--name value` или `--name=value`.
-fn flag_val(args: &[String], name: &str) -> Option<String> {
+/// Значение флага в виде строки (`--name value` или `--name=value`).
+pub(crate) fn flag_val(args: &[String], name: &str) -> Option<String> {
     let mut it = args.iter();
     while let Some(a) = it.next() {
         if a == name {

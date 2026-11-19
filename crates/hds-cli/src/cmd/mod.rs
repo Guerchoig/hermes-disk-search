@@ -2,6 +2,7 @@
 //! (или `hds/dbops.py`/`hds/diag.py`); общие помощники — в [`crate::support`].
 
 pub mod agent;
+pub mod agent_run;
 pub mod anonymize;
 pub mod ask;
 pub mod auth;
