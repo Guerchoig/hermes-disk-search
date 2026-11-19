@@ -12,9 +12,10 @@
 > **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
 > `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test); A3.2 — `6ef028af` (feat),
 > `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test); A3.4 — `55abc33b` (feat),
-> `1b80fc3f` (test) плюс docs-коммиты. Дерево чистое, push не делался.
+> `1b80fc3f` (test); A3.5 — `babb2223` (feat), `3e9d61f7` (test) плюс docs-коммиты. Дерево
+> чистое, push не делался.
 
-## 1. Что уже сделано и проверено (A3.0…A3.4)
+## 1. Что уже сделано и проверено (A3.0…A3.5)
 
 | Коммит | Содержание |
 |---|---|
@@ -208,12 +209,58 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
   `<state>\.cline\data\sessions`; коды: 0 — успех, 1 — нет истории /
   незарегистрированный проект / сбой, 2 — использование.
 
-**Ещё НЕ сделано в фазе A3** (после A3.4):
+### 1.5. A3.5: установщик воркера (подтверждено фактом)
 
-* `installers/build_agent_sidecar.ps1` — установщик воркера (A3.5);
+`installers/build_agent_sidecar.ps1` + `runtime-manifests/node-manifest.json` (ASCII-only,
+как соседние установщики). Проверки на срезе: `cargo test --workspace` — **751** тест
+(добавлен `plan_prefers_portable_node`), `npm test` — 23/23, `fmt`/`clippy` чисто. Логи
+прогонов — `tools/parity/out/a35-*.log` (каталог гитигнорится).
+
+**Что делает скрипт:**
+
+* **Node**: `runtime-manifests/node-manifest.json` (v24.18.0, официальные `url` + `sha256`
+  из `SHASUMS256.txt`) → скачивание → проверка sha256 → распаковка в `sidecar\node`
+  (macOS — `sidecar/node/bin/node`); `-NodeSource <dir>` копирует существующую установку
+  (`C:\Program Files\nodejs` → путь без пробелов), `-Force` переустанавливает; маркер
+  `.hds-node-version`;
+* **зависимости**: `npm ci` по `package-lock.json`; маркер
+  `node_modules\.hds-agent-lock` = хеш lock + режим `dev|prod`. В дереве поставки после
+  сборки — `npm prune --omit=dev` (в репозитории dev-зависимости остаются; `-Prune`
+  включает чистку на месте, `-KeepDev` выключает в поставке);
+* **сборка**: `npm run build` → `dist\worker.mjs` (163 KiB, esbuild ESM,
+  `--packages=external`);
+* **самопроверка `-SelfTest`**: путь Node без пробелов, `import('@cline/sdk')` (не только
+  наличие пакета), `node_modules\tavily-mcp\build\index.js` (путь, который hds передаёт
+  MCP-клиенту), `hello` → `ready {protocol:1}` с непустым `sdk`, затем `shutdown` и выход;
+* **идемпотентность**: повторный запуск ничего не делает (маркеры), `-SkipInstall` /
+  `-SkipBuild` — офлайн и диагностика.
+
+**Подтверждено фактом** (четыре прогона):
+
+1. в репозитории `-SelfTest`: скачивание zip (sha256 совпал), `npm ci` (341 пакет, 14 с),
+   сборка, `hello: ready {protocol=1, node=v24.18.0, sdk=0.2.0}`;
+2. дерево поставки (`-OutDir tools\parity\out\a35-dist\sidecar`): источники скопированы,
+   `npm prune --omit=dev` убрал 3 dev-пакета, в `node_modules` остались `@cline/sdk` и
+   `tavily-mcp`, `esbuild`/`typescript` удалены, `-SelfTest` зелёный; повторный прогон —
+   no-op (Node и `node_modules` переиспользованы, сборка не повторяется);
+3. офлайн-ветка `-NodeSource "C:\Program Files\nodejs"` → `sidecar\node` без пробелов,
+   `-SelfTest` зелёный;
+4. **продукт**: `hds agent run` с `HDS_ROOT` = установленное дерево (портативный Node +
+   pruned `node_modules`) и mock-провайдером провёл полный ход: событие `session`,
+   анонимизированный prompt, ответ модели, `turn_end {ok:true, reason:"completed"}`, код 0,
+   ровно 1 запрос к модели.
+
+**Тест:** `crates/hds-cli/tests/agent_run.rs::plan_prefers_portable_node` — план берёт
+`<root>\sidecar\node\node(.exe)` (и в пути нет пробелов), т.е. установщик кладёт Node туда,
+откуда его действительно берёт `hds-agent`.
+
+**Ещё НЕ сделано в фазе A3** (после A3.5):
+
 * приёмка e2e на стенде A2 (A3.6) — включая `run --session` и `history clear` на копии
   `agent-state`;
 * документация A3 (`sidecar/README.md`, раздел `README.md`, `RELEASE_NOTES`; A3.7);
+* подключение установщика к релизной сборке (`build_rust_release.ps1`, `install_server.ps1`) и
+  `hds check` про портативный Node — A3.7/A6 (§4 п.32);
 * долг A3.4: реестр `AgentRegistry` не подключён к CLI-прогону (один проект на процесс) и
   не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
 
@@ -229,13 +276,13 @@ agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тес
 | A3.2 | Rust ↔ настоящий воркер | **Закрыт.** `cargo test -p hds-agent`: интеграционный `tests/gateway_worker.rs` (56 тестов всего): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений; fail-closed = 0 запросов к провайдеру | закрыт |
 | A3.3 | Точка входа CLI | **Закрыт.** `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …] [--dry-run]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль (human / `--json` / `--quiet`). Тесты на mock-провайдере — `crates/hds-cli/tests/agent_run.rs` | закрыт |
 | A3.4 | Жизненный цикл (TR-3.9) | **Закрыт.** Реестр `AgentRegistry` в `hds-agent`: `max_live`/`idle` из `AgentSettings` (В-16: 2 и 30 мин), LRU-выгрузка (процесс завершён), переиспользование процесса на повторный `get_or_open`, переоткрытие упавшего воркера, `reap_idle` по параметру времени. Возобновление `session_id + initialMessages` (`history::read_messages`) — прошлая реплика в первом запросе модели; `session_id` без истории её не грузит. «Очистить историю» end-to-end (`Gateway::clear_history`, бэкапы `.json.bak`). CLI: `run --session`, `history clear [--session]`. Факты — §1.4, находки — §4 п.23–28 | закрыт |
-| A3.5 | Установщик | `installers/build_agent_sidecar.ps1` (портативный Node без пробелов в пути → `sidecar/node/`, `npm ci --omit=dev` по lock, сборка `dist/`, `-SelfTest` = `hello`); образец — `build_anonymize_sidecar.ps1`, `sidecar_common.ps1` | ~0,5 чата |
+| A3.5 | Установщик | **Закрыт.** `installers/build_agent_sidecar.ps1`: портативный Node из `runtime-manifests/node-manifest.json` (v24.18.0, официальные sha256) → `sidecar\node` без пробелов (`-NodeSource` — копия существующей установки, офлайн), `npm ci` по lock, сборка `dist\worker.mjs`, `npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` + `tavily-mcp`. Факты — §1.5, находки — §4 п.29–32 | закрыт |
 | A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён; плюс `run --session` (прошлая реплика модели) и `history clear` на **копии** `agent-state`. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
 | A3.7 | Документация и закрытие | `sidecar/README.md`, раздел в `README.md`, `RELEASE_NOTES` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`; полный набор проверок (§5 карты); вопросы В-12…В-16 владельцу | ~0,5 чата |
 
 Зависимости: A3.1 и A3.2 независимы (A3.1 первым — он проверяет допущения о SDK, на которые
-опирается всё остальное). A3.3 ← A3.2. A3.4 ← A3.3. A3.5 независим (можно в любой момент).
-A3.6 ← A3.3 + A3.5. A3.7 — последним.
+опирается всё остальное). A3.3 ← A3.2; A3.4 ← A3.3; A3.5 независим и закрыт; **A3.6 ← A3.3 +
+A3.5 — следующий**; A3.7 — последним.
 
 ## 3. Журнал под-этапов
 
@@ -246,6 +293,7 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 | A3.2 | закрыт 19.11.2026 | `6ef028af` (feat), `8204e384` (test) | `cargo test -p hds-agent` = 56 тестов (54 unit + 2 интеграционных), `cargo fmt --check` и `clippy --workspace -D warnings` чистые; факты — §1.2, находки — §4 п.1–3 и 13–16 |
 | A3.3 | закрыт 19.11.2026 | `be72b01d` (feat), `74d1aacb` (test) | `cargo test -p hds-cli --test agent_run` = 3 теста, весь воркспейс 737/737; факты — §1.3, находки — §4 п.17–22 |
 | A3.4 | закрыт 19.11.2026 | `55abc33b` (feat), `1b80fc3f` (test) | `cargo test -p hds-agent` = 68 тестов (8 — `registry`, 3 — `lifecycle_worker`), ≈ 11 с; `cargo test -p hds-cli --test agent_run` = 5, весь воркспейс 750/750; `npm test` 23/23; факты — §1.4, находки — §4 п.23–28. Долг: реестр готов, но CLI-прогон по-прежнему один проект на процесс (подключение — вкладка A5) |
+| A3.5 | закрыт 19.11.2026 | `babb2223` (feat), `3e9d61f7` (test) | `installers/build_agent_sidecar.ps1` + `runtime-manifests/node-manifest.json`; 4 прогона (`tools/parity/out/a35-*.log`): репозиторий, дерево поставки с `npm prune`, офлайн `-NodeSource`, `hds agent run` на установленном дереве; воркспейс 751 тест, `npm test` 23/23; факты — §1.5, находки — §4 п.29–32 |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -379,6 +427,32 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
     `crates/hds-anonymize/tests/mock_worker.py`. **A3.6:** «Очистить историю»
     проверять на копии профиля — реальные файлы сессии трогать нельзя.
 
+29. **A3.5: портативный Node берётся из манифеста, а не из кода скрипта.**
+    `runtime-manifests/node-manifest.json` (`tag`, `assets[{platform, archive, file_name,
+    url, sha256, root, exe, npm}]`) — единственное место с версией и хешами; sha256 взяты из
+    официального `https://nodejs.org/dist/<tag>/SHASUMS256.txt`. Смена версии Node = правка
+    манифеста, скрипт не переписывается. Скачанный архив проверяется по sha256 **до**
+    распаковки; несовпадение — остановка. `-NodeSource <dir>` копирует существующую установку
+    (`C:\Program Files\nodejs`) — это и есть офлайн-путь, копия убирает пробел из пути.
+30. **A3.5: `npm ci` нужен полный, «только runtime» делается `npm prune --omit=dev`.**
+    `esbuild`/`typescript` — devDependencies, без них `npm run build` не работает; поэтому
+    порядок: `npm ci` → `npm run build` → `npm prune --omit=dev` (в дереве поставки). В
+    репозитории dev-зависимости остаются (иначе после установщика не собрать и не прогнать
+    `npm test`); переключатели — `-Prune` (почистить на месте) и `-KeepDev` (не чистить в
+    поставке). Идемпотентность — маркер `node_modules\.hds-agent-lock` = хеш lock + `dev|prod`.
+31. **A3.5: `-SelfTest` проверяет импорт, а не наличие файла.** `ready.sdk` берётся из
+    `node_modules\@cline\sdk\package.json` рядом с `dist\worker.mjs`, но сам SDK при `hello`
+    не импортируется — поэтому самопроверка дополнительно делает
+    `node -e "import('@cline/sdk')…"` в каталоге воркера и проверяет
+    `node_modules\tavily-mcp\build\index.js` (ровно этот путь `hds-agent` передаёт MCP-клиенту).
+    Иначе `npm prune`, срезавший зависимость, прошёл бы «зелёным».
+32. **A3.5: PowerShell 5.1 и кириллица.** Установщики остаются ASCII-only (BOM-less `.ps1`
+    читается как ANSI). Проверочный стенд с русскими строками нужно сохранять как UTF-8 **с
+    BOM**, иначе парсер падает на «непредвиденной лексеме» (наступил на этом при прогоне
+    `a35-e2e.ps1`). Осталось для A3.7/A6: подключить установщик к `build_rust_release.ps1` и
+    `install_server.ps1`, добавить проверку портативного Node в `hds check` и раздел про
+    `sidecar\node` в `README.md`.
+
 ## 5. Промт для A3.1 (выполнен; оставлен для истории)
 
 ```text
@@ -467,7 +541,7 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
   вне secrets.json (например, в сессию SDK в agent-state).
 ```
 
-## 6. Контекст для нового чата (A3.5 и далее)
+## 6. Контекст для нового чата (A3.6 и далее)
 
 > «Памятка входа»: что сделано, где лежит, какие грабли уже оплачены. Промт
 > следующего подэтапа — §7. Требования и критерии фазы — `AGENT_A3_HANDOFF_PROMPT.md`;
@@ -477,18 +551,19 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 
 * Верхний уровень: фаза **A3** плана `PLAN_AGENT_PRIVACY_ZONE.md` (§5.3, §5.5, §5.6) —
   «агент в анонимной зоне». Нарезана на подэтапы **A3.1…A3.7** (§2): A3.1 — воркер на
-  Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, **A3.4 — жизненный
-  цикл (TR-3.9) — закрыт**, дальше A3.5 — установщик, A3.6 — приёмка (e2e), A3.7 —
+  Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, A3.4 — жизненный
+  цикл (TR-3.9), **A3.5 — установщик воркера — закрыт**, дальше A3.6 — приёмка (e2e), A3.7 —
   документация.
-* Ветка `agent-privacy-zone`, HEAD ≥ `1b80fc3f` (test A3.4), дерево чистое, push не делался.
+* Ветка `agent-privacy-zone`, HEAD ≥ `3e9d61f7` (test A3.5), дерево чистое, push не делался.
 * Коммиты: A3.0 — `f10a92e8`, `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test);
   A3.2 — `6ef028af` (feat), `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test);
-  A3.4 — `55abc33b` (feat), `1b80fc3f` (test); docs — `7779343b`, `c5c1f57d`, `76661a7a`
-  и docs-коммит A3.4.
+  A3.4 — `55abc33b` (feat), `1b80fc3f` (test); A3.5 — `babb2223` (feat), `3e9d61f7` (test);
+  docs — `7779343b`, `c5c1f57d`, `76661a7a` и docs-коммиты A3.4/A3.5.
 * Проверки на срезе: `cargo fmt --all --check` и
   `cargo clippy --workspace --all-targets -- -D warnings` — чисто;
-  `cargo test --workspace -- --test-threads=4` — **750** тестов, 0 падений;
-  `npm test` в `sidecar/hds_agent` — 23/23, ≈ 39 с; чистая копия (`npm ci` + build) собирается.
+  `cargo test --workspace -- --test-threads=4` — **751** тест, 0 падений;
+  `npm test` в `sidecar/hds_agent` — 23/23, ≈ 39 с; чистая копия (`npm ci` + build) собирается;
+  `installers/build_agent_sidecar.ps1 -SelfTest` — зелёный (портативный Node + `hello`).
 
 ### 6.2. Что уже работает (точки входа)
 
@@ -499,6 +574,13 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 `CLINE_MCP_SETTINGS_PATH`, плагины профиля выключены политикой, `turn_end {ok, reason, text,
 error, tools}`, восстановление сессии после фатальной ошибки (`revive` с тем же id).
 Тесты: `npm test` (карта — §1.1).
+
+**Установщик воркера `installers/build_agent_sidecar.ps1`** (A3.5): портативный Node из
+`runtime-manifests/node-manifest.json` → `sidecar\node` (без пробелов в пути; `-NodeSource`
+копирует существующую установку), `npm ci` по lock, `npm run build` → `dist\worker.mjs`,
+`npm prune --omit=dev` в дереве поставки, `-SelfTest` = `hello` + импорт `@cline/sdk` +
+наличие `tavily-mcp`. Идемпотентен (маркеры `.hds-node-version`,
+`node_modules\.hds-agent-lock`).
 
 **Крейт `crates/hds-agent`** (lib, без async):
 
@@ -588,6 +670,7 @@ cargo test --workspace -- --test-threads=4
 cargo test -p hds-agent
 cargo test -p hds-cli --test agent_run
 cd sidecar\hds_agent; npm test
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\build_agent_sidecar.ps1 -SelfTest
 ```
 
 * PowerShell печатает `cargo` в stderr как `NativeCommandError` — ориентироваться на
@@ -610,6 +693,7 @@ cd sidecar\hds_agent; npm test
 | словарь исходящего, fail-closed | `filter.rs`, `deanon.rs` |
 | история сессии | `history.rs` (`read_messages`, `clear`, `latest_session`) |
 | реестр живых процессов (A3.4) | `crates/hds-agent/src/registry.rs` |
+| установщик воркера и портативный Node (A3.5) | `installers/build_agent_sidecar.ps1`, `runtime-manifests/node-manifest.json` |
 | настройки, пути, реестр проектов, секреты | `settings.rs`, `projects.rs`, `secrets.rs` |
 | окружение процесса, MCP, правила | `env.rs`, `mcp.rs`, `rules.rs` |
 | сборка сессии в CLI | `crates/hds-cli/src/cmd/agent_run.rs` |
