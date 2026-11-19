@@ -11,10 +11,10 @@
 >
 > **Дата среза:** 19.11.2026. **Ветка:** `agent-privacy-zone`. Состояние: A3.0 — `f10a92e8`,
 > `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test); A3.2 — `6ef028af` (feat),
-> `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test) плюс docs-коммит с этим
-> файлом. Дерево чистое, push не делался.
+> `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test); A3.4 — `55abc33b` (feat),
+> `1b80fc3f` (test) плюс docs-коммиты. Дерево чистое, push не делался.
 
-## 1. Что уже сделано и проверено (A3.0, A3.1)
+## 1. Что уже сделано и проверено (A3.0…A3.4)
 
 | Коммит | Содержание |
 |---|---|
@@ -161,12 +161,61 @@
   текст ответа, `--json` — NDJSON-события;
 * срабатывания фильтра уходят в журнал `audit.enabled` (desktop-профиль — выключен).
 
-**Ещё НЕ написано:**
+### 1.4. A3.4: жизненный цикл (подтверждено фактом)
 
-* подключение `hds-agent` в `hds-cli` и сборка сессии из конфига;
-* менеджер жизненного цикла;
-* `installers/build_agent_sidecar.ps1`;
-* документация A3.
+`cargo test -p hds-agent` = **68** тестов (63 unit, из них 8 — `registry`; 2 —
+`gateway_worker`; 3 — `lifecycle_worker`), ≈ 11 с. `cargo test -p hds-cli --test
+agent_run` = **5** тестов, ≈ 7 с. Воркспейс — **750** тестов, 0 падений; `npm test`
+в `sidecar/hds_agent` — 23/23 (не менялся).
+
+| Файл | Факт |
+|---|---|
+| `crates/hds-agent/src/registry.rs` (unit, Node-заглушка) | 8 тестов: дефолты из `AgentSettings` (2 проекта, 30 мин); переиспользование (PID тот же, второго `start` нет); `max_live = 1` выгружает первый процесс (заглушка пишет файл выхода — процесс завершён); `max_live = 2` — оба живы; жертва — LRU; `reap_idle` только просроченные + переоткрытие; упавший воркер переоткрывается; no-op на неизвестном проекте |
+| `crates/hds-agent/tests/lifecycle_worker.rs` (настоящий `dist/worker.mjs` + mock-провайдер) | 3 теста: реестр (2 проекта, ход после второго `start`, переиспользование без `spawn`, выгрузка LRU); возобновление после «перезапуска hds»; «Очистить историю» end-to-end |
+| `crates/hds-cli/tests/agent_run.rs` | +2: `run --session` (прошлая реплика в первом запросе, ошибка при отсутствующей истории); `history clear` через бинарь (0/1/2, бэкапы, последняя сессия) |
+
+**Что проверено:**
+
+* реестр `AgentRegistry` (`hds-agent`): `max_live` и простой берутся из
+  `AgentSettings` (`agent.max_live_projects` = 2, `agent.idle_unload_min` = 30);
+  время — параметр (`now`), фоновых потоков и «спящих» тестов нет; выгрузка =
+  `stop` + `shutdown` (ожидание выхода ≤ 5 с) + удаление записи;
+* при `max_live = 1` открытие второго проекта завершает процесс первого
+  (заглушка успевает записать свой PID в файл выхода), запись уходит; при 2 —
+  оба живы, второй `start` первого не убивает; жертва переполнения — проект с
+  самым старым `last_used` (LRU), а не первый по порядку;
+* переиспользование: повторный `get_or_open` не вызывает `spawn`, PID тот же,
+  второго `start` в журнале заглушки нет (значит и `initialMessages` не
+  передаются повторно); упавший процесс (`is_closed`) переоткрывается;
+* `reap_idle(now)` выгружает только проекты, бездействовавшие дольше `idle`, и не
+  трогает свежие; после выгрузки проект открывается заново (новый PID, новый
+  `start`);
+* возобновление на **настоящем** воркере: `start` с тем же `session_id` **и**
+  `initialMessages` из `history::read_messages` — первый запрос к модели содержит
+  прошлую реплику; `session_id` **без** `initialMessages` историю не грузит
+  (регресс A0 §3.6 зафиксирован тестом);
+* «Очистить историю» end-to-end: `Gateway::clear_history` переписывает
+  `<id>.messages.json` и манифест, рядом остаются бэкапы `.json.bak`; значения в
+  файлах нет, метка на месте; следующий `start` с очищенной историей — в первом
+  запросе к модели метка, значения нет;
+* `Gateway::session_id()` отдаёт сессию, выданную воркером
+  (`start.result.session_id`) — её принимает `history clear --session`;
+  `history::read_messages` принимает и `{messages: […]}` и массив верхнего уровня;
+* CLI: `hds agent run --project P --session <id>` возобновляет сессию (история из
+  `agent-state`, событие `{"kind":"session","resumed":true}`), `TurnReport.session_id`
+  несёт идентификатор; `hds agent history clear --project P [--session ID]`
+  печатает число замен и пути бэкапов, без `--session` берёт последнюю сессию из
+  `<state>\.cline\data\sessions`; коды: 0 — успех, 1 — нет истории /
+  незарегистрированный проект / сбой, 2 — использование.
+
+**Ещё НЕ сделано в фазе A3** (после A3.4):
+
+* `installers/build_agent_sidecar.ps1` — установщик воркера (A3.5);
+* приёмка e2e на стенде A2 (A3.6) — включая `run --session` и `history clear` на копии
+  `agent-state`;
+* документация A3 (`sidecar/README.md`, раздел `README.md`, `RELEASE_NOTES`; A3.7);
+* долг A3.4: реестр `AgentRegistry` не подключён к CLI-прогону (один проект на процесс) и
+  не имеет фонового reaper — это вкладка A5/служба (§4 п.23).
 
 ## 2. Под-этапы (остаток A3)
 
@@ -179,9 +228,9 @@
 | **A3.1** | **Воркер: TR-3.10 на Node-стенде** | **Закрыт.** `npm test` покрывает TR-3.10 а, в, г, д, е, ж и ветки воркера: MCP-заглушка через файл настроек (`<server>__<tool>`, `ask_my_files` вырезан, `mcp_out`/`mcp_in` через `egress_check`), `office_*`/`ask_user` через `host_call`, отказ guard доходит до модели текстом, fail-closed = 0 запросов к mock, секрет блокируется, `abort`, `subagents` false/true, возобновление через `history` (карта — §1.1) | закрыт |
 | A3.2 | Rust ↔ настоящий воркер | **Закрыт.** `cargo test -p hds-agent`: интеграционный `tests/gateway_worker.rs` (56 тестов всего): `Gateway::spawn` → `hello` → `open` → `send` на mock-провайдере. `egress_check` проходит **настоящий** `Filter` (снимок без Python, `GatewayHost::without_client`); события деанонимизированы (`[PERSON_1]` → значение, пути workspace → пути проекта); `Redacted` без значений; fail-closed = 0 запросов к провайдеру | закрыт |
 | A3.3 | Точка входа CLI | **Закрыт.** `hds agent project add|list` (`projects.json`), `hds agent run --project P [--prompt …] [--dry-run]` (В-16) собирает сессию из конфига: поиск Node (`agent.node.path` → `sidecar/node` → PATH), `env::build`, `mcp::write_settings`, `rules::write_rules`, `Secrets`, снимок vault, `Gateway`; события печатаются в консоль (human / `--json` / `--quiet`). Тесты на mock-провайдере — `crates/hds-cli/tests/agent_run.rs` | закрыт |
-| A3.4 | Жизненный цикл (TR-3.9) | реестр живых проектов в `hds-agent`: `max_live_projects`, `idle_unload_min`, переиспользование процесса на повторный `start`, возобновление `session_id + initialMessages` из `history::read_messages`, «Очистить историю» end-to-end. Тесты на заглушке воркера (быстрые) + 1 на настоящем. **Промт — §7** | следующий |
+| A3.4 | Жизненный цикл (TR-3.9) | **Закрыт.** Реестр `AgentRegistry` в `hds-agent`: `max_live`/`idle` из `AgentSettings` (В-16: 2 и 30 мин), LRU-выгрузка (процесс завершён), переиспользование процесса на повторный `get_or_open`, переоткрытие упавшего воркера, `reap_idle` по параметру времени. Возобновление `session_id + initialMessages` (`history::read_messages`) — прошлая реплика в первом запросе модели; `session_id` без истории её не грузит. «Очистить историю» end-to-end (`Gateway::clear_history`, бэкапы `.json.bak`). CLI: `run --session`, `history clear [--session]`. Факты — §1.4, находки — §4 п.23–28 | закрыт |
 | A3.5 | Установщик | `installers/build_agent_sidecar.ps1` (портативный Node без пробелов в пути → `sidecar/node/`, `npm ci --omit=dev` по lock, сборка `dist/`, `-SelfTest` = `hello`); образец — `build_anonymize_sidecar.ps1`, `sidecar_common.ps1` | ~0,5 чата |
-| A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
+| A3.6 | Приёмка A3 (e2e) | стенд из A2: образ docx → `office_read` (настоящий Python-воркер), `disk-search__search_local_files` с маршрута `/mcp/agent/P0001` (живой `hds mcp-http`), заглушка `tavily` (`mcp_out`), запись файла в workspace; I2/I7 на заглушках; профиль `%USERPROFILE%\.cline` до/после не изменён; плюс `run --session` (прошлая реплика модели) и `history clear` на **копии** `agent-state`. **Здесь стоп-точки** «disk-search не отвечает из SDK» и «1c-buddy/tavily под подменённым HOME» | ~1 чат |
 | A3.7 | Документация и закрытие | `sidecar/README.md`, раздел в `README.md`, `RELEASE_NOTES` «Фаза A3», статус в `AGENT_A3_HANDOFF_PROMPT.md`; полный набор проверок (§5 карты); вопросы В-12…В-16 владельцу | ~0,5 чата |
 
 Зависимости: A3.1 и A3.2 независимы (A3.1 первым — он проверяет допущения о SDK, на которые
@@ -196,7 +245,7 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 | A3.1 | закрыт 19.11.2026 | `2efe8043` (fix), `8e26d0f3` (test) | `npm test` 23/23, ≈ 39 с; карта тестов — §1.1; находки — §4 п.7–12; `Gateway::open` поправить в A3.2 (§4 п.1) |
 | A3.2 | закрыт 19.11.2026 | `6ef028af` (feat), `8204e384` (test) | `cargo test -p hds-agent` = 56 тестов (54 unit + 2 интеграционных), `cargo fmt --check` и `clippy --workspace -D warnings` чистые; факты — §1.2, находки — §4 п.1–3 и 13–16 |
 | A3.3 | закрыт 19.11.2026 | `be72b01d` (feat), `74d1aacb` (test) | `cargo test -p hds-cli --test agent_run` = 3 теста, весь воркспейс 737/737; факты — §1.3, находки — §4 п.17–22 |
-| A3.4 | следующий | — | Промт — §7: реестр `AgentRegistry` (max_live/idle/LRU) + возобновление `session_id + initialMessages` + «Очистить историю»; CLI — `run --session`, `history clear`; переиспользовать `agent_run::{plan_with, open_client, run}`; учесть `HDS_ROOT` (§4 п.18) |
+| A3.4 | закрыт 19.11.2026 | `55abc33b` (feat), `1b80fc3f` (test) | `cargo test -p hds-agent` = 68 тестов (8 — `registry`, 3 — `lifecycle_worker`), ≈ 11 с; `cargo test -p hds-cli --test agent_run` = 5, весь воркспейс 750/750; `npm test` 23/23; факты — §1.4, находки — §4 п.23–28. Долг: реестр готов, но CLI-прогон по-прежнему один проект на процесс (подключение — вкладка A5) |
 
 ## 4. Известные долги и находки (передаются по под-этапам)
 
@@ -296,8 +345,39 @@ A3.6 ← A3.3 + A3.5. A3.7 — последним.
 22. **A3.3: `--dry-run` не создаёт каталоги и не запускает процессы** (план печатается до
     `prepare`): это же точка для A5 — вкладка показывает план до старта воркера. Ключ
     провайдера и токен проекта в план не попадают (проверяется тестом).
-
-
+23. **A3.4: реестр живых проектов — `crates/hds-agent/src/registry.rs`.** `AgentRegistry`
+    (`new(max_live, idle)`, `from_settings`, `defaults`) хранит по проекту `Gateway` и
+    `last_used`; время приходит параметром, **фонового потока нет** — тик
+    `reap_idle(Instant::now())` будет звать вкладка A5/служба. Выгрузка = `stop` +
+    `shutdown` (≤ 5 с ожидания, затем kill) + удаление записи; `max_live == 0`
+    трактуется как 1. `Drop` реестра выгружает всё (CLI/тесты не оставляют процессов).
+    **Не подключён к CLI-прогону:** `hds agent run` по-прежнему один проект на процесс
+    (§4 п.17) — реестр нужен вкладке, где несколько проектов живут одновременно.
+24. **A3.4: реестр переоткрывает упавший воркер.** `get_or_open` смотрит на
+    `Gateway::is_closed()`: мёртвая запись выгружается (без ожидания — процесс уже
+    вышел) и проект открывается заново. Без этого UI получил бы закрытый канал, а
+    «перезапустить» пользователю было бы нечем. Тест гоняет это на заглушке:
+    `send {text:"__crash__"}` → `process.exit(1)`.
+25. **A3.4: `Gateway::open` запоминает сессию, выданную воркером** (аддитивно):
+    раньше `session_id` брался только из аргумента, поэтому новая сессия не знала
+    своего id, и «Очистить историю» без `--session` была невозможна. Теперь при
+    `start` без id читается `start.result.session_id`, добавлен
+    `Gateway::session_id()`. Публичные сигнатуры A3.2/A3.3 не менялись.
+26. **A3.4: форматы истории.** `history::read_messages` принимает и `{ "messages": […] }`,
+    и массив верхнего уровня (SDK писал по-разному). Добавлен
+    `history::latest_session(state_dir)` — последняя сессия по времени изменения
+    `.messages.json` (нужна `history clear` без `--session`).
+27. **A3.4: очистка истории помечает форму граммемой.** Значение «Иванов Иван» в
+    файле заменяется на `[PERSON_1|nomn]`, а не на `[PERSON_1]` (в снимке mock-воркера
+    у формы есть граммема). Проверять в тестах префикс метки, а не точное совпадение:
+    разбор — только `hds_core::labels`.
+28. **A3.4: `hds agent history clear` не поднимает Node и не требует провайдера.**
+    Нужен только снимок vault (воркер анонимизации) и `Filter`; `secrets.json`
+    читается best-effort (без него очистка работает, ключи просто не входят в
+    словарь). Тестам CLI нужен `HDS_ANONYMIZE_PYTHON` (при `HDS_ROOT` = temp venv
+    лежит в репозитории) — `HDS_ANONYMIZE_WORKER` подменяет скрипт на
+    `crates/hds-anonymize/tests/mock_worker.py`. **A3.6:** «Очистить историю»
+    проверять на копии профиля — реальные файлы сессии трогать нельзя.
 
 ## 5. Промт для A3.1 (выполнен; оставлен для истории)
 
@@ -387,7 +467,7 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
   вне secrets.json (например, в сессию SDK в agent-state).
 ```
 
-## 6. Контекст для нового чата (A3.4 и далее)
+## 6. Контекст для нового чата (A3.5 и далее)
 
 > «Памятка входа»: что сделано, где лежит, какие грабли уже оплачены. Промт
 > следующего подэтапа — §7. Требования и критерии фазы — `AGENT_A3_HANDOFF_PROMPT.md`;
@@ -398,14 +478,16 @@ A3.1 — «Воркер: TR-3.10 на Node-стенде». Работаешь Т
 * Верхний уровень: фаза **A3** плана `PLAN_AGENT_PRIVACY_ZONE.md` (§5.3, §5.5, §5.6) —
   «агент в анонимной зоне». Нарезана на подэтапы **A3.1…A3.7** (§2): A3.1 — воркер на
   Node-стенде, A3.2 — Rust ↔ настоящий воркер, A3.3 — точка входа CLI, **A3.4 — жизненный
-  цикл (TR-3.9)**, A3.5 — установщик, A3.6 — приёмка (e2e), A3.7 — документация.
-* Ветка `agent-privacy-zone`, HEAD ≥ `76661a7a` (docs A3.3), дерево чистое, push не делался.
+  цикл (TR-3.9) — закрыт**, дальше A3.5 — установщик, A3.6 — приёмка (e2e), A3.7 —
+  документация.
+* Ветка `agent-privacy-zone`, HEAD ≥ `1b80fc3f` (test A3.4), дерево чистое, push не делался.
 * Коммиты: A3.0 — `f10a92e8`, `a8dc5b51`; A3.1 — `2efe8043` (fix), `8e26d0f3` (test);
   A3.2 — `6ef028af` (feat), `8204e384` (test); A3.3 — `be72b01d` (feat), `74d1aacb` (test);
-  docs — `7779343b`, `c5c1f57d`, `76661a7a`.
+  A3.4 — `55abc33b` (feat), `1b80fc3f` (test); docs — `7779343b`, `c5c1f57d`, `76661a7a`
+  и docs-коммит A3.4.
 * Проверки на срезе: `cargo fmt --all --check` и
   `cargo clippy --workspace --all-targets -- -D warnings` — чисто;
-  `cargo test --workspace -- --test-threads=4` — **737** тестов, 0 падений;
+  `cargo test --workspace -- --test-threads=4` — **750** тестов, 0 падений;
   `npm test` в `sidecar/hds_agent` — 23/23, ≈ 39 с; чистая копия (`npm ci` + build) собирается.
 
 ### 6.2. Что уже работает (точки входа)
@@ -426,7 +508,8 @@ error, tools}`, восстановление сессии после фатал�
 * `gateway` — `Gateway::spawn` (с Python-клиентом) / `Gateway::spawn_egress_only`, `hello`,
   `open(provider, history, session_id, max_iterations, subagents) -> declared_tools`, `send`,
   `send_anonymized`, `abort`, `stop`, `next_event` → `GatewayEvent::{Ready, Agent, TurnEnd,
-  Redacted, Done}`, `refresh`/`refresh_from_snapshot`, `clear_history`, `shutdown`;
+  Redacted, Done}`, `refresh`/`refresh_from_snapshot`, `session_id`, `clear_history`,
+  `shutdown`;
   `GatewayHost::{new, without_client}` (egress_check через `Filter`, `office_*` → Python,
   `ask_user`);
 * `filter` — `Filter::new(project, keep, UnknownPolicy, max_stale, Option<Audit>)`,
@@ -435,7 +518,13 @@ error, tools}`, восстановление сессии после фатал�
 * `deanon` — `DeAnonymizer::new(snapshot, sys, workspace, project_root)` (метки → значения,
   пути workspace → пути проекта);
 * `history` — `session_dir`, `session_files`, `clear(state, session, filter)` (бэкапы
-  `.json.bak`), `read_messages(state, session) -> Vec<Value>` (для `initialMessages`);
+  `.json.bak`), `read_messages(state, session) -> Vec<Value>` (для `initialMessages`),
+  `latest_session(state)`;
+* `registry` (**A3.4**) — `AgentRegistry::{new, from_settings, defaults}`, `get_or_open(project,
+  now, spawn_fn)`, `get_mut`, `touch`, `unload`, `reap_idle(now)`, `live`, `projects`;
+  выгрузка = `stop` + `shutdown`, жертва — LRU, упавший процесс переоткрывается. Фонового
+  потока нет — `reap_idle` зовут с `Instant::now()` (вкладка A5/служба); CLI-прогон реестр
+  пока не использует (один проект на процесс);
 * `settings` — `settings(cfg)` → `AgentSettings { root, max_live_projects (2), idle_secs (1800),
   request_timeout_secs (120), subagents, unknown, keep_terms, proxy, egress_log, node_path,
   filter_max_stale_secs, mcp.* }`, `project_dir/workspace_dir/config_dir/state_dir_for`,
@@ -447,13 +536,16 @@ error, tools}`, восстановление сессии после фатал�
   TEMP → agent-config, `CLINE_DATA_DIR` → agent-state, `CLINE_MCP_SETTINGS_PATH`),
   `prepare_dirs`; `mcp` — `McpSpec::from_secrets`/`write_settings`/`settings_path`;
   `rules` — `write_rules`; `paths` — матрица путей; `protocol` — §4.3.
-* Реестра живых процессов **пока нет** — это работа A3.4.
+* Реестр живых процессов — `registry` (A3.4, см. выше); вкладке A5 остаётся тик `reap_idle`
+  и переключение проектов через `get_or_open`.
 
 **CLI `hds agent`** (`crates/hds-cli/src/cmd/agent.rs` + `agent_run.rs`): `init|token` (A2),
-`project add|list`, `run --project P [--prompt …] [--max-iterations N] [--subagents] [--json]
-[--quiet] [--dry-run]`; `agent_run::{plan, plan_with, plan_json, prepare, run, open_client,
-TurnReport, RunOptions}`. Успех хода — по `GatewayEvent::TurnEnd`, `Redacted` — предупреждение,
-`ask_user` — `NoAskUser` (отказ). Тесты: `crates/hds-cli/tests/agent_run.rs`.
+`project add|list`, `run --project P [--prompt …] [--session ID] [--max-iterations N]
+[--subagents] [--json] [--quiet] [--dry-run]`, `history clear --project P [--session ID]`;
+`agent_run::{plan, plan_with, plan_json, prepare, run, open_client, open_client_at,
+clear_history, TurnReport, RunOptions}`. Успех хода — по `GatewayEvent::TurnEnd`,
+`Redacted` — предупреждение, `ask_user` — `NoAskUser` (отказ). Тесты:
+`crates/hds-cli/tests/agent_run.rs`.
 
 ### 6.3. Грабли, которые уже оплачены (не наступать снова)
 
@@ -479,6 +571,11 @@ TurnReport, RunOptions}`. Успех хода — по `GatewayEvent::TurnEnd`, 
   включать счётчик (`AtomicU32`), иначе тесты удаляют каталоги друг друга (§4 п.16).
 * `npm test` использует glob `test/*.test.mjs` (Node 24 не раскрывает каталог, §4 п.4);
   `npm ci` предупреждает про `allow-scripts` (esbuild/protobufjs) — это ожидаемо (§4 п.5).
+* **История сессии (A3.4):** `session_id` без `initialMessages` историю не грузит —
+  сообщения читает `history::read_messages` и передаёт в `start`; файл
+  `<id>.messages.json` бывает и объектом `{messages: […]}` и массивом (§4 п.26); в
+  очищенной истории форма метки может быть `[PERSON_1|nomn]` — сравнивать префикс
+  (§4 п.27). Реестр не держит фоновых потоков: `reap_idle(now)` зовёт вызывающий.
 
 ### 6.4. Окружение и команды (Windows, PowerShell)
 
@@ -511,14 +608,15 @@ cd sidecar\hds_agent; npm test
 | протокол §4.3, транспорт | `crates/hds-agent/src/protocol.rs`, `worker.rs` |
 | шлюз, события, TurnEnd, clear_history | `crates/hds-agent/src/gateway.rs` |
 | словарь исходящего, fail-closed | `filter.rs`, `deanon.rs` |
-| история сессии | `history.rs` (`read_messages`, `clear`) |
+| история сессии | `history.rs` (`read_messages`, `clear`, `latest_session`) |
+| реестр живых процессов (A3.4) | `crates/hds-agent/src/registry.rs` |
 | настройки, пути, реестр проектов, секреты | `settings.rs`, `projects.rs`, `secrets.rs` |
 | окружение процесса, MCP, правила | `env.rs`, `mcp.rs`, `rules.rs` |
 | сборка сессии в CLI | `crates/hds-cli/src/cmd/agent_run.rs` |
-| образцы тестов | `crates/hds-agent/tests/gateway_worker.rs`, `crates/hds-cli/tests/agent_run.rs` |
+| образцы тестов | `crates/hds-agent/tests/gateway_worker.rs`, `crates/hds-agent/tests/lifecycle_worker.rs`, `crates/hds-cli/tests/agent_run.rs` |
 | Node-воркер и его тесты | `sidecar/hds_agent/src/*.ts`, `sidecar/hds_agent/test/*.test.mjs` |
 
-## 7. Промт для A3.4 (копировать целиком в новый чат, режим Act)
+## 7. Промт для A3.4 (выполнен; оставлен для истории)
 
 ```text
 Ты продолжаешь этап A3 («агент в анонимной зоне») проекта hermes-disk-search (hds).
