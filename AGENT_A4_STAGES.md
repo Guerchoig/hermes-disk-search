@@ -564,7 +564,34 @@ sidecar\python\cpython-3.12.14-windows-x86_64-none\python.exe `
 # Повторный проход — 0 изменений; логи: sync-a43-1..6.log, отчёт A43_E2E.md
 ```
 
-## 8. Промт для A4.4 (копировать целиком в новый чат, режим Act)
+## 8. Контекст и промт для A4.4 (копировать целиком в новый чат, режим Act)
+
+### 8.1. Состояние на 20.11.2026 (сверить в новом чате)
+
+* Ветка `agent-privacy-zone`, HEAD — docs-коммит с этим разделом (сверить
+  `git log -1 --oneline`), `origin/agent-privacy-zone` ahead 59, дерево чистое;
+  push не делался.
+* Коммиты фазы: A4.1 — `00da7c54`, A4.2 — `81961936`, A4.3 — `d84571ee`
+  (+ docs после каждого). Журнал, решения и долги — этот файл.
+* Проверки A4.3: `cargo test --workspace` — **122 набора / 813 passed / 0 failed**,
+  fmt/clippy чисто; python **328 OK** (skip 1); `npm test` 23/23.
+  Известный флейк: `agent_acceptance::acceptance_a3_end_to_end` снимает mtime
+  `~/.cline`, а IDE туда пишет; отдельный прогон зелёный (грабля 12/17).
+* Стенд `tools\parity\out\agent_a42` (32 документа): 34 записи, **2 варианта
+  в `pending`** (md-письмо и docx-устав) — готовы для «Принять/Отклонить»;
+  `base\…` + `.images.json`, отчёт `A43_E2E.md`, логи `sync-a43-1..6.log`.
+  `HDS_ROOT` = `root` (junction `sidecar`/`models`/`hds`), `HDS_CONFIG` = `config.yaml`;
+  env стенда снимать перед `cargo test` (грабля 12).
+* Опора кода: `crates/hds-agent/src/mirror.rs` (прямой и обратный проход,
+  приватные `base_path`/`pending_path`/`free_project_name`/`copy_file`/`move_file`),
+  `registry_db.rs` (`list_pending`, `set_status_by_orig`, `set_issued`, `upsert`,
+  `delete`), `crates/hds-cli/src/cmd/agent_sync.rs` (проход + фабрики воркеров),
+  `agent.rs` (диспетчер подкоманд), e2e `crates/hds-cli/tests/agent_sync.rs`
+  (`ENV_LOCK`, mock-воркер). `hds_core::config::replace_file` — 20 попыток по
+  50 мс только на `PermissionDenied`, затем `CoreError::Io` (по нему отличать
+  «файл занят»).
+
+### 8.2. Промт (копировать целиком)
 
 ```text
 Ты — ведущий разработчик проекта hermes-disk-search (Rust + Python/Node sidecar).
@@ -585,7 +612,7 @@ A4.2 (прямой путь) — 81961936, A4.3 (обратный путь, TR-7
 новое основание).
 
 1. Прочитай AGENT_A4_STAGES.md целиком (§2, §3.3, §4.2 — особенно пункты 4, 5,
-   9–15, §5–§7), затем AGENT_A4_HANDOFF_PROMPT.md §4.6 и
+   9–16, §5–§7), затем AGENT_A4_HANDOFF_PROMPT.md §4.6 и
    PLAN_AGENT_PRIVACY_ZONE.md §5.7 (TR-7.6, таблица четырёх ситуаций).
 2. Код: crates/hds-agent/src/{mirror.rs (base/pending/issued — уже есть),
    registry_db.rs (set_status_by_orig/upsert/delete), results.rs — новый модуль
@@ -606,6 +633,9 @@ A4.2 (прямой путь) — 81961936, A4.3 (обратный путь, TR-7
    повторный проход не плодит вариантов/сообщений; e2e стенда agent_a42
    (pending уже собран в A4.3): accept → оригинал = вариант, backup есть,
    образ пересоздан; reject → образ = оригинал, агент получил сообщение.
+   Критерий готовности снаружи: после `accept` в `pending`/`base` пусто,
+   повторный `sync` — 0 изменений; на занятом файле — код 1, понятный текст,
+   состояние не изменилось.
 6. Коммиты: feat(agent): A4.4 — ...; docs(agent): A4.4 закрыт — ...; в сообщении —
    что проверено. Журнал и долги обнови в AGENT_A4_STAGES.md.
 ```
