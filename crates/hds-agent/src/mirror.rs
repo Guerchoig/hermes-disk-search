@@ -329,6 +329,9 @@ pub trait Anonymizer {
     fn read_marker(&mut self, path: &Path) -> Result<hds_anonymize::MarkerInfo, MirrorError>;
     /// `image_map` (В-4): карта `[IMAGE_n]` → часть пакета.
     fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError>;
+    /// `vault_snapshot` (TR-1.6): метки проекта — источник истины валидатора
+    /// (A4.5): «метка выдумана», если её нет в снимке.
+    fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError>;
     /// Обратный акт (TR-7.5): деанонимизировать образ в файл пользователя.
     ///
     /// `restore_from` — снимок основания: из него возвращаются `docProps` и
@@ -396,6 +399,11 @@ impl Anonymizer for hds_anonymize::Client {
 
     fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError> {
         hds_anonymize::Client::image_map(self, path)
+            .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError> {
+        hds_anonymize::Client::snapshot(self, project_id)
             .map_err(|e| MirrorError::Anonymizer(e.to_string()))
     }
 
@@ -525,6 +533,10 @@ impl Anonymizer for LazyAnonymizer {
 
     fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError> {
         Anonymizer::image_map(self.get()?, path)
+    }
+
+    fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError> {
+        Anonymizer::snapshot(self.get()?, project_id)
     }
 
     fn deanonymize_agent(
@@ -1379,7 +1391,12 @@ impl<'a> Mirror<'a> {
                     report.problems.push(format!("{}: {warning}", row.orig_rel));
                 }
                 match self.registry.set_issued(row.id, sha, Status::PendingAccept) {
-                    Ok(()) => report.variants += 1,
+                    Ok(()) => {
+                        report.variants += 1;
+                        // TR-7.8: отчёт «проверить/ок» рядом с вариантом. Ошибка
+                        // валидатора не отменяет выпуск — только строка в problems.
+                        self.validate_variant(row, report);
+                    }
                     Err(e) => {
                         report.errors += 1;
                         report
@@ -1395,6 +1412,49 @@ impl<'a> Mirror<'a> {
                     .problems
                     .push(format!("{}: вариант не собран — {e}", row.orig_rel));
             }
+        }
+    }
+
+    /// Отчёт валидатора к выпущенному варианту (TR-7.8, A4.5).
+    ///
+    /// Вызывается **после** `set_issued`: реестр уже перевёл артефакт в
+    /// `pending_accept`, поэтому сбой проверки ничего не отменяет — он попадает
+    /// в `SyncReport::problems`, а отчёт получает `verdict: "check"`.
+    fn validate_variant(&mut self, row: &Artifact, report: &mut SyncReport) {
+        let project_id = self.project_id.clone();
+        let snapshot = self
+            .anonymizer
+            .snapshot(&project_id)
+            .map_err(|e| e.to_string());
+        let kind = kind_for(&row.orig_rel).unwrap_or(row.kind);
+        let anon_rel = row.anon_rel.clone();
+        let image = self.workspace.join(rel_to_path(&anon_rel));
+        let variant = self.pending_path(&row.orig_rel);
+        let base = self.base_path(&row.orig_rel);
+        let images = self.image_map_path(&base);
+        let outcome = crate::validator::validate(
+            &crate::validator::Inputs {
+                rel: &row.orig_rel,
+                anon_rel: &anon_rel,
+                kind,
+                image: &image,
+                variant: &variant,
+                base: &base,
+                images: &images,
+            },
+            snapshot,
+            self.extractor,
+        );
+        for problem in &outcome.problems {
+            report
+                .problems
+                .push(format!("{}: валидатор — {problem}", row.orig_rel));
+        }
+        if let Err(e) = outcome.report.write(&variant) {
+            report.problems.push(format!(
+                "{}: отчёт валидатора не записан ({e})",
+                row.orig_rel
+            ));
         }
     }
 
@@ -1774,7 +1834,6 @@ pub(crate) mod tests {
         }
     }
 
-    #[derive(Default)]
     pub(crate) struct FakeAnon {
         pub(crate) path_calls: usize,
         pub(crate) image_calls: usize,
@@ -1782,6 +1841,28 @@ pub(crate) mod tests {
         pub(crate) deanon_calls: usize,
         pub(crate) fail_on: Option<String>,
         pub(crate) collide: bool,
+        /// Метки «проекта» для `snapshot` (валидатор A4.5 сверяет с ними).
+        pub(crate) labels: Vec<String>,
+        /// `vault_rev` поддельного хранилища — попадает в отчёт валидатора.
+        pub(crate) rev: i64,
+        /// Заставить `snapshot` упасть (проверка «валидатор не блокирует»).
+        pub(crate) fail_snapshot: bool,
+    }
+
+    impl Default for FakeAnon {
+        fn default() -> FakeAnon {
+            FakeAnon {
+                path_calls: 0,
+                image_calls: 0,
+                text_calls: 0,
+                deanon_calls: 0,
+                fail_on: None,
+                collide: false,
+                labels: vec!["[PERSON_1]".to_string(), "[PERSON_2]".to_string()],
+                rev: 7,
+                fail_snapshot: false,
+            }
+        }
     }
 
     impl FakeAnon {
@@ -1891,6 +1972,26 @@ pub(crate) mod tests {
 
         fn image_map(&mut self, _path: &Path) -> Result<serde_json::Value, MirrorError> {
             Ok(serde_json::json!([]))
+        }
+
+        fn snapshot(&mut self, _project: &str) -> Result<hds_anonymize::Snapshot, MirrorError> {
+            if self.fail_snapshot {
+                return Err(MirrorError::Anonymizer("снимок недоступен".to_string()));
+            }
+            Ok(hds_anonymize::Snapshot {
+                rev: self.rev,
+                labels: self
+                    .labels
+                    .iter()
+                    .map(|label| hds_anonymize::SnapshotLabel {
+                        label: label.clone(),
+                        entity_type: String::new(),
+                        forms: Vec::new(),
+                    })
+                    .collect(),
+                others: Vec::new(),
+                keep: Vec::new(),
+            })
         }
 
         fn deanonymize_agent(
@@ -2631,6 +2732,109 @@ pub(crate) mod tests {
             stand
                 .registry()
                 .by_orig("ТЗ Иванов Иван.md")
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::PendingAccept
+        );
+    }
+
+    /// A4.5: к варианту пишется отчёт валидатора, выпуск не блокируется.
+    #[test]
+    fn variant_gets_validator_report_and_stays_pending() {
+        let stand = Stand::new("validator-report");
+        // Имя без значений: в отчёте пути попадают как есть, а содержимое — нет.
+        stand.write("Письмо.md", "Контакт: Иванов Иван\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        // Агент «выдумал» метку `[PERSON_9]` — это и должен поймать валидатор.
+        stand.write_ws("Письмо.md", "Контакт: [PERSON_1], [PERSON_9]\n");
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.variants, 1, "{report:?}");
+        assert!(report.problems.is_empty(), "{:?}", report.problems);
+
+        let pending = stand.project.join(".hds-agent\\pending\\Письмо.md");
+        assert!(pending.is_file(), "вариант выпущен");
+        let check = crate::validator::Report::read(&pending).expect("отчёт к варианту");
+        assert_eq!(check.rel, "Письмо.md");
+        assert_eq!(check.anon_rel, "Письмо.md");
+        assert_eq!(check.rev, 7, "rev снимка меток попадает в отчёт");
+        assert_eq!(check.verdict, crate::validator::Verdict::Check);
+        let labels = check
+            .checks
+            .iter()
+            .find(|c| c.name == crate::validator::CHECK_LABELS)
+            .expect("проверка меток");
+        assert!(labels.detail.contains("[PERSON_9]"), "{labels:?}");
+
+        // Отчёт не блокирует: статус тот же, что и до A4.5.
+        assert_eq!(
+            stand
+                .registry()
+                .by_orig("Письмо.md")
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::PendingAccept
+        );
+        // В отчёте нет значений исходного документа (I8).
+        let body = fs::read_to_string(crate::validator::report_path(&pending)).unwrap();
+        assert!(!body.contains("Иванов"), "{body}");
+
+        // Повторный проход без правок отчёт не трогает.
+        let before = sha256_file(&crate::validator::report_path(&pending)).unwrap();
+        let again = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(again.changes(), 0, "{again:?}");
+        assert_eq!(
+            sha256_file(&crate::validator::report_path(&pending)).unwrap(),
+            before
+        );
+
+        // Новая правка агента пересобирает вариант — отчёт перезаписывается.
+        stand.write_ws("Письмо.md", "Контакт: [PERSON_1] — правка\n");
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).variants, 1);
+        let check = crate::validator::Report::read(&pending).expect("отчёт переписан");
+        assert_eq!(
+            check.verdict,
+            crate::validator::Verdict::Ok,
+            "{:?}",
+            check.checks
+        );
+    }
+
+    /// A4.5: сбой валидатора не отменяет выпуск — вариант и статус на месте.
+    #[test]
+    fn validator_failure_does_not_block_variant() {
+        let stand = Stand::new("validator-fail");
+        stand.write("Письмо.md", "Контакт: Иванов Иван\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        anon.fail_snapshot = true;
+        stand.write_ws("Письмо.md", "Контакт: [PERSON_1] — правка\n");
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.variants, 1, "{report:?}");
+        assert!(
+            report
+                .problems
+                .iter()
+                .any(|p| p.contains("валидатор") && p.contains("снимок")),
+            "{:?}",
+            report.problems
+        );
+
+        let pending = stand.project.join(".hds-agent\\pending\\Письмо.md");
+        assert!(pending.is_file(), "вариант выпущен несмотря на сбой");
+        let check = crate::validator::Report::read(&pending).expect("отчёт с пометкой");
+        assert_eq!(check.verdict, crate::validator::Verdict::Check);
+        assert_eq!(check.rev, 0);
+        assert_eq!(
+            stand
+                .registry()
+                .by_orig("Письмо.md")
                 .unwrap()
                 .unwrap()
                 .status,

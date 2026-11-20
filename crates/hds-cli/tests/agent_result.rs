@@ -175,9 +175,16 @@ fn make_variant(stand: &Stand, rel: &str, anon_rel: &str, text: &str) {
     );
     fs::write(&image, format!("{marker}\n{text}\n")).unwrap();
     assert_eq!(stand.sync(), 0);
+    let pending = stand.service("pending").join(rel);
+    assert!(pending.is_file(), "вариант должен лежать в pending");
+    // A4.5: рядом с вариантом — отчёт валидатора, без текста документа (I8).
+    let report = PathBuf::from(format!("{}.report.json", pending.to_string_lossy()));
+    assert!(report.is_file(), "отчёт валидатора к варианту");
+    let body = fs::read_to_string(&report).unwrap();
+    assert!(body.contains("\"checks\""), "{body}");
     assert!(
-        stand.service("pending").join(rel).is_file(),
-        "вариант должен лежать в pending"
+        !body.contains("правка агента"),
+        "текст варианта в отчёте: {body}"
     );
 }
 
@@ -232,6 +239,13 @@ fn accept_through_cli_replaces_original_and_keeps_backup() {
 
     // Вариант и основание убраны, образ пересоздан из нового оригинала.
     assert!(!stand.service("pending").join(rel).exists());
+    assert!(
+        !stand
+            .service("pending")
+            .join(format!("{rel}.report.json"))
+            .exists(),
+        "отчёт валидатора не переживает решение"
+    );
     assert!(!stand.service("base").join(rel).exists());
     let image = fs::read_to_string(stand.image(anon_rel)).unwrap();
     assert!(image.contains("[PERSON_1]"), "{image}");

@@ -511,10 +511,14 @@ impl<'a> Mirror<'a> {
         Ok(anon_rel)
     }
 
-    /// Убрать вариант и основание: после решения они не нужны.
+    /// Убрать вариант, основание и отчёт валидатора: после решения они не нужны.
+    ///
+    /// Отчёт (`<rel>.report.json`, A4.5) удаляется **до** чистки каталогов:
+    /// иначе каталог, где остался только отчёт, не считался бы пустым.
     fn cleanup_decision(&self, row: &Artifact) {
         let pending_root = self.project_root.join(SERVICE_DIR).join("pending");
         let pending = self.pending_path(&row.orig_rel);
+        let _ = fs::remove_file(crate::validator::report_path(&pending));
         let _ = fs::remove_file(&pending);
         prune_under(&pending_root, pending.parent());
         let base_root = self.project_root.join(SERVICE_DIR).join("base");
@@ -1133,5 +1137,29 @@ mod tests {
             Some(MessageKind::ConflictDelegated)
         );
         assert_eq!(MessageKind::parse("что-то"), None);
+    }
+
+    /// A4.5: отчёт валидатора уходит вместе с вариантом — любым решением.
+    #[test]
+    fn decision_removes_validator_report() {
+        let report_of =
+            |stand: &Stand| crate::validator::report_path(&service(stand, "pending").join(rel()));
+
+        let (stand, mut anon, mut ext) = stand_with_variant("a45-report-accept");
+        let report = report_of(&stand);
+        assert!(report.is_file(), "отчёт создан вместе с вариантом");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        assert!(!report.exists(), "после «Принять» отчёт не нужен");
+        assert!(!service(&stand, "pending").join(rel()).exists());
+        let left = fs::read_dir(service(&stand, "pending"))
+            .map(|dir| dir.count())
+            .unwrap_or(0);
+        assert_eq!(left, 0, "каталог вариантов пуст: отчёт не пережил решение");
+
+        let (stand, mut anon, mut ext) = stand_with_variant("a45-report-reject");
+        let report = report_of(&stand);
+        assert!(report.is_file(), "отчёт создан вместе с вариантом");
+        decide(&stand, &mut anon, &mut ext, Decision::Reject).expect("отклонить");
+        assert!(!report.exists(), "после «Отклонить» отчёт не нужен");
     }
 }

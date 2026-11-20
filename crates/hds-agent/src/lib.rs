@@ -39,6 +39,7 @@ pub mod results;
 pub mod rules;
 pub mod secrets;
 pub mod settings;
+pub mod validator;
 pub mod worker;
 
 pub use filter::{Filter, FilterError, FilterOutcome, Point, Source};
