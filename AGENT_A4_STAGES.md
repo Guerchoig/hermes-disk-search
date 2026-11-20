@@ -33,7 +33,7 @@
 | # | Под-этап | Результат «снаружи» (критерий) | Состояние |
 |---|---|---|---|
 | **A4.1** | **Реестр артефактов** `data\agent\registry\<P>.db` (TR-7.2) + минимальный `hds agent sync --once` | `cargo test -p hds-agent` покрывает схему/статусы/`mark_seen`/`list_pending`/конкурентную запись; `hds agent sync --once` на пустой папке создаёт реестр и не меняет папку проекта; повторный прогон идемпотентен; `--project` не идентификатор (D21) — отказ | **закрыт 19.11.2026** (§3) |
-| A4.2 | **Прямой путь** TR-7.1/7.3: обход дерева, `wait_stable` (2 с/0,5 с/30 с + `settle_age_sec` — ключи `agent.sync.*`, §4.3, они же в `config.example.yaml`), `anonymize_path` (RPC, метки **без** падежа), docx/xlsx/txt/md/xml → образ, pdf/pptx/mpp → `*.md` через `hds_extract` + `text_image`, `unsupported`/`too_big` по `index.max_file_mb`, удаление/переименование, `_attachments`/`_conflicts` не выпускаются | e2e на стенде 30–50 документов: структура повторена, имена с метками, текстовые образы читаются, повторный прогон — 0 изменений | следующий |
+| A4.2 | **Прямой путь** TR-7.1/7.3: обход дерева, `wait_stable` (2 с/0,5 с/30 с + `settle_age_sec` — ключи `agent.sync.*`, §4.3, они же в `config.example.yaml`), `anonymize_path` (RPC, метки **без** падежа), docx/xlsx/txt/md/xml → образ, pdf/pptx/mpp → `*.md` через `hds_extract` + `text_image`, `unsupported`/`too_big` по `index.max_file_mb`, удаление/переименование, `_attachments`/`_conflicts` не выпускаются | e2e на стенде 30–50 документов: структура повторена, имена с метками, текстовые образы читаются, повторный прогон — 0 изменений | **закрыт 20.11.2026** (§3.2) |
 | A4.3 | **Обратный путь** TR-7.5/7.7: `agent_new` → папка проекта (D5, суффикс ` (агент)`), `agent_changed` → вариант в `.hds-agent\pending` с восстановлением `docProps` и картинок из `.hds-agent\base`, маркер/`artifact_id`, защита от петель (`issued` vs `seen`) | e2e: правка `office_edit` → вариант в `pending`, sha256 оригиналов не изменились (I6); новый файл агента появился в папке; повторный обход не плодит записи | — |
 | A4.4 | **Решения TR-7.6**: «Принять» (backup → `replace_file` → `accepted` → пересоздать образ), три исхода конфликта, «файл занят» (os error 32), «Отклонить», «Сравнить» (данные: пути, для xlsx — ячейки, для md/txt — diff), очередь сообщений агенту `.hds-agent\messages.jsonl` | тесты на копиях: все четыре ситуации + занятый файл (открытый `File` handle), backup и восстановление | — |
 | A4.5 | **Валидатор** TR-7.8: отчёт `pending\<rel>.report.json`, метки вне проекта, несогласованный падеж, непомещённые `[IMAGE_n]`, порог «текст пропал» (40 %) | тест: подделанный вариант ловится, нормальный — нет; отчёт не блокирует выпуск | — |
@@ -49,6 +49,7 @@
 | Под-этап | Состояние | Коммиты | Заметки |
 |---|---|---|---|
 | A4.1 | закрыт 19.11.2026 | `00da7c54` (feat) | `crates/hds-agent`: `registry_db` (10 тестов), `settings::registry_dir/registry_db` (+тест), `rusqlite` в зависимости; `crates/hds-cli`: `agent_sync` + `hds agent sync --once` (4 интеграционных теста). Прогоны: `cargo test --workspace` — **122 набора / 781 passed / 0 failed** (лог `tools/parity/out/a41-cargo-test.log`), fmt/clippy чисто; python 307 OK (skip 1, `a41-python.log`); `npm test` 23/23 (`a41-npm.log`). |
+| A4.2 | закрыт 20.11.2026 | `81961936` (feat) | `crates/hds-agent`: `mirror` (**19 тестов**), `settings::sync_settings` (+2 теста, сверка с `config.example.yaml`), `hds-extract`/`sha2`/`hex` в зависимости; `hds-anonymize`: `anonymize_path`, `anonymize_agent_to`, `text_image_to`; python: `handlers.anonymize_path` + `sanitize_component`, capability, мок и тесты (**9 + 1** тестов); `crates/hds-cli`: проход в `agent sync`, ленивые воркеры, `HDS_EXTRACT_WORKER` (+1 e2e-тест). Прогоны: `cargo test --workspace` — **122 набора / 803 passed / 0 failed** (`a42-cargo-test.log`), fmt/clippy чисто; python **317 OK** (skip 1, `a42-python.log`); `npm test` 23/23 (`a42-npm.log`); e2e стенда — 32 образа, 1 `unsupported`, третий прогон 0 изменений (`tools/parity/out/agent_a42/`). |
 
 ### 3.1. A4.1: что именно сделано (факты)
 
@@ -82,6 +83,64 @@
   `list_pending`, переименование/удаление, переоткрытие и «значения из будущего»,
   **два потока-писателя** (2×20 `upsert` → 40 записей, без потерь). Временные каталоги
   — с `AtomicU32`-счётчиком (§5 п.4 хендоффа).
+
+### 3.2. A4.2: что именно сделано (факты)
+
+* **Модуль `mirror`** (`crates/hds-agent/src/mirror.rs`): `walk_files` (рекурсивно,
+  детерминированно; `.hds-agent`, `_attachments`, `_conflicts`, `~$*`, `*.tmp`,
+  `Thumbs.db` не обходятся; junction/симлинк не обходится, каталог канонизируется
+  и обязан остаться внутри корня), `kind_for` (docx/xlsx/txt/md/xml → `image`;
+  pdf/pptx/mpp → `text_image`), `wait_stable_at` (2 с/0,5 с/30 с; файл старше
+  `settle_age_sec` не ждём), `fit_component` (≤120 символов + 8 hex sha256,
+  расширение сохраняется), `unique_name` (` (2)`, ` (3)`), `sha256_file`.
+* **Идемпотентность — по sha256**: `orig_sha256` (оригинал) и
+  `anon_sha256_issued`/`anon_sha256_seen` (образ). Совпали — `mark_seen` только
+  если `seen` менялся, в БД иначе ничего не пишется; `unsupported`/`too_big`
+  повторно не перезаписываются. Второй прогон: `changes() == 0`.
+* **Переходы**: новый/изменённый оригинал → образ (`Synced`); образ потерян →
+  пересоздаётся; образ изменён агентом при неизменном оригинале →
+  `AgentChanged` (прямой путь **не** затирает); удалённый оригинал →
+  удаление образа и записи, если `seen == issued`, иначе `Orphan`; изменённый
+  оригинал при `PendingAccept`/`Conflict` → `Conflict` без перезаписи;
+  `Orphan` при возврате оригинала возвращается в `Synced`.
+* **Переименование**: файл без записи в реестре, чей sha256 совпал с
+  исчезнувшим оригиналом → образ переименовывается (`fs::rename`), запись —
+  `rename_orig`; повторной анонимизации нет, `artifact_id` сохраняется.
+* **Имена**: RPC `anonymize_path(project_id, path, suffix=false)` — NER по
+  компонентам, `project_label_ex(suffix=False)`, санитайзинг (`<>:"/\|?*`,
+  управляющие, схлопывание пробелов, хвостовые точки); `suffix=true` —
+  **отказ** (в имени нельзя `|`). Обрезка до 120 символов и коллизии — в Rust
+  (там же, где MAX_PATH и реестр), а не в Python.
+* **Клиент/воркеры**: `Client::anonymize_path`, `anonymize_agent_to`,
+  `text_image_to` (явный `out_path` — имя образа задаёт демон); capability
+  `anonymize_path` в `hello`; ленивые `LazyAnonymizer`/`LazyExtractor` —
+  пустая папка и папка без pdf/pptx/mpp Python не поднимают.
+* **CLI**: `hds agent sync --project <P> [--once]` выполняет один проход,
+  печатает счётчики и до 10 проблем (путь+причина, без значений, I8);
+  `HDS_EXTRACT_WORKER` подменяет скрипт извлечения (как
+  `HDS_ANONYMIZE_WORKER` — нужно, когда `HDS_ROOT` указывает на каталог данных).
+* **Тесты**: `mirror` — 19 (классификация/служебные имена, длина/коллизии,
+  sha256-вектор, `wait_stable` Ready/Deferred/Gone, обход, первый проход и
+  статусы, идемпотентность, изменение, переименование, удаление, правка
+  агента, orphan, `too_big`, коллизии, ошибка одного файла, конфликт,
+  удаление `unsupported`); `settings` +2 (дефолты = пример конфига, `0`/мусор);
+  python 9 (`test_anonymize_path.py`) + 1 RPC-тест в `test_anonymize_worker.py`;
+  CLI e2e +1 (mock-воркер: образ с меткой, `unsupported`, служебные не
+  выпущены, повторный прогон не трогает образ).
+* **Стенд** (`tools/parity/out/agent_a42/`): `agent_a0_gen_project.py` — 32
+  документа; прогон 1 — 31 образ + 1 текстовый образ (PDF через `hds_extract`),
+  1 `unsupported` (`project.json`), PDF-образ содержит `<!-- hds-agent/P0001/7 -->`,
+  `<!-- страница 1 -->`, `[ORG_3]`, `[PERSON_2]`, `[MONEY_1]`, keep-terms
+  `1С:ERP`/`REQ-001` на месте; прогон 3 — `33 файла, 32 без изменений,
+  0 изменений`. Структура каталогов повторена, имена с метками
+  (`Устав проекта внедрения [ORG_1].docx`, `Протокол 01 [ORG_8] …`).
+* **Отклонения от буквы плана** (осознанные): (1) `HDS_EXTRACT_WORKER` —
+  новый env (в плане не было; без него стенд с отдельным `HDS_ROOT` не
+  находит скрипт); (2) обрезка имени и коллизии — в Rust, в Python только
+  NER+санитайзинг; (3) тест A4.1 `sync_is_idempotent_and_keeps_rows`
+  переписан под семантику A4.2: запись об исчезнувшем оригинале удаляется
+  (это и есть TR-7.3 п.5), поэтому для проверки «реестр не чистится» в нём
+  теперь готовится живая пара «оригинал ↔ образ» с совпадающими sha256.
 
 ## 4. Решения и долги
 
@@ -253,16 +312,35 @@ COM-автоматизация: нужен установленный Word, не
    один проход, даже без `--once`.
 2. **A4.1: проект обязателен.** `sync` без `--project` отказывает (код 2): обход всех
    проектов сразу — A4.6 (там же `--all` или цикл по `projects.json`).
-3. **A4.1: реестр не чистится сам.** Записи `orphan`/`unsupported` живут до решения
-   пользователя (A5) — демон их только помечает. Удаление проекта (TR-8.1) должно
-   удалять `<P>.db` — A5/A6 вместе с кнопкой «удалить проект».
-4. **A4.2: `create_dir_all` в `ArtifactRegistry::open`** создаёт каталог реестра. Если
-   `<state_dir>` недоступен (права), это видно как `RegistryError::Open` — демон
-   останавливать не нужно, но в UI это будет «реестр недоступен».
-5. **A4.2: `rename_orig` не двигает файлы** — только запись реестра. Файловые операции
-   (переименовать образ, обновить снимок основания) делает демон и фиксирует результат
-   этим вызовом; порядок «файлы → реестр» обязателен, иначе реестр укажет на
-   несуществующий путь.
+3. **A4.2: реестр чистится только там, где это безопасно.** Запись об исчезнувшем
+   оригинале удаляется (`unsupported`/`too_big` — вместе с записью, `synced` — вместе
+   с образом, если `seen == issued`); `orphan` живёт до решения пользователя (A5),
+   `pending_accept`/`conflict`/`agent_changed`/`accepted` прямой путь не трогает.
+   Удаление проекта (TR-8.1) должно удалять `<P>.db` — A5/A6 вместе с кнопкой
+   «удалить проект».
+4. **A4.2: `agent_changed` только фиксируется.** Прямой путь видит, что образ
+   отличается от выпущенного (`seen != issued`), ставит статус и **не** перезаписывает;
+   снимок основания `.hds-agent\base`, вариант в `pending` и восстановление
+   `docProps`/картинок — A4.3.
+5. **A4.2: `pending_accept`/`conflict` — защита без источника.** Записи этих статусов
+   A4.2 не создаёт (кроме `conflict` при уже существующей записи); источник —
+   A4.3/A4.4. Проверено тестом на искусственно выставленном `pending_accept`.
+6. **A4.2: путь к sidecar — от `project_root()`**, то есть от `HDS_ROOT`, если он
+   задан. При `HDS_ROOT`, указывающем на отдельный каталог данных, нужны
+   `HDS_ANONYMIZE_WORKER`/`HDS_EXTRACT_WORKER` (или sidecar рядом с этим каталогом).
+   A4.6: описать в README и/или определять путь от каталога установки.
+7. **A4.2: у зеркала свои правила обхода** (`is_service_dir`/`is_service_file`), а не
+   `index_filter`: TR-7.1 перечисляет служебное явно. При появлении новых служебных
+   каталогов индекса списки синхронизировать (сейчас пересечение — `.hds-agent`,
+   `_conflicts`).
+8. **A4.2: sha256 считается каждый проход** для каждого поддерживаемого файла (кэша
+   size+mtime нет). Это осознанная простота и надёжность; для тысяч файлов —
+   оптимизация в A4.6 быстрым фильтром по размеру/mtime с проверкой sha при
+   изменении.
+9. **A4.2: смена расширения — не переименование.** Файл `a.docx` → `a.bin` даёт
+   удаление образа и запись `unsupported`, хотя sha совпадает: вид артефакта
+   определяется расширением (TR-7.3), а «переименование» ищется только среди
+   поддерживаемых видов.
 
 ### 4.3. Настройки зеркала `agent.sync` — смысл и значения
 
@@ -286,6 +364,7 @@ COM-автоматизация: нужен установленный Word, не
 | Контракт | Правило |
 |---|---|
 | **Метки** | разбор — только `hds_core::labels` (`label_parts`, `gram_to_suffix`, `split_labels`); второй регулярки быть не должно. В **именах файлов** `|` запрещён Windows → метка **без** падежного суффикса: `Встреча с [PERSON_3].docx` |
+| **Имена файлов (A4.2)** | только RPC `anonymize_path(project_id, path, suffix=false)` → `{path, components, labels}`; Python: NER по компонентам + `project_label_ex(suffix=False)` + санитайзинг; Rust: `fit_component` (≤120 + 8 hex sha256), `unique_name` (` (2)`), `text_image` — `<анонимное имя>.<ext>.md`; `suffix=true` — отказ |
 | **Режим `agent`** | `mode:"agent"` + `project_id` (+ `artifact_id`); имя файла сохраняется, маркер `hds-agent/<P>/<id>` в свойствах, картинки тела `strip` → `[IMAGE_n]`, оригинал не меняется |
 | **Текстовые образы** | `<имя>.<ext>.md`, только чтение; `editor`/`apply_patch`/`office_edit` по ним блокирует `hds-guard` (`READONLY_IMAGE`); правка — новым документом (TR-7.3a/D22) |
 | **Опасные пути** | одна матрица: `paths.rs` (Rust) + `guard.ts` (Node): UNC, `\\?\`, `\\.\`, ADS, устройства, `..`, junction |
@@ -319,6 +398,19 @@ COM-автоматизация: нужен установленный Word, не
    (A3 §4 п.27).
 10. **`cargo` пишет в stderr** → в PowerShell это `NativeCommandError`; ориентир —
     `$LASTEXITCODE`, а не красный текст.
+11. **`HDS_ROOT` — одновременно каталог состояния и корень sidecar** (`project_root()`
+    возвращает его первым). Стенд с отдельным каталогом данных без junction
+    `sidecar`/`models`/`hds` даёт «не найден интерпретатор/скрипт воркера» (проверено
+    на e2e A4.2); обход — `HDS_ANONYMIZE_PYTHON`/`HDS_ANONYMIZE_WORKER`/
+    `HDS_EXTRACT_PYTHON`/`HDS_EXTRACT_WORKER` или junction'ы.
+12. **Env стенда живёт в сессии PowerShell** (терминал Cline сохраняется между
+    вызовами): `$env:HDS_ROOT` от e2e уронил `host_resident`
+    (`server — системный каталог состояния`). Перед `cargo test` снимать
+    `HDS_ROOT`/`HDS_CONFIG`/`HDS_*_PYTHON`.
+13. **`*>` в PowerShell пишет UTF-16LE**: `Get-Content` без `-Encoding Unicode` даёт
+    «мохнатый» текст; для чтения логов — `-Encoding Unicode` или перекодировать.
+14. **mock-воркер должен чтить `out_path`**: иначе тест не проверит анонимное имя
+    (в A4.2 `text_image` мока исправлен — пишет в `params["out_path"]`).
 
 ## 7. Окружение и команды
 
@@ -335,46 +427,72 @@ npm --prefix sidecar/hds_agent test
 ```
 
 * `HDS_CONFIG`/`HDS_ROOT` изолируют прогоны; `HDS_ANONYMIZE_PYTHON`,
-  `HDS_ANONYMIZE_WORKER`, `HDS_EXTRACT_PYTHON` — подмена воркеров в тестах.
+  `HDS_ANONYMIZE_WORKER`, `HDS_EXTRACT_PYTHON`, `HDS_EXTRACT_WORKER` — подмена
+  воркеров в тестах и на стендах.
 * Артефакты — только `tools/parity/out/` (гитигнорится).
 * В окружении **не настроена git-identity**: коммиты —
   `git -c user.name='Alex Guerchoig' -c user.email='Guerchoig@gmail.com' commit …`,
-  пути — явным списком.
+  пути — явным списком; сообщение — файлом UTF-8 + `commit -F` (кириллица в
+  командной строке PS 5.1 портится).
 * Машина разработческая: `llm_host`/`hds *` можно останавливать и возвращать.
 
-## 8. Промт для A4.2 (копировать целиком в новый чат, режим Act)
+Стенд A4.2 (повторяемо; артефакты — `tools\parity\out\agent_a42\`):
+
+```powershell
+# 1. Проект (32 документа: docx/xlsx/pdf/md, вымышленные данные)
+sidecar\python\cpython-3.12.14-windows-x86_64-none\python.exe `
+  tools\parity\agent_a0_gen_project.py --out tools\parity\out\agent_a42\project
+# 2. Корень-«установка»: HDS_ROOT с junction sidecar/models/hds (иначе воркеры
+#    не находятся — грабля 11); config.yaml — agent.enabled/root, db_path.
+# 3. Регистрация и прогоны
+$env:HDS_ROOT   = '<repo>\tools\parity\out\agent_a42\root'
+$env:HDS_CONFIG = '<repo>\tools\parity\out\agent_a42\config.yaml'
+target\debug\hds.exe agent project add P0001 --name Pilot --path '<repo>\tools\parity\out\agent_a42\project'
+target\debug\hds.exe agent sync --project P0001 --once   # 31 образ + 1 pdf.md, 1 unsupported
+target\debug\hds.exe agent sync --project P0001 --once   # 0 изменений
+# 4. Перед cargo test — снять env стенда (грабля 12)
+Remove-Item Env:HDS_ROOT, Env:HDS_CONFIG -ErrorAction SilentlyContinue
+```
+
+## 8. Промт для A4.3 (копировать целиком в новый чат, режим Act)
 
 ```text
 Ты — ведущий разработчик проекта hermes-disk-search (Rust + Python/Node sidecar).
-Ветка agent-privacy-zone. Фаза A4 идёт по под-этапам: A4.1 (реестр артефактов) закрыт
-коммитом 00da7c54, журнал и решения — в AGENT_A4_STAGES.md (§2, §3, §4).
+Ветка agent-privacy-zone. Фаза A4 идёт по под-этапам: A4.1 (реестр) закрыт 00da7c54,
+A4.2 (прямой путь, TR-7.1/7.3) — 81961936, журнал и долги — в AGENT_A4_STAGES.md
+(§2, §3.1–3.2, §4, §5–§7).
 
-Задача: под-этап A4.2 — прямой путь зеркала (TR-7.1/7.3): обход папки проекта,
-wait_stable, анонимизация имён (новый RPC anonymize_path), образы docx/xlsx/txt/md/xml
-в mode:"agent", текстовые образы pdf/pptx/mpp через hds_extract + text_image,
-unsupported/too_big, удаление и переименование, служебные каталоги.
+Задача: под-этап A4.3 — обратный путь зеркала (TR-7.5/7.7): маркер
+`hds-agent/<P>/<id>` (read_anon_marker) сверяется с реестром; новый файл агента
+(agent_new, маркера нет или он новый) деанонимизируется и кладётся на своё место
+в папку проекта (суффикс ` (агент)` при занятом имени, D5); изменённый образ
+(agent_changed: seen != issued) → снимок основания `.hds-agent\base\<отн. путь>`
+(+ карта картинок `.images.json`, В-4) → `deanonymize` с восстановлением docProps
+и картинок тела → `.hds-agent\pending\<отн. путь>`, статус pending_accept;
+защита от петель (issued vs seen, orig_sha256 выпуска); удалённый агентом образ
+оригинал не удаляет.
 
-1. Прочитай AGENT_A4_STAGES.md целиком (§2 — нарезка, §4 — решения и долги, §5–§7 —
-   контракты, грабли, команды), затем AGENT_A4_HANDOFF_PROMPT.md §4.1/§4.3 и
-   PLAN_AGENT_PRIVACY_ZONE.md §5.7 (TR-7.1, TR-7.3).
-2. Код: crates/hds-agent/src/registry_db.rs (реестр A4.1 — используй, не переписывай),
-   crates/hds-anonymize/src/client.rs (anonymize/text_image), sidecar/hds_anonymize/
-   {worker,handlers,text_image}.py, crates/hds-index/src/{watch,pipeline}.rs
-   (wait_stable, index_filter), hds-extract (клиент), crates/hds-cli/src/cmd/agent_sync.rs.
-3. Сделай обход идемпотентным: повторный прогон — 0 изменений (сравнение по sha256),
-   реестр обновляется через upsert/set_issued/mark_seen, служебные каталоги
-   (.hds-agent, ~$*, *.tmp, Thumbs.db, _attachments, _conflicts) не выпускаются.
-   Настройки `agent.sync.*` (interval_sec, wait_stable_sec, wait_poll_ms, wait_max_sec,
-   settle_age_sec — смысл в §4.3, они уже в config.example.yaml) читать через
-   `settings::sync_settings`; тест: дефолты совпадают с примером конфига, `0`/мусор
-   дают дефолт.
-4. Python RPC anonymize_path(project_id, path, suffix=false) — аддитивно, с тестом в
-   sidecar/tests; воркер объявляет capability.
+1. Прочитай AGENT_A4_STAGES.md целиком (§2 — нарезка, §3.2 — факты A4.2,
+   §4.2 — долги, §5–§7 — контракты, грабли, команды), затем
+   AGENT_A4_HANDOFF_PROMPT.md §4.4/§4.5 и PLAN_AGENT_PRIVACY_ZONE.md §5.7
+   (TR-7.4/7.5/7.7).
+2. Код: crates/hds-agent/src/mirror.rs (прямой путь A4.2 — дополнить, не
+   переписывать), registry_db.rs (upsert/set_issued/mark_seen/rename_orig),
+   sidecar/hds_anonymize/{file_parser,handlers}.py (read_anon_marker,
+   strip_body_images — нужна карта [IMAGE_n]→media), crates/hds-anonymize/src/
+   {client,protocol}.rs (deanonymize с restore_from/images), sidecar/hds_agent
+   (READONLY_IMAGE уже блокирует правку *.pdf.md/*.pptx.md/*.mpp.md).
+3. Снимок основания: копировать оригинал в `.hds-agent\base\<отн. путь>` только если
+   sha256 оригинала ещё равен orig_sha256; удалять вместе с вариантом; карту
+   картинок хранить в `.images.json` (В-4), формат согласовать со
+   strip_body_images (она должна возвращать карту, а не только число).
+4. Петли: `agent_new` с маркером `hds-agent/<P>/<id>`, чей id уже есть в реестре,
+   повторно не выпускать; после выпуска записать orig_sha256 выпуска (TR-7.7);
+   повторный обход по неизменной зоне — 0 новых файлов в папке проекта.
 5. Проверки: cargo fmt --check, clippy -D warnings, cargo test --workspace,
-   npm test в sidecar/hds_agent, python unittest — и e2e на стенде 30–50 документов
-   (tools/parity/agent_a0_gen_project.py), артефакты в tools/parity/out/.
-6. Коммиты: feat(agent): A4.2 — ...; docs(agent): A4.2 закрыт — ...; в сообщении — что
-   проверено. Журнал и долги обнови в AGENT_A4_STAGES.md.
+   npm test, python unittest; e2e на уже сгенерированном стенде
+   tools/parity/out/agent_a42: правка образа → вариант в `.hds-agent\pending`,
+   sha256 оригиналов не изменились (I6), повторный прогон не плодит записей.
+6. Коммиты: feat(agent): A4.3 — ...; docs(agent): A4.3 закрыт — ...; в сообщении —
+   что проверено. Журнал и долги обнови в AGENT_A4_STAGES.md.
 ```
-
-тесте, закоммитить и записать остаток в §4.
