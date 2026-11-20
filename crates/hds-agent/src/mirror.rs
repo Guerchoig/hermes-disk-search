@@ -1584,18 +1584,12 @@ impl<'a> Mirror<'a> {
         (candidate_rel, candidate)
     }
 
-    pub(crate) fn base_path(&self, orig_rel: &str) -> PathBuf {
-        self.project_root
-            .join(".hds-agent")
-            .join("base")
-            .join(rel_to_path(orig_rel))
+    pub fn base_path(&self, orig_rel: &str) -> PathBuf {
+        crate::results::variant_paths(&self.project_root, orig_rel).base
     }
 
-    pub(crate) fn pending_path(&self, orig_rel: &str) -> PathBuf {
-        self.project_root
-            .join(".hds-agent")
-            .join("pending")
-            .join(rel_to_path(orig_rel))
+    pub fn pending_path(&self, orig_rel: &str) -> PathBuf {
+        crate::results::variant_paths(&self.project_root, orig_rel).pending
     }
 
     pub(crate) fn tmp_root(&self) -> PathBuf {

@@ -1948,6 +1948,20 @@ pub fn route_full(
                 Ok(cfg) => agent::files_json(&cfg, &qp(query, "project").unwrap_or_default()),
                 Err(reply) => reply,
             },
+            // A5.4: панель «Результаты» — варианты, ожидающие решения, и
+            // «Сравнить» (метаданные, отчёт валидатора, diff).
+            ("GET", "/api/agent/pending") => match agent::gate() {
+                Ok(cfg) => agent::pending_json(&cfg, &qp(query, "project").unwrap_or_default()),
+                Err(reply) => reply,
+            },
+            ("GET", "/api/agent/compare") => match agent::gate() {
+                Ok(cfg) => agent::compare_json(
+                    &cfg,
+                    &qp(query, "project").unwrap_or_default(),
+                    &qp(query, "rel").unwrap_or_default(),
+                ),
+                Err(reply) => reply,
+            },
             // A5.2: события хода без SSE (кольцо 500, `after=<seq>`). Транспорт
             // A5.3 добавит `text/event-stream` тем же маршрутом.
             ("GET", "/api/agent/events") => match agent::gate() {
@@ -2083,6 +2097,11 @@ pub fn route_full(
                     // A5.3: ответ на вопрос агента (`ask_user`).
                     "/api/agent/answer" => match agent::gate() {
                         Ok(cfg) => agent::answer_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    // A5.4: решения по вариантам — поверх `Mirror::decide`.
+                    "/api/agent/decision" => match agent::gate() {
+                        Ok(cfg) => agent::decision_json(&cfg, body),
                         Err(reply) => reply,
                     },
                     "/api/index/start" => {

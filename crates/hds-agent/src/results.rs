@@ -63,6 +63,45 @@ pub const CONFLICTS_DIR: &str = "_conflicts";
 /// Суффикс анонимной копии варианта агента в [`CONFLICTS_DIR`].
 pub const CONFLICT_SUFFIX: &str = " (вариант агента)";
 
+/// «Сравнить» (A5.4, В-A5-4): сколько строк diff отдаём вкладке.
+pub const DIFF_MAX_LINES: usize = 200;
+/// «Сравнить»: потолок символов в diff (панель не должна получать мегабайты).
+pub const DIFF_MAX_CHARS: usize = 2000;
+/// Сколько строк каждой стороны участвует в diff (защита от гигантских файлов).
+pub const DIFF_SCAN_LINES: usize = 400;
+/// Потолок длины одной строки diff.
+pub const DIFF_LINE_CHARS: usize = 200;
+
+/// Пути варианта и основания документа (A5.4).
+///
+/// Вкладка «Агент» не склеивает `.hds-agent\pending\…` сама: правило §5
+/// «статусы и пути — только из ядра». Свободная функция, потому что панели
+/// «Результаты» пути нужны без зеркала (воркеры для этого не поднимаются).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariantPaths {
+    /// Оригинал в папке проекта.
+    pub original: PathBuf,
+    /// Вариант агента: `.hds-agent\pending\<rel>`.
+    pub pending: PathBuf,
+    /// Снимок основания: `.hds-agent\base\<rel>`.
+    pub base: PathBuf,
+    /// Отчёт валидатора рядом с вариантом: `<rel>.report.json`.
+    pub report: PathBuf,
+}
+
+/// Пути варианта и основания для относительного пути оригинала.
+pub fn variant_paths(project_root: &Path, orig_rel: &str) -> VariantPaths {
+    let service = project_root.join(SERVICE_DIR);
+    let tail = rel_to_path(orig_rel);
+    let pending = service.join("pending").join(&tail);
+    VariantPaths {
+        original: project_root.join(&tail),
+        report: crate::validator::report_path(&pending),
+        base: service.join("base").join(tail),
+        pending,
+    }
+}
+
 /// Исход конфликта (TR-7.6, случай 2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictChoice {
@@ -108,6 +147,24 @@ pub enum Decision {
 }
 
 impl Decision {
+    /// Разбор решения из тела API: `accept` | `reject` | `conflict`
+    /// (для конфликта обязателен `choice`: `agent` | `new` | `delegate`).
+    ///
+    /// `None` — неизвестное слово: вкладка отвечает 400, а не догадывается.
+    pub fn parse(decision: &str, choice: Option<&str>) -> Option<Decision> {
+        let action = decision.trim().to_ascii_lowercase();
+        // Допускаем и слитую форму `conflict:agent` (так решение пишется в журнал).
+        if let Some(rest) = action.strip_prefix("conflict:") {
+            return ConflictChoice::parse(rest).map(Decision::Conflict);
+        }
+        match action.as_str() {
+            "accept" => Some(Decision::Accept),
+            "reject" => Some(Decision::Reject),
+            "conflict" => ConflictChoice::parse(choice.unwrap_or("")).map(Decision::Conflict),
+            _ => None,
+        }
+    }
+
     /// Строка для журнала и CLI: `accept`, `reject`, `conflict:<choice>`.
     pub fn as_str(self) -> String {
         match self {
@@ -191,6 +248,51 @@ impl DecisionReport {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Одна сторона сравнения: путь, наличие, размер, sha256 и время изменения.
+#[derive(Debug, Clone, Serialize)]
+pub struct FileInfo {
+    /// Абсолютный путь (зона пользователя: папка проекта/workspace).
+    pub path: String,
+    pub exists: bool,
+    pub size: Option<u64>,
+    pub sha256: Option<String>,
+    /// Unix-время изменения (секунды с дробной частью).
+    pub mtime: Option<f64>,
+}
+
+/// Отчёт «Сравнить» (TR-7.6, В-A5-4): метаданные обеих сторон, отчёт
+/// валидатора (TR-7.8) и текстовый diff в пределах [`DIFF_MAX_LINES`] /
+/// [`DIFF_MAX_CHARS`].
+///
+/// Word-compare и ячеечный diff xlsx — фаза 2 (долг §4.2 п.7). Здесь документ
+/// читается через `hds_extract` и сравнивается построчно: для панели этого
+/// достаточно, чтобы увидеть, что именно изменил агент.
+#[derive(Debug, Clone, Serialize)]
+pub struct CompareReport {
+    pub rel: String,
+    pub anon_rel: String,
+    pub kind: Kind,
+    pub status: Status,
+    /// Оригинал в папке проекта.
+    pub original: FileInfo,
+    /// Вариант агента в `.hds-agent\pending`.
+    pub variant: FileInfo,
+    /// Снимок основания.
+    pub base: FileInfo,
+    /// Образ в workspace (то, что видит агент).
+    pub image: FileInfo,
+    /// Отчёт валидатора рядом с вариантом (`None` — отчёта нет).
+    pub report: Option<crate::validator::Report>,
+    /// Совпадает ли содержимое оригинала и варианта (sha256).
+    pub identical: bool,
+    /// Построчный diff: `"  "` — общая строка, `"- "` — было, `"+ "` — стало.
+    pub diff: Vec<String>,
+    /// Diff обрезан лимитом (вкладка подписывает «показано N строк»).
+    pub diff_truncated: bool,
+    /// Почему diff пуст (файл не читается, формата нет в `hds_extract`).
+    pub diff_note: Option<String>,
 }
 
 /// Почему решение не выполнено. Текст — для пользователя: что случилось и что
@@ -618,6 +720,169 @@ impl<'a> Mirror<'a> {
         report.message = Some(message);
         Ok(())
     }
+}
+
+/// Сравнение варианта с оригиналом (A5.4, TR-7.6 «Сравнить»).
+impl<'a> Mirror<'a> {
+    /// Отчёт «Сравнить»: метаданные, отчёт валидатора, построчный diff.
+    ///
+    /// Решения не принимает и ничего не меняет — только читает. Запись
+    /// реестра ищется по относительному пути оригинала: панель «Результаты»
+    /// показывает только то, что зеркало уже выпустило.
+    pub fn compare(&mut self, rel: &str) -> Result<CompareReport, ResultsError> {
+        let rel = normalize_rel(rel)?;
+        let row = self
+            .registry
+            .by_orig(&rel)?
+            .ok_or_else(|| ResultsError::NotFound(rel.clone()))?;
+        let paths = variant_paths(&self.project_root, &row.orig_rel);
+        let image = if row.anon_rel.is_empty() {
+            PathBuf::new()
+        } else {
+            self.workspace.join(rel_to_path(&row.anon_rel))
+        };
+        let original_info = file_info(&paths.original);
+        let variant_info = file_info(&paths.pending);
+        // Diff строится по тексту: md/txt/xml читаются напрямую, docx/xlsx/
+        // pdf/pptx — через `hds_extract` (тот же путь, что у валидатора).
+        let mut diff_note = None;
+        let (diff, diff_truncated) = match (
+            crate::validator::read_text(&paths.original, self.extractor),
+            crate::validator::read_text(&paths.pending, self.extractor),
+        ) {
+            (Ok(old), Ok(new)) => line_diff(&old, &new),
+            (Err(e), _) => {
+                diff_note = Some(format!("оригинал не прочитан: {e}"));
+                (Vec::new(), false)
+            }
+            (_, Err(e)) => {
+                diff_note = Some(format!("вариант не прочитан: {e}"));
+                (Vec::new(), false)
+            }
+        };
+        let identical = matches!(
+            (&original_info.sha256, &variant_info.sha256),
+            (Some(a), Some(b)) if a == b
+        );
+        Ok(CompareReport {
+            rel: row.orig_rel.clone(),
+            anon_rel: row.anon_rel.clone(),
+            kind: row.kind,
+            status: row.status,
+            original: original_info,
+            variant: variant_info,
+            base: file_info(&paths.base),
+            image: file_info(&image),
+            report: crate::validator::Report::read(&paths.pending),
+            identical,
+            diff,
+            diff_truncated,
+            diff_note,
+        })
+    }
+}
+
+/// Метаданные файла: путь, наличие, размер, sha256, время изменения.
+fn file_info(path: &Path) -> FileInfo {
+    let meta = fs::metadata(path).ok();
+    FileInfo {
+        path: path.display().to_string(),
+        exists: meta.is_some(),
+        size: meta.as_ref().map(|m| m.len()),
+        sha256: if path.is_file() {
+            sha256_file(path).ok()
+        } else {
+            None
+        },
+        mtime: meta
+            .as_ref()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs_f64()),
+    }
+}
+
+/// Строки одной стороны diff: обрезка по [`DIFF_SCAN_LINES`] и
+/// [`DIFF_LINE_CHARS`]; `true` — текст пришлось обрезать.
+fn diff_lines(text: &str) -> (Vec<String>, bool) {
+    let mut lines: Vec<String> = text
+        .lines()
+        .take(DIFF_SCAN_LINES)
+        .map(|line| clip_chars(line, DIFF_LINE_CHARS))
+        .collect();
+    let more = text.lines().count() > DIFF_SCAN_LINES;
+    while lines.last().is_some_and(|line| line.is_empty()) {
+        lines.pop();
+    }
+    (lines, more)
+}
+
+/// Строка не длиннее `max` символов (`…` вместо хвоста).
+fn clip_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// Построчный diff (LCS) с жёсткими лимитами: строк ≤ [`DIFF_MAX_LINES`],
+/// символов ≤ [`DIFF_MAX_CHARS`]. Одинаковый текст — пустой diff.
+fn line_diff(old: &str, new: &str) -> (Vec<String>, bool) {
+    if old == new {
+        return (Vec::new(), false);
+    }
+    let (a, a_more) = diff_lines(old);
+    let (b, b_more) = diff_lines(new);
+    let mut truncated = a_more || b_more;
+    let (n, m) = (a.len(), b.len());
+    // LCS по строкам: 400×400 в худшем случае — это 160 тыс. ячеек, дешевле
+    // любого внешнего diff и без новых зависимостей.
+    let mut dp = vec![vec![0u32; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut chars = 0usize;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n || j < m {
+        let prefix;
+        let mut take_a = false;
+        let mut take_b = false;
+        if i < n && j < m && a[i] == b[j] {
+            prefix = "  ";
+            take_a = true;
+            take_b = true;
+        } else if j >= m || (i < n && dp[i + 1][j] >= dp[i][j + 1]) {
+            prefix = "- ";
+            take_a = true;
+        } else {
+            prefix = "+ ";
+            take_b = true;
+        }
+        let line = if take_a { a[i].clone() } else { b[j].clone() };
+        if take_a {
+            i += 1;
+        }
+        if take_b {
+            j += 1;
+        }
+        let cost = line.chars().count() + prefix.len();
+        if out.len() >= DIFF_MAX_LINES || chars + cost > DIFF_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        chars += cost;
+        out.push(format!("{prefix}{line}"));
+    }
+    (out, truncated)
 }
 
 /// Решение возможно только для записи, которая ждёт решения (TR-7.2).
@@ -1161,5 +1426,128 @@ mod tests {
         assert!(report.is_file(), "отчёт создан вместе с вариантом");
         decide(&stand, &mut anon, &mut ext, Decision::Reject).expect("отклонить");
         assert!(!report.exists(), "после «Отклонить» отчёт не нужен");
+    }
+
+    /// A5.4: «Сравнить» — метаданные обеих сторон, отчёт валидатора и diff.
+    #[test]
+    fn compare_reports_metadata_report_and_diff() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a54-compare");
+        let registry = ArtifactRegistry::open(&stand.db).unwrap();
+        let mut mirror = Mirror::new(
+            "P0001",
+            &stand.project,
+            &stand.workspace,
+            &registry,
+            &mut anon,
+            &mut ext,
+            fast(),
+            200,
+        );
+        let report = mirror.compare(&rel()).expect("сравнение");
+        assert_eq!(report.rel, rel());
+        assert_eq!(report.status, Status::PendingAccept);
+        assert!(
+            report.original.exists && report.variant.exists,
+            "{report:?}"
+        );
+        assert!(report.base.exists && report.image.exists, "{report:?}");
+        let original_sha = report.original.sha256.clone().expect("sha оригинала");
+        let variant_sha = report.variant.sha256.clone().expect("sha варианта");
+        assert_ne!(original_sha, variant_sha);
+        assert!(!report.identical);
+        // Отчёт валидатора уже написан зеркалом (TR-7.8): четыре проверки.
+        let validator = report.report.as_ref().expect("отчёт валидатора");
+        assert_eq!(validator.checks.len(), 4, "{validator:?}");
+        assert_eq!(validator.rel, rel());
+        // Diff: удалённая и добавленная строки, без обрезки на маленьком файле.
+        assert!(
+            report.diff.iter().any(|line| line.starts_with("- ")),
+            "{:?}",
+            report.diff
+        );
+        assert!(
+            report.diff.iter().any(|line| line.starts_with("+ ")),
+            "{:?}",
+            report.diff
+        );
+        assert!(!report.diff_truncated);
+        assert!(report.diff_note.is_none(), "{report:?}");
+    }
+
+    /// A5.4: запись без варианта не мешает сравнению (в панели она не видна,
+    /// но маршрут не должен падать), а неизвестный путь — 404-ошибка ядра.
+    #[test]
+    fn compare_tolerates_missing_variant_and_unknown_rel() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a54-compare-missing");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let registry = ArtifactRegistry::open(&stand.db).unwrap();
+        let mut mirror = Mirror::new(
+            "P0001",
+            &stand.project,
+            &stand.workspace,
+            &registry,
+            &mut anon,
+            &mut ext,
+            fast(),
+            200,
+        );
+        let report = mirror.compare(&rel()).expect("сравнение после решения");
+        assert_eq!(report.status, Status::Accepted);
+        assert!(!report.variant.exists, "вариант удалён решением");
+        assert!(report.report.is_none());
+        assert!(
+            report.diff_note.is_some(),
+            "варианта нет — почему diff пуст"
+        );
+
+        let err = mirror.compare("нет такого.md").expect_err("нет записи");
+        assert!(matches!(err, ResultsError::NotFound(_)), "{err}");
+        assert!(mirror.compare("../вне.md").is_err(), "путь наружу запрещён");
+    }
+
+    /// A5.4: лимиты diff — 200 строк и 2 000 символов, `truncated` честный.
+    #[test]
+    fn compare_diff_respects_limits() {
+        let build = |extra: &str| {
+            let mut text = String::new();
+            for i in 0..1000 {
+                text.push_str(&format!("строка {i}\n"));
+            }
+            text.push_str(extra);
+            text
+        };
+        let (diff, truncated) = line_diff(&build(""), &build("добавлено\n"));
+        assert!(truncated, "1000 строк не влезают в лимит");
+        assert!(diff.len() <= DIFF_MAX_LINES, "{}", diff.len());
+        let chars: usize = diff.iter().map(|line| line.chars().count()).sum();
+        assert!(chars <= DIFF_MAX_CHARS, "{chars}");
+
+        // Одинаковый текст — пустой diff, а не 200 строк контекста.
+        let (same, truncated) = line_diff("одно\nдва\n", "одно\nдва\n");
+        assert!(same.is_empty() && !truncated);
+    }
+
+    /// A5.4: разбор `decision`/`choice` из тела маршрута.
+    #[test]
+    fn decision_parse_accepts_known_forms() {
+        assert_eq!(Decision::parse("accept", None), Some(Decision::Accept));
+        assert_eq!(Decision::parse(" Reject ", None), Some(Decision::Reject));
+        assert_eq!(
+            Decision::parse("conflict", Some("agent")),
+            Some(Decision::Conflict(ConflictChoice::Agent))
+        );
+        assert_eq!(
+            Decision::parse("conflict", Some("delegate")),
+            Some(Decision::Conflict(ConflictChoice::Delegate))
+        );
+        // Слитая форма — так решение попадает в журнал (`conflict:<choice>`).
+        assert_eq!(
+            Decision::parse("conflict:new", None),
+            Some(Decision::Conflict(ConflictChoice::New))
+        );
+        assert_eq!(Decision::parse("conflict", None), None);
+        assert_eq!(Decision::parse("conflict", Some("как-нибудь")), None);
+        assert_eq!(Decision::parse("принять", None), None);
+        assert_eq!(Decision::parse("", None), None);
     }
 }

@@ -335,6 +335,22 @@ pub const PAGE: &str = r#"<!doctype html>
    <div id="agstate" class="muted">…</div>
    <pre id="agjournal" class="muted" style="max-height:260px;overflow:auto">…</pre></section>
 
+  <section><h2>Результаты</h2>
+   <div class="row"><button onclick="loadAgentPending()">Обновить</button>
+    <span id="agresmsg" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Вариант</th><th>Статус</th><th>Отчёт</th>
+     <th>Действия</th></tr></thead><tbody id="agresults"></tbody></table>
+   <div id="agcompare" hidden style="margin-top:10px;border:1px solid #3a5a80;border-radius:10px;padding:10px">
+    <div class="row"><b id="agcmpTitle"></b>
+     <button onclick="agentCompareClose()">Закрыть</button>
+     <span id="agcmpmsg" class="muted"></span></div>
+    <div id="agcmpMeta" class="muted" style="margin-top:6px"></div>
+    <div id="agcmpReport" class="muted" style="margin-top:6px"></div>
+    <pre id="agcmpDiff" style="max-height:320px;overflow:auto;white-space:pre-wrap"></pre></div>
+   <div class="muted" style="margin-top:6px">«Принять» заменит оригинал вариантом (копия прежней
+    версии — в <code>.hds-agent\backup</code>); «Отклонить» вернёт образ к оригиналу. Если оригинал
+    открыт в Word/Excel, сервер ответит «файл занят», а вариант останется на месте.</div></section>
+
   <section><h2>Файлы проекта</h2>
    <div class="row"><button onclick="loadAgentFiles()">Обновить</button>
     <span id="agfilesmsg" class="muted"></span></div>
@@ -602,7 +618,7 @@ function selectAgentProject(tr, id){
   document.getElementById('agpreview').textContent='…';
   document.getElementById('agpaths').textContent='';
   agStatus('');
-  loadAgentState(); loadAgentFiles();
+  loadAgentState(); loadAgentFiles(); loadAgentPending();
   agentStreamOpen();
 }
 // --- Реплика (A5.2): предпросмотр, метки, вложения, отправка ---
@@ -1019,6 +1035,122 @@ async function loadAgentFiles(){
       '</td><td>'+esc(f.kind)+'</td><td>'+esc(f.status)+'</td></tr>').join('')||
       '<tr><td colspan="4" class="muted">файлов нет — запустите hds agent sync</td></tr>';
   }catch(e){ m.textContent='ошибка: '+e; }
+}
+// --- Результаты (A5.4): варианты, «Сравнить», решения ---
+let AG_RESULTS=[];
+function agResMsg(text, isErr){
+  const m=document.getElementById('agresmsg');
+  if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
+}
+// Колонка «Отчёт»: вердикт валидатора (TR-7.8) и число проверок.
+function agReportLabel(r){
+  if(!r) return '<span class="muted">нет отчёта</span>';
+  return (r.verdict==='check'? '<span class="err">проверить</span>' : '<span class="ok">ок</span>')+
+    ' <span class="muted">· проверок '+r.checks+'</span>';
+}
+// Действия по варианту; кнопки конфликта — только у статуса `conflict`.
+function agResultActions(i){
+  let html='<button onclick="agentResultOpen('+i+')">Открыть</button> '+
+    '<button onclick="agentCompare('+i+')">Сравнить…</button> '+
+    '<button onclick="agentDecide('+i+',\'accept\')">Принять</button> '+
+    '<button onclick="agentDecide('+i+',\'reject\')">Отклонить</button>';
+  if(AG_RESULTS[i] && AG_RESULTS[i].conflict){
+    html+='<div class="muted" style="margin-top:4px">конфликт:</div>'+
+      '<button onclick="agentDecide('+i+',\'conflict\',\'agent\')">Оставить вариант агента</button> '+
+      '<button onclick="agentDecide('+i+',\'conflict\',\'new\')">Взять новую версию</button> '+
+      '<button onclick="agentDecide('+i+',\'conflict\',\'delegate\')">Поручить агенту</button>';
+  }
+  return html;
+}
+async function loadAgentPending(){
+  const tb=document.getElementById('agresults');
+  if(!AG_ID){ tb.innerHTML=''; AG_RESULTS=[]; agResMsg(''); return; }
+  agResMsg('…');
+  try{
+    const j=await jget('/api/agent/pending?project='+encodeURIComponent(AG_ID));
+    if(j.error){ agResMsg(j.error, true); tb.innerHTML=''; AG_RESULTS=[]; return; }
+    AG_RESULTS=j.items||[];
+    agResMsg('ждут решения: '+AG_RESULTS.length+(j.conflicts? ' · есть копии в _conflicts':''));
+    tb.innerHTML=AG_RESULTS.map(function(it,i){
+      const status=(it.status==='conflict'? '<span class="err">конфликт</span>' : esc(it.status))+
+        (it.variant? '' : ' <span class="muted">(варианта нет)</span>');
+      return '<tr data-i="'+i+'"><td>'+esc(it.rel)+
+        '<div class="muted">'+esc(it.anon_rel)+'</div></td>'+
+        '<td>'+status+'</td><td>'+agReportLabel(it.report)+'</td>'+
+        '<td>'+agResultActions(i)+'</td></tr>';
+    }).join('')||
+      '<tr><td colspan="4" class="muted">вариантов нет — правки агента появятся здесь после hds agent sync</td></tr>';
+  }catch(e){ agResMsg('ошибка: '+e, true); }
+}
+// «Открыть» = показать путь и скопировать (В-A5-7: UI не запускает процессы).
+function agentResultOpen(i){
+  const it=AG_RESULTS[i]; if(!it) return;
+  agentCopyPath(it.variant_path||'');
+}
+async function agentCompare(i){
+  const it=AG_RESULTS[i]; if(!it) return;
+  document.getElementById('agcompare').hidden=false;
+  document.getElementById('agcmpTitle').textContent='Сравнение: '+it.rel;
+  document.getElementById('agcmpMeta').textContent='…';
+  document.getElementById('agcmpReport').textContent='';
+  document.getElementById('agcmpDiff').textContent='';
+  document.getElementById('agcmpmsg').textContent='';
+  try{
+    const j=await jget('/api/agent/compare?project='+encodeURIComponent(AG_ID)+
+      '&rel='+encodeURIComponent(it.rel));
+    if(j.error){
+      document.getElementById('agcmpmsg').innerHTML='<span class="err">'+esc(j.error)+'</span>';
+      document.getElementById('agcmpMeta').textContent='';
+      return;
+    }
+    const line=function(name,f){
+      if(!f || !f.exists) return '<div>'+esc(name)+': <span class="muted">нет файла</span></div>';
+      return '<div>'+esc(name)+': '+esc(f.path)+' · '+fmtSize(f.size)+
+        ' · sha256 '+(f.sha256? esc(f.sha256.slice(0,12)):'?')+'</div>';
+    };
+    document.getElementById('agcmpMeta').innerHTML=
+      '<div>оригинал ↔ вариант'+(j.identical? ' <span class="muted">(файлы совпадают)</span>':'')+
+      '</div>'+line('оригинал', j.original)+line('вариант', j.variant)+
+      line('основание', j.base)+line('образ', j.image);
+    const r=j.report;
+    document.getElementById('agcmpReport').innerHTML = r
+      ? ('<div>отчёт валидатора: '+
+         (r.verdict==='check'? '<span class="err">проверить</span>':'<span class="ok">ок</span>')+
+         ' · rev '+r.rev+'</div>'+(r.checks||[]).map(function(c){
+           return '<div>· '+esc(c.name)+': '+
+             (c.verdict==='check'? '<span class="err">проверить</span>':'ок')+
+             ' — '+esc(c.detail)+'</div>'; }).join(''))
+      : '<div>отчёта валидатора нет</div>';
+    const diff=(j.diff||[]).join(NL);
+    document.getElementById('agcmpDiff').textContent=
+      diff || (j.diff_note? j.diff_note : 'различий в тексте нет');
+    if(j.diff_truncated) document.getElementById('agcmpmsg').textContent='diff обрезан лимитом';
+  }catch(e){
+    document.getElementById('agcmpmsg').innerHTML='<span class="err">ошибка: '+esc(e)+'</span>';
+  }
+}
+function agentCompareClose(){ document.getElementById('agcompare').hidden=true; }
+async function agentDecide(i, decision, choice){
+  const it=AG_RESULTS[i]; if(!it) return;
+  if(decision==='accept' &&
+     !confirm('Принять вариант? Оригинал будет заменён, прежняя версия — в .hds-agent\\backup.')) return;
+  if(decision==='reject' &&
+     !confirm('Отклонить правки агента? Образ вернётся к оригиналу, вариант будет удалён.')) return;
+  if(decision==='conflict' && !confirm('Разрешить конфликт: '+choice+'?')) return;
+  agResMsg('…');
+  try{
+    const body={project:AG_ID, rel:it.rel, decision:decision};
+    if(choice) body.choice=choice;
+    const j=await jpost('/api/agent/decision', body);
+    if(j.error){ agResMsg(j.error, true); return; }
+    let text='решение: '+(j.decision||decision)+(j.status? ' · статус '+j.status:'');
+    if(j.backup) text+=' · backup: '+j.backup;
+    if(j.conflict_copy) text+=' · копия для агента: '+j.conflict_copy;
+    await loadAgentPending();
+    await loadAgentFiles();
+    await loadAgentState();
+    agResMsg(text);
+  }catch(e){ agResMsg('ошибка: '+e, true); }
 }
 async function agentAdd(){
   const m=document.getElementById('agaddmsg'); m.textContent='…';

@@ -9,13 +9,19 @@
 //! журнал демона — пути/счётчики/причины. Значения из базы меток в A5.1 не
 //! читаются вообще (I8).
 
+use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use hds_agent::registry_db::ArtifactRegistry;
+use hds_agent::factory::{anonymizer_factory, extractor_factory};
+use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror};
+use hds_agent::registry_db::{ArtifactRegistry, Status};
+use hds_agent::results::{
+    self, Decision, DecisionReport, ResultsError, BACKUP_SUBDIR, CONFLICTS_DIR, SERVICE_DIR,
+};
 use hds_agent::{projects, settings};
 use hds_core::config::{self, Config, Profile};
 use serde_json::{json, Value};
@@ -431,6 +437,283 @@ pub fn answer_json(cfg: &Config, body: &str) -> Reply {
     }
 }
 
+/// `ResultsError` → HTTP-ответ вкладки (A5.4): 400 — плохой путь,
+/// 404 — нет записи/варианта, 409 — решать нечего, файл занят, конфликт,
+/// 500 — сбой ввода-вывода/реестра/воркера.
+fn results_err(e: ResultsError) -> Reply {
+    match &e {
+        ResultsError::BadPath(_) => err(400, e.to_string()),
+        ResultsError::NotFound(_) | ResultsError::NoVariant(_) => err(404, e.to_string()),
+        ResultsError::WrongStatus { .. }
+        | ResultsError::OriginalChanged(_)
+        | ResultsError::NothingToDelegate(_)
+        | ResultsError::Kind(_) => err(409, e.to_string()),
+        // Текст A4: пользователь должен понять, что закрыть и что не потеряно.
+        ResultsError::Busy(path) => err(
+            409,
+            format!(
+                "файл занят: закройте {} в Word/Excel и повторите — вариант остался в pending, \
+                 статус не изменён",
+                path.display()
+            ),
+        ),
+        ResultsError::Io(..) | ResultsError::Registry(_) | ResultsError::Mirror(_) => {
+            err(500, e.to_string())
+        }
+    }
+}
+
+/// Поднять зеркало по конфигу и выполнить действие над ним.
+///
+/// Воркеры ленивые (`hds_agent::factory`): для «Сравнить» `.md`/`.txt` Python
+/// не запускается вообще, для docx поднимается только извлекатель. Второй
+/// копии фабрик в UI нет (§5 «Воркер агента»).
+fn with_mirror<T>(
+    cfg: &Config,
+    id: &str,
+    action: impl for<'m> FnOnce(&mut Mirror<'m>) -> Result<T, ResultsError>,
+) -> Result<T, Reply> {
+    let Some(rec) = projects::get(cfg, id) else {
+        return Err(err(404, format!("проект {id} не зарегистрирован")));
+    };
+    let project_path = PathBuf::from(&rec.path);
+    if !project_path.is_dir() {
+        return Err(err(404, format!("папка проекта не найдена: {}", rec.path)));
+    }
+    let Some(db) = settings::registry_db(cfg, id) else {
+        return Err(err(
+            400,
+            format!("'{id}' не похож на идентификатор проекта (D21)"),
+        ));
+    };
+    if !db.is_file() {
+        return Err(err(
+            404,
+            format!("проект {id} ещё не зеркалился — запустите hds agent sync"),
+        ));
+    }
+    let registry = ArtifactRegistry::open(&db).map_err(|e| err(500, format!("{e}")))?;
+    let root = hds_core::config::project_root();
+    let mut anonymizer = LazyAnonymizer::new(anonymizer_factory(cfg, &root));
+    let mut extractor = LazyExtractor::new(extractor_factory(&root));
+    let mut mirror = Mirror::from_config(
+        cfg,
+        id,
+        &project_path,
+        &registry,
+        &mut anonymizer,
+        &mut extractor,
+    )
+    .map_err(|e| err(500, format!("{e}")))?;
+    action(&mut mirror).map_err(results_err)
+}
+
+/// `GET /api/agent/pending?project=<P>` — варианты, ждущие решения (TR-7.6).
+///
+/// Источник — реестр: `list_pending()` (`pending_accept`) плюс
+/// `list_by_status(Conflict)`. Для каждого варианта — отчёт валидатора
+/// (TR-7.8) и признаки наличия варианта/основания/копий в `_conflicts`.
+/// Значения документа сюда не попадают: только пути, статусы и вердикты.
+pub fn pending_json(cfg: &Config, project: &str) -> Reply {
+    let id = project.trim();
+    if id.is_empty() {
+        return err(400, "нет параметра project");
+    }
+    let Some(rec) = projects::get(cfg, id) else {
+        return err(404, format!("проект {id} не зарегистрирован"));
+    };
+    let Some(db) = settings::registry_db(cfg, id) else {
+        return err(
+            400,
+            format!("'{id}' не похож на идентификатор проекта (D21)"),
+        );
+    };
+    if !db.is_file() {
+        // Проект ещё не зеркалился — пустой список, а не ошибка (как `files`).
+        return ok(json!({ "count": 0, "pending": 0, "conflicts": false, "items": [] }));
+    }
+    let registry = match ArtifactRegistry::open(&db) {
+        Ok(registry) => registry,
+        Err(e) => return err(500, format!("{e}")),
+    };
+    let mut rows = match registry.list_pending() {
+        Ok(rows) => rows,
+        Err(e) => return err(500, format!("{e}")),
+    };
+    match registry.list_by_status(Status::Conflict) {
+        Ok(conflicts) => rows.extend(conflicts),
+        Err(e) => return err(500, format!("{e}")),
+    }
+    rows.sort_by(|a, b| {
+        a.ts.total_cmp(&b.ts)
+            .then_with(|| a.orig_rel.cmp(&b.orig_rel))
+    });
+    let project_dir = PathBuf::from(&rec.path);
+    let conflicts_root = settings::workspace_dir(cfg, id).map(|w| w.join(CONFLICTS_DIR));
+    let has_conflicts = conflicts_root
+        .as_ref()
+        .map(|dir| {
+            fs::read_dir(dir)
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false);
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let paths = results::variant_paths(&project_dir, &row.orig_rel);
+            let report = hds_agent::validator::Report::read(&paths.pending);
+            json!({
+                "rel": row.orig_rel,
+                "anon_rel": row.anon_rel,
+                "kind": row.kind.as_str(),
+                "status": row.status.as_str(),
+                "ts": row.ts,
+                "conflict": row.status == Status::Conflict,
+                "variant": paths.pending.is_file(),
+                "base": paths.base.is_file(),
+                "conflicts": has_conflicts,
+                "variant_path": paths.pending.display().to_string(),
+                "report": report.map(|r| json!({
+                    "verdict": r.verdict.as_str(),
+                    "checks": r.checks.len(),
+                    "rev": r.rev,
+                })),
+            })
+        })
+        .collect();
+    ok(json!({
+        "count": items.len(),
+        "pending": items.len(),
+        "conflicts": has_conflicts,
+        "items": items,
+    }))
+}
+
+/// `GET /api/agent/compare?project=<P>&rel=<отн. путь>` — `Mirror::compare`.
+pub fn compare_json(cfg: &Config, project: &str, rel: &str) -> Reply {
+    let id = project.trim();
+    if id.is_empty() {
+        return err(400, "нет параметра project");
+    }
+    let rel = rel.trim();
+    if rel.is_empty() {
+        return err(400, "нет параметра rel — относительный путь оригинала");
+    }
+    match with_mirror(cfg, id, |mirror| mirror.compare(rel)) {
+        Ok(report) => match serde_json::to_value(&report) {
+            Ok(value) => ok(value),
+            Err(e) => err(500, format!("сравнение не сериализовано: {e}")),
+        },
+        Err(reply) => reply,
+    }
+}
+
+/// Строка решения для ленты: путь и метки, без содержимого документа (I8).
+fn decision_notice(decision: Decision, report: &DecisionReport) -> String {
+    let action = match decision {
+        Decision::Accept => "принято",
+        Decision::Reject => "отклонено",
+        Decision::Conflict(results::ConflictChoice::Agent) => "конфликт: оставлен вариант агента",
+        Decision::Conflict(results::ConflictChoice::New) => "конфликт: взята новая версия",
+        Decision::Conflict(results::ConflictChoice::Delegate) => "конфликт: поручено агенту",
+    };
+    let mut text = format!("решение по «{}»: {action}", report.orig_rel);
+    if report.backup.is_some() {
+        text.push_str(&format!(
+            "; копия прежней версии — {SERVICE_DIR}\\{BACKUP_SUBDIR}"
+        ));
+    }
+    if let Some(copy) = &report.conflict_copy {
+        text.push_str(&format!("; правки для переноса — {copy}"));
+    }
+    text
+}
+
+/// `POST /api/agent/decision` `{project, rel, decision, choice?}`.
+///
+/// Решения A4 не переписываются: ядро — `Mirror::decide`. Коды ответа:
+/// 400 (тело/решение/путь), 404 (проект/запись/вариант), 409 (файл занят,
+/// решать нечего, конфликт), 503 (зона выключена), 500 (сбой).
+pub fn decision_json(cfg: &Config, body: &str) -> Reply {
+    let value: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return err(400, format!("тело запроса не JSON: {e}")),
+    };
+    let project = value
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let rel = value
+        .get("rel")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let action = value
+        .get("decision")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let choice = value.get("choice").and_then(Value::as_str);
+    if project.is_empty() {
+        return err(400, "нужно поле project");
+    }
+    if rel.is_empty() {
+        return err(400, "нужно поле rel — относительный путь оригинала");
+    }
+    let Some(decision) = Decision::parse(&action, choice) else {
+        return err(
+            400,
+            format!(
+                "decision '{action}' не разобрано: accept|reject|conflict \
+                 (для conflict — choice agent|new|delegate)"
+            ),
+        );
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — решения недоступны",
+        );
+    }
+    match with_mirror(cfg, &project, |mirror| mirror.decide(&rel, decision)) {
+        Ok(report) => {
+            // Лента узнаёт о решении так же, как о «Стоп» — событием `notice`.
+            agent_session::global(cfg).notice(&project, &decision_notice(decision, &report));
+            let mut body = json!({
+                "ok": true,
+                "decision": decision.as_str(),
+                "rel": report.orig_rel,
+                "anon": report.anon_rel,
+                "status": report.status.as_str(),
+                "warnings": report.warnings,
+            });
+            if let Some(backup) = &report.backup {
+                body["backup"] = json!(backup.display().to_string());
+            }
+            if let Some(copy) = &report.conflict_copy {
+                body["conflict_copy"] = json!(copy);
+            }
+            if let Some(message) = &report.message {
+                body["message"] = json!({
+                    "kind": message.kind.as_str(),
+                    "rel": message.rel,
+                    "text": message.text,
+                });
+            }
+            ok(body)
+        }
+        Err(reply) => reply,
+    }
+}
+
 /// `Accept: text/event-stream` — клиент ждёт поток, а не JSON.
 pub fn wants_stream(h: &ReqHeaders) -> bool {
     h.accept
@@ -685,5 +968,44 @@ mod tests {
         assert_eq!(stream_after(&h(None), ""), 0);
         // Мусор в заголовке не ломает поток — падаем на query.
         assert_eq!(stream_after(&h(Some("abc")), "after=5"), 5);
+    }
+
+    /// A5.4: `ResultsError` → код и текст HTTP-ответа вкладки.
+    #[test]
+    fn results_errors_map_to_http_codes() {
+        let code = |e: ResultsError| {
+            let (status, _, body) = results_err(e);
+            let parsed: Value = serde_json::from_str(&body).expect("JSON ошибки");
+            (status, parsed["error"].as_str().unwrap_or("").to_string())
+        };
+        assert_eq!(code(ResultsError::NotFound("Письмо.md".into())).0, 404);
+        assert_eq!(code(ResultsError::NoVariant("Письмо.md".into())).0, 404);
+        assert_eq!(
+            code(ResultsError::WrongStatus {
+                rel: "Письмо.md".into(),
+                status: Status::Accepted,
+            })
+            .0,
+            409
+        );
+        let (status, message) = code(ResultsError::OriginalChanged("Письмо.md".into()));
+        assert_eq!(status, 409);
+        assert!(message.contains("оригинал изменился"), "{message}");
+        assert!(message.contains("conflict --choice"), "{message}");
+        // Занятый файл — текст A4: что закрыть и что не потеряно.
+        let (status, message) = code(ResultsError::Busy(PathBuf::from("C:/Проект/Письмо.docx")));
+        assert_eq!(status, 409);
+        assert!(message.contains("файл занят"), "{message}");
+        assert!(message.contains("вариант остался в pending"), "{message}");
+        assert!(message.contains("Письмо.docx"), "{message}");
+        assert_eq!(code(ResultsError::BadPath("../вне.md".into())).0, 400);
+        assert_eq!(
+            code(ResultsError::Kind(hds_agent::registry_db::Kind::TextImage)).0,
+            409
+        );
+        assert_eq!(
+            code(ResultsError::Io(PathBuf::from("x"), "нет доступа".into())).0,
+            500
+        );
     }
 }
