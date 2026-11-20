@@ -115,8 +115,7 @@ pub fn fit_component(name: &str) -> String {
     format!("{head}-{}{ext}", &hash[..8])
 }
 
-/// `имя.ext` → (`имя`, `.ext`); у имени без точки расширения нет.
-fn split_name(name: &str) -> (&str, &str) {
+pub(crate) fn split_name(name: &str) -> (&str, &str) {
     match name.rfind('.') {
         Some(idx) if idx > 0 => (&name[..idx], &name[idx..]),
         _ => (name, ""),
@@ -653,15 +652,19 @@ impl SyncReport {
 }
 
 /// Один проход зеркала.
+///
+/// Поля `pub(crate)`: решения по вариантам (`.hds-agent\pending`, TR-7.6) живут
+/// в [`crate::results`] и работают с теми же путями и воркерами, что и обход —
+/// второй экземпляр зеркала с другим набором настроек дал бы расхождение.
 pub struct Mirror<'a> {
-    project_id: String,
-    project_root: PathBuf,
-    workspace: PathBuf,
-    registry: &'a ArtifactRegistry,
-    anonymizer: &'a mut dyn Anonymizer,
-    extractor: &'a mut dyn TextExtractor,
-    sync: SyncSettings,
-    max_file_mb: u64,
+    pub(crate) project_id: String,
+    pub(crate) project_root: PathBuf,
+    pub(crate) workspace: PathBuf,
+    pub(crate) registry: &'a ArtifactRegistry,
+    pub(crate) anonymizer: &'a mut dyn Anonymizer,
+    pub(crate) extractor: &'a mut dyn TextExtractor,
+    pub(crate) sync: SyncSettings,
+    pub(crate) max_file_mb: u64,
 }
 
 impl<'a> Mirror<'a> {
@@ -1045,7 +1048,7 @@ impl<'a> Mirror<'a> {
         }
     }
 
-    fn write_image(
+    pub(crate) fn write_image(
         &mut self,
         file: &ScannedFile,
         kind: Kind,
@@ -1074,7 +1077,7 @@ impl<'a> Mirror<'a> {
     }
 
     /// Анонимное имя образа: `anonymize_path` + длина + коллизии (TR-7.1).
-    fn plan_anon_rel(
+    pub(crate) fn plan_anon_rel(
         &mut self,
         rel: &str,
         kind: Kind,
@@ -1156,7 +1159,11 @@ impl<'a> Mirror<'a> {
     fn remove_missing(&self, row: &Artifact) -> Result<MissingAction, MirrorError> {
         if !matches!(
             row.status,
-            Status::Synced | Status::Error | Status::Unsupported | Status::TooBig
+            Status::Synced
+                | Status::Error
+                | Status::Unsupported
+                | Status::TooBig
+                | Status::Accepted
         ) {
             return Ok(MissingAction::Kept);
         }
@@ -1228,7 +1235,11 @@ impl<'a> Mirror<'a> {
             }
             if matches!(
                 row.status,
-                Status::Synced | Status::Error | Status::AgentChanged | Status::PendingAccept
+                Status::Synced
+                    | Status::Error
+                    | Status::AgentChanged
+                    | Status::PendingAccept
+                    | Status::Accepted
             ) {
                 self.make_variant(&row, file, &sha, report);
             }
@@ -1239,7 +1250,7 @@ impl<'a> Mirror<'a> {
             }
             if !matches!(
                 row.status,
-                Status::Synced | Status::Error | Status::AgentChanged
+                Status::Synced | Status::Error | Status::AgentChanged | Status::Accepted
             ) {
                 continue;
             }
@@ -1513,21 +1524,21 @@ impl<'a> Mirror<'a> {
         (candidate_rel, candidate)
     }
 
-    fn base_path(&self, orig_rel: &str) -> PathBuf {
+    pub(crate) fn base_path(&self, orig_rel: &str) -> PathBuf {
         self.project_root
             .join(".hds-agent")
             .join("base")
             .join(rel_to_path(orig_rel))
     }
 
-    fn pending_path(&self, orig_rel: &str) -> PathBuf {
+    pub(crate) fn pending_path(&self, orig_rel: &str) -> PathBuf {
         self.project_root
             .join(".hds-agent")
             .join("pending")
             .join(rel_to_path(orig_rel))
     }
 
-    fn tmp_root(&self) -> PathBuf {
+    pub(crate) fn tmp_root(&self) -> PathBuf {
         self.project_root.join(".hds-agent").join("tmp")
     }
 
@@ -1542,7 +1553,7 @@ impl<'a> Mirror<'a> {
         candidate
     }
 
-    fn image_map_path(&self, base_path: &Path) -> PathBuf {
+    pub(crate) fn image_map_path(&self, base_path: &Path) -> PathBuf {
         PathBuf::from(format!("{}.images.json", base_path.to_string_lossy()))
     }
 
@@ -1569,15 +1580,25 @@ enum MissingAction {
 }
 
 /// Статусы, которыми управляет прямой путь (A4.2).
+///
+/// `accepted` (A4.4) — тоже обычный артефакт: после «Принять» оригинал равен
+/// варианту, образ пересоздан, и пользователь продолжает править документ.
+/// Без этого статуса принятая запись замирала бы: прямой путь её больше не
+/// обслуживал бы, а образ агента после приёма не обновлялся бы никогда.
 fn is_forward_managed(status: Status) -> bool {
     matches!(
         status,
-        Status::Synced | Status::Error | Status::Unsupported | Status::TooBig | Status::Orphan
+        Status::Synced
+            | Status::Error
+            | Status::Unsupported
+            | Status::TooBig
+            | Status::Orphan
+            | Status::Accepted
     )
 }
 
 /// Относительный путь (`a\b\c`) → `PathBuf` без обращения к ФС.
-fn rel_to_path(rel: &str) -> PathBuf {
+pub(crate) fn rel_to_path(rel: &str) -> PathBuf {
     let mut path = PathBuf::new();
     for part in split_path(rel) {
         path.push(part);
@@ -1609,8 +1630,8 @@ fn safe_components(components: &[String]) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Скопировать файл, создав каталоги назначения (снимок основания).
-fn copy_file(src: &Path, dst: &Path) -> Result<(), MirrorError> {
+/// Скопировать файл, создав каталоги назначения (снимок основания, backup TR-7.6).
+pub(crate) fn copy_file(src: &Path, dst: &Path) -> Result<(), MirrorError> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent)
             .map_err(|e| MirrorError::Io(parent.to_path_buf(), e.to_string()))?;
@@ -1632,7 +1653,10 @@ fn move_file(src: &Path, dst: &Path) -> Result<(), MirrorError> {
 
 /// Есть ли у записи образ (кандидат на удаление/переименование).
 fn has_image(row: &Artifact) -> bool {
-    if matches!(row.status, Status::Synced | Status::Error | Status::Orphan) {
+    if matches!(
+        row.status,
+        Status::Synced | Status::Error | Status::Orphan | Status::Accepted
+    ) {
         return true;
     }
     // `unsupported`/`too_big` образа не имеют, но исчезнувший оригинал должен
@@ -1641,13 +1665,16 @@ fn has_image(row: &Artifact) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    //! Тесты зеркала; поддельные воркеры и стенд (`Stand`, `FakeAnon`,
+    //! `FakeExtractor`) переиспользуются тестами [`crate::results`] — второй
+    //! такой же набор держать незачем (A4.4).
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// Тесты одного файла идут параллельно в одном процессе — в имени
     /// временного каталога есть счётчик (A3 §4 п.16).
-    fn tmpdir(name: &str) -> PathBuf {
+    pub(crate) fn tmpdir(name: &str) -> PathBuf {
         static SEQ: AtomicU32 = AtomicU32::new(0);
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("hds-a42-{name}-{}-{seq}", std::process::id()));
@@ -1657,7 +1684,7 @@ mod tests {
     }
 
     /// Настройки без ожиданий: тест не спит `wait_stable_sec` на каждом файле.
-    fn fast() -> SyncSettings {
+    pub(crate) fn fast() -> SyncSettings {
         SyncSettings {
             interval_sec: 5,
             wait_stable_sec: 0,
@@ -1667,15 +1694,15 @@ mod tests {
         }
     }
 
-    struct Stand {
-        root: PathBuf,
-        project: PathBuf,
-        workspace: PathBuf,
-        db: PathBuf,
+    pub(crate) struct Stand {
+        pub(crate) root: PathBuf,
+        pub(crate) project: PathBuf,
+        pub(crate) workspace: PathBuf,
+        pub(crate) db: PathBuf,
     }
 
     impl Stand {
-        fn new(tag: &str) -> Stand {
+        pub(crate) fn new(tag: &str) -> Stand {
             let root = tmpdir(tag);
             let project = root.join("Проект");
             let workspace = root.join("zone").join("P0001").join("workspace");
@@ -1690,29 +1717,29 @@ mod tests {
             }
         }
 
-        fn write(&self, rel: &str, text: &str) {
+        pub(crate) fn write(&self, rel: &str, text: &str) {
             let path = self.project.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
 
-        fn write_ws(&self, rel: &str, text: &str) {
+        pub(crate) fn write_ws(&self, rel: &str, text: &str) {
             let path = self.workspace.join(rel);
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             fs::write(path, text).unwrap();
         }
 
-        fn remove(&self, rel: &str) {
+        pub(crate) fn remove(&self, rel: &str) {
             fs::remove_file(self.project.join(rel)).unwrap();
         }
 
-        fn rename(&self, from: &str, to: &str) {
+        pub(crate) fn rename(&self, from: &str, to: &str) {
             let dst = self.project.join(to);
             fs::create_dir_all(dst.parent().unwrap()).unwrap();
             fs::rename(self.project.join(from), dst).unwrap();
         }
 
-        fn run(
+        pub(crate) fn run(
             &self,
             anon: &mut dyn Anonymizer,
             ext: &mut dyn TextExtractor,
@@ -1732,11 +1759,11 @@ mod tests {
             mirror.sync_once().expect("проход зеркала")
         }
 
-        fn registry(&self) -> ArtifactRegistry {
+        pub(crate) fn registry(&self) -> ArtifactRegistry {
             ArtifactRegistry::open(&self.db).unwrap()
         }
 
-        fn image(&self, rel: &str) -> String {
+        pub(crate) fn image(&self, rel: &str) -> String {
             fs::read_to_string(self.workspace.join(rel)).unwrap_or_default()
         }
     }
@@ -1748,22 +1775,22 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeAnon {
-        path_calls: usize,
-        image_calls: usize,
-        text_calls: usize,
-        deanon_calls: usize,
-        fail_on: Option<String>,
-        collide: bool,
+    pub(crate) struct FakeAnon {
+        pub(crate) path_calls: usize,
+        pub(crate) image_calls: usize,
+        pub(crate) text_calls: usize,
+        pub(crate) deanon_calls: usize,
+        pub(crate) fail_on: Option<String>,
+        pub(crate) collide: bool,
     }
 
     impl FakeAnon {
-        fn map(text: &str) -> String {
+        pub(crate) fn map(text: &str) -> String {
             text.replace("Иванов Иван", "[PERSON_1]")
                 .replace("Петров Пётр", "[PERSON_2]")
         }
 
-        fn deanon(text: &str) -> String {
+        pub(crate) fn deanon(text: &str) -> String {
             text.replace("[PERSON_1]", "Иванов Иван")
                 .replace("[PERSON_2]", "Петров Пётр")
         }
@@ -1876,7 +1903,16 @@ mod tests {
             self.deanon_calls += 1;
             let text = fs::read_to_string(in_path)
                 .map_err(|e| MirrorError::Io(in_path.to_path_buf(), e.to_string()))?;
-            fs::write(out_path, Self::deanon(&text))
+            // Как настоящий воркер (A4.3): маркер образа в вариант не переносится,
+            // иначе «Принять» положило бы маркер в оригинал пользователя.
+            let body = match text.strip_prefix("<!-- hds-agent/") {
+                Some(rest) => match rest.split_once("-->") {
+                    Some((_, tail)) => tail.trim_start_matches(['\r', '\n']).to_string(),
+                    None => text.clone(),
+                },
+                None => text.clone(),
+            };
+            fs::write(out_path, Self::deanon(&body))
                 .map_err(|e| MirrorError::Io(out_path.to_path_buf(), e.to_string()))?;
             Ok(hds_anonymize::DeanonymizeResult {
                 out_path: out_path.to_string_lossy().into_owned(),
@@ -1890,8 +1926,8 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct FakeExtractor {
-        calls: usize,
+    pub(crate) struct FakeExtractor {
+        pub(crate) calls: usize,
     }
 
     impl TextExtractor for FakeExtractor {

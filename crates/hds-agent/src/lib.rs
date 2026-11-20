@@ -35,6 +35,7 @@ pub mod projects;
 pub mod protocol;
 pub mod registry;
 pub mod registry_db;
+pub mod results;
 pub mod rules;
 pub mod secrets;
 pub mod settings;
@@ -45,5 +46,9 @@ pub use gateway::{Gateway, GatewayEvent};
 pub use projects::{Project, Projects};
 pub use registry::AgentRegistry;
 pub use registry_db::{Artifact, ArtifactRegistry, RegistryError};
+pub use results::{
+    ConflictChoice, Decision, DecisionReport, Message, MessageKind, ResultsError, BACKUP_SUBDIR,
+    CONFLICTS_DIR, MESSAGES_FILE,
+};
 pub use settings::{AgentSettings, SyncSettings, UnknownPolicy};
 pub use worker::{HostHandler, Worker, WorkerEvent, WorkerSpec};

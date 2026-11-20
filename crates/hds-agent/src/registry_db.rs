@@ -463,7 +463,32 @@ impl ArtifactRegistry {
         Ok(())
     }
 
-    /// Записать, что видели последним (`anon_sha256_seen`, TR-7.7).
+    /// Записать новое **основание** и образ, пересозданный из него (A4.4).
+    ///
+    /// Отличие от [`ArtifactRegistry::set_issued`]: «Принять», «Взять новую
+    /// версию» и «Поручить агенту» могут пересоздать образ из **другого**
+    /// оригинала (пользователь успел его изменить — TR-7.6, случай 2), поэтому
+    /// `orig_sha256` тоже обновляется. Иначе следующий проход считал бы
+    /// оригинал изменившимся и пересоздавал образ заново — «повторный sync —
+    /// 0 изменений» перестало бы выполняться.
+    pub fn set_baseline(
+        &self,
+        id: i64,
+        orig_sha256: &str,
+        anon_sha256: &str,
+        status: Status,
+    ) -> Result<(), RegistryError> {
+        let changed = self.conn.execute(
+            "UPDATE artifacts SET orig_sha256 = ?2, anon_sha256_issued = ?3, \
+             anon_sha256_seen = ?3, status = ?4, ts = ?5 WHERE id = ?1",
+            params![id, orig_sha256, anon_sha256, status.as_str(), now_ts()],
+        )?;
+        if changed == 0 {
+            return Err(RegistryError::NotFound(id));
+        }
+        Ok(())
+    }
+
     pub fn mark_seen(&self, id: i64, anon_sha256: Option<&str>) -> Result<(), RegistryError> {
         let changed = self.conn.execute(
             "UPDATE artifacts SET anon_sha256_seen = ?2, ts = ?3 WHERE id = ?1",

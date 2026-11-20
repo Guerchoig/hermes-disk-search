@@ -36,6 +36,7 @@ pub mod queue;
 pub mod ratelimit;
 pub mod roots;
 pub mod service;
+pub mod timefmt;
 pub mod tools;
 
 pub use access::{
@@ -59,4 +60,5 @@ pub use roots::{
     agent_enabled, agent_root, agent_roots, default_project, effective_roots, is_agent_project,
     project_for_path, roots_from_cfg, roots_paths, Root,
 };
+pub use timefmt::{civil_from_epoch, fmt_local_datetime, now_epoch, stamp_local};
 pub use tools::{find_ffmpeg, which};

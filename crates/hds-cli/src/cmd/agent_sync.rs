@@ -1,12 +1,13 @@
 //! `hds agent sync` — демон двустороннего зеркала папки проекта и
 //! `<P>\workspace` (фаза A4, TR-7.1…7.9).
 //!
-//! **A4.3 (этот под-этап):** к прямому пути добавлен обратный — маркер
+//! **A4.3:** к прямому пути добавлен обратный — маркер
 //! `hds-agent/<P>/<id>` сверяется с реестром, новый файл агента выпускается в
 //! папку проекта, изменённый образ собирается в `.hds-agent\pending` со
 //! снимком основания; защита от петель — `issued`/`seen` (TR-7.5/7.7).
-//! Варианты TR-7.6 («Принять/Отклонить») — A4.4, валидатор — A4.5,
-//! циклический режим (`--interval`) — A4.6.
+//! **A4.4:** решения по вариантам — отдельная команда `hds agent result`
+//! (`crates/hds-cli/src/cmd/agent_result.rs` + `hds_agent::results`); валидатор —
+//! A4.5, циклический режим (`--interval`) — A4.6.
 //!
 //! Порядок именно такой: реестр — то, что переживает перезапуск и потерю
 //! папки, и без него остальные шаги нечем проверять.
@@ -114,7 +115,10 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
 
 /// Ленивое поднятие воркера анонимизации (Python поднимается только при
 /// первом файле, которому нужен образ).
-fn anonymizer_factory(
+///
+/// `pub(crate)`: тем же способом поднимает воркер `hds agent result` —
+/// пересоздание образа после решения идёт по тому же пути (A4.4).
+pub(crate) fn anonymizer_factory(
     cfg: &Config,
     root: &Path,
 ) -> impl FnMut() -> Result<hds_anonymize::Client, MirrorError> {
@@ -147,7 +151,9 @@ fn anonymizer_factory(
 /// `HDS_EXTRACT_WORKER` подменяет скрипт воркера (диагностика и тесты, как
 /// `HDS_ANONYMIZE_WORKER`): при `HDS_ROOT`, указывающем на каталог данных,
 /// штатный `root/sidecar/...` не находится.
-fn extractor_factory(root: &Path) -> impl FnMut() -> Result<hds_extract::Worker, MirrorError> {
+pub(crate) fn extractor_factory(
+    root: &Path,
+) -> impl FnMut() -> Result<hds_extract::Worker, MirrorError> {
     let root = root.to_path_buf();
     move || {
         let python = hds_extract::discover_python(&root).ok_or_else(|| {

@@ -49,6 +49,7 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
         "run" => crate::cmd::agent_run::cmd_run(cfg, rest),
         "history" => crate::cmd::agent_run::cmd_history(cfg, rest),
         "sync" => crate::cmd::agent_sync::cmd_sync(cfg, rest),
+        "result" => crate::cmd::agent_result::cmd_result(cfg, rest),
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             0
@@ -85,8 +86,12 @@ fn usage() -> String {
      \x20       (Очистить историю: значения в файлах сессии заменяются метками,\n\
      \x20        рядом остаётся бэкап .json.bak; без --session — последняя сессия)\n\
      \x20 sync --project <P> [--once]\n\
-     \x20       (зеркало папки проекта и <P>\\workspace; A4.1 — реестр\n\
-     \x20        data\\agent\\registry\\<P>.db, обход и правки — A4.2…A4.6)"
+     \x20       (зеркало папки проекта и <P>\\workspace; реестр\n\
+     \x20        data\\agent\\registry\\<P>.db, прямой и обратный путь; цикл — A4.6)\n\
+     \x20 result accept|reject|conflict --project <P> --path <отн. путь>\n\
+     \x20       [--choice agent|new|delegate]\n\
+     \x20       (решения по варианту агента: backup и замена оригинала, отклонение\n\
+     \x20        с сообщением агенту, три исхода конфликта; TR-7.6, A4.4)"
         .to_string()
 }
 
