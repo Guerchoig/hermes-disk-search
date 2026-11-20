@@ -11,6 +11,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod agent;
 pub mod anonymize;
 pub mod config_edit;
 pub mod page;
@@ -1927,6 +1928,20 @@ pub fn route_full(
             ("GET", "/api/chat-model") => json_ok(chat_model_json()),
             ("GET", "/api/mcp-http") => json_ok(mcp_http_status()),
             ("GET", "/api/services") => json_ok(services_json()),
+            // A5.1: вкладка «Агент» — проекты, состояние зеркала, файлы реестра.
+            // В серверном профиле — 403 (D20), без конфига — 500.
+            ("GET", "/api/agent/projects") => match agent::gate() {
+                Ok(cfg) => agent::projects_json(&cfg),
+                Err(reply) => reply,
+            },
+            ("GET", "/api/agent/state") => match agent::gate() {
+                Ok(cfg) => agent::state_json(&cfg, &qp(query, "project").unwrap_or_default()),
+                Err(reply) => reply,
+            },
+            ("GET", "/api/agent/files") => match agent::gate() {
+                Ok(cfg) => agent::files_json(&cfg, &qp(query, "project").unwrap_or_default()),
+                Err(reply) => reply,
+            },
             ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
             ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
             ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
@@ -2013,6 +2028,11 @@ pub fn route_full(
                     "/api/access/token/revoke" => access_token_revoke(body, access_path),
                     "/api/access/token/new" => access_token_new(body, access_path),
                     "/api/services" => services_action_json(body),
+                    // A5.1: создание проекта вкладки «Агент» (CSRF уже проверен выше).
+                    "/api/agent/projects" => match agent::gate() {
+                        Ok(cfg) => agent::project_add_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
                     "/api/index/start" => {
                         let full = qp(query, "full")
                             .map(|v| v == "1" || v == "true")

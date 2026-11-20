@@ -25,6 +25,7 @@
 
 pub mod deanon;
 pub mod env;
+pub mod factory;
 pub mod filter;
 pub mod gateway;
 pub mod history;

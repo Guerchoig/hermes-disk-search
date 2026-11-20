@@ -16,6 +16,12 @@ use hds_core::roots::is_agent_project;
 
 use crate::settings;
 
+/// Провайдер по умолчанию (решение В-12): ключ проекта — в `secrets.json`.
+pub const DEFAULT_PROVIDER: &str = "openrouter";
+
+/// Модель по умолчанию (решение В-12).
+pub const DEFAULT_MODEL: &str = "~deepseek/deepseek-flash-latest";
+
 /// Проект анонимной зоны (TR-8.1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Project {

@@ -40,10 +40,9 @@ use hds_anonymize::protocol::Snapshot;
 use hds_anonymize::{Client, ClientConfig, Settings as AnonSettings};
 use hds_core::config::{dig, project_root, Config};
 
-/// Провайдер нового проекта по умолчанию (В-12: предложение исполнителя).
-pub const DEFAULT_PROVIDER: &str = "openrouter";
-/// Модель нового проекта по умолчанию (В-12: как в дымовом прогоне A0).
-pub const DEFAULT_MODEL: &str = "~deepseek/deepseek-flash-latest";
+// Провайдер и модель нового проекта по умолчанию (В-12) — одна копия на весь
+// workspace: `hds_agent::projects`. Здесь реэкспорт, чтобы не менять вызовы.
+pub use hds_agent::projects::{DEFAULT_MODEL, DEFAULT_PROVIDER};
 
 /// Параметры одного прогона.
 #[derive(Debug, Clone, Default)]

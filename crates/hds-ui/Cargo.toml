@@ -14,6 +14,9 @@ hds-extract = { path = "../hds-extract" }
 # клиент Python-воркера, обход папки и GPU-lease.
 hds-anonymize = { path = "../hds-anonymize" }
 hds-llama = { path = "../hds-llama" }
+# A5.1: вкладка «Агент» — проекты, состояние зеркала и файлы реестра поверх
+# `hds-agent` (реестр артефактов, проекты, настройки); чат и решения — A5.2…A5.6.
+hds-agent = { path = "../hds-agent" }
 walkdir.workspace = true
 serde_yaml.workspace = true
 rusqlite.workspace = true

@@ -34,7 +34,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror, MirrorError, SyncReport};
+use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror, SyncReport};
 use hds_agent::registry_db::ArtifactRegistry;
 use hds_agent::{projects, settings};
 use hds_core::config::Config;
@@ -232,66 +232,10 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     code
 }
 
-/// Ленивое поднятие воркера анонимизации (Python поднимается только при
-/// первом файле, которому нужен образ).
-///
-/// `pub(crate)`: тем же способом поднимает воркер `hds agent result` —
-/// пересоздание образа после решения идёт по тому же пути (A4.4).
-pub(crate) fn anonymizer_factory(
-    cfg: &Config,
-    root: &Path,
-) -> impl FnMut() -> Result<hds_anonymize::Client, MirrorError> {
-    let root = root.to_path_buf();
-    let cfg = cfg.clone();
-    move || {
-        let python = hds_anonymize::discover_python(&root).ok_or_else(|| {
-            MirrorError::Config(
-                "не найден интерпретатор воркера анонимизации \
-                 (HDS_ANONYMIZE_PYTHON / sidecar\\venv-anonymize / sidecar\\python)"
-                    .to_string(),
-            )
-        })?;
-        let anon = hds_anonymize::Settings::from_config(&cfg);
-        let mut client_cfg = hds_anonymize::ClientConfig::new(&python, &root);
-        client_cfg.idle_timeout = Duration::from_secs(anon.idle_timeout_sec.max(1));
-        client_cfg.request_timeout = Duration::from_secs(anon.request_timeout_sec.max(60));
-        client_cfg.extra_args = anon.worker_args(&root);
-        if let Some(script) = std::env::var_os("HDS_ANONYMIZE_WORKER") {
-            if !script.is_empty() {
-                client_cfg.script = Some(PathBuf::from(script));
-            }
-        }
-        hds_anonymize::Client::spawn(client_cfg).map_err(|e| MirrorError::Anonymizer(e.to_string()))
-    }
-}
-
-/// Ленивое поднятие воркера извлечения (нужен только pdf/pptx/mpp).
-///
-/// `HDS_EXTRACT_WORKER` подменяет скрипт воркера (диагностика и тесты, как
-/// `HDS_ANONYMIZE_WORKER`): при `HDS_ROOT`, указывающем на каталог данных,
-/// штатный `root/sidecar/...` не находится.
-pub(crate) fn extractor_factory(
-    root: &Path,
-) -> impl FnMut() -> Result<hds_extract::Worker, MirrorError> {
-    let root = root.to_path_buf();
-    move || {
-        let python = hds_extract::discover_python(&root).ok_or_else(|| {
-            MirrorError::Config(
-                "не найден интерпретатор воркера извлечения \
-                 (HDS_EXTRACT_PYTHON / sidecar\\python / .venv)"
-                    .to_string(),
-            )
-        })?;
-        let mut worker_cfg = hds_extract::WorkerConfig::new(&python, &root);
-        worker_cfg.idle_timeout = Duration::from_secs(600);
-        if let Some(script) = std::env::var_os("HDS_EXTRACT_WORKER") {
-            if !script.is_empty() {
-                worker_cfg.script = PathBuf::from(script);
-            }
-        }
-        hds_extract::Worker::spawn(worker_cfg).map_err(|e| MirrorError::Extractor(e.to_string()))
-    }
-}
+/// Фабрики воркеров живут в `hds-agent` (A5.1): тем же способом поднимает
+/// воркеры вкладка «Агент». Здесь — реэкспорт, чтобы не менять вызовы:
+/// `hds agent result` берёт их отсюда с A4.4, демон — тоже.
+pub(crate) use hds_agent::factory::{anonymizer_factory, extractor_factory};
 
 /// Почему кончился цикл демона (и чем закончился разовый проход).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

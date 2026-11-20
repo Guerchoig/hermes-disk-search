@@ -51,6 +51,7 @@ pub const PAGE: &str = r#"<!doctype html>
   <button data-tab="search" class="active" onclick="showTab('search')">Главная</button>
   <button data-tab="transcribe" onclick="showTab('transcribe')">Транскрибация</button>
   <button data-tab="anonymize" onclick="showTab('anonymize')">Анонимизация</button>
+  <button data-tab="agent" onclick="showTab('agent')">Агент</button>
  </nav>
  <div id="tab-search">
  <section><h2>Состояние</h2><div id="status" class="muted">…</div></section>
@@ -292,6 +293,35 @@ pub const PAGE: &str = r#"<!doctype html>
   </div>
  </div>
 
+ <div id="tab-agent" hidden>
+  <section><h2>Проекты</h2>
+   <div class="row"><button onclick="loadAgentProjects()">Обновить</button>
+    <span id="agmsg" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Проект</th><th>Папка</th><th>Файлов</th><th>Ждут решения</th></tr></thead>
+    <tbody id="agrows"></tbody></table>
+   <div class="muted" id="aghint">Выберите проект — ниже состояние зеркала и файлы.</div></section>
+
+  <section><h2>Состояние проекта</h2>
+   <div id="agstate" class="muted">…</div>
+   <pre id="agjournal" class="muted" style="max-height:260px;overflow:auto">…</pre></section>
+
+  <section><h2>Файлы проекта</h2>
+   <div class="row"><button onclick="loadAgentFiles()">Обновить</button>
+    <span id="agfilesmsg" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Оригинал</th><th>Образ</th><th>Вид</th><th>Статус</th></tr></thead>
+    <tbody id="agfiles"></tbody></table></section>
+
+  <section><h2>Новый проект</h2>
+   <div class="row"><span class="muted" style="min-width:120px">Имя</span>
+    <input id="agname" placeholder="Пилот" style="min-width:260px"></div>
+   <div class="row" style="margin-top:6px"><span class="muted" style="min-width:120px">Папка</span>
+    <input id="agpath" placeholder="D:\Проекты\Внедрение ERP" style="min-width:420px"></div>
+   <div class="row" style="margin-top:8px"><button onclick="agentAdd()">Создать проект</button>
+    <span id="agaddmsg" class="muted"></span></div>
+   <div class="muted">Идентификатор (P0001, P0002, …) выдаётся автоматически. Папка проекта — ваша,
+    вне <code>agent.root</code>; после создания запустите зеркало:
+    <code>hds agent sync --project …</code>.</div></section>
+ </div>
 </main>
 <script>
 // M1 T5: админ-токен UI (?token=... сохраняется; сервер-режим требует его).
@@ -507,9 +537,81 @@ async function clineSync(){
       +(r.restart_required?'<div class="warnbox">&#9888;&#65039; '+esc(r.restart_note||'Перезапустите Cline.')+'</div>':'');
   }catch(e){ m.textContent='ошибка: '+e; }
 }
+// --- Агент (A5.1): проекты, состояние зеркала, файлы реестра ---
+let AG_ID='';
+async function loadAgentProjects(){
+  const m=document.getElementById('agmsg'); m.textContent='…';
+  try{
+    const j=await jget('/api/agent/projects');
+    if(j.error){
+      m.innerHTML='<span class="err">'+esc(j.error)+'</span>';
+      if(j.error.indexOf('серверном профиле')>=0){
+        const b=document.querySelector('nav.tabs button[data-tab="agent"]');
+        if(b) b.style.display='none';
+      }
+      return;
+    }
+    m.textContent=(j.enabled? 'зона включена':'зона выключена (agent.enabled: false)')+
+      (j.root? ' · '+j.root : ' · agent.root не задан');
+    const list=j.projects||[];
+    document.getElementById('agrows').innerHTML=list.map(p=>
+      '<tr data-id="'+esc(p.id)+'" onclick="selectAgentProject(this)">'+
+      '<td><b>'+esc(p.id)+'</b> '+esc(p.name)+'</td><td class="muted">'+esc(p.path)+'</td>'+
+      '<td>'+p.files+'</td><td>'+(p.pending? '<b>'+p.pending+'</b>':'0')+'</td></tr>').join('')||
+      '<tr><td colspan="4" class="muted">проектов пока нет — создайте ниже</td></tr>';
+    if(!AG_ID && list.length) selectAgentProject(null, list[0].id);
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+function selectAgentProject(tr, id){
+  AG_ID=id || (tr&&tr.getAttribute('data-id')) || '';
+  Array.prototype.forEach.call(document.querySelectorAll('#agrows tr'), function(r){
+    r.classList.toggle('sel', r.getAttribute('data-id')===AG_ID); });
+  loadAgentState(); loadAgentFiles();
+}
+async function loadAgentState(){
+  const box=document.getElementById('agstate'), pre=document.getElementById('agjournal');
+  if(!AG_ID){ box.textContent='проект не выбран'; pre.textContent=''; return; }
+  try{
+    const j=await jget('/api/agent/state?project='+encodeURIComponent(AG_ID));
+    if(j.error){ box.innerHTML='<span class="err">'+esc(j.error)+'</span>'; pre.textContent=''; return; }
+    box.innerHTML='<pre>'+esc('проект '+j.id+' · '+j.name+'\nпапка: '+j.path+
+      '\nпровайдер: '+j.provider+' · '+j.model+
+      '\nзона: '+(j.root||'не задана')+(j.enabled?'':' (выключена)')+
+      '\nдемон зеркала: '+(j.daemon?'работает':'не запущен')+
+      '\nфайлов: '+j.files+' · ждут решения: '+j.pending)+'</pre>';
+    pre.textContent=(j.journal||[]).join('\n')||'(журнал пуст)';
+  }catch(e){ box.textContent='ошибка: '+e; }
+}
+async function loadAgentFiles(){
+  const tb=document.getElementById('agfiles'), m=document.getElementById('agfilesmsg');
+  if(!AG_ID){ tb.innerHTML=''; m.textContent=''; return; }
+  m.textContent='…';
+  try{
+    const j=await jget('/api/agent/files?project='+encodeURIComponent(AG_ID));
+    if(j.error){ m.innerHTML='<span class="err">'+esc(j.error)+'</span>'; tb.innerHTML=''; return; }
+    m.textContent='файлов: '+j.count+' · ждут решения: '+j.pending;
+    tb.innerHTML=(j.files||[]).map(f=>'<tr><td>'+esc(f.orig)+'</td><td class="muted">'+esc(f.anon)+
+      '</td><td>'+esc(f.kind)+'</td><td>'+esc(f.status)+'</td></tr>').join('')||
+      '<tr><td colspan="4" class="muted">файлов нет — запустите hds agent sync</td></tr>';
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
+async function agentAdd(){
+  const m=document.getElementById('agaddmsg'); m.textContent='…';
+  const name=document.getElementById('agname').value.trim();
+  const path=document.getElementById('agpath').value.trim();
+  try{
+    const j=await jpost('/api/agent/projects',{name:name,path:path});
+    if(j.error){ m.innerHTML='<span class="err">'+esc(j.error)+'</span>'; return; }
+    m.textContent='создан '+(j.project? j.project.id : '');
+    document.getElementById('agname').value='';
+    document.getElementById('agpath').value='';
+    AG_ID='';
+    await loadAgentProjects();
+  }catch(e){ m.textContent='ошибка: '+e; }
+}
 // --- Транскрибация (PLAN_AUTO_TRANSCRIBE §8) ---
 function showTab(name){
-  const tabs=['search','transcribe','anonymize'];
+  const tabs=['search','transcribe','anonymize','agent'];
   const cur=tabs.indexOf(name)>=0? name : 'search';
   tabs.forEach(function(t){
     document.getElementById('tab-'+t).style.display=(t===cur?'block':'none'); });
@@ -521,6 +623,7 @@ function showTab(name){
     if(document.getElementById('anopath').value.trim()) loadAnonLs(); else loadAnonInfo();
     loadAnonStatus();
   }
+  if(cur==='agent'){ loadAgentProjects(); }
 }
 function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
 function fmtTime(t){ return t? new Date(t*1000).toLocaleString() : '—'; }
@@ -828,7 +931,7 @@ function anonShow(j){
 function initTab(){
   let t='search';
   try{ t=localStorage.getItem('hds.tab')||'search'; }catch(e){}
-  const known=['search','transcribe','anonymize'];
+  const known=['search','transcribe','anonymize','agent'];
   showTab(known.indexOf(t)>=0? t : 'search');
   loadWatchDaemon();
 }
