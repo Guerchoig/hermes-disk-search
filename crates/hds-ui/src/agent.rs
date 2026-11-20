@@ -25,6 +25,7 @@ use hds_agent::results::{
     self, append_message, Decision, DecisionReport, MessageKind, ResultsError, BACKUP_SUBDIR,
     CONFLICTS_DIR, SERVICE_DIR,
 };
+use hds_agent::secrets::Secrets;
 use hds_agent::{projects, settings};
 use hds_core::config::{self, Config, Profile};
 use serde_json::{json, Value};
@@ -1302,6 +1303,615 @@ pub fn events_json(cfg: &Config, project: &str, after: Option<u64>, limit: Optio
     ))
 }
 
+// --- Настройки агента (A5.6): провайдер/модель/ключ, фильтр, MCP ----------
+
+/// Пределы числовых настроек панели: вне диапазона — 400, а не тихая подмена.
+pub const SETTINGS_MAX_LIVE: u64 = 8;
+pub const SETTINGS_MIN_TIMEOUT_SEC: u64 = 10;
+pub const SETTINGS_MIN_ASK_SEC: u64 = 30;
+pub const SETTINGS_MIN_STALE_SEC: u64 = 30;
+
+/// YAML-литерал строки (одинарные кавычки, `''` — экранирование).
+fn yaml_str(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn yaml_bool(value: bool) -> String {
+    if value {
+        "true".to_string()
+    } else {
+        "false".to_string()
+    }
+}
+
+/// Строковое поле тела; `None` — поля нет. Не строка — 400.
+fn field_str(value: &Value, key: &str) -> Result<Option<String>, Reply> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => Ok(Some(text.trim().to_string())),
+        Some(_) => Err(err(400, format!("поле {key} должно быть строкой"))),
+    }
+}
+
+/// Логическое поле тела; не `true`/`false` — 400.
+fn field_bool(value: &Value, key: &str) -> Result<Option<bool>, Reply> {
+    match value.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(*flag)),
+        Some(_) => Err(err(400, format!("поле {key} должно быть true/false"))),
+    }
+}
+
+/// Числовое поле с границами; границы попадают в текст ошибки.
+fn field_u64(value: &Value, key: &str, min: u64, max: u64) -> Result<Option<u64>, Reply> {
+    let Some(raw) = value.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let number = raw
+        .as_u64()
+        .ok_or_else(|| err(400, format!("поле {key} должно быть целым числом")))?;
+    if number < min || number > max {
+        return Err(err(
+            400,
+            format!("поле {key}: допустимо от {min} до {max} ({number})"),
+        ));
+    }
+    Ok(Some(number))
+}
+
+/// Имя провайдера — оно же ключ `providers.<name>` в `secrets.json`.
+fn check_provider(name: &str) -> Result<(), Reply> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+    if ok {
+        Ok(())
+    } else {
+        Err(err(
+            400,
+            format!("недопустимое имя провайдера {name:?}: буквы, цифры, '-', '_', '.' (до 64)"),
+        ))
+    }
+}
+
+/// Строка без управляющих символов (модель, ключ, команда, адрес API).
+fn check_line(field: &str, text: &str, max: usize) -> Result<(), Reply> {
+    if text.chars().any(char::is_control) {
+        return Err(err(
+            400,
+            format!("в поле {field} есть управляющие символы или перевод строки"),
+        ));
+    }
+    let len = text.chars().count();
+    if len > max {
+        return Err(err(
+            400,
+            format!("поле {field} длиннее {max} символов ({len})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Разобранное тело `POST /api/agent/settings`.
+#[derive(Debug, Default)]
+struct SettingsRequest {
+    project: String,
+    provider: Option<String>,
+    model: Option<String>,
+    api_key: Option<String>,
+    base_url: Option<String>,
+    /// Правки `config.yaml`: путь внутри `agent` и готовый YAML-литерал.
+    config: Vec<(&'static str, String)>,
+    /// Что меняется — для ответа `applied`.
+    applied: Vec<String>,
+    /// Нужен новый процесс: ключ, провайдер, модель, фильтр, MCP, таймауты.
+    reopen: bool,
+}
+
+impl SettingsRequest {
+    /// Ни одного поля: 400, а не пустая запись.
+    fn is_empty(&self) -> bool {
+        self.provider.is_none()
+            && self.model.is_none()
+            && self.api_key.is_none()
+            && self.base_url.is_none()
+            && self.config.is_empty()
+    }
+}
+
+/// Разбор тела `POST /api/agent/settings`; все проверки — до записи файлов.
+///
+/// Своих регулярок нет: только сравнения строк и подсчёт символов (AG-1).
+fn settings_request(body: &str) -> Result<SettingsRequest, Reply> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| err(400, format!("тело запроса не JSON: {e}")))?;
+    let project = field_str(&value, "project")?.unwrap_or_default();
+    if project.is_empty() {
+        return Err(err(400, "нужно поле project"));
+    }
+    let mut request = SettingsRequest {
+        project,
+        ..SettingsRequest::default()
+    };
+
+    if let Some(provider) = field_str(&value, "provider")? {
+        check_provider(&provider)?;
+        request.provider = Some(provider);
+        request.applied.push("provider".to_string());
+        request.reopen = true;
+    }
+    if let Some(model) = field_str(&value, "model")? {
+        if model.is_empty() {
+            return Err(err(400, "модель не может быть пустой"));
+        }
+        check_line("model", &model, 200)?;
+        request.model = Some(model);
+        request.applied.push("model".to_string());
+        request.reopen = true;
+    }
+    if let Some(key) = field_str(&value, "api_key")? {
+        if key.is_empty() {
+            return Err(err(
+                400,
+                "пустой ключ: введите значение или не отправляйте поле api_key",
+            ));
+        }
+        check_line("api_key", &key, 4096)?;
+        request.api_key = Some(key);
+        request.applied.push("api_key".to_string());
+        request.reopen = true;
+    }
+    if let Some(url) = field_str(&value, "base_url")? {
+        if !url.is_empty() && !(url.starts_with("http://") || url.starts_with("https://")) {
+            return Err(err(
+                400,
+                "base_url должен начинаться с http:// или https:// (пусто — база по умолчанию)",
+            ));
+        }
+        check_line("base_url", &url, 500)?;
+        request.base_url = Some(url);
+        request.applied.push("base_url".to_string());
+        request.reopen = true;
+    }
+
+    // Общие настройки — в `config.yaml` (TR-8.3). Каждая правка означает новый
+    // процесс: план сессии и MCP собираются при открытии шлюза.
+    if let Some(flag) = field_bool(&value, "enabled")? {
+        request.config.push(("enabled", yaml_bool(flag)));
+        request.applied.push("enabled".to_string());
+        request.reopen = true;
+    }
+    if let Some(flag) = field_bool(&value, "preview_outgoing")? {
+        request.config.push(("preview_outgoing", yaml_bool(flag)));
+        request.applied.push("preview_outgoing".to_string());
+    }
+    if let Some(flag) = field_bool(&value, "subagents")? {
+        request.config.push(("subagents", yaml_bool(flag)));
+        request.applied.push("subagents".to_string());
+        request.reopen = true;
+    }
+    if let Some(flag) = field_bool(&value, "egress_log")? {
+        request.config.push(("egress_log", yaml_bool(flag)));
+        request.applied.push("egress_log".to_string());
+        request.reopen = true;
+    }
+    if let Some(policy) = field_str(&value, "unknown")? {
+        let policy = policy.to_ascii_lowercase();
+        if !matches!(policy.as_str(), "label" | "block") {
+            return Err(err(400, "поле unknown: допустимо 'label' или 'block'"));
+        }
+        request.config.push(("filter.unknown", yaml_str(&policy)));
+        request.applied.push("unknown".to_string());
+        request.reopen = true;
+    }
+    if let Some(root) = field_str(&value, "root")? {
+        if root.is_empty() {
+            return Err(err(400, "корень зоны не может быть пустым"));
+        }
+        if !crate::config_edit::looks_abs(&root) {
+            return Err(err(400, "корень зоны должен быть абсолютным путём"));
+        }
+        if !Path::new(&root).is_dir() {
+            return Err(err(400, format!("папка зоны не найдена: {root}")));
+        }
+        request.config.push(("root", yaml_str(&root)));
+        request.applied.push("root".to_string());
+        request.reopen = true;
+    }
+    if let Some(n) = field_u64(&value, "max_live_projects", 1, SETTINGS_MAX_LIVE)? {
+        request.config.push(("max_live_projects", n.to_string()));
+        request.applied.push("max_live_projects".to_string());
+        request.reopen = true;
+    }
+    if let Some(n) = field_u64(
+        &value,
+        "request_timeout_sec",
+        SETTINGS_MIN_TIMEOUT_SEC,
+        3600,
+    )? {
+        request.config.push(("request_timeout_sec", n.to_string()));
+        request.applied.push("request_timeout_sec".to_string());
+        request.reopen = true;
+    }
+    if let Some(n) = field_u64(&value, "ask_timeout_sec", SETTINGS_MIN_ASK_SEC, 3600)? {
+        request.config.push(("ask_timeout_sec", n.to_string()));
+        request.applied.push("ask_timeout_sec".to_string());
+        request.reopen = true;
+    }
+    if let Some(n) = field_u64(
+        &value,
+        "filter_max_stale_sec",
+        SETTINGS_MIN_STALE_SEC,
+        86_400,
+    )? {
+        request.config.push(("filter.max_stale_sec", n.to_string()));
+        request.applied.push("filter_max_stale_sec".to_string());
+        request.reopen = true;
+    }
+    if let Some(proxy) = field_str(&value, "proxy")? {
+        check_line("proxy", &proxy, 500)?;
+        request.config.push(("network.proxy", yaml_str(&proxy)));
+        request.applied.push("proxy".to_string());
+        request.reopen = true;
+    }
+    if let Some(flag) = field_bool(&value, "disk_search_enabled")? {
+        request
+            .config
+            .push(("mcp.disk_search.enabled", yaml_bool(flag)));
+        request.applied.push("disk_search_enabled".to_string());
+        request.reopen = true;
+    }
+    if let Some(flag) = field_bool(&value, "onec_enabled")? {
+        request
+            .config
+            .push(("mcp.onec_buddy.enabled", yaml_bool(flag)));
+        request.applied.push("onec_enabled".to_string());
+        request.reopen = true;
+    }
+    if let Some(command) = field_str(&value, "onec_command")? {
+        check_line("onec_command", &command, 500)?;
+        request
+            .config
+            .push(("mcp.onec_buddy.command", yaml_str(&command)));
+        request.applied.push("onec_command".to_string());
+        request.reopen = true;
+    }
+    if let Some(flag) = field_bool(&value, "tavily_enabled")? {
+        request.config.push(("mcp.tavily.enabled", yaml_bool(flag)));
+        request.applied.push("tavily_enabled".to_string());
+        request.reopen = true;
+    }
+    if let Some(command) = field_str(&value, "tavily_command")? {
+        check_line("tavily_command", &command, 500)?;
+        request
+            .config
+            .push(("mcp.tavily.command", yaml_str(&command)));
+        request.applied.push("tavily_command".to_string());
+        request.reopen = true;
+    }
+    Ok(request)
+}
+
+/// Тело панели настроек: проект, ключи (только «задан/нет»), секция `agent:`,
+/// живые процессы и пути файлов.
+fn settings_body(cfg: &Config, rec: &projects::Project, secrets: &Secrets) -> Value {
+    let agent = settings::settings(cfg);
+    let provider = if !rec.provider.trim().is_empty() {
+        rec.provider.trim().to_string()
+    } else {
+        secrets
+            .project_provider(&rec.id)
+            .unwrap_or_else(|| DEFAULT_PROVIDER.to_string())
+    };
+    let model = if !rec.model.trim().is_empty() {
+        rec.model.trim().to_string()
+    } else {
+        secrets.project_model(&rec.id).unwrap_or_default()
+    };
+    let providers: Vec<Value> = secrets
+        .provider_names()
+        .iter()
+        .map(|name| {
+            json!({
+                "name": name,
+                "key": { "set": secrets.has_provider_key(name) },
+                "base_url": secrets.provider_base_url(name),
+            })
+        })
+        .collect();
+    let live: Vec<Value> = agent_session::global(cfg)
+        .live()
+        .iter()
+        .map(|(project, idle)| json!({ "project": project, "idle_sec": idle }))
+        .collect();
+    json!({
+        "project": {
+            "id": rec.id,
+            "name": rec.name,
+            "provider": provider,
+            "model": model,
+            // Маски значения нет: только признак (В-A5.6-2).
+            "key": { "set": secrets.has_provider_key(&provider) },
+            "base_url": secrets.provider_base_url(&provider),
+        },
+        "providers": providers,
+        "config": {
+            "enabled": agent.enabled,
+            "root": agent.root.as_ref().map(|p| p.display().to_string()),
+            "preview_outgoing": agent.preview_outgoing,
+            "subagents": agent.subagents,
+            "unknown": agent.unknown.as_str(),
+            "egress_log": agent.egress_log,
+            "max_live_projects": agent.max_live_projects,
+            "request_timeout_sec": agent.request_timeout_secs,
+            "ask_timeout_sec": agent.ask_timeout_secs,
+            "filter_max_stale_sec": agent.filter_max_stale_secs,
+            "proxy": agent.proxy,
+            "disk_search_enabled": agent.disk_search_enabled,
+            "onec_enabled": agent.onec_enabled,
+            "onec_command": agent.onec_command,
+            "tavily_enabled": agent.tavily_enabled,
+            "tavily_command": agent.tavily_command,
+        },
+        "live": live,
+        "config_path": config::config_path().display().to_string(),
+        "secrets_path": settings::secrets_file(cfg).display().to_string(),
+    })
+}
+
+/// `GET /api/agent/settings?project=<P>` — панель «Настройки агента».
+///
+/// Ключи отдаются признаком «задан/нет»; значения не попадают ни в ответ, ни
+/// в журналы (TR-8.3, I8).
+pub fn settings_json(cfg: &Config, project: &str) -> Reply {
+    let id = project.trim();
+    if id.is_empty() {
+        return err(400, "нет параметра project");
+    }
+    let Some(rec) = projects::get(cfg, id) else {
+        return err(404, format!("проект {id} не зарегистрирован"));
+    };
+    let secrets = match Secrets::load_or_empty(&settings::secrets_file(cfg)) {
+        Ok(secrets) => secrets,
+        Err(e) => return err(500, e.to_string()),
+    };
+    ok(settings_body(cfg, &rec, &secrets))
+}
+
+/// `POST /api/agent/settings` `{project, provider?, model?, api_key?, …}`.
+///
+/// Порядок: проверки → `projects.json` (провайдер и модель проекта) →
+/// `secrets.json` (ключ; только этот файл, TR-8.3) → `config.yaml` (общие
+/// настройки, редактор сохраняет комментарии) → `unload` шлюза и `notice`.
+pub fn settings_save_json(cfg: &Config, body: &str) -> Reply {
+    let request = match settings_request(body) {
+        Ok(request) => request,
+        Err(reply) => return reply,
+    };
+    if request.is_empty() {
+        return err(
+            400,
+            "нечего менять: укажите provider/model/api_key или настройки agent.*",
+        );
+    }
+    let Some(mut rec) = projects::get(cfg, &request.project) else {
+        return err(
+            404,
+            format!("проект {} не зарегистрирован", request.project),
+        );
+    };
+    let mut changed = false;
+    if let Some(provider) = &request.provider {
+        if rec.provider != *provider {
+            rec.provider = provider.clone();
+            changed = true;
+        }
+    }
+    if let Some(model) = &request.model {
+        if rec.model != *model {
+            rec.model = model.clone();
+            changed = true;
+        }
+    }
+    if changed {
+        let mut registry = match projects::load(cfg) {
+            Ok(registry) => registry,
+            Err(e) => return err(500, e),
+        };
+        registry.upsert(rec.clone());
+        if let Err(e) = projects::save(cfg, &registry) {
+            return err(500, e);
+        }
+    }
+
+    let provider_name = rec.provider.trim().to_string();
+    let mut secrets = match Secrets::load_or_empty(&settings::secrets_file(cfg)) {
+        Ok(secrets) => secrets,
+        Err(e) => return err(500, e.to_string()),
+    };
+    if let Some(key) = &request.api_key {
+        secrets.set_provider_key(&provider_name, key);
+    }
+    if let Some(url) = &request.base_url {
+        secrets.set_provider_base_url(&provider_name, url);
+    }
+    if request.api_key.is_some() || request.base_url.is_some() {
+        if let Err(e) = secrets.save() {
+            return err(500, format!("ключ не сохранён: {e}"));
+        }
+    }
+    if !request.config.is_empty() {
+        let values: Vec<(&str, &str)> = request
+            .config
+            .iter()
+            .map(|(path, literal)| (*path, literal.as_str()))
+            .collect();
+        if let Err(e) = crate::config_edit::set_agent_values(&values) {
+            return err(500, format!("config.yaml: {e}"));
+        }
+    }
+
+    // Конфиг читаем заново: ответ должен показывать то, что записано на диске.
+    let fresh = config::load().unwrap_or_else(|_| cfg.clone());
+    let api = agent_session::global(&fresh);
+    let unloaded = if request.reopen {
+        api.unload(&rec.id)
+    } else {
+        false
+    };
+    if request.reopen {
+        api.notice(
+            &rec.id,
+            "настройки применены — следующий ход откроет сессию заново",
+        );
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    if request
+        .applied
+        .iter()
+        .any(|field| field == "max_live_projects")
+    {
+        warnings.push("max_live_projects применится после перезапуска hds ui".to_string());
+    }
+    let secrets_after = Secrets::load_or_empty(&settings::secrets_file(&fresh)).unwrap_or(secrets);
+    let mut body = settings_body(&fresh, &rec, &secrets_after);
+    if let Some(map) = body.as_object_mut() {
+        map.insert("ok".to_string(), json!(true));
+        map.insert("applied".to_string(), json!(request.applied));
+        map.insert("reopened".to_string(), json!(request.reopen));
+        map.insert("unloaded".to_string(), json!(unloaded));
+        map.insert("warnings".to_string(), json!(warnings));
+    }
+    ok(body)
+}
+
+/// Разбор тела `POST /api/agent/history/clear`: `(project, session?)`.
+///
+/// Идентификатор сессии проверяется `hds_agent::history::valid_session_id`
+/// (буквы/цифры/`-`/`_`, до 128): он подставляется в путь файлов истории.
+fn history_request(body: &str) -> Result<(String, Option<String>), Reply> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| err(400, format!("тело запроса не JSON: {e}")))?;
+    let project = field_str(&value, "project")?.unwrap_or_default();
+    if project.is_empty() {
+        return Err(err(400, "нужно поле project"));
+    }
+    let session = match value.get("session") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) => {
+            let id = id.trim();
+            if id.is_empty() {
+                None
+            } else if hds_agent::history::valid_session_id(id) {
+                Some(id.to_string())
+            } else {
+                return Err(err(
+                    400,
+                    format!("недопустимый идентификатор сессии {id:?}: буквы, цифры, '-' и '_' (до 128)"),
+                ));
+            }
+        }
+        Some(_) => return Err(err(400, "поле session должно быть строкой")),
+    };
+    Ok((project, session))
+}
+
+/// Ошибка `run::clear_history` → HTTP-ответ (A5.6).
+fn history_err(message: &str) -> Reply {
+    if message.contains("недопустимый идентификатор") {
+        err(400, message)
+    } else if message.contains("не зарегистрирован")
+        || message.contains("нет состояния проекта")
+        || message.contains("не найден")
+        || message.contains("укажите --session")
+    {
+        err(404, message)
+    } else if message.contains("словарь недоступен") || message.contains("воркер анонимизации")
+    {
+        err(503, message)
+    } else {
+        err(500, message)
+    }
+}
+
+/// `POST /api/agent/history/clear` `{project, session?}` — TR-6.6.
+///
+/// Порядок: если ход идёт — `stop` (не удалось — 409), затем `unload` шлюза
+/// (SDK не должен держать файлы сессии), затем `run::clear_history` (тот же
+/// путь, что у CLI: словарь фильтра и бэкапы) и `notice` в ленту. В ответе —
+/// `{session, files, backups, replaced}` без значений (В-A5.6-4).
+pub fn history_clear_json(cfg: &Config, body: &str) -> Reply {
+    let (project, session) = match history_request(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    let Some(rec) = projects::get(cfg, &project) else {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    };
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — очистка истории недоступна",
+        );
+    }
+    let api = agent_session::global(cfg);
+    if let Some(turn) = api.existing_turn(&rec.id) {
+        if turn.is_busy() {
+            if let Err(e) = api.stop(cfg, &rec.id) {
+                return err(
+                    409,
+                    format!(
+                        "ход идёт и остановить его не удалось: {} — нажмите «Стоп» и повторите",
+                        e.message
+                    ),
+                );
+            }
+        }
+    }
+    let unloaded = api.unload(&rec.id);
+    let root = hds_core::config::project_root();
+    let (session, outcome) =
+        match hds_agent::run::clear_history(cfg, &rec.id, session.as_deref(), &root) {
+            Ok(result) => result,
+            Err(message) => return history_err(&message),
+        };
+    let files: Vec<String> = outcome
+        .files
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    let backups: Vec<String> = outcome
+        .backups
+        .iter()
+        .map(|p| p.display().to_string())
+        .collect();
+    api.notice(
+        &rec.id,
+        &format!(
+            "история очищена: сессия {session}, файлов {}, замен {}, бэкапов {} — \
+             значения в истории заменены метками",
+            files.len(),
+            outcome.replaced,
+            backups.len()
+        ),
+    );
+    ok(json!({
+        "ok": true,
+        "session": session,
+        "files": files,
+        "backups": backups,
+        "files_count": files.len(),
+        "backups_count": backups.len(),
+        "replaced": outcome.replaced,
+        "unloaded": unloaded,
+    }))
+}
+
 /// Последние `n` строк файла; нет файла или слишком большой — пусто.
 fn tail_lines(path: &Path, n: usize) -> Vec<String> {
     let Ok(meta) = std::fs::metadata(path) else {
@@ -1524,5 +2134,86 @@ mod tests {
         assert_eq!(merge_id_of(&value(r#"{"merge_id":" 7 "}"#)), Some(7));
         assert_eq!(merge_id_of(&value(r#"{"merge_id":"семь"}"#)), None);
         assert_eq!(merge_id_of(&value("{}")), None);
+    }
+
+    /// A5.6: разбор `POST /api/agent/settings` — 400 на всё, что не проходит
+    /// проверку до записи файлов.
+    #[test]
+    fn settings_request_validates_body() {
+        let status = |body: &str| match settings_request(body) {
+            Ok(_) => 200,
+            Err((status, _, _)) => status,
+        };
+        let ok = settings_request(
+            r#"{"project":"P0001","model":"mock-model","api_key":"sk-test-123456",
+                "unknown":"block","ask_timeout_sec":601,"egress_log":true}"#,
+        )
+        .expect("корректное тело");
+        assert_eq!(ok.project, "P0001");
+        assert_eq!(ok.model.as_deref(), Some("mock-model"));
+        assert_eq!(ok.api_key.as_deref(), Some("sk-test-123456"));
+        assert!(ok.reopen, "ключ/модель/фильтр — новый процесс");
+        assert_eq!(
+            ok.config,
+            vec![
+                ("egress_log", "true".to_string()),
+                ("filter.unknown", "'block'".to_string()),
+                ("ask_timeout_sec", "601".to_string()),
+            ]
+        );
+        // Только `preview_outgoing` — процесс перезапускать не нужно.
+        let quiet =
+            settings_request(r#"{"project":"P0001","preview_outgoing":false}"#).expect("корректно");
+        assert!(!quiet.reopen);
+        assert_eq!(
+            quiet.config,
+            vec![("preview_outgoing", "false".to_string())]
+        );
+
+        assert_eq!(status("не json"), 400);
+        assert_eq!(status("{}"), 400);
+        assert_eq!(status(r#"{"project":""}"#), 400);
+        assert_eq!(status(r#"{"project":7}"#), 400);
+        // Тело разбирается, но менять нечего — 400 отдаёт маршрут (`is_empty`).
+        assert!(settings_request(r#"{"project":"P0001"}"#)
+            .unwrap()
+            .is_empty());
+        assert_eq!(status(r#"{"project":"P0001","api_key":""}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","api_key":"a\nb"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","model":"  "}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","provider":"../evil"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","unknown":"keep"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","egress_log":"да"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","ask_timeout_sec":5}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","max_live_projects":99}"#), 400);
+        assert_eq!(
+            status(r#"{"project":"P0001","filter_max_stale_sec":"300"}"#),
+            400
+        );
+        assert_eq!(status(r#"{"project":"P0001","base_url":"ftp://x"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","root":"relative"}"#), 400);
+    }
+
+    /// A5.6: разбор `POST /api/agent/history/clear` — 400 на плохую сессию.
+    #[test]
+    fn history_request_validates_session() {
+        let status = |body: &str| match history_request(body) {
+            Ok(_) => 200,
+            Err((status, _, _)) => status,
+        };
+        let (project, session) =
+            history_request(r#"{"project":"P0001","session":"S-OLD_1"}"#).expect("корректно");
+        assert_eq!(project, "P0001");
+        assert_eq!(session.as_deref(), Some("S-OLD_1"));
+        let (_, session) = history_request(r#"{"project":"P0001","session":"  "}"#).unwrap();
+        assert!(session.is_none(), "пустая сессия — последняя");
+        let (_, session) = history_request(r#"{"project":"P0001"}"#).unwrap();
+        assert!(session.is_none());
+
+        assert_eq!(status("не json"), 400);
+        assert_eq!(status("{}"), 400);
+        assert_eq!(status(r#"{"project":"P0001","session":"..\\..\\x"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","session":"a/b"}"#), 400);
+        assert_eq!(status(r#"{"project":"P0001","session":7}"#), 400);
     }
 }

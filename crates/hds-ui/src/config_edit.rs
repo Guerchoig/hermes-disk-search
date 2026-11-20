@@ -298,8 +298,177 @@ fn set_list(key: &str, items: &[String]) -> Value {
     }
 }
 
+/// Отступ строки в пробелах.
+fn indent_of(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// Конец диапазона детей строки-заголовка: первая непустая строка с отступом
+/// не больше, чем у заголовка (то есть следующая секция/ключ того же уровня).
+fn child_end(lines: &[String], header: usize) -> usize {
+    let indent = indent_of(&lines[header]);
+    let mut end = header + 1;
+    while end < lines.len() {
+        let line = &lines[end];
+        if line.trim().is_empty() {
+            end += 1;
+            continue;
+        }
+        if indent_of(line) <= indent {
+            break;
+        }
+        end += 1;
+    }
+    end
+}
+
+/// Прямой потомок `key:` на уровне `indent` в диапазоне `start..end`.
+fn find_child(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    key: &str,
+    indent: usize,
+) -> Option<usize> {
+    let needle = format!("{key}:");
+    (start..end)
+        .find(|&i| indent_of(&lines[i]) == indent && lines[i].trim_start().starts_with(&needle))
+}
+
+/// Строки блока «ключ(и) → значение» с отступом `indent`.
+fn block_lines(keys: &[&str], literal: &str, indent: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut pad = indent;
+    for (i, key) in keys.iter().enumerate() {
+        if i + 1 == keys.len() {
+            out.push(format!("{}{key}: {literal}", " ".repeat(pad)));
+        } else {
+            out.push(format!("{}{key}:", " ".repeat(pad)));
+            pad += 2;
+        }
+    }
+    out
+}
+
+/// Расставить скаляр по пути `keys` внутри диапазона `start..end`.
+///
+/// Значение — готовый YAML-литерал (`true`, `120`, `'label'`): кавычки и тип
+/// выбирает вызывающий, поэтому здесь нет ни разбора значений, ни регулярок.
+/// Хвостовой комментарий строки сохраняется, отсутствующие подсекции
+/// создаются.
+fn set_nested(
+    lines: &mut Vec<String>,
+    start: usize,
+    end: usize,
+    keys: &[&str],
+    literal: &str,
+    indent: usize,
+) -> Result<(), String> {
+    let Some((key, rest)) = keys.split_first() else {
+        return Err("пустой путь ключа config.yaml".to_string());
+    };
+    match find_child(lines, start, end, key, indent) {
+        Some(index) => {
+            if rest.is_empty() {
+                let tail = &lines[index][indent..];
+                let comment = match tail.split_once('#') {
+                    Some((_, comment)) => format!("  #{comment}"),
+                    None => String::new(),
+                };
+                lines[index] = format!("{}{key}: {literal}{comment}", " ".repeat(indent));
+                return Ok(());
+            }
+            let end = child_end(lines, index);
+            if end == index + 1 {
+                // Подсекция без детей (`filter:` и всё) — вставляем блок.
+                let block = block_lines(rest, literal, indent + 2);
+                for (n, line) in block.into_iter().enumerate() {
+                    lines.insert(index + 1 + n, line);
+                }
+                return Ok(());
+            }
+            set_nested(lines, index + 1, end, rest, literal, indent + 2)
+        }
+        None => {
+            let mut at = end;
+            // Не уезжаем за пустые строки в конце секции.
+            while at > start && lines[at - 1].trim().is_empty() {
+                at -= 1;
+            }
+            let block = block_lines(keys, literal, indent);
+            for (n, line) in block.into_iter().enumerate() {
+                lines.insert(at + n, line);
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Строчный редактор секции: `values` — пары «путь через точку» → «YAML-литерал».
+///
+/// Комментарии и порядок остальных ключей сохраняются (тот же приём, что у
+/// [`replace_scalar`]): меняется ровно строка нужного ключа, отсутствующий
+/// ключ/подсекция вставляется. Нет самой секции — она дописывается в конец
+/// файла.
+pub fn apply_scalars(text: &str, section: &str, values: &[(&str, &str)]) -> Result<String, String> {
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    let head = format!("{section}:");
+    if !lines.iter().any(|line| is_section_header(line, &head)) {
+        if !lines.last().is_some_and(|line| line.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push(head.clone());
+    }
+    for (dotted, literal) in values {
+        let keys: Vec<&str> = dotted.split('.').map(str::trim).collect();
+        if keys.is_empty() || keys.iter().any(|key| key.is_empty()) {
+            return Err(format!("пустой ключ в пути {dotted:?}"));
+        }
+        // Заголовок ищем на каждой итерации: вставка сдвигает номера строк.
+        let header = lines
+            .iter()
+            .position(|line| is_section_header(line, &head))
+            .ok_or_else(|| format!("не найдена секция {section} в config.yaml"))?;
+        let end = child_end(&lines, header);
+        set_nested(&mut lines, header + 1, end, &keys, literal, 2)?;
+    }
+    Ok(lines.join("\n"))
+}
+
+/// Строка — заголовок секции `head` (`agent:`, `agent: # комментарий`).
+fn is_section_header(line: &str, head: &str) -> bool {
+    line == head || line.starts_with(&format!("{head} ")) || line.starts_with(&format!("{head}#"))
+}
+
+/// Записать настройки `agent:` из панели (A5.6): правка и проверка YAML.
+///
+/// Проверка — не «файл разбирается», а «каждый путь получил ровно это
+/// значение»: иначе опечатка в литерале тихо оставила бы панель с одним
+/// значением, а конфиг с другим.
+pub fn set_agent_values(values: &[(&str, &str)]) -> Result<(), String> {
+    if values.is_empty() {
+        return Ok(());
+    }
+    let path = config_path();
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("чтение config.yaml: {e}"))?;
+    let new_text = apply_scalars(&text, "agent", values)?;
+    let parsed =
+        load_text(&new_text).map_err(|e| format!("итоговый config.yaml некорректен: {e}"))?;
+    for (dotted, literal) in values {
+        let expected: Config = serde_yaml::from_str(literal)
+            .map_err(|e| format!("значение {dotted} не разбирается: {e}"))?;
+        let full = format!("agent.{dotted}");
+        if dig(&parsed, &full) != Some(&expected) {
+            return Err(format!(
+                "agent.{dotted} не принял значение {literal} в итоговом config.yaml"
+            ));
+        }
+    }
+    write_config(&new_text)
+}
+
 /// Абсолютен ли путь (Windows `D:\`/`D:/`, UNC, POSIX).
-fn looks_abs(p: &str) -> bool {
+pub(crate) fn looks_abs(p: &str) -> bool {
     let b = p.as_bytes();
     (b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
         || p.starts_with('\\')
@@ -359,5 +528,73 @@ mod tests {
         assert!(
             replace_scalar("index:\n  roots: []\n", "auto_transcribe", "inbox_dir", "x").is_err()
         );
+    }
+
+    /// A5.6: правка `agent:` сохраняет комментарии (хвостовые и отдельные
+    /// строки) и не трогает соседние ключи/секции.
+    #[test]
+    fn agent_scalars_keep_comments_and_neighbours() {
+        let src = "agent:\n  enabled: true          # зона включена\n  root: 'D:\\zone'\n  \
+                   # filter.max_stale_sec: 300  # комментарий по умолчанию\n  \
+                   ask_timeout_sec: 600   # хвост\n\nllm:\n  temperature: 0.2\n";
+        let out = apply_scalars(
+            src,
+            "agent",
+            &[
+                ("ask_timeout_sec", "601"),
+                ("filter.unknown", "'block'"),
+                ("egress_log", "true"),
+            ],
+        )
+        .unwrap();
+        assert!(
+            out.contains("  enabled: true          # зона включена"),
+            "{out}"
+        );
+        assert!(out.contains("  ask_timeout_sec: 601  # хвост"), "{out}");
+        assert!(
+            out.contains("  # filter.max_stale_sec: 300  # комментарий по умолчанию"),
+            "{out}"
+        );
+        assert!(out.contains("  filter:\n    unknown: 'block'"), "{out}");
+        assert!(out.contains("  egress_log: true"), "{out}");
+        assert!(out.contains("\nllm:\n  temperature: 0.2"), "{out}");
+        // Итоговый файл валиден и значения видны `dig`.
+        let cfg: Config = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(
+            dig(&cfg, "agent.filter.unknown").and_then(|v| v.as_str()),
+            Some("block")
+        );
+        assert_eq!(
+            dig(&cfg, "agent.ask_timeout_sec").and_then(|v| v.as_u64()),
+            Some(601)
+        );
+        assert_eq!(
+            dig(&cfg, "agent.egress_log").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+    }
+
+    /// A5.6: нет секции `agent:` — она дописывается; подсекция с детьми
+    /// получает новый ключ, а не дубль заголовка.
+    #[test]
+    fn agent_scalars_create_section_and_subsections() {
+        let out = apply_scalars(
+            "index:\n  clip: false\n",
+            "agent",
+            &[("mcp.tavily.enabled", "false")],
+        )
+        .unwrap();
+        assert!(
+            out.contains("agent:\n  mcp:\n    tavily:\n      enabled: false"),
+            "{out}"
+        );
+        let src = "agent:\n  filter:\n    max_stale_sec: 300\n";
+        let out = apply_scalars(src, "agent", &[("filter.unknown", "'label'")]).unwrap();
+        assert!(
+            out.contains("  filter:\n    max_stale_sec: 300\n    unknown: 'label'"),
+            "{out}"
+        );
+        assert_eq!(out.matches("filter:").count(), 1, "дубль подсекции: {out}");
     }
 }

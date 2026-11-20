@@ -30,6 +30,8 @@ use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
+use hds_core::config::replace_file;
+
 /// Реквизиты провайдера из `secrets.json` (без модели — она в `projects.json`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCreds {
@@ -50,6 +52,8 @@ pub enum SecretsError {
     Invalid(String),
     /// Нет нужного ключа.
     NoKey(String),
+    /// Файл не удалось записать (нет каталога, занят, сбой `replace_file`).
+    Write(PathBuf, String),
 }
 
 impl std::fmt::Display for SecretsError {
@@ -58,6 +62,9 @@ impl std::fmt::Display for SecretsError {
             SecretsError::Missing(p) => write!(f, "нет файла секретов: {}", p.display()),
             SecretsError::Invalid(e) => write!(f, "secrets.json не разбирается: {e}"),
             SecretsError::NoKey(k) => write!(f, "в secrets.json нет ключа {k}"),
+            SecretsError::Write(p, why) => {
+                write!(f, "secrets.json не записан ({}): {why}", p.display())
+            }
         }
     }
 }
@@ -120,6 +127,131 @@ impl Secrets {
             base_url,
             api_key: key.to_string(),
         })
+    }
+
+    /// Пустой файл секретов: панель настроек (A5.6) работает и до первого
+    /// `hds agent project add`, когда `secrets.json` ещё нет.
+    pub fn empty(path: &Path) -> Secrets {
+        Secrets {
+            path: path.to_path_buf(),
+            raw: Value::Object(serde_json::Map::new()),
+        }
+    }
+
+    /// Прочитать файл, а при его отсутствии — пустой набор (не ошибка).
+    ///
+    /// Нечитаемый/битый файл остаётся ошибкой: молча перезаписывать его нельзя.
+    pub fn load_or_empty(path: &Path) -> Result<Secrets, SecretsError> {
+        match Secrets::load(path) {
+            Ok(secrets) => Ok(secrets),
+            Err(SecretsError::Missing(_)) => Ok(Secrets::empty(path)),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Задан ли ключ провайдера — **без** значения (только признак, В-A5.6-2).
+    pub fn has_provider_key(&self, name: &str) -> bool {
+        self.raw
+            .pointer(&format!("/providers/{name}/api_key"))
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty())
+    }
+
+    /// `providers.<name>.base_url` (пусто — база API по умолчанию).
+    pub fn provider_base_url(&self, name: &str) -> Option<String> {
+        self.raw
+            .pointer(&format!("/providers/{name}/base_url"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|url| !url.trim().is_empty())
+    }
+
+    /// Имена провайдеров из `providers` (по алфавиту) — для панели настроек.
+    pub fn provider_names(&self) -> Vec<String> {
+        let Some(map) = self.raw.get("providers").and_then(Value::as_object) else {
+            return Vec::new();
+        };
+        let mut names: Vec<String> = map.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// Записать ключ провайдера (`providers.<name>.api_key`).
+    ///
+    /// Меняется только этот ключ: остальные поля провайдера, проекты и
+    /// `mcp.servers` остаются как были (слияние делает [`Secrets::save`]).
+    pub fn set_provider_key(&mut self, name: &str, api_key: &str) {
+        let json = self.entry_object(&["providers", name]);
+        json.insert("api_key".to_string(), Value::String(api_key.to_string()));
+    }
+
+    /// Записать `base_url` провайдера; пустая строка — снять значение
+    /// (`null` в файле: `save` не удаляет ключи, а слияние не умеет удалять).
+    /// Снятый `base_url` означает «база API по умолчанию»
+    /// (`run::default_base_url`).
+    pub fn set_provider_base_url(&mut self, name: &str, base_url: &str) {
+        let json = self.entry_object(&["providers", name]);
+        let url = base_url.trim();
+        if url.is_empty() {
+            json.insert("base_url".to_string(), Value::Null);
+        } else {
+            json.insert("base_url".to_string(), Value::String(url.to_string()));
+        }
+    }
+
+    /// Объект по пути `keys` (создаётся при необходимости, не-объекты
+    /// заменяются объектами — файл мог быть испорчен вручную).
+    fn entry_object(&mut self, keys: &[&str]) -> &mut serde_json::Map<String, Value> {
+        if !self.raw.is_object() {
+            self.raw = Value::Object(serde_json::Map::new());
+        }
+        let mut current = self.raw.as_object_mut().expect("объект только что создан");
+        for key in keys {
+            let slot = current
+                .entry((*key).to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            if !slot.is_object() {
+                *slot = Value::Object(serde_json::Map::new());
+            }
+            current = slot.as_object_mut().expect("значение только что заменено");
+        }
+        current
+    }
+
+    /// Записать файл: слияние с тем, что лежит на диске, и атомарная замена.
+    ///
+    /// Почему слияние, а не слепое `self.raw`: `secrets.json` правят и CLI, и
+    /// другой чат UI — ключи, появившиеся после [`Secrets::load`], терять
+    /// нельзя. Наши значения сильнее (объекты сливаются рекурсивно), удалений
+    /// здесь нет — панель только задаёт ключи.
+    ///
+    /// Значения никогда не логируются: ошибка называет путь и причину, но не
+    /// содержимое файла.
+    pub fn save(&self) -> Result<(), SecretsError> {
+        let disk = match std::fs::read_to_string(&self.path) {
+            Ok(text) => Some(
+                serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}'))
+                    .map_err(|e| SecretsError::Invalid(e.to_string()))?,
+            ),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(SecretsError::Write(self.path.clone(), e.to_string())),
+        };
+        let mut merged = match disk {
+            Some(value) if value.is_object() => value,
+            _ => Value::Object(serde_json::Map::new()),
+        };
+        merge_into(&mut merged, &self.raw);
+        let text = serde_json::to_string_pretty(&merged)
+            .map_err(|e| SecretsError::Write(self.path.clone(), e.to_string()))?;
+        if let Some(dir) = self.path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| SecretsError::Write(dir.to_path_buf(), e.to_string()))?;
+        }
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, text).map_err(|e| SecretsError::Write(tmp.clone(), e.to_string()))?;
+        replace_file(&tmp, &self.path)
+            .map_err(|e| SecretsError::Write(self.path.clone(), e.message()))?;
+        Ok(())
     }
 
     /// Модель проекта (`projects.<p>.model`).
@@ -282,6 +414,23 @@ fn collect_secret_strings(value: &Value, out: &mut Vec<String>) {
     }
 }
 
+/// Рекурсивное слияние: значения `patch` побеждают, объекты сливаются по ключам.
+fn merge_into(base: &mut Value, patch: &Value) {
+    match (base, patch) {
+        (Value::Object(target), Value::Object(source)) => {
+            for (key, value) in source {
+                match target.get_mut(key) {
+                    Some(slot) => merge_into(slot, value),
+                    None => {
+                        target.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,6 +583,109 @@ mod tests {
         assert!(strings.iter().any(|s| s == "secret-token-123"));
         assert!(strings.iter().any(|s| s == "Bearer secret-token-123"));
         assert!(strings.iter().any(|s| s == "tvly-secret-123456"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A5.6: `save` не теряет ни `mcp.servers`, ни незнакомые ключи — и те,
+    /// что были в файле, и те, что появились на диске после `load`.
+    #[test]
+    fn save_merges_and_keeps_unknown_keys() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-secrets6-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "projects": { "P0001": { "token": "tok-P0001-123456" } },
+              "providers": { "openrouter": { "api_key": "sk-old-123456", "base_url": "https://openrouter.ai/api/v1" } },
+              "mcp": {
+                "servers": { "1c-buddy": { "type": "stdio", "command": "C:\\tools\\1c-buddy.exe" } },
+                "tavily": { "api_key": "tvly-old-123456" }
+              },
+              "future_block": { "keep": true }
+            }"#,
+        )
+        .unwrap();
+        let mut secrets = Secrets::load(&path).unwrap();
+        assert!(secrets.has_provider_key("openrouter"));
+        secrets.set_provider_key("openrouter", "sk-new-654321");
+        // Пока панель держала файл, CLI добавил свой ключ: он не должен пропасть.
+        std::fs::write(
+            &path,
+            r#"{
+              "projects": { "P0001": { "token": "tok-P0001-123456" } },
+              "providers": { "openrouter": { "api_key": "sk-old-123456", "base_url": "https://openrouter.ai/api/v1" } },
+              "mcp": {
+                "servers": { "1c-buddy": { "type": "stdio", "command": "C:\\tools\\1c-buddy.exe" } },
+                "tavily": { "api_key": "tvly-old-123456" }
+              },
+              "future_block": { "keep": true },
+              "added_by_cli": { "api_key": "cli-secret-123456" }
+            }"#,
+        )
+        .unwrap();
+        secrets.save().unwrap();
+
+        let saved = Secrets::load(&path).unwrap();
+        assert_eq!(
+            saved.provider("openrouter").unwrap().api_key,
+            "sk-new-654321"
+        );
+        assert_eq!(
+            saved.provider_base_url("openrouter").as_deref(),
+            Some("https://openrouter.ai/api/v1")
+        );
+        assert_eq!(saved.mcp_servers().len(), 1);
+        assert_eq!(saved.mcp_key("tavily").as_deref(), Some("tvly-old-123456"));
+        assert_eq!(
+            saved.project_token("P0001").as_deref(),
+            Some("tok-P0001-123456")
+        );
+        assert_eq!(
+            saved.raw.pointer("/future_block/keep"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            saved.raw.pointer("/added_by_cli/api_key"),
+            Some(&Value::String("cli-secret-123456".to_string()))
+        );
+        // Новый ключ попал в словарь фильтра (секреты не уходят в облако).
+        let strings = saved.secret_strings();
+        assert!(strings.iter().any(|s| s == "sk-new-654321"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A5.6: файла ещё нет — `save` создаёт каталог и файл; ошибка не печатает
+    /// значения (только путь и причину).
+    #[test]
+    fn save_creates_missing_file_without_values() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-secrets7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("data").join("agent").join("secrets.json");
+        let mut secrets = Secrets::load_or_empty(&path).unwrap();
+        assert!(!secrets.has_provider_key("openrouter"));
+        assert!(secrets.provider_names().is_empty());
+        secrets.set_provider_key("openrouter", "sk-created-123456");
+        secrets.set_provider_base_url("openrouter", "https://example.invalid/v1");
+        secrets.save().unwrap();
+        let saved = Secrets::load(&path).unwrap();
+        assert!(saved.has_provider_key("openrouter"));
+        assert_eq!(
+            saved.provider_base_url("openrouter").as_deref(),
+            Some("https://example.invalid/v1")
+        );
+        // Пустая строка убирает base_url — база API берётся по умолчанию.
+        let mut secrets = saved;
+        secrets.set_provider_base_url("openrouter", "   ");
+        secrets.save().unwrap();
+        assert!(Secrets::load(&path)
+            .unwrap()
+            .provider_base_url("openrouter")
+            .is_none());
+        assert_eq!(secrets.provider_names(), vec!["openrouter".to_string()]);
+        let message = SecretsError::Write(path.clone(), "занят".to_string()).to_string();
+        assert!(message.contains("secrets.json") && !message.contains("sk-created-123456"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

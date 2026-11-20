@@ -1967,6 +1967,12 @@ pub fn route_full(
                 Ok(cfg) => agent::labels_json(&cfg, &qp(query, "project").unwrap_or_default()),
                 Err(reply) => reply,
             },
+            // A5.6: панель «Настройки агента» — провайдер/модель/ключ (признак),
+            // пороги фильтра, MCP; значения ключей не отдаются (TR-8.3, I8).
+            ("GET", "/api/agent/settings") => match agent::gate() {
+                Ok(cfg) => agent::settings_json(&cfg, &qp(query, "project").unwrap_or_default()),
+                Err(reply) => reply,
+            },
             // A5.2: события хода без SSE (кольцо 500, `after=<seq>`). Транспорт
             // A5.3 добавит `text/event-stream` тем же маршрутом.
             ("GET", "/api/agent/events") => match agent::gate() {
@@ -2116,6 +2122,16 @@ pub fn route_full(
                     },
                     "/api/agent/labels/unmerge" => match agent::gate() {
                         Ok(cfg) => agent::labels_unmerge_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    // A5.6: настройки (ключ — только в secrets.json) и
+                    // «Очистить историю» (стоп → unload → очистка → notice).
+                    "/api/agent/settings" => match agent::gate() {
+                        Ok(cfg) => agent::settings_save_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/history/clear" => match agent::gate() {
+                        Ok(cfg) => agent::history_clear_json(&cfg, body),
                         Err(reply) => reply,
                     },
                     "/api/index/start" => {

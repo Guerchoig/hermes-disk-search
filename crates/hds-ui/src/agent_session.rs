@@ -220,6 +220,13 @@ impl Turn {
         self.busy.load(Ordering::SeqCst)
     }
 
+    /// Выставить «ход идёт» — только для интеграционных тестов маршрутов
+    /// (A5.6: 409 «ход идёт, остановить не удалось» без живого воркера).
+    #[doc(hidden)]
+    pub fn set_busy_for_tests(&self, busy: bool) {
+        self.busy.store(busy, Ordering::SeqCst);
+    }
+
     /// Сессия воркера, если она уже выдана.
     pub fn session(&self) -> Option<String> {
         self.session
@@ -485,6 +492,35 @@ impl AgentApi {
             .unwrap_or_else(|e| e.into_inner())
             .get(project)
             .cloned()
+    }
+
+    /// Живые процессы проекта: идентификатор и секунды с последнего обращения.
+    pub fn live(&self) -> Vec<(String, u64)> {
+        let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+        registry
+            .live()
+            .into_iter()
+            .map(|(project, used)| (project, used.elapsed().as_secs()))
+            .collect()
+    }
+
+    /// Выгрузить шлюз проекта (`stop` + `shutdown`); сессия остаётся на диске
+    /// и возобновляется следующим ходом.
+    ///
+    /// Нужно панели настроек (A5.6): смена ключа/провайдера/модели и очистка
+    /// истории не должны оставлять живой процесс с прежними настройками.
+    pub fn unload(&self, project: &str) -> bool {
+        let removed = {
+            let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            registry.unload(project)
+        };
+        if removed {
+            if let Some(turn) = self.existing_turn(project) {
+                turn.opened.store(false, Ordering::SeqCst);
+                turn.stop.store(true, Ordering::SeqCst);
+            }
+        }
+        removed
     }
 
     /// Положить событие в кольцо проекта (номер выдаёт кольцо, оно же будит

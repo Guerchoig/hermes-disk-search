@@ -329,7 +329,17 @@ pub const PAGE: &str = r#"<!doctype html>
      <textarea id="agasktext" rows="2" style="min-width:420px"
       placeholder="Ответ уйдёт агенту; значения на выходе заменит фильтр"></textarea></div>
     <div class="row" style="margin-top:6px"><button onclick="agentAnswer()">Ответить</button>
-     <span id="agaskmsg" class="muted"></span></div></div></section>
+     <span id="agaskmsg" class="muted"></span></div></div>
+   <div id="agredact" hidden style="margin-top:10px;border:1px solid #8a7a2a;border-radius:10px;padding:10px">
+    <div><b>Фильтр срабатывал:</b> <span id="agredactsum" class="muted">…</span></div>
+    <div id="agredactlast" class="muted" style="margin-top:4px"></div>
+    <div class="row" style="margin-top:6px">
+     <button onclick="agentClearHistory()">Очистить историю…</button>
+     <button onclick="agentRedactReset()">Сбросить сводку</button>
+     <span id="agredactmsg" class="muted"></span></div>
+    <div class="muted" style="margin-top:4px">Срабатывание фильтра значит, что значение уже лежит
+     в истории агента: NER пропустил его при анонимизации файла или реплики. Каждый запрос фильтр
+     чинит, а «Очистить историю» убирает «грязный» хвост с диска.</div></div></section>
 
   <section><h2>Состояние проекта</h2>
    <div id="agstate" class="muted">…</div>
@@ -370,6 +380,21 @@ pub const PAGE: &str = r#"<!doctype html>
     склейки до A5.5 необратимы.</div>
    <table class="tr"><thead><tr><th>Когда</th><th>Оставлено</th><th>Склеено</th><th></th></tr></thead>
     <tbody id="agmerges"></tbody></table></section>
+
+  <section><h2>Настройки агента</h2>
+   <div class="row"><button onclick="loadAgentSettings()">Обновить</button>
+    <span id="agsetmsg" class="muted"></span></div>
+   <table class="tr"><thead><tr><th>Параметр</th><th>Значение</th><th></th></tr></thead>
+    <tbody id="agsettings"></tbody></table>
+   <div class="muted" style="margin-top:6px">Провайдер и модель проекта — в
+    <code>projects.json</code>; ключ — только в <code>data\agent\secrets.json</code> и показывается
+    признаком «задан/нет»; пороги фильтра и MCP — в <code>config.yaml</code> (ключей там нет).
+    Смена ключа, провайдера, модели или фильтра применится следующим ходом — сессия откроется заново.</div>
+   <div class="row" style="margin-top:8px"><button onclick="agentClearHistory()">Очистить историю…</button>
+    <span id="aghistmsg" class="muted"></span></div>
+   <div class="muted">«Очистить историю»: остановить сессию, заменить значения в файлах истории
+    метками (рядом останутся бэкапы) и возобновить сессию. Автопроверка истории перед завершением
+    сессии — A6.</div></section>
 
   <section><h2>Новый проект</h2>
    <div class="row"><span class="muted" style="min-width:120px">Имя</span>
@@ -632,7 +657,7 @@ function selectAgentProject(tr, id){
   document.getElementById('agpreview').textContent='…';
   document.getElementById('agpaths').textContent='';
   agStatus('');
-  loadAgentState(); loadAgentFiles(); loadAgentPending(); loadAgentLabels();
+  loadAgentState(); loadAgentFiles(); loadAgentPending(); loadAgentLabels(); loadAgentSettings();
   agentStreamOpen();
 }
 // --- Реплика (A5.2): предпросмотр, метки, вложения, отправка ---
@@ -771,6 +796,7 @@ function agReset(){
   AG_EVENTS=[]; AG_TEXT=null; AG_REASON=null; AG_BUSY=false;
   const box=agFeed(); if(box) box.innerHTML='';
   agAskHide();
+  agentRedactReset();
 }
 // Принять событие: номер для переподключения, копия для перерисовки, показ.
 function agOnItem(ev){
@@ -906,9 +932,20 @@ function agAgentEvent(t){
   agStatus('событие: '+k);
 }
 function agRedacted(t){
-  const hits=(t.hits||[]).map(function(h){ return h.label+(h.source? ' ('+h.source+')':''); }).join(', ');
+  const hits=t.hits||[];
+  // Сводка — по событиям, без значений: только метки и источник словаря.
+  hits.forEach(function(h){
+    AG_REDACT.total+=1;
+    const label=h.label||'?';
+    AG_REDACT.labels[label]=(AG_REDACT.labels[label]||0)+1;
+    const src=h.source||'?';
+    AG_REDACT.sources[src]=(AG_REDACT.sources[src]||0)+1;
+  });
+  AG_REDACT.last=hits.map(function(h){ return h.label+(h.source? ' ('+h.source+')':''); });
+  agRedactRender();
+  const text=AG_REDACT.last.join(', ');
   const li=agLi('#8a7a2a');
-  li.innerHTML='<span class="warnbox" style="margin:0">фильтр заменил: '+esc(hits||'метки')+'</span>';
+  li.innerHTML='<span class="warnbox" style="margin:0">фильтр заменил: '+esc(text||'метки')+'</span>';
   agAppend(li);
 }
 function agTurnEnd(t){
@@ -1289,6 +1326,199 @@ async function agentAdd(){
     AG_ID='';
     await loadAgentProjects();
   }catch(e){ m.textContent='ошибка: '+e; }
+}
+// --- Уведомления фильтра и «Очистить историю» (A5.6) ---
+let AG_REDACT={total:0, labels:{}, sources:{}, last:[]};
+function agRedactRender(){
+  const box=document.getElementById('agredact');
+  if(!box) return;
+  box.hidden=AG_REDACT.total===0;
+  const labels=Object.keys(AG_REDACT.labels).map(function(k){
+    return k+' × '+AG_REDACT.labels[k]; }).join(', ');
+  const srcs=Object.keys(AG_REDACT.sources).map(function(k){
+    return k+' × '+AG_REDACT.sources[k]; }).join(', ');
+  document.getElementById('agredactsum').textContent=AG_REDACT.total?
+    ('срабатываний: '+AG_REDACT.total+(labels? ' · метки: '+labels:'')+
+     (srcs? ' · источник: '+srcs:'')):'';
+  document.getElementById('agredactlast').textContent=AG_REDACT.last.length?
+    ('последнее: '+AG_REDACT.last.join(', ')):'';
+}
+function agentRedactReset(){
+  AG_REDACT={total:0, labels:{}, sources:{}, last:[]};
+  agRedactRender();
+}
+function agHistMsg(text, isErr){
+  const a=document.getElementById('aghistmsg'), b=document.getElementById('agredactmsg');
+  [a, b].forEach(function(m){
+    if(!m) return;
+    if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
+  });
+}
+// «Очистить историю» (TR-6.6): стоп → метки вместо значений → отчёт. Своих
+// разборов в JS нет — сервер отдаёт {session, files, backups, replaced}.
+async function agentClearHistory(){
+  if(!AG_ID){ agHistMsg('сначала выберите проект', true); return; }
+  if(!confirm('Очистить историю агента?'+NL+NL+
+      'Будет: остановить сессию, заменить значения в файлах истории метками '+NL+
+      '(рядом останутся бэкапы) и возобновить сессию следующим ходом.'+NL+NL+
+      'Продолжить?')) return;
+  agHistMsg('…');
+  try{
+    const j=await jpost('/api/agent/history/clear', {project:AG_ID});
+    if(j.error){ agHistMsg(j.error, true); return; }
+    const files=(j.files||[]).length||j.files_count||0;
+    const backups=(j.backups||[]).length||j.backups_count||0;
+    agHistMsg('история очищена: сессия '+(j.session||'-')+' · файлов '+files+
+      ' · бэкапов '+backups+' · замен '+(j.replaced||0));
+    agentRedactReset();
+    loadAgentState(); loadAgentSettings();
+  }catch(e){ agHistMsg('ошибка: '+e, true); }
+}
+// --- Настройки агента (A5.6): таблица «параметр → значение → изменить» ---
+let AG_SET=null, AG_SETROWS=[];
+function agSetMsg(text, isErr){
+  const m=document.getElementById('agsetmsg');
+  if(!m) return;
+  if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
+}
+function agBool(v){ return v? '<span class="ok">да</span>':'<span class="muted">нет</span>'; }
+// Строки таблицы строятся из ответа сервера: своих значений и регулярок в JS нет.
+function agBuildRows(j){
+  const p=j.project||{}, c=j.config||{};
+  const rows=[
+    {label:'Провайдер', field:'provider', kind:'text', raw:p.provider||'', view:esc(p.provider||'-')},
+    {label:'Модель', field:'model', kind:'text', raw:p.model||'', view:esc(p.model||'-')},
+    {label:'Ключ провайдера', field:'api_key', kind:'secret',
+      raw:(p.key&&p.key.set)?'set':'', view:(p.key&&p.key.set)?
+        '<span class="ok">задан</span>':'<span class="err">не задан</span>'},
+    {label:'База API', field:'base_url', kind:'text', raw:p.base_url||'',
+      view:esc(p.base_url||'(по умолчанию)')},
+    {label:'Зона включена', field:'enabled', kind:'bool', raw:c.enabled, view:agBool(c.enabled)},
+    {label:'Корень зоны', field:'root', kind:'text', raw:c.root||'', view:esc(c.root||'-')},
+    {label:'Неизвестные значения', field:'unknown', kind:'select', raw:c.unknown||'label',
+      view:esc(c.unknown||'label')},
+    {label:'Снимок vault, сек', field:'filter_max_stale_sec', kind:'num',
+      raw:c.filter_max_stale_sec, view:esc(String(c.filter_max_stale_sec||''))},
+    {label:'Журнал исходящего', field:'egress_log', kind:'bool', raw:c.egress_log,
+      view:agBool(c.egress_log)},
+    {label:'Предпросмотр в CLI', field:'preview_outgoing', kind:'bool', raw:c.preview_outgoing,
+      view:agBool(c.preview_outgoing)},
+    {label:'Суб-агенты', field:'subagents', kind:'bool', raw:c.subagents, view:agBool(c.subagents)},
+    {label:'Живых проектов', field:'max_live_projects', kind:'num', raw:c.max_live_projects,
+      view:esc(String(c.max_live_projects||''))},
+    {label:'Таймаут команды, сек', field:'request_timeout_sec', kind:'num',
+      raw:c.request_timeout_sec, view:esc(String(c.request_timeout_sec||''))},
+    {label:'Таймаут вопроса, сек', field:'ask_timeout_sec', kind:'num',
+      raw:c.ask_timeout_sec, view:esc(String(c.ask_timeout_sec||''))},
+    {label:'Прокси', field:'proxy', kind:'text', raw:c.proxy||'',
+      view:esc(c.proxy||'(нет)')},
+    {label:'MCP disk-search', field:'disk_search_enabled', kind:'bool',
+      raw:c.disk_search_enabled, view:agBool(c.disk_search_enabled)},
+    {label:'MCP 1c-buddy', field:'onec_enabled', kind:'bool', raw:c.onec_enabled,
+      view:agBool(c.onec_enabled)},
+    {label:'Команда 1c-buddy', field:'onec_command', kind:'text', raw:c.onec_command||'',
+      view:esc(c.onec_command||'(из secrets/node_modules)')},
+    {label:'MCP tavily', field:'tavily_enabled', kind:'bool', raw:c.tavily_enabled,
+      view:agBool(c.tavily_enabled)},
+    {label:'Команда tavily', field:'tavily_command', kind:'text', raw:c.tavily_command||'',
+      view:esc(c.tavily_command||'(node_modules воркера)')}
+  ];
+  const live=(j.live||[]).map(function(l){ return l.project+' ('+l.idle_sec+' с)'; }).join(', ');
+  rows.push({label:'Живые процессы', field:'', kind:'info', raw:live, view:esc(live||'нет')});
+  rows.push({label:'Файлы', field:'', kind:'info', raw:'',
+    view:'<span class="muted">config: '+esc(j.config_path||'?')+'<br>secrets: '+
+      esc(j.secrets_path||'?')+'</span>'});
+  return rows;
+}
+function agSettingsTable(){
+  const tb=document.getElementById('agsettings');
+  if(!tb) return;
+  tb.innerHTML=AG_SETROWS.map(function(r, i){
+    return '<tr><td>'+esc(r.label)+'</td><td>'+r.view+'</td><td>'+
+      (r.field? '<button onclick="agentSetEdit('+i+')">Изменить</button>'
+        : '<span class="muted">—</span>')+'</td></tr>';
+  }).join('');
+}
+async function loadAgentSettings(){
+  if(!AG_ID){
+    AG_SET=null; AG_SETROWS=[];
+    const tb=document.getElementById('agsettings'); if(tb) tb.innerHTML='';
+    agSetMsg(''); return;
+  }
+  agSetMsg('…');
+  try{
+    const j=await jget('/api/agent/settings?project='+encodeURIComponent(AG_ID));
+    if(j.error){ agSetMsg(j.error, true); AG_SET=null; AG_SETROWS=[]; agSettingsTable(); return; }
+    AG_SET=j; AG_SETROWS=agBuildRows(j);
+    agSettingsTable();
+    agSetMsg('ключ: '+((j.project&&j.project.key&&j.project.key.set)? 'задан':'не задан')+
+      ' · живых процессов: '+((j.live||[]).length));
+  }catch(e){ agSetMsg('ошибка: '+e, true); }
+}
+async function agentSetSave(body){
+  agSetMsg('…');
+  try{
+    const j=await jpost('/api/agent/settings', body);
+    if(j.error){ agSetMsg(j.error, true); return; }
+    AG_SET=j; AG_SETROWS=agBuildRows(j); agSettingsTable();
+    let text='сохранено: '+((j.applied||[]).join(', ')||'без изменений')+
+      (j.reopened? ' · сессия откроется заново':'')+
+      (j.unloaded? ' · процесс выгружен':'');
+    if((j.warnings||[]).length) text+=' · '+j.warnings.join('; ');
+    agSetMsg(text);
+    loadAgentState(); loadAgentProjects(); loadAgentFiles();
+  }catch(e){ agSetMsg('ошибка: '+e, true); }
+}
+function agentSetSelect(i){
+  const r=AG_SETROWS[i], el=document.getElementById('agsetselect');
+  if(!r||!el) return;
+  const body={project:AG_ID};
+  body[r.field]=el.value;
+  agentSetSave(body);
+}
+// Правка одной строки: prompt() для скаляров, select для `unknown`, confirm()
+// для bool и для того, что перезапускает сессию (В-A5.6-3).
+async function agentSetEdit(i){
+  const r=AG_SETROWS[i];
+  if(!r||!r.field) return;
+  if(r.kind==='bool'){
+    if(!confirm(r.label+': сейчас '+(r.raw? 'включено':'выключено')+'. Переключить?')) return;
+    const body={project:AG_ID};
+    body[r.field]=!r.raw;
+    agentSetSave(body); return;
+  }
+  if(r.kind==='select'){
+    const tb=document.getElementById('agsettings');
+    const cell=tb&&tb.rows[i]? tb.rows[i].cells[1]:null;
+    if(!cell) return;
+    cell.innerHTML='<select id="agsetselect"><option value="label">label</option>'+
+      '<option value="block">block</option></select> '+
+      '<button onclick="agentSetSelect('+i+')">Сохранить</button> '+
+      '<button onclick="loadAgentSettings()">Отмена</button>';
+    document.getElementById('agsetselect').value=r.raw||'label';
+    return;
+  }
+  const current=(r.kind==='secret')? '':String(r.raw===null||r.raw===undefined? '':r.raw);
+  const input=window.prompt(r.label+' — '+
+    (r.kind==='secret'? 'новый ключ (значение не показывается)':'новое значение'), current);
+  if(input===null) return;
+  const value=input.trim();
+  if(r.kind==='secret' && !value){ agSetMsg('ключ пустой — не меняем', true); return; }
+  const body={project:AG_ID};
+  if(r.kind==='num'){
+    const n=Number(value);
+    if(!isFinite(n) || Math.floor(n)!==n){ agSetMsg('нужно целое число', true); return; }
+    body[r.field]=n;
+  }else{
+    body[r.field]=value;
+  }
+  if(r.kind==='secret'||r.field==='provider'||r.field==='model'||r.field==='root'){
+    const warn=(r.field==='root'?
+      'Корень зоны меняется: сессия будет выгружена, зона станет другой. Продолжить?':
+      'Смена применится следующим ходом — сессия откроется заново. Продолжить?');
+    if(!confirm(warn)) return;
+  }
+  agentSetSave(body);
 }
 // --- Транскрибация (PLAN_AUTO_TRANSCRIBE §8) ---
 function showTab(name){
