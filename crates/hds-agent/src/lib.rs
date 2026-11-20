@@ -38,6 +38,7 @@ pub mod registry;
 pub mod registry_db;
 pub mod results;
 pub mod rules;
+pub mod run;
 pub mod secrets;
 pub mod settings;
 pub mod validator;

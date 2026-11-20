@@ -10,12 +10,14 @@
 //! читаются вообще (I8).
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use hds_agent::registry_db::ArtifactRegistry;
 use hds_agent::{projects, settings};
 use hds_core::config::{self, Config, Profile};
 use serde_json::{json, Value};
 
+use crate::agent_session::{self, AgentApi, ApiError};
 use crate::Reply;
 
 /// Сколько последних строк журнала отдаёт панель состояния.
@@ -296,6 +298,115 @@ pub fn files_json(cfg: &Config, project: &str) -> Reply {
         "pending": pending,
         "files": files,
     }))
+}
+
+/// Строковое поле JSON-тела (`{"text": "..."}`); нет поля — пусто.
+fn body_str(body: &str, key: &str) -> String {
+    serde_json::from_str::<Value>(body)
+        .ok()
+        .and_then(|v| v.get(key).and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// `ApiError` вкладки → HTTP-ответ с текстом (§4.8: ошибки 400/403/409/503).
+fn api_err(e: ApiError) -> Reply {
+    err(e.status, e.message)
+}
+
+/// `POST /api/agent/preview` `{project,text}` — что уйдёт модели (TR-5.1).
+pub fn preview_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.preview(cfg, &body_str(body, "project"), &body_str(body, "text")) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/label` `{project,value,type?}` — «Скрыть ещё…».
+pub fn label_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.label(
+        cfg,
+        &body_str(body, "project"),
+        &body_str(body, "value"),
+        &body_str(body, "type"),
+    ) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/keep` `{project,value}` — «Не скрывать» (глобальная база).
+pub fn keep_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.keep(cfg, &body_str(body, "project"), &body_str(body, "value")) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/attach` `{project,path}` — образ файла проекта или копия
+/// вложения в `workspace\_attachments` (TR-5.2).
+pub fn attach_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.attach(cfg, &body_str(body, "project"), &body_str(body, "path")) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/message` `{project,text,session?}` — отправить ход.
+pub fn message_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    let session = body_str(body, "session");
+    let session = session.trim();
+    let session = (!session.is_empty()).then_some(session);
+    match api.message(
+        cfg,
+        &body_str(body, "project"),
+        &body_str(body, "text"),
+        session,
+    ) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/abort` `{project}` — прервать текущий ход.
+pub fn abort_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.abort(cfg, &body_str(body, "project")) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `POST /api/agent/stop` `{project}` — мягкая остановка сессии.
+pub fn stop_json(cfg: &Config, body: &str) -> Reply {
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.stop(cfg, &body_str(body, "project")) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `GET /api/agent/events?project=<P>&after=<seq>&limit=200` — события без SSE
+/// (транспорт A5.3 добавит `text/event-stream` тем же маршрутом).
+pub fn events_json(cfg: &Config, project: &str, after: Option<u64>, limit: Option<usize>) -> Reply {
+    // Проект проверяем мягко: событий могло не быть вовсе — пустой ответ, а не
+    // 404. Зона выключена — 503/RU-текст (как у остальных маршрутов вкладки).
+    if let Err(e) = projects::get(cfg, project.trim())
+        .map(|_| ())
+        .ok_or_else(|| ApiError::new(400, "нет параметра project"))
+    {
+        return api_err(e);
+    }
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    ok(api.events_json(
+        project.trim(),
+        after.unwrap_or(0),
+        limit.unwrap_or(agent_session::EVENTS_DEFAULT),
+    ))
 }
 
 /// Последние `n` строк файла; нет файла или слишком большой — пусто.

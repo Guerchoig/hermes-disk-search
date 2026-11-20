@@ -301,6 +301,26 @@ pub const PAGE: &str = r#"<!doctype html>
     <tbody id="agrows"></tbody></table>
    <div class="muted" id="aghint">Выберите проект — ниже состояние зеркала и файлы.</div></section>
 
+  <section><h2>Реплика</h2>
+   <div class="row"><textarea id="agtext" rows="4" style="width:100%;min-width:520px"
+     placeholder="Подготовь письмо Иванову Ивану о переносе встречи"></textarea></div>
+   <div class="row" style="margin-top:6px">
+    <button onclick="agentPreview()">Что увидит модель</button>
+    <button onclick="agentHide()">Скрыть ещё…</button>
+    <button onclick="agentKeep()">Не скрывать</button>
+    <button onclick="agentSend()">Отправить</button>
+    <button onclick="agentStop()">Стоп</button>
+    <span id="agmsg2" class="muted"></span></div>
+   <div class="row" style="margin-top:6px"><span class="muted" style="min-width:120px">Вложить файл</span>
+    <input id="agattach" placeholder="C:\\Проекты\\Пилот\\ТЗ.docx" style="min-width:420px">
+    <button onclick="agentAttach()">Вложить файл…</button></div>
+   <div class="muted" style="margin-top:8px">Что увидит модель (метки вместо значений).
+    Отправляется исходный текст — предпросмотр нужен, чтобы проверить замены до отправки.</div>
+   <pre id="agpreview" style="white-space:pre-wrap">…</pre>
+   <div id="agpaths" class="muted"></div>
+   <div id="agstatus" class="muted"></div>
+   <pre id="agevents" class="muted" style="max-height:180px;overflow:auto"></pre></section>
+
   <section><h2>Состояние проекта</h2>
    <div id="agstate" class="muted">…</div>
    <pre id="agjournal" class="muted" style="max-height:260px;overflow:auto">…</pre></section>
@@ -566,7 +586,151 @@ function selectAgentProject(tr, id){
   AG_ID=id || (tr&&tr.getAttribute('data-id')) || '';
   Array.prototype.forEach.call(document.querySelectorAll('#agrows tr'), function(r){
     r.classList.toggle('sel', r.getAttribute('data-id')===AG_ID); });
+  AG_PREVIEW=null; AG_SEQ=0; AG_LINES=[];
+  document.getElementById('agpreview').textContent='…';
+  document.getElementById('agpaths').textContent='';
+  document.getElementById('agevents').textContent='';
+  document.getElementById('agstatus').textContent='';
   loadAgentState(); loadAgentFiles();
+}
+// --- Реплика (A5.2): предпросмотр, метки, вложения, отправка ---
+let AG_PREVIEW=null, AG_SEQ=0, AG_POLL=null, AG_LINES=[]; const NL=String.fromCharCode(10);
+function agentMsg(text, isErr){
+  const m=document.getElementById('agmsg2');
+  if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
+}
+function agentText(){ return document.getElementById('agtext').value; }
+function agentNeedProject(){ if(!AG_ID){ agentMsg('сначала выберите проект', true); return false; } return true; }
+// Подсветка меток — только представление: токены берём из ответа сервера,
+// своих регулярок меток в UI нет (AG-1).
+function agentHighlight(text, labels){
+  let html=esc(text);
+  (labels||[]).slice().sort(function(a,b){ return (b.token||'').length-(a.token||'').length; })
+    .forEach(function(l){ const t=esc(l.token||''); if(t) html=html.split(t).join('<mark>'+t+'</mark>'); });
+  return html;
+}
+async function agentPreview(){
+  if(!agentNeedProject()) return null;
+  const text=agentText();
+  if(!text.trim()){ agentMsg('введите реплику', true); return null; }
+  agentMsg('…');
+  try{
+    const j=await jpost('/api/agent/preview',{project:AG_ID,text:text});
+    if(j.error){ agentMsg(j.error, true); return null; }
+    AG_PREVIEW={src:text};
+    document.getElementById('agpreview').innerHTML=agentHighlight(j.text, j.labels);
+    document.getElementById('agpaths').innerHTML=(j.paths||[]).map(function(p){
+      return 'образ ' + esc(p.anon||p.to); }).join('<br>');
+    const marks=(j.labels||[]).map(function(l){ return l.token; }).join(', ');
+    agentMsg((j.changed? 'замены есть':'замен нет')+' · метки: '+(marks||'нет')+
+      ((j.warnings||[]).length? ' · предупреждения: '+j.warnings.join('; '):''));
+    return j;
+  }catch(e){ agentMsg('ошибка: '+e, true); return null; }
+}
+async function agentHide(){
+  if(!agentNeedProject()) return;
+  const ta=document.getElementById('agtext');
+  let value=ta.value.substring(ta.selectionStart, ta.selectionEnd).trim();
+  if(!value) value=(window.prompt('Что скрыть? (значение целиком)')||'').trim();
+  if(!value){ agentMsg('выделите значение в реплике', true); return; }
+  try{
+    const j=await jpost('/api/agent/label',{project:AG_ID,value:value});
+    if(j.error){ agentMsg(j.error, true); return; }
+    if(j.kept) agentMsg('значение уже в списке «не скрывать» — метка не выдана');
+    else if(!j.label) agentMsg('не удалось разобрать значение — выделите другое', true);
+    else agentMsg('метка '+j.label+(j.confident? '':' (падеж проверить)'));
+    await agentPreview();
+  }catch(e){ agentMsg('ошибка: '+e, true); }
+}
+async function agentKeep(){
+  if(!agentNeedProject()) return;
+  const ta=document.getElementById('agtext');
+  let value=ta.value.substring(ta.selectionStart, ta.selectionEnd).trim();
+  if(!value) value=(window.prompt('Что не скрывать? (значение целиком)')||'').trim();
+  if(!value){ agentMsg('выделите значение в реплике', true); return; }
+  try{
+    const j=await jpost('/api/agent/keep',{project:AG_ID,value:value});
+    if(j.error){ agentMsg(j.error, true); return; }
+    agentMsg(j.added? 'добавлено в базу «не скрывать» (действует во всех проектах)':'уже было в базе');
+    await agentPreview();
+  }catch(e){ agentMsg('ошибка: '+e, true); }
+}
+async function agentAttach(){
+  if(!agentNeedProject()) return;
+  const path=document.getElementById('agattach').value.trim();
+  if(!path){ agentMsg('укажите путь к файлу', true); return; }
+  agentMsg('…');
+  try{
+    const j=await jpost('/api/agent/attach',{project:AG_ID,path:path});
+    if(j.error){ agentMsg(j.error, true); return; }
+    const ta=document.getElementById('agtext');
+    ta.value=(ta.value.trim()? ta.value.trimEnd()+NL:'')+(j.anon||j.path)+NL;
+    agentMsg((j.kind==='image'? 'образ файла: ':'вложение: ')+j.path);
+  }catch(e){ agentMsg('ошибка: '+e, true); }
+}
+async function agentSend(){
+  if(!agentNeedProject()) return;
+  const text=agentText();
+  if(!text.trim()){ agentMsg('введите реплику', true); return; }
+  if(!AG_PREVIEW || AG_PREVIEW.src!==text){
+    await agentPreview();
+    agentMsg('проверьте «Что увидит модель» и нажмите «Отправить» ещё раз');
+    return;
+  }
+  agentMsg('…отправка');
+  try{
+    const j=await jpost('/api/agent/message',{project:AG_ID,text:text});
+    if(j.error){ agentMsg(j.error, true); return; }
+    AG_SEQ=0; document.getElementById('agevents').textContent='';
+    agentMsg('ход принят · сессия '+(j.session_id||'-'));
+    agentPoll();
+  }catch(e){ agentMsg('ошибка: '+e, true); }
+}
+async function agentStop(){
+  if(!agentNeedProject()) return;
+  try{
+    const j=await jpost('/api/agent/abort',{project:AG_ID});
+    if(j.error){ agentMsg(j.error, true); return; }
+    agentMsg('прерывание отправлено');
+    agentPoll();
+  }catch(e){ agentMsg('ошибка: '+e, true); }
+}
+function agentEventText(ev){
+  const t=ev.text||{};
+  if(ev.kind==='prompt') return '→ модели: '+(t.text||'');
+  if(ev.kind==='session') return 'сессия: '+(t.session||'-')+(t.resumed? ' (возобновлена)':'');
+  if(ev.kind==='agent'){
+    const k=t.kind||'';
+    if(k==='text') return 'агент: '+(t.text||'');
+    if(k==='tool_use') return 'инструмент: '+(t.tool||'');
+    if(k==='tool_result') return 'инструмент '+(t.tool||'')+': '+(t.failed? 'ошибка':'готово');
+    return 'агент: '+k;
+  }
+  if(ev.kind==='turn_end') return (t.ok? 'готово':'сбой')+': '+(t.text||t.error||t.reason||'');
+  if(ev.kind==='done') return 'ответ воркера: '+(t.ok? 'ok':'ошибка')+(t.error? ' — '+t.error:'');
+  if(ev.kind==='redacted') return 'фильтр: '+((t.hits||[]).map(function(h){ return h.label; }).join(', '));
+  if(ev.kind==='notice') return t.text||'';
+  if(ev.kind==='error') return 'ошибка: '+(t.error||'');
+  return ev.kind;
+}
+async function agentPoll(){
+  if(!AG_ID) return;
+  try{
+    const j=await jget('/api/agent/events?project='+encodeURIComponent(AG_ID)+'&after='+AG_SEQ);
+    if(j.error) return;
+    (j.events||[]).forEach(function(ev){ if(ev.seq>AG_SEQ) AG_SEQ=ev.seq; });
+    const lines=(j.events||[]).map(function(ev){ return '['+ev.kind+'] '+agentEventText(ev); });
+    const box=document.getElementById('agevents');
+    if(lines.length){
+      AG_LINES=AG_LINES.concat(lines).slice(-20);
+      box.textContent=AG_LINES.join(NL);
+      box.scrollTop=box.scrollHeight;
+    }
+    document.getElementById('agstatus').textContent='ход: '+(j.busy? 'идёт':'свободен')+
+      ' · сессия: '+(j.session||'-')+' · последнее событие: '+(j.seq||0);
+    if(AG_POLL){ clearTimeout(AG_POLL); AG_POLL=null; }
+    if(j.busy) AG_POLL=setTimeout(agentPoll, 1200);
+  }catch(e){}
 }
 async function loadAgentState(){
   const box=document.getElementById('agstate'), pre=document.getElementById('agjournal');

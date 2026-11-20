@@ -124,6 +124,19 @@ impl std::fmt::Display for GatewayError {
 
 impl std::error::Error for GatewayError {}
 
+/// Текст ошибки «событие не пришло за отведённое время»: [`Gateway::next_event`]
+/// отдаёт его вместо `WorkerError::Timeout`, чтобы вызывающая сторона (pump
+/// вкладки «Агент») могла отличить пустой poll от сбоя канала.
+pub const TIMEOUT_EVENT: &str = "таймаут события";
+
+impl GatewayError {
+    /// Пул пуст: за таймаут не пришло ни события, ни срабатывания фильтра.
+    /// Это нормальное состояние ожидания, а не сбой.
+    pub fn is_timeout(&self) -> bool {
+        matches!(self, GatewayError::Worker(m) if m == TIMEOUT_EVENT)
+    }
+}
+
 impl From<WorkerError> for GatewayError {
     fn from(e: WorkerError) -> Self {
         GatewayError::Worker(e.to_string())
@@ -683,7 +696,7 @@ impl Gateway {
             Err(WorkerError::Timeout(_)) => {
                 let hits = self.host.take_redactions();
                 if hits.is_empty() {
-                    Err(GatewayError::Worker("таймаут события".to_string()))
+                    Err(GatewayError::Worker(TIMEOUT_EVENT.to_string()))
                 } else {
                     Ok(GatewayEvent::Redacted { hits })
                 }

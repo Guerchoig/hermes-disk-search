@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod agent_session;
 pub mod anonymize;
 pub mod config_edit;
 pub mod page;
@@ -1942,6 +1943,17 @@ pub fn route_full(
                 Ok(cfg) => agent::files_json(&cfg, &qp(query, "project").unwrap_or_default()),
                 Err(reply) => reply,
             },
+            // A5.2: события хода без SSE (кольцо 500, `after=<seq>`). Транспорт
+            // A5.3 добавит `text/event-stream` тем же маршрутом.
+            ("GET", "/api/agent/events") => match agent::gate() {
+                Ok(cfg) => agent::events_json(
+                    &cfg,
+                    &qp(query, "project").unwrap_or_default(),
+                    qp(query, "after").and_then(|v| v.parse().ok()),
+                    qp(query, "limit").and_then(|v| v.parse().ok()),
+                ),
+                Err(reply) => reply,
+            },
             ("GET", "/api/llm-host/job") => json_ok(llm_job_json()),
             ("GET", "/api/transcribe/daemon") => json_ok(transcribe::daemon_status()),
             ("GET", "/api/transcribe/list") => json_ok(transcribe::list_json()),
@@ -2031,6 +2043,36 @@ pub fn route_full(
                     // A5.1: создание проекта вкладки «Агент» (CSRF уже проверен выше).
                     "/api/agent/projects" => match agent::gate() {
                         Ok(cfg) => agent::project_add_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    // A5.2: реплика — предпросмотр, метки, вложения, отправка,
+                    // стоп и события (все под тем же CSRF-гейтом и 403 в server).
+                    "/api/agent/preview" => match agent::gate() {
+                        Ok(cfg) => agent::preview_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/label" => match agent::gate() {
+                        Ok(cfg) => agent::label_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/keep" => match agent::gate() {
+                        Ok(cfg) => agent::keep_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/attach" => match agent::gate() {
+                        Ok(cfg) => agent::attach_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/message" => match agent::gate() {
+                        Ok(cfg) => agent::message_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/abort" => match agent::gate() {
+                        Ok(cfg) => agent::abort_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/stop" => match agent::gate() {
+                        Ok(cfg) => agent::stop_json(&cfg, body),
                         Err(reply) => reply,
                     },
                     "/api/index/start" => {
