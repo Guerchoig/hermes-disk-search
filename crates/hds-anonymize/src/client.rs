@@ -200,10 +200,23 @@ impl Client {
         artifact_id: Option<&str>,
     ) -> Result<AnonymizeResult, AnonymizeError> {
         let out = out_path(in_path, out_dir, Mode::Agent);
+        self.anonymize_agent_to(in_path, &out, project_id, artifact_id)
+    }
+
+    /// `anonymize` с `mode:"agent"` и **явным** выходным путём (TR-7.1):
+    /// имя образа задаёт демон (анонимизированное имя), а не `out_path` по
+    /// имени оригинала. Маркер `hds-agent/<P>/<artifact_id>` пишет воркер.
+    pub fn anonymize_agent_to(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        artifact_id: Option<&str>,
+    ) -> Result<AnonymizeResult, AnonymizeError> {
         let mut params = json!({
             "in_path": path_str(in_path),
-            "out_dir": path_str(out_dir),
-            "out_path": path_str(&out),
+            "out_dir": path_str(out_path.parent().unwrap_or_else(|| Path::new("."))),
+            "out_path": path_str(out_path),
             "project_id": project_id,
             "mode": "agent",
         });
@@ -212,6 +225,30 @@ impl Client {
         }
         let value = self.call("anonymize", params)?;
         Ok(anonymize_from(&value))
+    }
+
+    /// `anonymize_path` (TR-7.1, A4.2): анонимизировать относительный путь —
+    /// NER по компонентам, метки проекта **без** падежного суффикса (`|`
+    /// запрещён Windows), санитайзинг имени. Оригинал не читается.
+    pub fn anonymize_path(
+        &mut self,
+        project_id: &str,
+        path: &str,
+    ) -> Result<String, AnonymizeError> {
+        let value = self.call(
+            "anonymize_path",
+            json!({"project_id": project_id, "path": path, "suffix": false}),
+        )?;
+        value
+            .get("path")
+            .and_then(|p| p.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| {
+                AnonymizeError::new(
+                    ErrorKind::Internal,
+                    "anonymize_path: в ответе воркера нет поля path",
+                )
+            })
     }
 
     /// Деанонимизация с метками проекта: `[PERSON_3|дат]` → форма в падеже
@@ -337,6 +374,32 @@ impl Client {
         let mut params = json!({
             "in_path": path_str(in_path),
             "out_dir": path_str(out_dir),
+            "project_id": project_id,
+        });
+        if let Some(id) = artifact_id {
+            params["artifact_id"] = json!(id);
+        }
+        if let Some(text) = text {
+            params["text"] = json!(text);
+        }
+        let value = self.call("text_image", params)?;
+        Ok(image_from(&value))
+    }
+
+    /// `text_image` с **явным** выходным путём (TR-7.1): имя текстового
+    /// образа `<анонимное имя>.<ext>.md` задаёт демон, а не имя оригинала.
+    pub fn text_image_to(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        artifact_id: Option<&str>,
+        text: Option<&str>,
+    ) -> Result<TextImageResult, AnonymizeError> {
+        let mut params = json!({
+            "in_path": path_str(in_path),
+            "out_dir": path_str(out_path.parent().unwrap_or_else(|| Path::new("."))),
+            "out_path": path_str(out_path),
             "project_id": project_id,
         });
         if let Some(id) = artifact_id {

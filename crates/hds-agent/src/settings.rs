@@ -124,6 +124,50 @@ fn list_at(cfg: &Config, path: &str) -> Vec<String> {
     Vec::new()
 }
 
+/// Настройки зеркала `agent.sync.*` (A4.2, §4.3 `AGENT_A4_STAGES.md`).
+///
+/// Все ключи необязательные; дефолты совпадают с блоком `agent.sync` в
+/// `config.example.yaml`. Значения `0`, отрицательные и нечисловые
+/// игнорируются — остаётся дефолт (`u64_at`): иначе `wait_poll_ms: 0`
+/// превратился бы в busy-loop, а `wait_max_sec: 0` — в «откладывать всё».
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncSettings {
+    /// Период обхода в режиме демона (A4.6).
+    pub interval_sec: u64,
+    /// Сколько размер и mtime должны не меняться, чтобы файл «успокоился».
+    pub wait_stable_sec: u64,
+    /// Период опроса размера/mtime во время ожидания.
+    pub wait_poll_ms: u64,
+    /// Максимум ожидания одного файла (дальше — отложить до следующего прохода).
+    pub wait_max_sec: u64,
+    /// Файл старше этого возраста не ждём вовсе (быстрый первый проход).
+    pub settle_age_sec: u64,
+}
+
+impl Default for SyncSettings {
+    fn default() -> Self {
+        SyncSettings {
+            interval_sec: 5,
+            wait_stable_sec: 2,
+            wait_poll_ms: 500,
+            wait_max_sec: 30,
+            settle_age_sec: 5,
+        }
+    }
+}
+
+/// Прочитать `agent.sync.*` из конфига (§4.3) с дефолтами.
+pub fn sync_settings(cfg: &Config) -> SyncSettings {
+    let dflt = SyncSettings::default();
+    SyncSettings {
+        interval_sec: u64_at(cfg, "agent.sync.interval_sec", dflt.interval_sec),
+        wait_stable_sec: u64_at(cfg, "agent.sync.wait_stable_sec", dflt.wait_stable_sec),
+        wait_poll_ms: u64_at(cfg, "agent.sync.wait_poll_ms", dflt.wait_poll_ms),
+        wait_max_sec: u64_at(cfg, "agent.sync.wait_max_sec", dflt.wait_max_sec),
+        settle_age_sec: u64_at(cfg, "agent.sync.settle_age_sec", dflt.settle_age_sec),
+    }
+}
+
 /// Прочитать секцию `agent:` (TR-8.3) с дефолтами.
 pub fn settings(cfg: &Config) -> AgentSettings {
     AgentSettings {
@@ -310,5 +354,76 @@ agent:
         // Не идентификатор проекта — путь не строится (защита от обхода).
         assert!(registry_db(&c, "..\\..\\evil").is_none());
         assert!(registry_db(&c, "P1").is_none());
+    }
+
+    /// Блок `agent.sync` из `config.example.yaml`, развёрнутый в YAML.
+    ///
+    /// В примере конфига ключи **закомментированы** (это документация
+    /// дефолтов), поэтому `serde_yaml::from_str` их не видит. Здесь снимаем
+    /// один `#` и крайний пробел, чтобы тест сверял **фактические** значения
+    /// из примера с `SyncSettings::default()`, а не копию чисел в коде.
+    fn example_sync_yaml() -> String {
+        let text = include_str!("../../../config.example.yaml");
+        let mut out = String::from("agent:\n  sync:\n");
+        let mut inside = false;
+        for line in text.lines() {
+            let trimmed = line.trim_start();
+            if !inside {
+                if trimmed.starts_with("# sync:") {
+                    inside = true;
+                }
+                continue;
+            }
+            if trimmed.starts_with("# network:") {
+                break;
+            }
+            let Some(rest) = trimmed.strip_prefix('#') else {
+                break;
+            };
+            let rest = rest.strip_prefix(' ').unwrap_or(rest);
+            if rest.trim().is_empty() || rest.trim_start().starts_with('#') {
+                continue;
+            }
+            out.push_str("    ");
+            out.push_str(rest);
+            out.push('\n');
+        }
+        assert!(inside, "в config.example.yaml нет блока `# sync:`");
+        out
+    }
+
+    #[test]
+    fn sync_defaults_match_example_config() {
+        let yaml = example_sync_yaml();
+        let parsed = cfg(&yaml);
+        assert_eq!(
+            sync_settings(&parsed),
+            SyncSettings::default(),
+            "дефолты agent.sync.* разошлись с config.example.yaml:\n{yaml}"
+        );
+    }
+
+    #[test]
+    fn sync_zero_and_garbage_fall_back_to_defaults() {
+        let s = sync_settings(&cfg(
+            "agent:\n  sync:\n    interval_sec: 0\n    wait_stable_sec: -3\n\
+             \x20   wait_poll_ms: 'мусор'\n    wait_max_sec: 0\n    settle_age_sec: 0\n",
+        ));
+        assert_eq!(s, SyncSettings::default());
+        // Явные значения читаются как есть (не подменяются дефолтом).
+        let s = sync_settings(&cfg(
+            "agent:\n  sync:\n    interval_sec: 11\n    wait_stable_sec: 1\n\
+             \x20   wait_poll_ms: 250\n    wait_max_sec: 9\n    settle_age_sec: 7\n",
+        ));
+        assert_eq!(
+            s,
+            SyncSettings {
+                interval_sec: 11,
+                wait_stable_sec: 1,
+                wait_poll_ms: 250,
+                wait_max_sec: 9,
+                settle_age_sec: 7,
+            }
+        );
     }
 }

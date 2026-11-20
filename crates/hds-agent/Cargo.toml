@@ -13,9 +13,16 @@ rust-version.workspace = true
 [dependencies]
 hds-core = { path = "../hds-core" }
 hds-anonymize = { path = "../hds-anonymize" }
+# A4.2: текст для образов pdf/pptx/mpp (TR-7.3) берётся у существующего воркера
+# извлечения; транспорт/типы — те же, что у `hds-anonymize`.
+hds-extract = { path = "../hds-extract" }
 aho-corasick.workspace = true
 # A4.1: реестр артефактов `data\agent\registry\<P>.db` (TR-7.2) — SQLite (WAL).
 rusqlite.workspace = true
+# A4.2: sha256 оригинала/образа — единственный критерий идемпотентности
+# обхода (повторный прогон — 0 изменений) и признак правки агентом (TR-7.7).
+sha2.workspace = true
+hex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 

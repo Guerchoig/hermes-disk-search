@@ -5,6 +5,7 @@
 и структурированные kind-ошибки."""
 import json
 import os
+import re
 import sys
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -56,6 +57,7 @@ def _handle(req):
             "capabilities": ["anonymize", "anonymize_values", "deanonymize",
                              "deanonymize_values", "inspect", "warmup",
                              "anonymize_text", "text_image", "label_for_value",
+                             "anonymize_path",
                              "vault_snapshot", "vault_rev", "vault_drop_project",
                              "merge_entities", "keep_terms",
                              "office_read", "office_edit", "office_create",
@@ -130,6 +132,35 @@ def _handle(req):
                         "count": text.count("Иванов Иван")}],
             "project_id": project,
             "warnings": [],
+        })
+        return False
+
+    if method == "anonymize_path":
+        project = params.get("project_id") or ""
+        raw = str(params.get("path") or "")
+        if params.get("suffix"):
+            stdio.err(mid, -32602, "suffix=true недопустим в именах файлов",
+                      kind="internal")
+            return False
+        if not raw:
+            stdio.err(mid, -32602, "anonymize_path: пустой path", kind="internal")
+            return False
+        parts = [p for p in re.split(r"[\\/]+", raw) if p not in ("", ".")]
+        out = []
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            stem, ext = os.path.splitext(part) if last else (part, "")
+            anon = (stem.replace("Иванов Иван", "[PERSON_1]")
+                        .replace("Петров Пётр", "[PERSON_2]"))
+            anon = re.sub(r'[<>:"/\\|?*]', "", anon).strip() or "_"
+            out.append(anon + ext)
+        sep = "\\" if "\\" in raw else "/"
+        stdio.ok(mid, {
+            "path": sep.join(out),
+            "components": out,
+            "labels": [{"label": "[PERSON_1]", "type": "PERSON",
+                        "count": 1}],
+            "project_id": project,
         })
         return False
 
@@ -254,8 +285,10 @@ def _handle(req):
         text = params.get("text")
         if text is None:
             text = "Иванов Иван — текст извлечения"
-        name = os.path.basename(in_path) + ".md"
-        out_path = os.path.join(out_dir, name)
+        if params.get("out_path"):
+            out_path = params["out_path"]
+        else:
+            out_path = os.path.join(out_dir, os.path.basename(in_path) + ".md")
         marker = "<!-- hds-agent/%s/%s -->" % (project, artifact or "")
         marker = marker.replace("/ -->", " -->")
         with open(out_path, "w", encoding="utf-8", newline="") as f:

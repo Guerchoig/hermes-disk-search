@@ -97,6 +97,7 @@ class AnonymizeWorkerTest(unittest.TestCase):
         self.assertEqual(hello["protocol"], 1)
         self.assertEqual(hello["formats"], ["docx", "xlsx", "txt", "md", "xml"])
         self.assertIn("anonymize_values", hello["capabilities"])
+        self.assertIn("anonymize_path", hello["capabilities"])
         self.assertEqual(hello["model"], "knowledgator/gliner-pii-large-v1.0")
 
         # warmup без весов → kind: model_missing + hint про установщик
@@ -147,6 +148,36 @@ class AnonymizeWorkerTest(unittest.TestCase):
             self.assertIn("phase", n["params"])
         replies = [a for a in answers if "id" in a]
         self.assertEqual(len(replies), 2)
+
+    def test_anonymize_path_over_rpc(self):
+        """RPC `anonymize_path`: метки без суффикса, `suffix=true` — отказ."""
+        # Своя БД меток: общий `cls.db` выдаёт счётчики по порядку тестов,
+        # и проверка «[PERSON_1]» зависела бы от порядка запуска.
+        db = os.path.join(self.tmp.name, "path-only.db")
+        payload = [
+            req(1, "anonymize_path", {
+                "project_id": "P0001",
+                "path": "Протоколы Иванов И. И.\\Встреча Иванов И. И..docx",
+                "ner": False,
+            }),
+            req(2, "anonymize_path", {
+                "project_id": "P0001",
+                "path": "Иванов И. И..docx",
+                "suffix": True,
+                "ner": False,
+            }),
+            req(3, "shutdown"),
+        ]
+        answers, err, code = run(payload, self.root, db, self.models)
+        replies = {a["id"]: a for a in answers if "id" in a}
+        self.assertEqual(code, 0, err)
+        res = replies[1]["result"]
+        self.assertIn("[PERSON_", res["path"])
+        self.assertNotIn("Иванов", res["path"])
+        self.assertNotIn("|", res["path"])
+        self.assertTrue(res["path"].endswith(".docx"))
+        self.assertEqual(len(res["components"]), 2)
+        self.assertIn("error", replies[2], "suffix=true должен быть отказом")
 
     def test_stderr_has_no_pii(self):
         """PII-значения не попадают в stderr воркера."""

@@ -597,10 +597,13 @@ dependencies = [
  "aho-corasick",
  "hds-anonymize",
  "hds-core",
+ "hds-extract",
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2",
 ]
 
 [[package]]

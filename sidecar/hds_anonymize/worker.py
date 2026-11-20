@@ -273,6 +273,8 @@ class Worker:
                 "deanonymize_values", "inspect", "warmup",
                 # v2 (TR-1.6/1.7, TR-3.5, TR-7.4, D18)
                 "anonymize_text", "text_image", "label_for_value",
+                # A4.2 (TR-7.1): анонимизация имён файлов и папок
+                "anonymize_path",
                 "vault_snapshot", "vault_rev", "vault_drop_project",
                 "merge_entities", "keep_terms",
                 "office_read", "office_edit", "office_create",
@@ -356,6 +358,13 @@ class Worker:
                     raise ValueError("anonymize_text: пустой text")
                 res = run(self.handlers.anonymize_text(
                     project_id, text, bool(params.get("ner", True))))
+            elif method == "anonymize_path":
+                res = run(self.handlers.anonymize_path(
+                    project_id,
+                    str(params.get("path") or params.get("in_path") or ""),
+                    bool(params.get("suffix", False)),
+                    bool(params.get("ner", True)),
+                ))
             elif method == "text_image":
                 if not in_path:
                     raise ValueError("text_image: не задан in_path")
@@ -431,6 +440,7 @@ class Worker:
         if method in ("anonymize", "anonymize_values",
                       "deanonymize", "deanonymize_values", "inspect",
                       "anonymize_text", "text_image", "label_for_value",
+                      "anonymize_path",
                       "vault_snapshot", "vault_rev", "merge_entities",
                       "vault_drop_project", "keep_terms", "vault_stats",
                       "office_read", "office_edit", "office_create"):

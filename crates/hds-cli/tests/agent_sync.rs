@@ -17,7 +17,6 @@ use std::path::{Path, PathBuf};
 use hds_agent::registry_db::{Artifact, ArtifactRegistry, Kind, Status};
 use hds_cli::cmd::agent::cmd_agent_cfg;
 use hds_core::config::{load_from, Config};
-
 /// Тесты трогают env (`HDS_ROOT`, `HDS_CONFIG`) — гонка недопустима.
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -124,23 +123,33 @@ fn sync_is_idempotent_and_keeps_rows() {
     assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
     let registry = stand.registry_path("P0001");
 
-    // Запись, сделанная «демоном», переживает повторный прогон.
+    // A4.2: запись о **существующем** оригинале переживает повторный прогон.
+    // Готовим пару «оригинал ↔ образ» с совпадающими sha256 — тогда проходу
+    // не нужен воркер, а изменение (и «чистка») были бы видны по счётчикам.
+    let project_rel = "Протоколы\\Встреча.docx";
+    let anon_rel = "Протоколы\\Встреча с [PERSON_3].docx";
+    fs::create_dir_all(stand.project_dir.join("Протоколы")).unwrap();
+    let original = stand.project_dir.join(project_rel);
+    fs::write(&original, "версия документа").unwrap();
+    let workspace = stand.dir.join("zone").join("P0001").join("workspace");
+    fs::create_dir_all(workspace.join("Протоколы")).unwrap();
+    let image = workspace.join(anon_rel);
+    fs::write(&image, "образ документа").unwrap();
+    let orig_sha = hds_agent::mirror::sha256_file(&original).unwrap();
+    let image_sha = hds_agent::mirror::sha256_file(&image).unwrap();
     {
         let reg = ArtifactRegistry::open(&registry).unwrap();
-        let mut artifact = Artifact::new(
-            "Протоколы\\Встреча.docx",
-            "Протоколы\\Встреча с [PERSON_3].docx",
-            Kind::Image,
-            Status::Synced,
-        );
-        artifact.orig_sha256 = Some("base".to_string());
+        let mut artifact = Artifact::new(project_rel, anon_rel, Kind::Image, Status::Synced);
+        artifact.orig_sha256 = Some(orig_sha);
+        artifact.anon_sha256_issued = Some(image_sha.clone());
+        artifact.anon_sha256_seen = Some(image_sha);
         reg.insert(&artifact).unwrap();
     }
     assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
 
     let reg = ArtifactRegistry::open(&registry).unwrap();
     assert_eq!(reg.count().unwrap(), 1, "повторный прогон не чистит реестр");
-    assert!(reg.by_orig("Протоколы\\Встреча.docx").unwrap().is_some());
+    assert!(reg.by_orig(project_rel).unwrap().is_some());
 }
 
 #[test]
@@ -166,4 +175,114 @@ fn sync_refuses_when_agent_disabled() {
     assert_eq!(stand.register("P0001"), 0);
     assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 1);
     assert!(!stand.registry_path("P0001").exists());
+}
+
+/// Корень репозитория: `crates/hds-cli` → два уровня вверх.
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf()
+}
+
+/// Вернуть переменные окружения в исходное состояние после теста.
+struct EnvGuard(Vec<&'static str>);
+
+impl EnvGuard {
+    fn set(pairs: &[(&'static str, PathBuf)]) -> EnvGuard {
+        for (key, value) in pairs {
+            std::env::set_var(key, value);
+        }
+        EnvGuard(pairs.iter().map(|(key, _)| *key).collect())
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for key in &self.0 {
+            std::env::remove_var(key);
+        }
+    }
+}
+
+/// A4.2 e2e: прямой путь на mock-воркере (NER-модели не нужны).
+///
+/// Проверяется «снаружи»: образ появился под анонимным именем и с метками,
+/// служебные записи не выпущены, реестр знает про unsupported, а повторный
+/// прогон не пересоздаёт образ (mtime не меняется).
+#[test]
+fn sync_forward_path_creates_labeled_images() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = repo_root();
+    let Some(python) = hds_anonymize::discover_python(&root) else {
+        eprintln!("skip: нет интерпретатора воркера анонимизации");
+        return;
+    };
+    let mock = root
+        .join("crates")
+        .join("hds-anonymize")
+        .join("tests")
+        .join("mock_worker.py");
+    let _env = EnvGuard::set(&[
+        ("HDS_ANONYMIZE_PYTHON", python),
+        ("HDS_ANONYMIZE_WORKER", mock),
+    ]);
+
+    let stand = Stand::new("forward", true);
+    fs::create_dir_all(stand.project_dir.join("Протоколы")).unwrap();
+    fs::write(
+        stand.project_dir.join("Протоколы\\Встреча Иванов Иван.md"),
+        "# Встреча\n\nКонтакт: Иванов Иван\n",
+    )
+    .unwrap();
+    fs::write(stand.project_dir.join("данные.bin"), b"\x00\x01binary").unwrap();
+    fs::write(stand.project_dir.join("~$Встреча.docx"), "lock").unwrap();
+    fs::create_dir_all(stand.project_dir.join(".hds-agent")).unwrap();
+    fs::write(stand.project_dir.join(".hds-agent\\state.json"), "{}").unwrap();
+
+    assert_eq!(stand.register("P0001"), 0);
+    assert_eq!(
+        stand.sync(&["--project", "P0001", "--once"]),
+        0,
+        "прямой путь на mock-воркере"
+    );
+
+    let workspace = stand.dir.join("zone").join("P0001").join("workspace");
+    let image = workspace.join("Протоколы\\Встреча [PERSON_1].md");
+    let text = fs::read_to_string(&image).expect("образ с анонимным именем");
+    assert!(text.contains("[PERSON_1]"), "{text}");
+    assert!(!text.contains("Иванов Иван"), "значение не утекло в образ");
+
+    let registry = ArtifactRegistry::open(&stand.registry_path("P0001")).unwrap();
+    let row = registry
+        .by_orig("Протоколы\\Встреча Иванов Иван.md")
+        .unwrap()
+        .expect("запись образа");
+    assert_eq!(row.status, Status::Synced);
+    assert_eq!(row.anon_rel, "Протоколы\\Встреча [PERSON_1].md");
+    assert_eq!(row.kind, Kind::Image);
+    assert!(row.orig_sha256.is_some());
+
+    let bin = registry
+        .by_orig("данные.bin")
+        .unwrap()
+        .expect("запись unsupported");
+    assert_eq!(bin.status, Status::Unsupported);
+    assert!(registry
+        .by_orig(".hds-agent\\state.json")
+        .unwrap()
+        .is_none());
+    assert!(registry.by_orig("~$Встреча.docx").unwrap().is_none());
+    let records = registry.count().unwrap();
+    drop(registry);
+
+    // Повторный прогон: 0 изменений — образ не перезаписан (mtime тот же).
+    let mtime_before = fs::metadata(&image).unwrap().modified().unwrap();
+    assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
+    let mtime_after = fs::metadata(&image).unwrap().modified().unwrap();
+    assert_eq!(mtime_before, mtime_after, "образ не пересоздавался");
+    let registry = ArtifactRegistry::open(&stand.registry_path("P0001")).unwrap();
+    assert_eq!(registry.count().unwrap(), records, "реестр не раздулся");
 }

@@ -54,6 +54,27 @@ _NUMERIC_VALUE_RE = re.compile(r"[+-]?\d[\d \u00A0.,]*")
 # (перенос из anonymizer_proxy/proxy/command_args.py)
 _NAME_ITEM_RE = re.compile(r"^[A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё.\- ]*$")
 
+# Имя файла/папки в Windows (TR-7.1): `|` появляется от падежных меток,
+# остальные символы — из исходных имён; управляющие тоже вырезаем. Разделители
+# пути (`\`, `/`) в имени компонента недопустимы — они режут путь.
+_INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_PATH_SPLIT_RE = re.compile(r"[\\/]+")
+
+
+def sanitize_component(name: str) -> str:
+    """Санитайзинг компонента пути после подстановки меток (TR-7.1).
+
+    Убирает недопустимые Windows-символы, схлопывает пробелы, снимает
+    хвостовые точки/пробелы (Windows их молча отбрасывает — имя в реестре
+    разошлось бы с файлом). Пустой результат заменяется `_`, чтобы компонент
+    не исчез из пути.
+    """
+    cleaned = _INVALID_NAME_RE.sub("", name or "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    cleaned = cleaned.rstrip(". ")
+    return cleaned or "_"
+
+
 
 def is_name_like(item: str) -> bool:
     """Имя → PERSON, прочее (номера, даты, суммы) → MISC."""
@@ -657,6 +678,7 @@ class AnonymizeHandlers:
         project_id: str,
         text: str,
         use_llm: bool = True,
+        suffix: bool = True,
     ) -> dict:
         """Анонимизировать произвольный текст метками проекта (TR-1.7).
 
@@ -664,6 +686,9 @@ class AnonymizeHandlers:
         известные формы проекта (`project_label_ex` переиспользует сущность
         по `norm_key`) + `keep_terms`. Метки — с падежными суффиксами, если
         падеж определён однозначно; иначе «проверить» (TR-2.4).
+
+        `suffix=False` — метки без падежного суффикса: так `anonymize_path`
+        готовит имена файлов (`|` в имени Windows запрещён, TR-7.1).
         """
         project_id = (project_id or "").strip()
         if not project_id:
@@ -683,7 +708,7 @@ class AnonymizeHandlers:
 
         async def add_mapping(value: str, entity_type: str) -> str:
             label, confident = self.store.project_label_ex(
-                project_id, value, entity_type
+                project_id, value, entity_type, suffix=suffix
             )
             if label is None:
                 return value
@@ -726,3 +751,66 @@ class AnonymizeHandlers:
             "project_id": project_id,
             "warnings": warnings,
         }
+
+    # ── имена файлов и папок (TR-7.1, A4.2) ─────────────────────────────
+
+    async def anonymize_path(
+        self,
+        project_id: str,
+        path: str,
+        suffix: bool = False,
+        ner: bool = True,
+    ) -> dict:
+        """Анонимизировать относительный путь: `Протоколы\\Встреча.docx`.
+
+        NER по **компонентам** (на короткой строке он слабее, чем на тексте,
+        но `project_label_ex` переиспользует уже известные формы проекта),
+        метки — без падежного суффикса: `|` в имени Windows запрещён, поэтому
+        `suffix=true` — ошибка, а не молчаливая порча имени (TR-7.1).
+
+        Возвращает `path` (тот же разделитель, что во входе), `components`
+        (Rust собирает путь своим разделителем) и `labels`.
+        """
+        project_id = (project_id or "").strip()
+        if not project_id:
+            raise ValueError("anonymize_path: не задан project_id")
+        raw = (path or "").strip()
+        if not raw:
+            raise ValueError("anonymize_path: пустой path")
+        if suffix:
+            raise ValueError(
+                "anonymize_path: suffix=true недопустим — `|` в имени файла "
+                "запрещён Windows (TR-7.1)"
+            )
+        parts = [p for p in _PATH_SPLIT_RE.split(raw) if p not in ("", ".")]
+        out: list[str] = []
+        labels: dict[str, dict] = {}
+        for index, part in enumerate(parts):
+            if part == "..":
+                # `..` не должен появляться (путь строит демон); не трогаем,
+                # чтобы не превратить его в имя и не «спрятать» выход из папки.
+                out.append(part)
+                continue
+            last = index == len(parts) - 1
+            stem, ext = os.path.splitext(part) if last else (part, "")
+            if not stem:
+                out.append(sanitize_component(part))
+                continue
+            res = await self.anonymize_text(
+                project_id, stem, use_llm=ner, suffix=False
+            )
+            out.append(sanitize_component(res["text"]) + ext)
+            for item in res["labels"]:
+                known = labels.get(item["label"])
+                if known is None:
+                    labels[item["label"]] = dict(item)
+                else:
+                    known["count"] = known.get("count", 0) + item.get("count", 0)
+        sep = "\\" if "\\" in raw else "/"
+        return {
+            "path": sep.join(out),
+            "components": out,
+            "labels": list(labels.values()),
+            "project_id": project_id,
+        }
+
