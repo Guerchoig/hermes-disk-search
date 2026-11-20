@@ -85,9 +85,11 @@ fn usage() -> String {
      \x20 history clear --project <P> [--session ID]\n\
      \x20       (Очистить историю: значения в файлах сессии заменяются метками,\n\
      \x20        рядом остаётся бэкап .json.bak; без --session — последняя сессия)\n\
-     \x20 sync --project <P> [--once]\n\
+     \x20 sync --project <P> [--once | --interval SEC]\n\
      \x20       (зеркало папки проекта и <P>\\workspace; реестр\n\
-     \x20        data\\agent\\registry\\<P>.db, прямой и обратный путь; цикл — A4.6)\n\
+     \x20        data\\agent\\registry\\<P>.db, прямой и обратный путь; --interval —\n\
+     \x20        демон по таймеру, остановка `hds stop`/Ctrl+C, журнал\n\
+     \x20        <P>\\agent-state\\sync.log; A4.6)\n\
      \x20 result accept|reject|conflict --project <P> --path <отн. путь>\n\
      \x20       [--choice agent|new|delegate]\n\
      \x20       (решения по варианту агента: backup и замена оригинала, отклонение\n\

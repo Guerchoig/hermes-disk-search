@@ -89,6 +89,11 @@ impl Stand {
             .join("registry")
             .join(format!("{id}.db"))
     }
+
+    /// Каталог `agent-state` проекта (`settings::state_dir_for`, A4.6).
+    fn state_dir(&self) -> PathBuf {
+        self.dir.join("zone").join("P0001").join("agent-state")
+    }
 }
 
 #[test]
@@ -393,5 +398,133 @@ fn sync_reverse_emits_agent_files_and_pending_variant() {
     assert_eq!(
         fs::read_dir(&stand.project_dir).unwrap().count(),
         project_files
+    );
+}
+
+/// A4.6: отказы разбора аргументов — код 2 до любых действий с файлами.
+///
+/// `--interval 0` дал бы busy-loop, отрицательное и не число — смысла не
+/// имеют, `--interval` без значения и `--once` вместе с `--interval` —
+/// противоречие: во всех случаях честный отказ и подсказка, а не догадка.
+#[test]
+fn sync_rejects_bad_interval_arguments() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("interval", true);
+    assert_eq!(stand.register("P0001"), 0);
+    for bad in [
+        vec!["--project", "P0001", "--interval", "0"],
+        vec!["--project", "P0001", "--interval", "-5"],
+        vec!["--project", "P0001", "--interval", "abc"],
+        vec!["--project", "P0001", "--interval"],
+        vec!["--project", "P0001", "--once", "--interval", "5"],
+        vec!["--project", "P0001", "--interval=0"],
+    ] {
+        assert_eq!(stand.sync(&bad), 2, "{bad:?}");
+    }
+    assert!(
+        !stand.state_dir().join("sync.log").exists(),
+        "отказ разбора не создаёт журнал"
+    );
+}
+
+/// A4.6: демон живёт по таймеру и останавливается сигналом `index.stop`.
+///
+/// Снаружи видно: код 0, журнал со строками `start`/`pass`/`stop`, снятые
+/// `index.stop` и `sync.lock`. Проверка «не висит» — по времени теста.
+#[test]
+fn sync_daemon_stops_on_index_stop_and_writes_journal() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("daemon", true);
+    assert_eq!(stand.register("P0001"), 0);
+    // `hds stop` пишет `<root>\index.stop`; корень — `HDS_ROOT` стенда.
+    let stop_file = stand.dir.path.join("index.stop");
+    let signal = stop_file.clone();
+    let stopper = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        fs::write(&signal, b"").unwrap();
+    });
+    let started = std::time::Instant::now();
+    let code = stand.sync(&["--project", "P0001", "--interval", "1"]);
+    stopper.join().unwrap();
+    assert_eq!(code, 0, "остановка по сигналу — код 0");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "демон не завис: {:?}",
+        started.elapsed()
+    );
+    let state = stand.state_dir();
+    assert!(!stop_file.exists(), "index.stop снят сигналом");
+    assert!(!state.join("sync.lock").exists(), "sync.lock снят");
+    let log = fs::read_to_string(state.join("sync.log")).expect("журнал демона");
+    assert!(
+        log.contains("start mode=daemon project=P0001 interval=1s"),
+        "{log}"
+    );
+    assert!(log.lines().any(|l| l.contains(" pass ")), "{log}");
+    assert!(log.contains("stop reason=index.stop"), "{log}");
+}
+
+/// A4.6: занятый `sync.lock` — «уже запущен» и код 0; чужой lock не снимается.
+#[test]
+fn sync_daemon_refuses_busy_sync_lock() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("busylock", true);
+    assert_eq!(stand.register("P0001"), 0);
+    let state = stand.state_dir();
+    fs::create_dir_all(&state).unwrap();
+    let lock = state.join("sync.lock");
+    // Живой PID (свой) — lock не устаревший, второй демон не стартует.
+    fs::write(&lock, std::process::id().to_string()).unwrap();
+    assert_eq!(
+        stand.sync(&["--project", "P0001", "--interval", "1"]),
+        0,
+        "занятый lock — «уже запущен», код 0"
+    );
+    assert!(lock.exists(), "чужой lock не снят");
+}
+
+/// A4.6: журнал разового прохода — счётчики и пути, но не значения (I8).
+///
+/// Mock-воркер заменяет «Иванов Иван» меткой; проверяется, что в журнале нет
+/// ни значения, ни текста документа — только счётчики и пути.
+#[test]
+fn sync_journal_has_paths_but_no_values() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = repo_root();
+    let Some(python) = hds_anonymize::discover_python(&root) else {
+        eprintln!("skip: нет интерпретатора воркера анонимизации");
+        return;
+    };
+    let mock = root
+        .join("crates")
+        .join("hds-anonymize")
+        .join("tests")
+        .join("mock_worker.py");
+    let _env = EnvGuard::set(&[
+        ("HDS_ANONYMIZE_PYTHON", python),
+        ("HDS_ANONYMIZE_WORKER", mock),
+    ]);
+
+    let stand = Stand::new("journal", true);
+    fs::write(
+        stand.project_dir.join("Письмо.md"),
+        "Контакт: Иванов Иван\n",
+    )
+    .unwrap();
+    assert_eq!(stand.register("P0001"), 0);
+    assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
+
+    let log = fs::read_to_string(stand.state_dir().join("sync.log")).expect("журнал");
+    assert!(log.contains("start mode=once project=P0001"), "{log}");
+    assert!(log.contains("pass scanned=1"), "{log}");
+    assert!(log.contains("created=1"), "{log}");
+    assert!(log.contains("stop reason=once passes=1 changes=1"), "{log}");
+    assert!(
+        !log.contains("Иванов Иван"),
+        "значение в журнале (I8): {log}"
+    );
+    assert!(
+        !log.contains("Контакт:"),
+        "текст документа в журнале (I8): {log}"
     );
 }
