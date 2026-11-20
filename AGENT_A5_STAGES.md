@@ -50,7 +50,7 @@
 | **A5.2** | **Реплика: предпросмотр и отправка.** `POST /api/agent/preview`, `/label` («Скрыть ещё…»), `/keep` («Не скрывать»), `/attach` (вложения и пути, TR-5.2), `/message`, `/abort`, `/stop`; сессия через `AgentRegistry::get_or_open` | предпросмотр показывает ровно то, что увидит модель (метки подсвечены), «1С:ERP» не скрыт (D19), «Иванову Ивану» → `[PERSON_1\|дат]`; вложение из папки проекта даёт путь образа, файл вне папки — `workspace\_attachments`; один активный ход на проект (второй `message` — 409) | 1,5–2 дн | **закрыт 20.11.2026** (§3.2) |
 | **A5.3** | **Лента событий, деанонимизация, `ask_user`.** pump-поток на сессию (`Gateway::next_event`), кольцевой буфер + `seq`; `GET /api/agent/events` (SSE, запасной вариант — long-poll `?after=`); стриминговый ответ в `run_http_listener`; `HostHandler` с вопросами; `POST /api/agent/answer`; переключатель «как видит модель» | в ленте видны рассуждения, вызовы инструментов и MCP с **настоящими** значениями, пути workspace переведены в пути папки проекта, есть ссылка «открыть»; «как видит модель» показывает метки; вопрос агента появляется в ленте и получает ответ, ход продолжается | 2 дн | **закрыт 20.11.2026** (§3.3, отчёт `A53_E2E.md`) |
 | **A5.4** | **«Результаты» и решения.** `GET /api/agent/pending`, `/compare`, `POST /api/agent/decision` поверх `hds_agent::results`; `Mirror::compare` в `hds-agent`; панель «Результаты» | вариант в `pending`, отчёт валидатора (`verdict`, `checks`), «Открыть» (путь + копирование), «Сравнить» (минимальный объём), «Принять» (оригинал заменён, backup есть, образ пересоздан), «Отклонить», «Конфликт» с тремя исходами; «файл занят» — понятная ошибка, вариант на месте, повторный `sync` — 0 изменений | 1,5–2 дн | **закрыт 20.11.2026** (§3.4, отчёт `A54_E2E.md`) |
-| **A5.5** | **«Метки проекта» (TR-2.6).** RPC `vault_project_labels`; `merge_log` + `unmerge_entities` (миграция схемы); «Объединить», «Разъединить», «Не скрывать»; после склейки — один проход `Mirror::sync_once` и сообщение агенту | таблица «метка → значение (формы) → где встречается»; склейка двух меток: образ содержит старшую, уже выпущенные файлы с `[PERSON_5]` деанонимизируются (`aliases`), агенту ушло сообщение; «Разъединить» возвращает формы склейки, записанной после A5.5 | 1,5–2 дн | — |
+| **A5.5** | **«Метки проекта» (TR-2.6).** RPC `vault_project_labels`; `merge_log` + `unmerge_entities` (миграция схемы); «Объединить», «Разъединить», «Не скрывать»; после склейки — один проход `Mirror::sync_once` и сообщение агенту | таблица «метка → значение (формы) → где встречается»; склейка двух меток: образ содержит старшую, уже выпущенные файлы с `[PERSON_5]` деанонимизируются (`aliases`), агенту ушло сообщение; «Разъединить» возвращает формы склейки, записанной после A5.5 | 1,5–2 дн | **закрыт 20.11.2026** (§3.5, отчёт `A55_E2E.md`) |
 | **A5.6** | **«Настройки агента», уведомления фильтра, «Очистить историю».** Панель настроек (провайдер, модель, ключи → `secrets.json`, MCP, суб-агенты); `take_redactions()` → уведомления в ленте; `Gateway::clear_history` по кнопке | ключ не попадает ни в `config.yaml`, ни в ответы API (маска); «Очистить историю»: стоп → значения заменены метками → сессия возобновлена, отчёт «файлов/замен»; в `agent-state` и журналах значений нет (I8) после очистки | 1 дн | — |
 | **A5.7** | **Живой сценарий §7, инварианты, отчёт.** Сценарий на вымышленных данных (реальный провайдер; без ключа — mock, и это явно в отчёте); I1/I2/I4/I8 на стенде; `AGENT_A5_REPORT.md`; README §20 — раздел про вкладку | шаги §7 проходят целиком: проект → образы; реплика с `[PERSON_1\|дат]` и «1С:ERP»; агент читает образы, ищет по проекту, пишет столбец и письмо; в ленте настоящие значения; письмо в папке проекта, вариант реестра в `pending`; «Принять» → backup; `egress_log` и `<agent.root>` без форм значений fixtures; `%USERPROFILE%\.cline` не изменён | 1,5 дн | — |
 
@@ -74,10 +74,9 @@ A5.5 ← A5.1; A5.6 ← A5.3 (уведомления — из событий); A
 |---|---|---|---|
 | A5.1 | закрыт 20.11.2026 | `be398515` (feat) + docs | см. §3.1 |
 | A5.2 | закрыт 20.11.2026 | feat + docs | см. §3.2 |
-| A5.3 | контекст готов 20.11.2026 | — | `AGENT_A5_3_HANDOFF_PROMPT.md` (SSE, лента, `ask_user`) |
-| A5.3 | — | — | — |
-| A5.4 | — | — | — |
-| A5.5 | — | — | — |
+| A5.3 | закрыт 20.11.2026 | feat + docs (`fd2852b2`) | см. §3.3, отчёт `A53_E2E.md` |
+| A5.4 | закрыт 20.11.2026 | `b5daab0b` (feat) + `fb699982` (docs) | см. §3.4, отчёт `A54_E2E.md` |
+| A5.5 | закрыт 20.11.2026 | feat + docs | см. §3.5, отчёт `A55_E2E.md` |
 | A5.6 | — | — | — |
 | A5.7 | — | — | — |
 
@@ -294,7 +293,125 @@ A5.5 ← A5.1; A5.6 ← A5.3 (уведомления — из событий); A
 * **E2E стенда** — `a54_e2e.ps1`, `A54_E2E.md`: 36/36 проверок (см. §4.2 п.24 — что нашлось).
 
 
-## 4. Решения и долги
+### 3.5. A5.5: что именно сделано (факты)
+
+* **Схема без повышения версии.** `vault.merge_log` создаётся в `_init_schema`
+  как `CREATE TABLE IF NOT EXISTS` рядом с `aliases` (аддитивная миграция «на
+  месте»): `SCHEMA_VERSION` остался **2**, потому что `_migrate_if_needed` при
+  другой версии переименовал бы базу (D4) и потерял метки. Колонки: `id,
+  project_id, ts, keep_type, keep_n, keep_entity, dropped, forms_before`
+  (`dropped` — JSON `[{type, n, entity_id, forms}]`, `forms_before` — JSON форм
+  старшей **до** склейки).
+* **`Vault.merge_entities`** в той же транзакции пишет строку журнала и
+  возвращает `merge_id` (`None`, если склеивать было нечего). Поведение
+  (алиасы, перенос форм, отказ для разных типов) не менялось — на нём CLI.
+* **`Vault.unmerge_entities(project_id, merge_id)`** (A5.5, В-A5-3): проверяет
+  журнал, для каждой младшей метки снимает псевдоним, восстанавливает `labels`,
+  убирает из старшей формы, которых не было в `forms_before`; удаляет запись
+  журнала. Возвращает `{merge_id, keep, restored, forms_removed}`. Неизвестная
+  склейка (в том числе любая до A5.5) и чужой проект — `VaultError` с понятным
+  текстом (UI → 404/409). `drop_project` чистит `merge_log` вместе с
+  `labels`/`aliases` (`merges` в ответе).
+* **`Vault.project_labels(project_id)`** — `{rev, labels: [{label, type, forms,
+  aliases}], merges: [{id, ts, keep, dropped, forms_moved}], keep}`. Псевдонимы
+  собраны у **оставшейся** метки. Значения форм отдаются (зона пользователя,
+  как `snapshot`), в журналы не пишутся (I8).
+* **Разрешение псевдонимов при выдаче метки** (`_merged_target` в
+  `_ensure_label`): без него следующий проход NER завёл бы младшей сущности
+  **новый** номер (`norm_key` у неё свой, строка `labels` удалена) — образы
+  после пересборки разошлись бы со вторым проходом, а `sync --once` дал бы
+  изменения. Теперь номер берётся у старшей (цепочка `A → B → C` разрешается,
+  цикл отсекается); после «Разъединить» запись журнала удалена — метка снова
+  своя. Тест `test_merge_makes_ner_use_senior_label`.
+* **RPC**: `vault_project_labels`, `unmerge_entities` — в `worker.py` (диспетчер
+  + `hello.capabilities`) и `handlers.py`. Клиент `hds-anonymize`:
+  `ProjectLabel`/`MergeRecord`/`ProjectLabels`/`MergeOutcome`/`UnmergeOutcome`,
+  методы `project_labels`, `unmerge_entities`; `merge_entities` теперь отдаёт
+  типизированный `MergeOutcome` с `merge_id` (CLI печатает «склейка №N»).
+* **Ядро `crates/hds-agent/src/labels.rs`**: `LabelsReport` (`rev`, `labels`,
+  `merges`, `keep`), строка `LabelRow` (метка, тип, формы, псевдонимы,
+  `occurrences` — файлы реестра, где метка есть в образе, с числом вхождений),
+  `report(registry, workspace, anonymizer, extractor, project_id)` и вход
+  `Mirror::labels_report()`. Текст образа читается `validator::read_text`
+  (md/txt/xml — напрямую, docx/xlsx/pdf/pptx — `hds_extract`), метки —
+  `hds_core::labels::{find_labels, label_parts}`: своих регулярок в ядре и в
+  UI нет (AG-1). Сравнение — по частям метки, поэтому `[PERSON_1|дат]` — та же
+  сущность. Нечитаемый образ пропускается: панель подписана «по тексту
+  документов (тело)» (A5.4 §6 п.24).
+* **`Mirror::refresh_label_images(dropped)`** (`results.rs`) — пересборка
+  образов, где встречаются младшие метки, через существующий
+  `rebuild_image(row, Status::Synced)`; `RefreshReport {rebuilt, skipped}`.
+  Пересобираются только `synced`/`accepted`; `pending_accept`/`conflict`/
+  `agent_changed` попадают в `skipped` (пересборка потеряла бы правки агента,
+  В-A5.5-5). После — **один** `sync_once` в маршруте.
+* **Сообщения агенту**: `MessageKind::LabelsMerged` (`labels_merged`) и
+  `LabelsUnmerged` (`labels_unmerged`), публичный
+  `results::append_message(project_root, kind, rel, text)`; `Mirror::notify`
+  делегирует ему. У меток `rel=""`, текст — только метки
+  (`labels::merge_message`/`unmerge_message`), значений нет (I8).
+* **Маршруты** (`crates/hds-ui/src/agent.rs`, `lib.rs`):
+  `GET /api/agent/labels?project=`, `POST /api/agent/labels/merge
+  {project, keep, drop}`, `POST /api/agent/labels/unmerge {project, merge_id}`;
+  «Не скрывать» — существующий `/api/agent/keep`. Все под `agent::gate()` и
+  CSRF-гейтом, в server-профиле 403. Python-воркер — **один на UI**
+  (`AgentApi::client`), замок держится только на вызов vault и на
+  пересборку+проход: `with_client_mirror` (новый вариант рядом с `with_mirror`
+  A5.4, `LazyAnonymizer` не поднимается). Коды: 400 (тело, нет `keep`/`drop`,
+  разные типы, одна метка, нет `merge_id`), 404 (проект/реестр/метка не
+  проекта/склейка не найдена), 409 (метка уже псевдоним; склейка изменилась),
+  503 (зона выключена), 500 (сбой). Проверка «метка есть в проекте / уже
+  псевдоним» идёт по снимку `project_labels` **до** записи, а не по тексту
+  ошибки Python. После склейки/разъединения — `notice` в ленту без значений.
+* **Панель «Метки проекта»** (`page.rs`, между «Файлами проекта» и «Новым
+  проектом»): таблица «метка | значение (формы) | где встречается», чекбоксы,
+  «Объединить выбранные» (один тип, старшая — максимум файлов, при равенстве —
+  первая отмеченная, `confirm()` с выбором), блок склеек с «Разъединить»
+  (только `merge_log`), «Не скрывать» у каждой формы с подписью «действует во
+  всех проектах», подпись про необратимость склеек до A5.5. После склейки и
+  разъединения обновляются панель, «Файлы проекта» и «Состояние проекта».
+* **Тесты.** Python: `SchemaTest` (`merge_log` в таблицах и колонках),
+  `test_merge_writes_log`, `test_unmerge_restores`, `test_unmerge_unknown`,
+  `test_project_labels_shape`. Клиент: mock-воркер отвечает
+  `vault_project_labels`/`unmerge_entities`, в `tests/client.rs` — разбор
+  `ProjectLabels`/`MergeOutcome`/`UnmergeOutcome`. `hds-agent`: `labels::tests`
+  (вхождения по файлам, пропавший образ, тексты сообщений, отчёт через
+  зеркало), `results::tests`
+  (`refresh_rebuilds_synced_images_and_skips_variants`,
+  `append_message_writes_labels_only_queue`, разбор новых `MessageKind`).
+  `hds-ui`: unit `merge_request_accepts_one_type_and_rejects_bad_bodies`,
+  `unmerge_merge_id_parses_number_and_string`; сокет
+  `crates/hds-ui/tests/agent_labels.rs`
+  (`labels_merge_unmerge_cycle_on_socket`,
+  `labels_routes_validate_body_and_require_csrf`): GET labels, merge (образы
+  пересобраны, `messages.jsonl`, журнал склеек, `notice`), 409 на повторную
+  склейку псевдонима, 404, unmerge (метки вернулись, образы снова с младшей),
+  keep, 400, 403 без CSRF и в server-профиле. `cargo test -p hds-cli` —
+  `hds anon merge` не сломан (типизированный ответ).
+* **Прогоны:** `cargo fmt --all --check` и
+  `clippy --workspace --all-targets -- -D warnings` — чисто;
+  `cargo test --workspace --no-fail-fast -- --test-threads=4` — **127 наборов /
+  907 passed / 13 ignored** и два известных флейка под параллельной нагрузкой
+  (`agent_acceptance::acceptance_a3_end_to_end` — IDE пишет в `%USERPROFILE%\.cline`;
+  `quota_socket::unauthorized_heavy_rejected_before_queue` — `max_conns`/503);
+  оба одиночным прогоном зелёные. Python — **333 OK (skip 1)**, `npm test` —
+  **23/23**. Логи: `tools/parity/out/a55-cargo-test2.log`.
+* **E2E стенда** — `a55_e2e.ps1` (+ `a55_probe.py`: текст образа, метки, значение
+  метки, журнал склеек; `a55_db_state.py`): `GET labels` (46 меток), пара одного
+  типа (`[MONEY_1]`/`[MONEY_2]`), склейка → 45 меток, образы пересобраны
+  (младшей метки нет, старшая есть), `messages.jsonl` `labels_merged`, `sync --once`
+  `changes=0`, деанонимизация младшей метки через псевдоним, разъединение → 46
+  меток, `labels_unmerged`, `changes=0`, «Не скрывать» (вымышленный термин), I8 —
+  значений в служебных артефактах нет. **30/30 проверок** (`a55-checks.txt`,
+  отчёт `A55_E2E.md`). Бэкап `anonymize.db` — в `finally` (восстановление, если
+  разъединение не прошло; на прогоне не понадобилось).
+* **Осознанные отклонения:** (1) при разъединении образы пересобираются по
+  **старшей** метке (`restored`-метки в образах уже нет — её заменяет NER);
+  (2) `labels_err` отдаёт 500 на любую ошибку реестра/воркера — отдельного
+  кода не заводили, причина для пользователя одна: «посмотрите `sync.log` и
+  повторите»; (3) заголовки docx в «где встречается» не видны — ограничение
+  `hds_extract` (A5.4 §6 п.24), а не панели.
+
+
 
 ### 4.1. Вопросы владельцу — предложены дефолты
 
@@ -344,6 +461,17 @@ A5.5 ← A5.1; A5.6 ← A5.3 (уведомления — из событий); A
 | В-A5.4-5 | Ошибки решения | 400/404/409/503/500 (§3.4); «файл занят» — 409 с текстом A4, вариант и статус не меняются; панель показывает текст сервера и не «притворяется», что решение прошло |
 | В-A5.4-6 | Что после решения | Событие `notice` в кольцо ленты (путь и исход, без содержимого) и обновление «Результатов», «Файлов проекта» и «Состояния проекта» |
 
+**Ответы A5.5** (приняты при разработке, действуют до решения владельца):
+
+| # | Вопрос | Решение |
+|---|---|---|
+| В-A5.5-1 | Какая метка «старшая» | Метка с наибольшим числом файлов в `occurrences`; при равенстве — первая отмеченная. `confirm()` показывает выбор; ручной выбор «оставить» — фаза 2 |
+| В-A5.5-2 | Область «Разъединить» | Только склейки из `merge_log` (A5.5+). Для старых — ошибка 404 с текстом «склейка N не найдена — «Разъединить» возможно только для склеек, записанных после A5.5» (В-A5-3) |
+| В-A5.5-3 | «Число упоминаний» | Формы значения + число файлов реестра, где метка есть в образе, и вхождения в каждом (В-A5-2); точный счётчик — фаза 2 |
+| В-A5.5-4 | Что уходит агенту | `messages.jsonl`: `labels_merged`/`labels_unmerged`, только метки, `rel=""`; `notice` в ленту. Доставка в сессию — A5.6 |
+| В-A5.5-5 | Что делать с вариантами при склейке | `pending_accept`/`conflict`/`agent_changed` не пересобираются — попадают в `skipped`; решение — в «Результатах» (A5.4) |
+| В-A5.5-6 | «Не скрывать» в панели | Глобальный `keep_terms` (D19), кнопка у каждой формы, подпись «действует во всех проектах»; метка не удаляется — новые значения метку не получат |
+
 ### 4.2. Долги и открытые места (передаются по под-этапам)
 
 1. **K1 (RAG «с/без») не выполнен** — предпосылка плана «после A3, до A5». Параллельно
@@ -354,14 +482,17 @@ A5.5 ← A5.1; A5.6 ← A5.3 (уведомления — из событий); A
 3. **`hds-ui` → `hds-agent` (закрыто в A5.1).** Зависимость добавлена, ленивые
    фабрики воркеров переехали в `hds_agent::factory`; CLI и UI поднимают Python
    одинаково. Новых копий фабрик не заводить.
-4. **«Метки проекта» без RPC с counters/aliases.** `vault_snapshot` отдаёт метки и их
-   формы (значения тоже — это зона пользователя), но без числа упоминаний и без
-   псевдонимов; `merge_entities` есть, «Разъединить» — нет. A5.5 добавляет
-   `vault_project_labels` и `unmerge_entities`.
-5. **«Разъединить» потребует `merge_log`** (миграция `anonymize.db` без изменения
-   данных). Если владелец выберет «не делать» — TR-2.6 закрывается частично, долг
-   фиксируется.
-6. **Точный счётчик упоминаний метки** — фаза 2 (В-A5-2).
+4. **«Метки проекта» без RPC с counters/aliases.** *(Закрыто в A5.5:*
+   `vault_project_labels` отдаёт метки с формами и псевдонимами, журнал склеек
+   и `keep`; `unmerge_entities` — «Разъединить»; в панели — формы + число
+   файлов, точный счётчик вхождений остаётся фазой 2.)*
+5. **«Разъединить» потребует `merge_log`** *(Закрыто в A5.5: таблица
+   `merge_log` создаётся аддитивно, `SCHEMA_VERSION` не повышался — иначе D4
+   переименовал бы базу и потерял метки. Склейки до A5.5 необратимы, об этом
+   сказано в панели и в тексте 404.)*
+6. **Точный счётчик упоминаний метки** — фаза 2 (В-A5-2). В панели «Метки
+   проекта» (A5.5) — формы значения, число файлов и вхождения в каждом файле
+   по тексту образа.
 7. **Полный Word-compare** — фаза 2 (В-A5-4).
 8. **Открытие файлов из UI** — A6/отдельное решение (В-A5-7).
 9. **Многопользовательская вкладка «Агент»** — фаза 2 (D20: сейчас 403).
@@ -570,6 +701,33 @@ A5.5 ← A5.1; A5.6 ← A5.3 (уведомления — из событий); A
     `Mirror` в нём нужны `anonymize_path`, `image_map`, `anonymize` и `vault_snapshot`.
 38. **A5.4: `notice` заводит состояние хода.** `AgentApi::notice` создаёт `Turn` проекта,
     даже если чата не было: `busy=false`, событий — одно. Не считать это «ходом идёт».
+39. **A5.5: `merge_log` создаётся аддитивно, `SCHEMA_VERSION` не повышается.**
+    `Vault._migrate_if_needed` при другой версии **переименовывает** базу (D4) и
+    теряет метки стенда. Новая таблица — `CREATE TABLE IF NOT EXISTS` в
+    `_init_schema`, как `projects`/`aliases`.
+40. **A5.5: пересборка после разъединения — по старшей метке.** `restored`-меток
+    в образах уже нет (их заменил NER после склейки), поэтому
+    `refresh_label_images(&[keep])`: образы пересобираются из оригиналов, и
+    младшая метка возвращается сама. Искать `restored` в образах бесполезно —
+    получится пустой `rebuilt`.
+41. **A5.5: `drop` всегда приходит со страницы вместе со старшей меткой.**
+    `merge_request` вычитает `keep` из `drop`, поэтому «одна метка» — это пустой
+    `drop` **после** вычитания (400), а не пустой массив в теле.
+42. **A5.5: значения форм — только в ответе панели.** `vault_project_labels`
+    отдаёт формы значениями (зона пользователя, как `snapshot`), но
+    `messages.jsonl`, `sync.log` и `notice` содержат только метки (I8). В
+    сокет-тесте это проверяется явно (`!messages.contains("Петров")`).
+43. **A5.5: не поднимать второй Python.** `with_mirror` (A5.4) создаёт
+    `LazyAnonymizer` — для меток это второй процесс на тот же `anonymize.db`.
+    `with_client_mirror` берёт уже открытый `AgentApi::client`; замок держится
+    только на пересборку+проход, поэтому «Стоп» и реплика не ждут меток.
+44. **A5.5: в E2E-сканировании I8 пути — не утечка.** `rebuilt[].rel/anon` —
+    путь папки проекта и workspace; значение в имени файла там законно (на
+    стенде «1С ERP» есть и в формах `[ORG_1]`, и в имени `.pdf.md`). Сценарий
+    сканирует текст сообщения, метки, `sync.log` и `messages.jsonl`, а пути из
+    проверки исключает. `forms_before` в `merge_log` — значения форм старшей, и
+    это допустимо **только внутри `anonymize.db`** (I1); в логах и сообщениях
+    их нет.
 
 
 ## 7. Окружение и команды
@@ -641,6 +799,31 @@ cargo test -p hds-ui agent::                 # results_err → коды 400/404/
 cargo test -p hds-ui --test agent_results    # pending/compare/decision, busy, CSRF, server
 ```
 
+Тесты A5.5 (метки проекта, склейка, разъединение):
+
+```powershell
+cargo test -p hds-agent labels::             # report/occurrences, message, отчёт зеркала
+cargo test -p hds-agent results::            # refresh_label_images, append_message, MessageKind
+cargo test -p hds-anonymize --test client    # project_labels/unmerge на mock-воркере
+cargo test -p hds-ui --test agent_labels     # сокет: GET labels, merge, unmerge, keep, 400/403
+sidecar\venv-anonymize\Scripts\python.exe -m unittest sidecar.tests.test_anonymize_vault -v
+```
+
+Маршруты A5.5 на стенде (`$h` — `@{"X-HDS-UI"="1";"Content-Type"="application/json"}`):
+
+```powershell
+# A5.5: метки проекта (формы — значения, зона пользователя; кириллица в ответе — UTF-8)
+Invoke-RestMethod 'http://127.0.0.1:8799/api/agent/labels?project=P0001'
+# A5.5: склейка: тело — UTF-8 байтами, иначе кириллица меток ломается
+$body=@{project='P0001';keep='[PERSON_1]';drop=@('[PERSON_2]')}|ConvertTo-Json
+Invoke-RestMethod 'http://127.0.0.1:8799/api/agent/labels/merge' -Method Post -Headers $h `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))
+# A5.5: разъединение — только склейки из merge_log (номер из GET labels → merges[].id)
+$body=@{project='P0001';merge_id=1}|ConvertTo-Json
+Invoke-RestMethod 'http://127.0.0.1:8799/api/agent/labels/unmerge' -Method Post -Headers $h `
+    -Body ([Text.Encoding]::UTF8.GetBytes($body))
+```
+
 E2E вкладки по шагам под-этапа (артефакты — `A51_E2E.md` … `A57_E2E.md` в каталоге
 стенда; сценарии — `a51_e2e.ps1` и далее):
 
@@ -649,6 +832,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\out\agent_a42\a
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\out\agent_a42\a52_e2e.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\out\agent_a42\a53_e2e.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\out\agent_a42\a54_e2e.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File tools\parity\out\agent_a42\a55_e2e.ps1
 ```
 
 * **Mock-провайдер** без облака: `MOCK_JS` из `crates/hds-agent/tests/gateway_worker.rs`;
