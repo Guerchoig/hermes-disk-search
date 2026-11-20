@@ -332,6 +332,12 @@ pub trait Anonymizer {
     /// `vault_snapshot` (TR-1.6): метки проекта — источник истины валидатора
     /// (A4.5): «метка выдумана», если её нет в снимке.
     fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError>;
+    /// `vault_project_labels` (A5.5): метки проекта с псевдонимами, журнал
+    /// склеек и `keep` — панель «Метки проекта» (TR-2.6).
+    fn project_labels(
+        &mut self,
+        project_id: &str,
+    ) -> Result<hds_anonymize::ProjectLabels, MirrorError>;
     /// Обратный акт (TR-7.5): деанонимизировать образ в файл пользователя.
     ///
     /// `restore_from` — снимок основания: из него возвращаются `docProps` и
@@ -404,6 +410,14 @@ impl Anonymizer for hds_anonymize::Client {
 
     fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError> {
         hds_anonymize::Client::snapshot(self, project_id)
+            .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn project_labels(
+        &mut self,
+        project_id: &str,
+    ) -> Result<hds_anonymize::ProjectLabels, MirrorError> {
+        hds_anonymize::Client::project_labels(self, project_id)
             .map_err(|e| MirrorError::Anonymizer(e.to_string()))
     }
 
@@ -537,6 +551,13 @@ impl Anonymizer for LazyAnonymizer {
 
     fn snapshot(&mut self, project_id: &str) -> Result<hds_anonymize::Snapshot, MirrorError> {
         Anonymizer::snapshot(self.get()?, project_id)
+    }
+
+    fn project_labels(
+        &mut self,
+        project_id: &str,
+    ) -> Result<hds_anonymize::ProjectLabels, MirrorError> {
+        Anonymizer::project_labels(self.get()?, project_id)
     }
 
     fn deanonymize_agent(
@@ -1841,6 +1862,8 @@ pub(crate) mod tests {
         pub(crate) rev: i64,
         /// Заставить `snapshot` упасть (проверка «валидатор не блокирует»).
         pub(crate) fail_snapshot: bool,
+        /// Журнал склеек для `project_labels` (A5.5).
+        pub(crate) merges: Vec<hds_anonymize::MergeRecord>,
     }
 
     impl Default for FakeAnon {
@@ -1855,6 +1878,7 @@ pub(crate) mod tests {
                 labels: vec!["[PERSON_1]".to_string(), "[PERSON_2]".to_string()],
                 rev: 7,
                 fail_snapshot: false,
+                merges: Vec::new(),
             }
         }
     }
@@ -1984,6 +2008,32 @@ pub(crate) mod tests {
                     })
                     .collect(),
                 others: Vec::new(),
+                keep: Vec::new(),
+            })
+        }
+
+        /// A5.5: метки проекта для панели — те же, что у `snapshot`, плюс
+        /// псевдонимы и журнал склеек (`merged`).
+        fn project_labels(
+            &mut self,
+            _project: &str,
+        ) -> Result<hds_anonymize::ProjectLabels, MirrorError> {
+            if self.fail_snapshot {
+                return Err(MirrorError::Anonymizer("метки недоступны".to_string()));
+            }
+            Ok(hds_anonymize::ProjectLabels {
+                rev: self.rev,
+                labels: self
+                    .labels
+                    .iter()
+                    .map(|label| hds_anonymize::ProjectLabel {
+                        label: label.clone(),
+                        entity_type: "PERSON".to_string(),
+                        forms: Vec::new(),
+                        aliases: Vec::new(),
+                    })
+                    .collect(),
+                merges: self.merges.clone(),
                 keep: Vec::new(),
             })
         }

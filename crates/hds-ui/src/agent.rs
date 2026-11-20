@@ -9,6 +9,7 @@
 //! журнал демона — пути/счётчики/причины. Значения из базы меток в A5.1 не
 //! читаются вообще (I8).
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::net::TcpStream;
@@ -17,10 +18,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use hds_agent::factory::{anonymizer_factory, extractor_factory};
+use hds_agent::labels::{self, LabelsError, LabelsReport};
 use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror};
 use hds_agent::registry_db::{ArtifactRegistry, Status};
 use hds_agent::results::{
-    self, Decision, DecisionReport, ResultsError, BACKUP_SUBDIR, CONFLICTS_DIR, SERVICE_DIR,
+    self, append_message, Decision, DecisionReport, MessageKind, ResultsError, BACKUP_SUBDIR,
+    CONFLICTS_DIR, SERVICE_DIR,
 };
 use hds_agent::{projects, settings};
 use hds_core::config::{self, Config, Profile};
@@ -506,6 +509,459 @@ fn with_mirror<T>(
     )
     .map_err(|e| err(500, format!("{e}")))?;
     action(&mut mirror).map_err(results_err)
+}
+
+/// Поднять зеркало поверх **общего** воркера анонимизации UI (A5.5).
+///
+/// `with_mirror` (A5.4) поднимает ленивый `LazyAnonymizer` — для панели меток
+/// это дало бы второй Python-процесс на тот же `anonymize.db` (A5.4 §6 п.37).
+/// Здесь берётся клиент `AgentApi::client` (один на процесс UI), замок
+/// держится только на пересборку образов и проход зеркала.
+fn with_client_mirror<T>(
+    cfg: &Config,
+    id: &str,
+    action: impl for<'m> FnOnce(&mut Mirror<'m>) -> Result<T, Reply>,
+) -> Result<T, Reply> {
+    let Some(rec) = projects::get(cfg, id) else {
+        return Err(err(404, format!("проект {id} не зарегистрирован")));
+    };
+    let project_path = PathBuf::from(&rec.path);
+    if !project_path.is_dir() {
+        return Err(err(404, format!("папка проекта не найдена: {}", rec.path)));
+    }
+    let Some(db) = settings::registry_db(cfg, id) else {
+        return Err(err(
+            400,
+            format!("'{id}' не похож на идентификатор проекта (D21)"),
+        ));
+    };
+    if !db.is_file() {
+        return Err(err(
+            404,
+            format!("проект {id} ещё не зеркалился — запустите hds agent sync"),
+        ));
+    }
+    let registry = ArtifactRegistry::open(&db).map_err(|e| err(500, format!("{e}")))?;
+    let Some(state_dir) = settings::state_dir_for(cfg, id) else {
+        return Err(err(503, "agent.root не задан: анонимная зона не настроена"));
+    };
+    let client = agent_session::global(cfg)
+        .client(cfg, &state_dir)
+        .map_err(api_err)?;
+    let mut guard = client
+        .lock()
+        .map_err(|_| err(503, "воркер анонимизации занят"))?;
+    let root = hds_core::config::project_root();
+    let mut extractor = LazyExtractor::new(extractor_factory(&root));
+    let mut mirror = Mirror::from_config(
+        cfg,
+        id,
+        &project_path,
+        &registry,
+        &mut *guard,
+        &mut extractor,
+    )
+    .map_err(|e| err(500, format!("{e}")))?;
+    action(&mut mirror)
+}
+
+/// `LabelsError` → HTTP-ответ вкладки (A5.5): 500 — сбой реестра, воркера,
+/// извлечения или ввода-вывода (404 отдаёт `with_client_mirror`).
+fn labels_err(e: LabelsError) -> Reply {
+    err(500, e.to_string())
+}
+
+/// Тело `GET /api/agent/labels`: к строке метки добавлены `files` и
+/// `forms_count` — по ним страница показывает «где встречается» и выбирает
+/// старшую метку.
+fn labels_body(report: &LabelsReport) -> Value {
+    let labels: Vec<Value> = report
+        .labels
+        .iter()
+        .map(|row| {
+            json!({
+                "label": row.label,
+                "type": row.entity_type,
+                "forms": row
+                    .forms
+                    .iter()
+                    .map(|form| json!({
+                        "value": form.value,
+                        "gram": form.gram,
+                        "origin": form.origin,
+                    }))
+                    .collect::<Vec<_>>(),
+                "aliases": row.aliases,
+                "occurrences": row
+                    .occurrences
+                    .iter()
+                    .map(|o| json!({ "rel": o.rel, "anon_rel": o.anon_rel, "count": o.count }))
+                    .collect::<Vec<_>>(),
+                "files": row.files(),
+                "forms_count": row.forms_count(),
+            })
+        })
+        .collect();
+    let merges: Vec<Value> = report
+        .merges
+        .iter()
+        .map(|merge| {
+            json!({
+                "id": merge.id,
+                "ts": merge.ts,
+                "keep": merge.keep,
+                "dropped": merge.dropped,
+                "forms_moved": merge.forms_moved,
+            })
+        })
+        .collect();
+    json!({
+        "rev": report.rev,
+        "labels": labels,
+        "merges": merges,
+        "keep": report.keep,
+    })
+}
+
+/// `GET /api/agent/labels?project=<P>` — панель «Метки проекта» (TR-2.6).
+pub fn labels_json(cfg: &Config, project: &str) -> Reply {
+    let id = project.trim();
+    if id.is_empty() {
+        return err(400, "нет параметра project");
+    }
+    match with_client_mirror(cfg, id, |mirror| mirror.labels_report().map_err(labels_err)) {
+        Ok(report) => ok(labels_body(&report)),
+        Err(reply) => reply,
+    }
+}
+
+/// Метка проекта: `[PERSON_3|дат]` → (`PERSON`, 3). Разбор — `hds_core::labels`.
+fn label_key(token: &str) -> Option<(String, u32)> {
+    hds_core::labels::label_parts(token).map(|(kind, n, _gram)| (kind, n))
+}
+
+/// Разбор тела `POST /api/agent/labels/merge`: `(project, keep, drop)`.
+///
+/// Проверки 400 — здесь, до Python: пустое тело, нет `keep`/`drop`, метка не
+/// разобрана, разные типы, «склеить одну метку».
+fn merge_request(body: &str) -> Result<(String, String, Vec<String>), Reply> {
+    let value: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return Err(err(400, format!("тело запроса не JSON: {e}"))),
+    };
+    let project = value
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if project.is_empty() {
+        return Err(err(400, "нужно поле project"));
+    }
+    let keep = value
+        .get("keep")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if keep.is_empty() {
+        return Err(err(400, "нужно поле keep — метка, которая останется"));
+    }
+    let Some((keep_type, keep_n)) = label_key(&keep) else {
+        return Err(err(400, format!("не разобрана метка '{keep}'")));
+    };
+    let list: Vec<String> = value
+        .get("drop")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
+    if list.is_empty() {
+        return Err(err(400, "нужно поле drop — метки, которые склеиваются"));
+    }
+    let mut drop: Vec<String> = Vec::new();
+    for token in list {
+        let Some((kind, n)) = label_key(&token) else {
+            return Err(err(400, format!("не разобрана метка '{token}'")));
+        };
+        if kind != keep_type {
+            return Err(err(
+                400,
+                format!("нельзя объединить метки разных типов: {keep} и {token}"),
+            ));
+        }
+        if (kind.as_str(), n) == (keep_type.as_str(), keep_n) {
+            continue;
+        }
+        if !drop.contains(&token) {
+            drop.push(token);
+        }
+    }
+    if drop.is_empty() {
+        return Err(err(400, "выберите минимум две разные метки"));
+    }
+    Ok((project, keep, drop))
+}
+
+/// `merge_id` из тела: число или строка (`curl.exe` шлёт и так, и так).
+fn merge_id_of(value: &Value) -> Option<i64> {
+    match value.get("merge_id") {
+        Some(Value::Number(n)) => n.as_i64(),
+        Some(Value::String(s)) => s.trim().parse().ok(),
+        _ => None,
+    }
+}
+
+/// `POST /api/agent/labels/merge` `{project, keep, drop}` — «Объединить» (TR-2.6).
+///
+/// Порядок: проверка меток по снимку (404/409) → `merge_entities` (пишет
+/// `merge_log`) → пересборка образов со младшими метками → **один**
+/// `sync_once` → сообщение агенту и `notice` в ленту.
+pub fn labels_merge_json(cfg: &Config, body: &str) -> Reply {
+    let (project, keep, drop) = match merge_request(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — склейка недоступна",
+        );
+    }
+    let Some(state_dir) = settings::state_dir_for(cfg, &project) else {
+        return err(503, "agent.root не задан: анонимная зона не настроена");
+    };
+    let api = agent_session::global(cfg);
+    let client = match api.client(cfg, &state_dir) {
+        Ok(client) => client,
+        Err(e) => return api_err(e),
+    };
+    let outcome = {
+        let mut guard = match client.lock() {
+            Ok(guard) => guard,
+            Err(_) => return err(503, "воркер анонимизации занят"),
+        };
+        // Что есть в проекте: 404 «метки нет» и 409 «уже псевдоним»
+        // отличаются до записи, а не по тексту ошибки Python.
+        let known = match guard.project_labels(&project) {
+            Ok(labels) => labels,
+            Err(e) => return err(503, format!("метки проекта: {e}")),
+        };
+        let primary: BTreeSet<&str> = known.labels.iter().map(|row| row.label.as_str()).collect();
+        let aliases: BTreeSet<&str> = known
+            .labels
+            .iter()
+            .flat_map(|row| row.aliases.iter().map(String::as_str))
+            .collect();
+        for token in std::iter::once(&keep).chain(drop.iter()) {
+            if primary.contains(token.as_str()) {
+                continue;
+            }
+            if aliases.contains(token.as_str()) {
+                return err(
+                    409,
+                    format!("метка {token} уже псевдоним другой метки — выберите действующую"),
+                );
+            }
+            return err(
+                404,
+                format!("метка {token} не принадлежит проекту {project}"),
+            );
+        }
+        match guard.merge_entities(&project, &keep, &drop) {
+            Ok(outcome) => outcome,
+            Err(e) => return err(500, format!("склейка: {e}")),
+        }
+    };
+
+    let refresh = match with_client_mirror(cfg, &project, |mirror| {
+        let refresh = mirror
+            .refresh_label_images(&outcome.dropped)
+            .map_err(results_err)?;
+        mirror
+            .sync_once()
+            .map_err(|e| err(500, format!("проход зеркала: {e}")))?;
+        Ok(refresh)
+    }) {
+        Ok(refresh) => refresh,
+        Err(reply) => return reply,
+    };
+
+    let Some(rec) = projects::get(cfg, &project) else {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    };
+    let message = match append_message(
+        Path::new(&rec.path),
+        MessageKind::LabelsMerged,
+        "",
+        labels::merge_message(&outcome.keep, &outcome.dropped),
+    ) {
+        Ok(message) => message,
+        Err(e) => return results_err(e),
+    };
+    let notice = format!(
+        "метки склеены: {} → {}; пересобрано образов: {}",
+        joined_or_dash(&outcome.dropped),
+        outcome.keep,
+        refresh.rebuilt.len()
+    );
+    api.notice(&project, &notice);
+    ok(json!({
+        "ok": true,
+        "keep": outcome.keep,
+        "dropped": outcome.dropped,
+        "merge_id": outcome.merge_id,
+        "forms_moved": outcome.forms_moved,
+        "rebuilt": rebuilt_json(&refresh.rebuilt),
+        "skipped": refresh.skipped,
+        "message": agent_message_json(&message),
+    }))
+}
+
+/// Список меток через запятую; пусто — прочерк (текст `notice`).
+fn joined_or_dash(labels: &[String]) -> String {
+    if labels.is_empty() {
+        "—".to_string()
+    } else {
+        labels.join(", ")
+    }
+}
+
+/// Пересобранные образы для ответа вкладки: путь, образ, статус.
+fn rebuilt_json(rebuilt: &[hds_agent::results::RebuiltImage]) -> Vec<Value> {
+    rebuilt
+        .iter()
+        .map(|image| {
+            json!({
+                "rel": image.rel,
+                "anon": image.anon_rel,
+                "status": image.status.as_str(),
+            })
+        })
+        .collect()
+}
+
+/// Сообщение агенту в ответе вкладки: вид, путь и текст (только метки).
+fn agent_message_json(message: &hds_agent::results::Message) -> Value {
+    json!({
+        "kind": message.kind.as_str(),
+        "rel": message.rel,
+        "text": message.text,
+    })
+}
+
+/// `POST /api/agent/labels/unmerge` `{project, merge_id}` — «Разъединить».
+///
+/// Отменяются только склейки из `merge_log` (A5.5+); после отмены образы
+/// пересобираются по **старшей** метке: NER снова выдаст младшую.
+pub fn labels_unmerge_json(cfg: &Config, body: &str) -> Reply {
+    let value: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return err(400, format!("тело запроса не JSON: {e}")),
+    };
+    let project = value
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if project.is_empty() {
+        return err(400, "нужно поле project");
+    }
+    let Some(merge_id) = merge_id_of(&value) else {
+        return err(400, "нужно поле merge_id — номер склейки из журнала");
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — разъединение недоступно",
+        );
+    }
+    let Some(state_dir) = settings::state_dir_for(cfg, &project) else {
+        return err(503, "agent.root не задан: анонимная зона не настроена");
+    };
+    let api = agent_session::global(cfg);
+    let client = match api.client(cfg, &state_dir) {
+        Ok(client) => client,
+        Err(e) => return api_err(e),
+    };
+    let outcome = {
+        let mut guard = match client.lock() {
+            Ok(guard) => guard,
+            Err(_) => return err(503, "воркер анонимизации занят"),
+        };
+        let known = match guard.project_labels(&project) {
+            Ok(labels) => labels,
+            Err(e) => return err(503, format!("метки проекта: {e}")),
+        };
+        if !known.merges.iter().any(|merge| merge.id == merge_id) {
+            return err(
+                404,
+                format!(
+                    "склейка {merge_id} не найдена — «Разъединить» возможно только для \
+                     склеек, записанных после A5.5"
+                ),
+            );
+        }
+        match guard.unmerge_entities(&project, merge_id) {
+            Ok(outcome) => outcome,
+            Err(e) => return err(409, format!("разъединить не удалось: {e}")),
+        }
+    };
+
+    let refresh = match with_client_mirror(cfg, &project, |mirror| {
+        let refresh = mirror
+            .refresh_label_images(std::slice::from_ref(&outcome.keep))
+            .map_err(results_err)?;
+        mirror
+            .sync_once()
+            .map_err(|e| err(500, format!("проход зеркала: {e}")))?;
+        Ok(refresh)
+    }) {
+        Ok(refresh) => refresh,
+        Err(reply) => return reply,
+    };
+
+    let Some(rec) = projects::get(cfg, &project) else {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    };
+    let message = match append_message(
+        Path::new(&rec.path),
+        MessageKind::LabelsUnmerged,
+        "",
+        labels::unmerge_message(&outcome.restored),
+    ) {
+        Ok(message) => message,
+        Err(e) => return results_err(e),
+    };
+    let notice = format!(
+        "склейка меток отменена: {} снова самостоятельные; пересобрано образов: {}",
+        joined_or_dash(&outcome.restored),
+        refresh.rebuilt.len()
+    );
+    api.notice(&project, &notice);
+    ok(json!({
+        "ok": true,
+        "merge_id": outcome.merge_id,
+        "keep": outcome.keep,
+        "restored": outcome.restored,
+        "forms_removed": outcome.forms_removed,
+        "rebuilt": rebuilt_json(&refresh.rebuilt),
+        "skipped": refresh.skipped,
+        "message": agent_message_json(&message),
+    }))
 }
 
 /// `GET /api/agent/pending?project=<P>` — варианты, ждущие решения (TR-7.6).
@@ -1007,5 +1463,66 @@ mod tests {
             code(ResultsError::Io(PathBuf::from("x"), "нет доступа".into())).0,
             500
         );
+    }
+
+    /// A5.5: разбор тела `merge` — «один тип», минимум две метки, коды 400.
+    #[test]
+    fn merge_request_accepts_one_type_and_rejects_bad_bodies() {
+        let status = |body: &str| match merge_request(body) {
+            Ok(_) => 200,
+            Err((status, _, _)) => status,
+        };
+        let (project, keep, drop) = merge_request(
+            r#"{"project":"P0001","keep":"[PERSON_1]","drop":["[PERSON_2]","[PERSON_3]"]}"#,
+        )
+        .expect("корректное тело");
+        assert_eq!(project, "P0001");
+        assert_eq!(keep, "[PERSON_1]");
+        assert_eq!(
+            drop,
+            vec!["[PERSON_2]".to_string(), "[PERSON_3]".to_string()]
+        );
+        // `keep` в `drop` и повторы отбрасываются
+        let (_, _, drop) = merge_request(
+            r#"{"project":"P0001","keep":"[PERSON_1]","drop":["[PERSON_1]","[PERSON_2]","[PERSON_2]"]}"#,
+        )
+        .expect("повтор не мешает");
+        assert_eq!(drop, vec!["[PERSON_2]".to_string()]);
+
+        assert_eq!(status("не json"), 400);
+        assert_eq!(status("{}"), 400);
+        assert_eq!(
+            status(r#"{"project":"","keep":"[PERSON_1]","drop":["[PERSON_2]"]}"#),
+            400
+        );
+        assert_eq!(
+            status(r#"{"project":"P0001","keep":"","drop":["[PERSON_2]"]}"#),
+            400
+        );
+        assert_eq!(status(r#"{"project":"P0001","keep":"[PERSON_1]"}"#), 400);
+        // метка не разобрана (нет скобок) и разные типы
+        assert_eq!(
+            status(r#"{"project":"P0001","keep":"PERSON_1","drop":["[PERSON_2]"]}"#),
+            400
+        );
+        assert_eq!(
+            status(r#"{"project":"P0001","keep":"[PERSON_1]","drop":["[ORG_2]"]}"#),
+            400
+        );
+        // одна и та же метка — склеивать нечего
+        assert_eq!(
+            status(r#"{"project":"P0001","keep":"[PERSON_1]","drop":["[PERSON_1]"]}"#),
+            400
+        );
+    }
+
+    /// A5.5: `merge_id` принимается числом и строкой, мусор — 400 на входе.
+    #[test]
+    fn unmerge_merge_id_parses_number_and_string() {
+        let value = |text: &str| -> serde_json::Value { serde_json::from_str(text).unwrap() };
+        assert_eq!(merge_id_of(&value(r#"{"merge_id":7}"#)), Some(7));
+        assert_eq!(merge_id_of(&value(r#"{"merge_id":" 7 "}"#)), Some(7));
+        assert_eq!(merge_id_of(&value(r#"{"merge_id":"семь"}"#)), None);
+        assert_eq!(merge_id_of(&value("{}")), None);
     }
 }

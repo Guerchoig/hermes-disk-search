@@ -608,18 +608,21 @@ fn cmd_merge(cfg: &Config, args: &[String]) -> i32 {
     client.shutdown();
     match result {
         Ok(answer) => {
-            let dropped = answer
-                .get("dropped")
-                .and_then(|d| d.as_array())
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(|item| item.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                })
-                .unwrap_or_default();
-            println!("[ok] {}: {} (псевдонимы: {})", project, keep, dropped);
+            let dropped = if answer.dropped.is_empty() {
+                String::new()
+            } else {
+                answer.dropped.join(", ")
+            };
+            println!(
+                "[ok] {}: {} (псевдонимы: {}{})",
+                project,
+                keep,
+                dropped,
+                match answer.merge_id {
+                    Some(id) => format!("; склейка №{id}"),
+                    None => String::new(),
+                }
+            );
             0
         }
         Err(err) => {

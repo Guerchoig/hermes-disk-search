@@ -357,6 +357,20 @@ pub const PAGE: &str = r#"<!doctype html>
    <table class="tr"><thead><tr><th>Оригинал</th><th>Образ</th><th>Вид</th><th>Статус</th></tr></thead>
     <tbody id="agfiles"></tbody></table></section>
 
+  <section><h2>Метки проекта</h2>
+   <div class="row"><button onclick="loadAgentLabels()">Обновить</button>
+    <span id="aglabelsmsg" class="muted"></span></div>
+   <table class="tr"><thead><tr><th></th><th>Метка</th><th>Значение (формы)</th>
+    <th>Где встречается</th></tr></thead><tbody id="aglabels"></tbody></table>
+   <div class="row" style="margin-top:6px">
+    <button onclick="agentMerge()">Объединить выбранные</button>
+    <span class="muted">старшая — метка с наибольшим числом файлов</span></div>
+   <div class="muted" style="margin-top:4px">«Где встречается» — по тексту образов (тело документа,
+    без заголовков docx). «Разъединить» отменяет склейку, записанную в журнале (после A5.5);
+    склейки до A5.5 необратимы.</div>
+   <table class="tr"><thead><tr><th>Когда</th><th>Оставлено</th><th>Склеено</th><th></th></tr></thead>
+    <tbody id="agmerges"></tbody></table></section>
+
   <section><h2>Новый проект</h2>
    <div class="row"><span class="muted" style="min-width:120px">Имя</span>
     <input id="agname" placeholder="Пилот" style="min-width:260px"></div>
@@ -618,7 +632,7 @@ function selectAgentProject(tr, id){
   document.getElementById('agpreview').textContent='…';
   document.getElementById('agpaths').textContent='';
   agStatus('');
-  loadAgentState(); loadAgentFiles(); loadAgentPending();
+  loadAgentState(); loadAgentFiles(); loadAgentPending(); loadAgentLabels();
   agentStreamOpen();
 }
 // --- Реплика (A5.2): предпросмотр, метки, вложения, отправка ---
@@ -1035,6 +1049,116 @@ async function loadAgentFiles(){
       '</td><td>'+esc(f.kind)+'</td><td>'+esc(f.status)+'</td></tr>').join('')||
       '<tr><td colspan="4" class="muted">файлов нет — запустите hds agent sync</td></tr>';
   }catch(e){ m.textContent='ошибка: '+e; }
+}
+// --- Метки проекта (A5.5): формы, «Не скрывать», «Объединить», «Разъединить» ---
+let AG_LABELS=[];
+function agLabelsMsg(text, isErr){
+  const m=document.getElementById('aglabelsmsg');
+  if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
+}
+function agLabelFiles(l){ return ((l&&l.occurrences)||[]).length; }
+// Колонка «Значение (формы)»: формы — значения (зона пользователя); кнопка
+// «Не скрывать» пишет в общий keep_terms (D19, действует во всех проектах).
+function agLabelForms(l, i){
+  const forms=(l&&l.forms)||[];
+  if(!forms.length) return '<span class="muted">—</span>';
+  return forms.map(function(f, j){
+    return '<div>'+esc(f.value)+' <span class="muted">'+esc(f.gram||'ном')+
+      (f.origin==='derived'? ' · порождённая':'')+'</span>'+
+      ' <button onclick="agLabelKeep('+i+','+j+')">Не скрывать</button></div>';
+  }).join('');
+}
+// Колонка «Где встречается»: число файлов + первые 3 пути, остальное — «ещё N».
+function agLabelWhere(l){
+  const occ=(l&&l.occurrences)||[];
+  if(!occ.length) return '<span class="muted">в образе не встречается</span>';
+  const first=occ.slice(0,3).map(function(o){
+    return esc(o.rel)+' <span class="muted">·'+o.count+'</span>';
+  }).join('<br>');
+  const more=occ.length>3? '<div class="muted">ещё '+(occ.length-3)+'</div>':'';
+  return '<div class="muted">файлов: '+occ.length+' · форм: '+((l.forms||[]).length)+
+    (l.aliases&&l.aliases.length? ' · псевдонимы: '+esc(l.aliases.join(', ')):'')+'</div>'+first+more;
+}
+function agLabelRow(l, i){
+  return '<tr><td><input type="checkbox" class="aglabelpick" data-i="'+i+'" style="min-width:0"></td>'+
+    '<td><b>'+esc(l.label)+'</b> <span class="muted">'+esc(l.type||'')+'</span></td>'+
+    '<td>'+agLabelForms(l, i)+'</td><td>'+agLabelWhere(l)+'</td></tr>';
+}
+function agMergeRow(m){
+  const when=m.ts? new Date(m.ts*1000).toLocaleString():'-';
+  return '<tr><td class="muted">'+esc(when)+'</td><td>'+esc(m.keep)+
+    '</td><td>'+esc((m.dropped||[]).join(', '))+
+    '</td><td><button onclick="agentUnmerge('+m.id+')">Разъединить</button></td></tr>';
+}
+async function loadAgentLabels(){
+  const tb=document.getElementById('aglabels'), mg=document.getElementById('agmerges');
+  if(!AG_ID){ tb.innerHTML=''; mg.innerHTML=''; agLabelsMsg(''); AG_LABELS=[]; return; }
+  agLabelsMsg('…');
+  try{
+    const j=await jget('/api/agent/labels?project='+encodeURIComponent(AG_ID));
+    if(j.error){ agLabelsMsg(j.error, true); tb.innerHTML=''; mg.innerHTML=''; AG_LABELS=[]; return; }
+    AG_LABELS=j.labels||[];
+    agLabelsMsg('меток: '+AG_LABELS.length+' · склеек: '+((j.merges||[]).length)+' · rev '+j.rev);
+    tb.innerHTML=AG_LABELS.map(agLabelRow).join('')||
+      '<tr><td colspan="4" class="muted">меток нет — запустите hds agent sync</td></tr>';
+    mg.innerHTML=(j.merges||[]).map(agMergeRow).join('')||
+      '<tr><td colspan="4" class="muted">склеек нет</td></tr>';
+  }catch(e){ agLabelsMsg('ошибка: '+e, true); }
+}
+async function agLabelKeep(i, j){
+  const l=AG_LABELS[i], f=l&&(l.forms||[])[j];
+  if(!f){ agLabelsMsg('форма не найдена — обновите панель', true); return; }
+  agLabelsMsg('…');
+  try{
+    const r=await jpost('/api/agent/keep', {project:AG_ID, value:f.value});
+    if(r.error){ agLabelsMsg(r.error, true); return; }
+    agLabelsMsg(r.added? 'добавлено в базу «не скрывать» (действует во всех проектах)':'уже было в базе');
+    await loadAgentLabels();
+  }catch(e){ agLabelsMsg('ошибка: '+e, true); }
+}
+function agLabelPicked(){
+  const out=[];
+  Array.prototype.forEach.call(document.querySelectorAll('#aglabels input.aglabelpick:checked'),
+    function(cb){ const i=+cb.getAttribute('data-i'); if(AG_LABELS[i]) out.push(AG_LABELS[i]); });
+  return out;
+}
+// «Объединить выбранные»: один тип, старшая — максимум файлов (В-A5.5-1).
+async function agentMerge(){
+  if(!AG_ID){ agLabelsMsg('сначала выберите проект', true); return; }
+  const picked=agLabelPicked();
+  if(picked.length<2){ agLabelsMsg('отметьте минимум две метки одного типа', true); return; }
+  const type=picked[0].type||'';
+  if(picked.some(function(l){ return (l.type||'')!==type; })){
+    agLabelsMsg('метки разных типов склеить нельзя — отметьте метки одного типа', true); return;
+  }
+  let keep=picked[0];
+  picked.forEach(function(l){ if(agLabelFiles(l)>agLabelFiles(keep)) keep=l; });
+  const drop=picked.filter(function(l){ return l.label!==keep.label; })
+    .map(function(l){ return l.label; });
+  if(!drop.length){ agLabelsMsg('нужны минимум две разные метки', true); return; }
+  if(!confirm('Объединить метки?'+NL+'старшая: '+keep.label+NL+'склеиваются: '+drop.join(', ')+
+      NL+NL+'Образы будут пересобраны, агенту уйдёт сообщение.')) return;
+  agLabelsMsg('…');
+  try{
+    const j=await jpost('/api/agent/labels/merge', {project:AG_ID, keep:keep.label, drop:drop});
+    if(j.error){ agLabelsMsg(j.error, true); return; }
+    await loadAgentLabels(); await loadAgentFiles(); await loadAgentState();
+    agLabelsMsg('склеено: '+drop.join(', ')+' → '+j.keep+' · пересобрано образов: '+
+      ((j.rebuilt||[]).length)+((j.skipped||[]).length? ' · пропущено: '+j.skipped.length:''));
+  }catch(e){ agLabelsMsg('ошибка: '+e, true); }
+}
+async function agentUnmerge(mergeId){
+  if(!AG_ID){ agLabelsMsg('сначала выберите проект', true); return; }
+  if(!confirm('Отменить склейку №'+mergeId+'? Метки снова станут самостоятельными, '+
+      'образы будут пересобраны.')) return;
+  agLabelsMsg('…');
+  try{
+    const j=await jpost('/api/agent/labels/unmerge', {project:AG_ID, merge_id:mergeId});
+    if(j.error){ agLabelsMsg(j.error, true); return; }
+    await loadAgentLabels(); await loadAgentFiles(); await loadAgentState();
+    agLabelsMsg('разъединено: '+(j.restored||[]).join(', ')+' · пересобрано образов: '+
+      ((j.rebuilt||[]).length));
+  }catch(e){ agLabelsMsg('ошибка: '+e, true); }
 }
 // --- Результаты (A5.4): варианты, «Сравнить», решения ---
 let AG_RESULTS=[];

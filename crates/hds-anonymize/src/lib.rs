@@ -29,7 +29,8 @@ pub use folder::list_files;
 pub use lease::{LeaseError, LeaseGrant, LeaseGuard};
 pub use protocol::{
     is_label, label_parts, AnonymizeResult, DeanonymizeResult, HelloInfo, InspectResult,
-    LabelForValue, Mode, OfficeResult, Placeholder, Resolved, Snapshot, SnapshotForm,
-    SnapshotLabel, TextImageResult, TextResult, TokenCount, WarmupResult, LABEL_PATTERN,
+    LabelForValue, MergeOutcome, MergeRecord, Mode, OfficeResult, Placeholder, ProjectLabel,
+    ProjectLabels, Resolved, Snapshot, SnapshotForm, SnapshotLabel, TextImageResult, TextResult,
+    TokenCount, UnmergeOutcome, WarmupResult, LABEL_PATTERN,
 };
 pub use settings::Settings;

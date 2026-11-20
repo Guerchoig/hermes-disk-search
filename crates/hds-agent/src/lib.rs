@@ -29,6 +29,7 @@ pub mod factory;
 pub mod filter;
 pub mod gateway;
 pub mod history;
+pub mod labels;
 pub mod mcp;
 pub mod mirror;
 pub mod paths;
@@ -50,8 +51,8 @@ pub use projects::{Project, Projects};
 pub use registry::AgentRegistry;
 pub use registry_db::{Artifact, ArtifactRegistry, RegistryError};
 pub use results::{
-    ConflictChoice, Decision, DecisionReport, Message, MessageKind, ResultsError, BACKUP_SUBDIR,
-    CONFLICTS_DIR, MESSAGES_FILE,
+    ConflictChoice, Decision, DecisionReport, Message, MessageKind, RebuiltImage, RefreshReport,
+    ResultsError, BACKUP_SUBDIR, CONFLICTS_DIR, MESSAGES_FILE,
 };
 pub use settings::{AgentSettings, SyncSettings, UnknownPolicy};
 pub use worker::{HostHandler, Worker, WorkerEvent, WorkerSpec};

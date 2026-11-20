@@ -12,6 +12,10 @@
   (TR-1.5). В анонимную зону попадают только они;
 * `aliases` — след «Объединить метки» (TR-2.6): уже выпущенные файлы с
   младшими метками по-прежнему деанонимизируются;
+* `merge_log` — журнал склеек (A5.5): что склеили и какие формы старшей были
+  до переноса. Только по нему работает «Разъединить»; склейки до A5.5 —
+  необратимы (В-A5-3). Таблица создаётся `IF NOT EXISTS` и **не меняет**
+  `schema_version`: иначе миграция D4 переименовала бы базу и потеряла метки;
 * `keep_terms` — «не анонимизировать» (D19). Записи `re:<шаблон>` —
   регулярные выражения (`REQ-\\d+`), остальное — точные значения.
 
@@ -30,6 +34,7 @@ Rust и Node к файлу не обращаются: наружу — толь�
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import os
 import re
@@ -294,6 +299,21 @@ class Vault:
                 "CREATE TABLE IF NOT EXISTS aliases ("
                 " project_id TEXT NULL, type TEXT NOT NULL, n INTEGER NOT NULL,"
                 " entity_id INTEGER NOT NULL)"
+            )
+            # Журнал склеек (A5.5, В-A5-3): «Разъединить» возможно только для
+            # склеек, записанных здесь. Аддитивная миграция «на месте»:
+            # schema_version не повышается (D4 переименовал бы базу и потерял
+            # метки), таблица создаётся IF NOT EXISTS, как projects/aliases.
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS merge_log ("
+                " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                " project_id TEXT NOT NULL,"
+                " ts REAL NOT NULL,"
+                " keep_type TEXT NOT NULL,"
+                " keep_n INTEGER NOT NULL,"
+                " keep_entity INTEGER NOT NULL,"
+                " dropped TEXT NOT NULL,"
+                " forms_before TEXT NOT NULL)"
             )
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS keep_terms (value TEXT PRIMARY KEY)"
@@ -654,10 +674,41 @@ class Vault:
                 (project_id, time.time()),
             )
 
+    def _merged_target(self, conn, project_id: str, entity_id: int) -> int:
+        """Старшая сущность, в которую склеена эта (по `merge_log`, TR-2.6).
+
+        Без этого после склейки NER снова завёл бы младшей сущности **новый**
+        номер: `norm_key` у неё свой, а строка `labels` удалена. Склейка же
+        означает «эта сущность теперь обозначается старшей», поэтому номер
+        берётся у старшей. Цепочка (`A → B`, затем `B → C`) разрешается до
+        конца; защита от цикла — по множеству посещённых.
+        """
+        current = int(entity_id)
+        seen: set[int] = set()
+        while current not in seen:
+            seen.add(current)
+            target = None
+            for dropped_json, keep_entity in conn.execute(
+                "SELECT dropped, keep_entity FROM merge_log WHERE project_id = ?"
+                " ORDER BY id",
+                (project_id,),
+            ).fetchall():
+                for item in json.loads(dropped_json or "[]"):
+                    if int(item["entity_id"]) == current:
+                        target = int(keep_entity)
+                        break
+                if target is not None:
+                    break
+            if target is None:
+                return current
+            current = target
+        return current
+
     def _ensure_label(
         self, conn, project_id: str, entity_id: int, entity_type: str
     ) -> int:
         """Номер метки проекта для сущности (счётчик проекта, TR-1.5)."""
+        entity_id = self._merged_target(conn, project_id, entity_id)
         row = conn.execute(
             "SELECT n FROM labels WHERE project_id = ? AND entity_id = ?",
             (project_id, entity_id),
@@ -883,12 +934,22 @@ class Vault:
             raise VaultError(f"метка {keep} не принадлежит проекту {project_id}")
 
         merged: list[str] = []
+        dropped_records: list[dict] = []
         moved = 0
         with self._write() as conn:
             conn.execute(
                 "INSERT INTO projects(id, ts) VALUES(?, ?) ON CONFLICT(id) DO NOTHING",
                 (project_id, time.time()),
             )
+            # Формы старшей ДО переноса: по ним «Разъединить» поймёт, какие
+            # формы пришли из младших и их надо убрать (A5.5).
+            forms_before = [
+                row[0]
+                for row in conn.execute(
+                    "SELECT value FROM forms WHERE entity_id = ? ORDER BY id",
+                    (keep_entity,),
+                ).fetchall()
+            ]
             for token in drop:
                 parsed = parse_label(token)
                 if parsed is None:
@@ -909,8 +970,9 @@ class Vault:
                     " ON CONFLICT(entity_id, value) DO NOTHING",
                     (keep_entity, entity_id),
                 )
-                if cursor.rowcount and cursor.rowcount > 0:
-                    moved += cursor.rowcount
+                entity_moved = int(cursor.rowcount or 0)
+                if entity_moved > 0:
+                    moved += entity_moved
                 conn.execute(
                     "DELETE FROM labels WHERE project_id = ? AND entity_id = ?",
                     (project_id, entity_id),
@@ -924,10 +986,180 @@ class Vault:
                     (project_id, entity_type, n, keep_entity),
                 )
                 merged.append(label_of(entity_type, n))
+                dropped_records.append(
+                    {
+                        "type": entity_type,
+                        "n": int(n),
+                        "entity_id": int(entity_id),
+                        "forms": entity_moved,
+                    }
+                )
+            merge_id: Optional[int] = None
+            if dropped_records:
+                cursor = conn.execute(
+                    "INSERT INTO merge_log(project_id, ts, keep_type, keep_n,"
+                    " keep_entity, dropped, forms_before)"
+                    " VALUES(?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        project_id,
+                        time.time(),
+                        keep_type,
+                        int(keep_n),
+                        int(keep_entity),
+                        json.dumps(dropped_records, ensure_ascii=False),
+                        json.dumps(forms_before, ensure_ascii=False),
+                    ),
+                )
+                merge_id = int(cursor.lastrowid)
         return {
             "keep": label_of(keep_type, keep_n),
             "dropped": merged,
             "forms_moved": moved,
+            "merge_id": merge_id,
+        }
+
+    def project_labels(self, project_id: str) -> dict:
+        """Метки проекта для панели «Метки проекта» (A5.5, TR-2.6).
+
+        `{rev, labels: [{label, type, forms, aliases}], merges: [{id, ts, keep,
+        dropped, forms_moved}], keep}`. Псевдонимы собраны у **оставшейся**
+        метки: пользователь видит, какие номера стали её обозначениями.
+        Значения форм отдаются (зона пользователя, как в `snapshot`), но не
+        логируются (I8).
+        """
+        project_id = (project_id or "").strip()
+        aliases: dict[int, list[str]] = {}
+        for a_type, a_n, a_entity in self._conn.execute(
+            "SELECT type, n, entity_id FROM aliases WHERE project_id = ?"
+            " ORDER BY type, n",
+            (project_id,),
+        ).fetchall():
+            aliases.setdefault(int(a_entity), []).append(label_of(a_type, int(a_n)))
+        labels: list[dict] = []
+        for entity_id, entity_type, n in self._conn.execute(
+            "SELECT entity_id, type, n FROM labels WHERE project_id = ?"
+            " ORDER BY type, n",
+            (project_id,),
+        ).fetchall():
+            entity_id = int(entity_id)
+            forms = [
+                {"value": value, "gram": gram, "origin": origin}
+                for value, gram, origin in self._conn.execute(
+                    "SELECT value, gram, origin FROM forms WHERE entity_id = ?"
+                    " ORDER BY id",
+                    (entity_id,),
+                ).fetchall()
+            ]
+            labels.append(
+                {
+                    "label": label_of(entity_type, int(n)),
+                    "type": entity_type,
+                    "forms": forms,
+                    "aliases": aliases.get(entity_id, []),
+                }
+            )
+        merges: list[dict] = []
+        for row in self._conn.execute(
+            "SELECT id, ts, keep_type, keep_n, dropped FROM merge_log"
+            " WHERE project_id = ? ORDER BY id",
+            (project_id,),
+        ).fetchall():
+            dropped = json.loads(row[4] or "[]")
+            merges.append(
+                {
+                    "id": int(row[0]),
+                    "ts": float(row[1]),
+                    "keep": label_of(row[2], int(row[3])),
+                    "dropped": [
+                        label_of(item["type"], int(item["n"])) for item in dropped
+                    ],
+                    "forms_moved": sum(int(item.get("forms") or 0) for item in dropped),
+                }
+            )
+        return {
+            "rev": self.rev(),
+            "labels": labels,
+            "merges": merges,
+            "keep": self.keep_list(),
+        }
+
+    def unmerge_entities(self, project_id: str, merge_id: int) -> dict:
+        """Отменить склейку из `merge_log` (A5.5, В-A5-3).
+
+        Возвращает младшие метки в проект: удаляет псевдонимы, восстанавливает
+        `labels` и убирает из старшей те формы, которых у неё не было до
+        склейки. Формы младших сущностей не удалялись, поэтому восстанавливать
+        их не нужно — только снять копии со старшей.
+
+        Склейки до A5.5 в журнал не попали и необратимы: так и сказано в
+        ошибке, её показывает панель «Метки проекта».
+        """
+        project_id = (project_id or "").strip()
+        if not project_id:
+            raise VaultError("не задан project_id")
+        try:
+            merge_id = int(merge_id)
+        except (TypeError, ValueError):
+            raise VaultError(f"не разобран merge_id: {merge_id!r}") from None
+
+        restored: list[str] = []
+        removed = 0
+        with self._write() as conn:
+            row = conn.execute(
+                "SELECT project_id, keep_type, keep_n, keep_entity, dropped,"
+                " forms_before FROM merge_log WHERE id = ?",
+                (merge_id,),
+            ).fetchone()
+            if row is None:
+                raise VaultError(
+                    f"склейка {merge_id} не найдена — «Разъединить» возможно только "
+                    "для склеек, записанных после A5.5"
+                )
+            owner, keep_type, keep_n, keep_entity, dropped_json, before_json = row
+            if str(owner) != project_id:
+                raise VaultError(f"склейка {merge_id} записана для другого проекта")
+            keep_forms = set(json.loads(before_json or "[]"))
+            for item in json.loads(dropped_json or "[]"):
+                entity_type = str(item["type"])
+                n = int(item["n"])
+                entity_id = int(item["entity_id"])
+                alias = conn.execute(
+                    "SELECT entity_id FROM aliases WHERE project_id = ?"
+                    " AND type = ? AND n = ?",
+                    (project_id, entity_type, n),
+                ).fetchone()
+                if alias is None:
+                    raise VaultError(
+                        f"метка {label_of(entity_type, n)} уже склеена заново — "
+                        "разъединить нельзя"
+                    )
+                for (value,) in conn.execute(
+                    "SELECT value FROM forms WHERE entity_id = ?", (entity_id,)
+                ).fetchall():
+                    if value in keep_forms:
+                        continue
+                    cursor = conn.execute(
+                        "DELETE FROM forms WHERE entity_id = ? AND value = ?",
+                        (int(keep_entity), value),
+                    )
+                    removed += int(cursor.rowcount or 0)
+                conn.execute(
+                    "DELETE FROM aliases WHERE project_id = ? AND type = ? AND n = ?",
+                    (project_id, entity_type, n),
+                )
+                conn.execute(
+                    "INSERT INTO labels(project_id, entity_id, type, n, ts)"
+                    " VALUES(?, ?, ?, ?, ?)"
+                    " ON CONFLICT(project_id, entity_id) DO NOTHING",
+                    (project_id, entity_id, entity_type, n, time.time()),
+                )
+                restored.append(label_of(entity_type, n))
+            conn.execute("DELETE FROM merge_log WHERE id = ?", (merge_id,))
+        return {
+            "merge_id": merge_id,
+            "keep": label_of(keep_type, int(keep_n)),
+            "restored": restored,
+            "forms_removed": removed,
         }
 
     def drop_project(self, project_id: str) -> dict:
@@ -943,10 +1175,14 @@ class Vault:
             aliases = conn.execute(
                 "DELETE FROM aliases WHERE project_id = ?", (project_id,)
             ).rowcount
+            merges = conn.execute(
+                "DELETE FROM merge_log WHERE project_id = ?", (project_id,)
+            ).rowcount
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
         return {
             "project_id": project_id,
             "labels": labels or 0,
             "counters": counters or 0,
             "aliases": aliases or 0,
+            "merges": merges or 0,
         }

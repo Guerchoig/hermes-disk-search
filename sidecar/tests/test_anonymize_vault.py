@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -47,6 +48,7 @@ class SchemaTest(VaultBase):
             {
                 "meta", "entities", "forms", "global_counters",
                 "projects", "labels", "counters", "aliases", "keep_terms",
+                "merge_log",
             },
         )
         version = self.vault._conn.execute(
@@ -63,6 +65,10 @@ class SchemaTest(VaultBase):
             "labels": {"project_id", "entity_id", "type", "n", "ts"},
             "counters": {"project_id", "type", "last"},
             "aliases": {"project_id", "type", "n", "entity_id"},
+            "merge_log": {
+                "id", "project_id", "ts", "keep_type", "keep_n", "keep_entity",
+                "dropped", "forms_before",
+            },
             "keep_terms": {"value"},
             "meta": {"key", "value"},
         }
@@ -220,6 +226,106 @@ class ProjectTest(VaultBase):
         self.assertGreaterEqual(result["forms_moved"], 1)
         labels = self.vault.project_mappings("P0001")
         self.assertNotIn(drop, labels)
+
+    def test_merge_writes_log(self):
+        """A5.5, В-A5-3: склейка записана в merge_log — только её можно отменить."""
+        keep = self.vault.project_label("P0001", PERSON, "PERSON")
+        drop = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        result = self.vault.merge_entities("P0001", keep, [drop])
+        merge_id = result["merge_id"]
+        self.assertIsInstance(merge_id, int)
+        row = self.vault._conn.execute(
+            "SELECT project_id, keep_type, keep_n, dropped, forms_before"
+            " FROM merge_log WHERE id = ?",
+            (merge_id,),
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row[0], "P0001")
+        self.assertEqual(row[1], "PERSON")
+        self.assertTrue(row[3])
+        # forms_before — формы старшей ДО склейки: JSON-список значений
+        before = json.loads(row[4])
+        self.assertIn(PERSON, before)
+        self.assertNotIn("Иванов И. И.", before)
+        # в журнале нет значений склеенных меток — только метки и id
+        self.assertNotIn("Иванов И. И.", row[3])
+        self.assertEqual(result["dropped"], [drop])
+
+    def test_unmerge_restores(self):
+        """A5.5: «Разъединить» возвращает младшую метку и снимает её формы."""
+        keep = self.vault.project_label("P0001", PERSON, "PERSON")
+        drop = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        merged = self.vault.merge_entities("P0001", keep, [drop])
+        self.assertEqual(self.vault.project_value("P0001", drop), PERSON)
+
+        result = self.vault.unmerge_entities("P0001", merged["merge_id"])
+        self.assertEqual(result["restored"], [drop])
+        self.assertGreaterEqual(result["forms_removed"], 1)
+        # младшая метка снова самостоятельна и отдаёт своё значение
+        self.assertEqual(self.vault.project_value("P0001", drop), "Иванов И. И.")
+        # старшая не потеряла собственных форм
+        self.assertEqual(self.vault.project_value("P0001", keep), PERSON)
+        mappings = self.vault.project_mappings("P0001")
+        self.assertEqual(mappings[keep], PERSON)
+        self.assertEqual(mappings[drop], "Иванов И. И.")
+        # склейки больше нет: ни в aliases, ни в merge_log
+        self.assertEqual(self.vault.project_labels("P0001")["merges"], [])
+        self.assertIsNone(
+            self.vault._conn.execute(
+                "SELECT 1 FROM aliases WHERE project_id = 'P0001' AND type = 'PERSON'"
+                " AND n = ?",
+                (int(drop.strip("[]").rsplit("_", 1)[1]),),
+            ).fetchone()
+        )
+
+    def test_unmerge_unknown(self):
+        """A5.5: неизвестная склейка и чужая склейка — VaultError (UI → 404/409)."""
+        with self.assertRaises(vault_mod.VaultError):
+            self.vault.unmerge_entities("P0001", 999)
+        keep = self.vault.project_label("P0001", PERSON, "PERSON")
+        drop = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        merged = self.vault.merge_entities("P0001", keep, [drop])
+        with self.assertRaises(vault_mod.VaultError):
+            self.vault.unmerge_entities("P0002", merged["merge_id"])
+
+    def test_project_labels_shape(self):
+        """A5.5: `vault_project_labels` — метки с формами, aliases, merges, keep."""
+        keep = self.vault.project_label("P0001", PERSON, "PERSON")
+        drop = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        merged = self.vault.merge_entities("P0001", keep, [drop])
+        labels = self.vault.project_labels("P0001")
+        self.assertEqual(set(labels), {"rev", "labels", "merges", "keep"})
+        self.assertEqual(labels["rev"], self.vault.rev())
+        self.assertEqual(len(labels["labels"]), 1)
+        item = labels["labels"][0]
+        self.assertEqual(set(item), {"label", "type", "forms", "aliases"})
+        self.assertEqual(item["label"], keep)
+        self.assertEqual(item["type"], "PERSON")
+        self.assertIn(drop, item["aliases"])
+        self.assertTrue(item["forms"])
+        self.assertEqual(set(item["forms"][0]), {"value", "gram", "origin"})
+        merge = labels["merges"][0]
+        self.assertEqual(set(merge), {"id", "ts", "keep", "dropped", "forms_moved"})
+        self.assertEqual(merge["id"], merged["merge_id"])
+        self.assertEqual(merge["keep"], keep)
+        self.assertEqual(merge["dropped"], [drop])
+        self.assertIn("1С:ERP", labels["keep"])
+
+    def test_merge_makes_ner_use_senior_label(self):
+        """A5.5: после склейки новый NER-проход отдаёт старшую метку (TR-2.6)."""
+        keep = self.vault.project_label("P0001", PERSON, "PERSON")
+        drop = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        self.vault.merge_entities("P0001", keep, [drop])
+        again = self.vault.project_label("P0001", "Иванов И. И.", "PERSON")
+        self.assertEqual(again, keep)
+        # и метка не «уехала» на новый номер: в проекте ровно одна метка
+        self.assertEqual(
+            len(self.vault.project_labels("P0001")["labels"]), 1)
+        # после разъединения — снова своя метка
+        merge_id = self.vault.project_labels("P0001")["merges"][0]["id"]
+        self.vault.unmerge_entities("P0001", merge_id)
+        self.assertEqual(
+            self.vault.project_label("P0001", "Иванов И. И.", "PERSON"), drop)
 
     def test_merge_rejects_other_type(self):
         person = self.vault.project_label("P0001", PERSON, "PERSON")

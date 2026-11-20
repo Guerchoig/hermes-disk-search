@@ -14,9 +14,10 @@ use serde_json::json;
 use crate::error::{from_transport, AnonymizeError, ErrorKind};
 use crate::protocol::{
     anonymize_from, deanonymize_from, hello_from, image_from, inspect_from, label_from,
-    office_from, out_path, snapshot_from, text_from, warmup_from, AnonymizeResult,
-    DeanonymizeResult, HelloInfo, InspectResult, LabelForValue, Mode, OfficeResult, Snapshot,
-    TextImageResult, TextResult, WarmupResult,
+    merge_outcome_from, office_from, out_path, project_labels_from, snapshot_from, text_from,
+    unmerge_outcome_from, warmup_from, AnonymizeResult, DeanonymizeResult, HelloInfo,
+    InspectResult, LabelForValue, MergeOutcome, Mode, OfficeResult, ProjectLabels, Snapshot,
+    TextImageResult, TextResult, UnmergeOutcome, WarmupResult,
 };
 
 /// Параметры запуска воркера (§2.6: RPC на файл до 600 с, idle 60 с).
@@ -430,16 +431,43 @@ impl Client {
     }
 
     /// `merge_entities` — «Объединить метки» (TR-2.6).
+    ///
+    /// Возвращает и номер склейки (`merge_log`, A5.5): без него «Разъединить»
+    /// не сможет отменить именно это объединение.
     pub fn merge_entities(
         &mut self,
         project_id: &str,
         keep: &str,
         drop: &[String],
-    ) -> Result<serde_json::Value, AnonymizeError> {
-        self.call(
+    ) -> Result<MergeOutcome, AnonymizeError> {
+        let value = self.call(
             "merge_entities",
             json!({"project_id": project_id, "keep": keep, "drop": drop}),
-        )
+        )?;
+        Ok(merge_outcome_from(&value))
+    }
+
+    /// `unmerge_entities` — «Разъединить»: отмена склейки из `merge_log` (A5.5).
+    pub fn unmerge_entities(
+        &mut self,
+        project_id: &str,
+        merge_id: i64,
+    ) -> Result<UnmergeOutcome, AnonymizeError> {
+        let value = self.call(
+            "unmerge_entities",
+            json!({"project_id": project_id, "merge_id": merge_id}),
+        )?;
+        Ok(unmerge_outcome_from(&value))
+    }
+
+    /// `vault_project_labels` (A5.5, TR-2.6): метки проекта с формами и
+    /// псевдонимами, журнал склеек, список «не анонимизировать».
+    ///
+    /// Ответ содержит значения форм: это зона пользователя, как `snapshot`;
+    /// в журналы они не пишутся (I8).
+    pub fn project_labels(&mut self, project_id: &str) -> Result<ProjectLabels, AnonymizeError> {
+        let value = self.call("vault_project_labels", json!({"project_id": project_id}))?;
+        Ok(project_labels_from(&value))
     }
 
     /// `vault_drop_project` — удалить проект и его метки (глобальные остаются).

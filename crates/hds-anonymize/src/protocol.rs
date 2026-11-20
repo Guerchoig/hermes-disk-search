@@ -2,6 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
 use serde_json::Value;
 
 /// Режим акта: анонимизация (`<stem>.anonymized.<ext>`), деанонимизация
@@ -287,7 +288,7 @@ pub fn inspect_from(v: &Value) -> InspectResult {
 }
 
 /// Форма значения в снимке меток (`vault_snapshot`, TR-1.6).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SnapshotForm {
     pub value: String,
     pub gram: Option<String>,
@@ -310,6 +311,60 @@ pub struct Snapshot {
     pub labels: Vec<SnapshotLabel>,
     pub others: Vec<String>,
     pub keep: Vec<String>,
+}
+
+/// Метка проекта в панели «Метки проекта» (A5.5, TR-2.6).
+///
+/// `aliases` — младшие метки, ставшие обозначениями этой: склейка оставляет их
+/// псевдонимами, чтобы уже выпущенные файлы деанонимизировались.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProjectLabel {
+    pub label: String,
+    pub entity_type: String,
+    pub forms: Vec<SnapshotForm>,
+    pub aliases: Vec<String>,
+}
+
+/// Запись журнала склеек (`merge_log`, A5.5).
+///
+/// «Разъединить» возможно только для этих записей: у склеек до A5.5 журнала
+/// нет (В-A5-3).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct MergeRecord {
+    pub id: i64,
+    pub ts: f64,
+    pub keep: String,
+    pub dropped: Vec<String>,
+    pub forms_moved: u64,
+}
+
+/// Ответ `vault_project_labels` (A5.5): метки с формами и псевдонимами, журнал
+/// склеек и список «не анонимизировать».
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectLabels {
+    pub rev: i64,
+    pub labels: Vec<ProjectLabel>,
+    pub merges: Vec<MergeRecord>,
+    pub keep: Vec<String>,
+}
+
+/// Ответ `merge_entities`: оставленная метка, псевдонимы и номер склейки.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MergeOutcome {
+    pub keep: String,
+    pub dropped: Vec<String>,
+    pub forms_moved: u64,
+    /// `None` — склеивать было нечего (метки уже склеены).
+    pub merge_id: Option<i64>,
+}
+
+/// Ответ `unmerge_entities`: возвращённые младшие метки (A5.5).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UnmergeOutcome {
+    pub merge_id: i64,
+    pub keep: String,
+    pub restored: Vec<String>,
+    pub forms_removed: u64,
 }
 
 /// Ответ `anonymize_text` (TR-1.7): текст с метками и список меток.
@@ -387,6 +442,85 @@ pub fn snapshot_from(v: &Value) -> Snapshot {
         labels,
         others: str_list(v, "others"),
         keep: str_list(v, "keep"),
+    }
+}
+
+/// Формы значения в ответе меток (`{value, gram, origin}`).
+fn forms_of(item: &Value) -> Vec<SnapshotForm> {
+    item.get("forms")
+        .and_then(|f| f.as_array())
+        .map(|forms| {
+            forms
+                .iter()
+                .map(|form| SnapshotForm {
+                    value: opt_str(form, "value").unwrap_or_default(),
+                    gram: opt_str(form, "gram"),
+                    origin: opt_str(form, "origin").unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `vault_project_labels` (A5.5): метки, псевдонимы, журнал склеек, keep.
+pub fn project_labels_from(v: &Value) -> ProjectLabels {
+    let labels = v
+        .get("labels")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| ProjectLabel {
+                    label: opt_str(item, "label").unwrap_or_default(),
+                    entity_type: opt_str(item, "type").unwrap_or_default(),
+                    forms: forms_of(item),
+                    aliases: str_list(item, "aliases"),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let merges = v
+        .get("merges")
+        .and_then(|x| x.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .map(|item| MergeRecord {
+                    id: item.get("id").and_then(|i| i.as_i64()).unwrap_or(0),
+                    ts: item.get("ts").and_then(|t| t.as_f64()).unwrap_or(0.0),
+                    keep: opt_str(item, "keep").unwrap_or_default(),
+                    dropped: str_list(item, "dropped"),
+                    forms_moved: item
+                        .get("forms_moved")
+                        .and_then(|f| f.as_u64())
+                        .unwrap_or(0),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    ProjectLabels {
+        rev: v.get("rev").and_then(|r| r.as_i64()).unwrap_or(0),
+        labels,
+        merges,
+        keep: str_list(v, "keep"),
+    }
+}
+
+pub fn merge_outcome_from(v: &Value) -> MergeOutcome {
+    MergeOutcome {
+        keep: opt_str(v, "keep").unwrap_or_default(),
+        dropped: str_list(v, "dropped"),
+        forms_moved: v.get("forms_moved").and_then(|f| f.as_u64()).unwrap_or(0),
+        merge_id: v.get("merge_id").and_then(|m| m.as_i64()),
+    }
+}
+
+pub fn unmerge_outcome_from(v: &Value) -> UnmergeOutcome {
+    UnmergeOutcome {
+        merge_id: v.get("merge_id").and_then(|m| m.as_i64()).unwrap_or(0),
+        keep: opt_str(v, "keep").unwrap_or_default(),
+        restored: str_list(v, "restored"),
+        forms_removed: v.get("forms_removed").and_then(|f| f.as_u64()).unwrap_or(0),
     }
 }
 

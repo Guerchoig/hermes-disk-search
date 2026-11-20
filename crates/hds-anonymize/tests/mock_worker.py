@@ -61,6 +61,7 @@ def _handle(req):
                              "read_marker", "deanonymize_path", "image_map",
                              "vault_snapshot", "vault_rev", "vault_drop_project",
                              "merge_entities", "keep_terms",
+                             "vault_project_labels", "unmerge_entities",
                              "office_read", "office_edit", "office_create",
                              "mode_agent"],
             "schema_version": 2,
@@ -271,7 +272,36 @@ def _handle(req):
     if method == "merge_entities":
         stdio.ok(mid, {"keep": params.get("keep"),
                        "dropped": params.get("drop") or [],
-                       "forms_moved": 2})
+                       "forms_moved": 2, "merge_id": 1})
+        return False
+
+    if method == "unmerge_entities":
+        merge_id = params.get("merge_id")
+        if int(merge_id or 0) != 1:
+            stdio.err(mid, -32001, "склейка %s не найдена" % merge_id,
+                      kind="internal")
+            return False
+        stdio.ok(mid, {"merge_id": 1, "keep": "[PERSON_1]",
+                       "restored": ["[PERSON_2]"], "forms_removed": 2})
+        return False
+
+    if method == "vault_project_labels":
+        stdio.ok(mid, {
+            "rev": STATE["rev"],
+            "labels": [{
+                "label": "[PERSON_1]", "type": "PERSON",
+                "forms": [
+                    {"value": "Иванов Иван", "gram": "nomn", "origin": "seen"},
+                    {"value": "Иванову Ивану", "gram": "datv", "origin": "seen"},
+                ],
+                "aliases": ["[PERSON_2]"],
+            }],
+            "merges": [{
+                "id": 1, "ts": 1700000000.0, "keep": "[PERSON_1]",
+                "dropped": ["[PERSON_2]"], "forms_moved": 2,
+            }],
+            "keep": ["ТЗ", "1С:ERP"],
+        })
         return False
 
     if method == "vault_drop_project":

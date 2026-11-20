@@ -279,6 +279,8 @@ class Worker:
                 "read_marker", "deanonymize_path", "image_map",
                 "vault_snapshot", "vault_rev", "vault_drop_project",
                 "merge_entities", "keep_terms",
+                # A5.5 (TR-2.6): панель «Метки проекта» и «Разъединить»
+                "vault_project_labels", "unmerge_entities",
                 "office_read", "office_edit", "office_create",
                 "mode_agent",
             ],
@@ -413,6 +415,15 @@ class Worker:
                     str(params.get("keep") or ""),
                     list(params.get("drop") or []),
                 )
+            elif method == "unmerge_entities":
+                if not project_id:
+                    raise ValueError("unmerge_entities: не задан project_id")
+                res = self.handlers.unmerge_entities(
+                    project_id, params.get("merge_id"))
+            elif method == "vault_project_labels":
+                if not project_id:
+                    raise ValueError("vault_project_labels: не задан project_id")
+                res = self.handlers.vault_project_labels(project_id)
             elif method == "vault_drop_project":
                 res = self.handlers.vault_drop_project(
                     project_id or str(params.get("project_id") or ""))
@@ -458,6 +469,7 @@ class Worker:
                       "anonymize_path",
                       "read_marker", "deanonymize_path", "image_map",
                       "vault_snapshot", "vault_rev", "merge_entities",
+                      "vault_project_labels", "unmerge_entities",
                       "vault_drop_project", "keep_terms", "vault_stats",
                       "office_read", "office_edit", "office_create"):
             try:

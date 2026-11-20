@@ -425,6 +425,14 @@ class AnonymizeHandlers:
     def merge_entities(self, project_id: str, keep: str, drop: list[str]) -> dict:
         return self.store.merge_entities(project_id, keep, drop)
 
+    def unmerge_entities(self, project_id: str, merge_id: int) -> dict:
+        """«Разъединить»: отмена склейки из `merge_log` (A5.5, TR-2.6)."""
+        return self.store.unmerge_entities(project_id, merge_id)
+
+    def vault_project_labels(self, project_id: str) -> dict:
+        """Метки проекта с формами, псевдонимами и склейками (A5.5)."""
+        return self.store.project_labels(project_id)
+
     def vault_drop_project(self, project_id: str) -> dict:
         return self.store.drop_project(project_id)
 

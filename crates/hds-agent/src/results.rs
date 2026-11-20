@@ -183,6 +183,10 @@ pub enum MessageKind {
     DocumentRejected,
     /// Документ обновлён пользователем, правки переносить из `_conflicts`.
     ConflictDelegated,
+    /// Метки склеены пользователем: младшие теперь обозначаются старшей (A5.5).
+    LabelsMerged,
+    /// Склейка меток отменена: метки снова самостоятельные (A5.5).
+    LabelsUnmerged,
 }
 
 impl MessageKind {
@@ -191,6 +195,8 @@ impl MessageKind {
         match self {
             MessageKind::DocumentRejected => "document_rejected",
             MessageKind::ConflictDelegated => "conflict_delegated",
+            MessageKind::LabelsMerged => "labels_merged",
+            MessageKind::LabelsUnmerged => "labels_unmerged",
         }
     }
 
@@ -199,6 +205,8 @@ impl MessageKind {
         match s.trim() {
             "document_rejected" => Some(MessageKind::DocumentRejected),
             "conflict_delegated" => Some(MessageKind::ConflictDelegated),
+            "labels_merged" => Some(MessageKind::LabelsMerged),
+            "labels_unmerged" => Some(MessageKind::LabelsUnmerged),
             _ => None,
         }
     }
@@ -247,6 +255,33 @@ impl DecisionReport {
             message: None,
             warnings: Vec::new(),
         }
+    }
+}
+
+/// Образ, пересозданный после склейки меток (A5.5).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RebuiltImage {
+    /// Относительный путь оригинала (папка проекта).
+    pub rel: String,
+    /// Относительный путь образа (workspace).
+    pub anon_rel: String,
+    pub status: Status,
+}
+
+/// Итог пересборки образов после склейки/разъединения меток (A5.5).
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct RefreshReport {
+    pub rebuilt: Vec<RebuiltImage>,
+    /// Оригиналы, которые не пересобирались: вариант, конфликт или правка
+    /// агента — пересборка потеряла бы их (В-A5.5-5).
+    pub skipped: Vec<String>,
+}
+
+impl RefreshReport {
+    /// Ситуации, в которых пересборка безопасна: образ совпадает с тем, что
+    /// выпустило зеркало, и варианта в `pending` нет.
+    fn rebuildable(status: Status) -> bool {
+        matches!(status, Status::Synced | Status::Accepted)
     }
 }
 
@@ -404,6 +439,39 @@ pub fn normalize_rel(rel: &str) -> Result<String, ResultsError> {
         return Err(ResultsError::BadPath(rel.to_string()));
     }
     Ok(parts.join(std::path::MAIN_SEPARATOR_STR))
+}
+
+/// Дописать сообщение агенту в `.hds-agent\messages.jsonl` (В-6, A5.5).
+///
+/// Очередь общая для решений по документам и для склеек меток: у меток
+/// `rel` пустой, текст — только метки («метки [PERSON_5] теперь обозначаются
+/// [PERSON_3]»), значений в нём быть не должно (I8).
+pub fn append_message(
+    project_root: &Path,
+    kind: MessageKind,
+    rel: &str,
+    text: String,
+) -> Result<Message, ResultsError> {
+    let message = Message {
+        ts: now_epoch(),
+        kind,
+        rel: rel.to_string(),
+        text,
+    };
+    let dir = project_root.join(SERVICE_DIR);
+    fs::create_dir_all(&dir).map_err(|e| ResultsError::Io(dir.clone(), e.to_string()))?;
+    let path = dir.join(MESSAGES_FILE);
+    let mut line = serde_json::to_string(&message)
+        .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
+    line.push('\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| ResultsError::Io(path, e.to_string()))?;
+    Ok(message)
 }
 
 impl<'a> Mirror<'a> {
@@ -698,28 +766,74 @@ impl<'a> Mirror<'a> {
         kind: MessageKind,
         text: String,
     ) -> Result<(), ResultsError> {
-        let message = Message {
-            ts: now_epoch(),
-            kind,
-            rel: report.anon_rel.clone(),
-            text,
-        };
-        let dir = self.project_root.join(SERVICE_DIR);
-        fs::create_dir_all(&dir).map_err(|e| ResultsError::Io(dir.clone(), e.to_string()))?;
-        let path = dir.join(MESSAGES_FILE);
-        let mut line = serde_json::to_string(&message)
-            .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
-        line.push('\n');
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)
-            .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
-        file.write_all(line.as_bytes())
-            .map_err(|e| ResultsError::Io(path, e.to_string()))?;
+        let message = append_message(&self.project_root, kind, &report.anon_rel, text)?;
         report.message = Some(message);
         Ok(())
     }
+}
+
+/// Пересборка образов после склейки меток (A5.5, TR-2.6, В-A5.5-5).
+impl<'a> Mirror<'a> {
+    /// Пересоздать образы, где встречаются `dropped`-метки.
+    ///
+    /// После склейки NER отдаёт старшую метку, поэтому образы пересобираются из
+    /// **текущего** оригинала тем же кодом, что и прямой путь. Варианты и
+    /// конфликты не трогаем: там правки агента, и пересборка их потеряла бы —
+    /// такие записи попадают в `skipped` (пользователь решает по
+    /// «Результатам»).
+    pub fn refresh_label_images(
+        &mut self,
+        dropped: &[String],
+    ) -> Result<RefreshReport, ResultsError> {
+        let targets: BTreeSet<(String, u32)> = dropped
+            .iter()
+            .filter_map(|token| hds_core::labels::label_parts(token))
+            .map(|(kind, n, _gram)| (kind, n))
+            .collect();
+        let mut report = RefreshReport::default();
+        if targets.is_empty() {
+            return Ok(report);
+        }
+        for row in self.registry.list()? {
+            if row.anon_rel.is_empty() {
+                continue;
+            }
+            let image = self.workspace.join(rel_to_path(&row.anon_rel));
+            let Ok(text) = crate::validator::read_text(&image, self.extractor) else {
+                // Образ не прочитан (нет файла или воркера извлечения) — молча
+                // пропускаем: пересборка начнётся с оригинала, а не с образа.
+                continue;
+            };
+            if !mentions_any(&text, &targets) {
+                continue;
+            }
+            let rebuildable =
+                matches!(kind_for(&row.orig_rel), Some(Kind::Image | Kind::TextImage))
+                    && RefreshReport::rebuildable(row.status);
+            if !rebuildable {
+                report.skipped.push(row.orig_rel.clone());
+                continue;
+            }
+            let anon_rel = self.rebuild_image(&row, Status::Synced)?;
+            report.rebuilt.push(RebuiltImage {
+                rel: row.orig_rel.clone(),
+                anon_rel,
+                status: Status::Synced,
+            });
+        }
+        Ok(report)
+    }
+}
+
+/// Есть ли в тексте хотя бы одна из меток набора (`[PERSON_1|дат]` = `[PERSON_1]`).
+///
+/// Сравниваются части метки (`hds_core::labels`), а не строки: падежный
+/// суффикс — не другая сущность (та же грабля, что у валидатора, A4.5).
+fn mentions_any(text: &str, targets: &BTreeSet<(String, u32)>) -> bool {
+    hds_core::labels::find_labels(text)
+        .iter()
+        .filter_map(|token| hds_core::labels::label_parts(token))
+        .any(|(kind, n, _gram)| targets.contains(&(kind, n)))
 }
 
 /// Сравнение варианта с оригиналом (A5.4, TR-7.6 «Сравнить»).
@@ -1401,7 +1515,98 @@ mod tests {
             MessageKind::parse(MessageKind::ConflictDelegated.as_str()),
             Some(MessageKind::ConflictDelegated)
         );
+        // A5.5: сообщения о склейке меток
+        assert_eq!(
+            MessageKind::parse("labels_merged"),
+            Some(MessageKind::LabelsMerged)
+        );
+        assert_eq!(
+            MessageKind::parse(MessageKind::LabelsUnmerged.as_str()),
+            Some(MessageKind::LabelsUnmerged)
+        );
+        assert_eq!(MessageKind::LabelsMerged.as_str(), "labels_merged");
         assert_eq!(MessageKind::parse("что-то"), None);
+    }
+
+    /// A5.5: «Разъединить» пересобирает образ по старшей метке, а вариант в
+    /// `pending` не трогает — его правки потерялись бы (В-A5.5-5).
+    #[test]
+    fn refresh_rebuilds_synced_images_and_skips_variants() {
+        let stand = Stand::new("a55-refresh");
+        stand.write("А.md", "Контакт: Иванов Иван\n");
+        stand.write("Б.md", "Контакт: Петров Пётр\n");
+        stand.write("В.md", "Контакт: Петров Пётр\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 3);
+        // «В» получает правку агента → вариант в pending (статус pending_accept);
+        // метка в правке остаётся, поэтому файл нельзя пересобирать
+        stand.write_ws(
+            "В.md",
+            "<!-- hds-agent/P0001/3 -->\nКонтакт: [PERSON_2] — правка\n",
+        );
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.variants, 1, "{report:?}");
+
+        let registry = ArtifactRegistry::open(&stand.db).unwrap();
+        let mut mirror = Mirror::new(
+            "P0001",
+            &stand.project,
+            &stand.workspace,
+            &registry,
+            &mut anon,
+            &mut ext,
+            fast(),
+            200,
+        );
+        let refresh = mirror
+            .refresh_label_images(&["[PERSON_2]".to_string()])
+            .expect("пересборка образов");
+        assert_eq!(refresh.rebuilt.len(), 1, "{refresh:?}");
+        assert_eq!(refresh.rebuilt[0].rel, "Б.md");
+        assert_eq!(refresh.rebuilt[0].status, Status::Synced);
+        // вариант агента не пересобирается: правки потерялись бы
+        assert_eq!(refresh.skipped, vec!["В.md".to_string()]);
+        // образ «В» с правкой на месте
+        assert_eq!(
+            fs::read_to_string(stand.workspace.join("В.md")).unwrap(),
+            "<!-- hds-agent/P0001/3 -->\nКонтакт: [PERSON_2] — правка\n"
+        );
+        drop(registry);
+
+        // После пересборки один проход — без изменений (критерий TR-2.6).
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).changes(), 0);
+    }
+
+    /// A5.5: очередь агенту — строка JSON, только метки, без значений (I8).
+    #[test]
+    fn append_message_writes_labels_only_queue() {
+        let stand = Stand::new("a55-message");
+        let message = append_message(
+            &stand.project,
+            MessageKind::LabelsMerged,
+            "",
+            crate::labels::merge_message("[PERSON_1]", &["[PERSON_2]".to_string()]),
+        )
+        .expect("сообщение в очередь");
+        assert_eq!(message.rel, "");
+        let text = messages(&stand);
+        assert_eq!(text.lines().count(), 1, "{text}");
+        let line: serde_json::Value = serde_json::from_str(text.lines().next().unwrap()).unwrap();
+        assert_eq!(line["kind"], "labels_merged");
+        assert_eq!(line["rel"], "");
+        let body = line["text"].as_str().unwrap();
+        assert!(body.contains("[PERSON_2]"), "{body}");
+        assert!(body.contains("[PERSON_1]"), "{body}");
+        let unmerge = append_message(
+            &stand.project,
+            MessageKind::LabelsUnmerged,
+            "",
+            crate::labels::unmerge_message(&["[PERSON_2]".to_string()]),
+        )
+        .expect("второе сообщение");
+        assert_eq!(unmerge.kind, MessageKind::LabelsUnmerged);
+        assert_eq!(messages(&stand).lines().count(), 2);
     }
 
     /// A4.5: отчёт валидатора уходит вместе с вариантом — любым решением.

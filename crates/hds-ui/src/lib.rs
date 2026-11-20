@@ -1962,6 +1962,11 @@ pub fn route_full(
                 ),
                 Err(reply) => reply,
             },
+            // A5.5: панель «Метки проекта» (формы — значения, зона пользователя).
+            ("GET", "/api/agent/labels") => match agent::gate() {
+                Ok(cfg) => agent::labels_json(&cfg, &qp(query, "project").unwrap_or_default()),
+                Err(reply) => reply,
+            },
             // A5.2: события хода без SSE (кольцо 500, `after=<seq>`). Транспорт
             // A5.3 добавит `text/event-stream` тем же маршрутом.
             ("GET", "/api/agent/events") => match agent::gate() {
@@ -2102,6 +2107,15 @@ pub fn route_full(
                     // A5.4: решения по вариантам — поверх `Mirror::decide`.
                     "/api/agent/decision" => match agent::gate() {
                         Ok(cfg) => agent::decision_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    // A5.5: склейка и разъединение меток проекта (TR-2.6).
+                    "/api/agent/labels/merge" => match agent::gate() {
+                        Ok(cfg) => agent::labels_merge_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/labels/unmerge" => match agent::gate() {
+                        Ok(cfg) => agent::labels_unmerge_json(&cfg, body),
                         Err(reply) => reply,
                     },
                     "/api/index/start" => {

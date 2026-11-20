@@ -204,7 +204,32 @@ fn agent_and_vault_acts_on_mock() {
     let merged = client
         .merge_entities("P0001", "[PERSON_1]", &["[PERSON_3]".to_string()])
         .unwrap();
-    assert_eq!(merged["keep"], "[PERSON_1]");
+    assert_eq!(merged.keep, "[PERSON_1]");
+    assert_eq!(merged.dropped, vec!["[PERSON_3]".to_string()]);
+    assert_eq!(merged.merge_id, Some(1));
+    // «Разъединить»: только запись журнала; неизвестная — ошибка
+    let unmerged = client.unmerge_entities("P0001", 1).unwrap();
+    assert_eq!(unmerged.restored, vec!["[PERSON_2]".to_string()]);
+    assert_eq!(unmerged.keep, "[PERSON_1]");
+    assert!(client.unmerge_entities("P0001", 2).is_err());
+
+    // Метки проекта с псевдонимами и журналом склеек (значения не печатаем)
+    let rev = client.vault_rev().unwrap();
+    let labels = client.project_labels("P0001").unwrap();
+    assert_eq!(labels.rev, rev);
+    assert_eq!(labels.labels.len(), 1);
+    assert_eq!(labels.labels[0].label, "[PERSON_1]");
+    assert_eq!(labels.labels[0].entity_type, "PERSON");
+    assert_eq!(labels.labels[0].forms.len(), 2);
+    assert_eq!(labels.labels[0].aliases, vec!["[PERSON_2]".to_string()]);
+    assert_eq!(labels.merges.len(), 1);
+    assert_eq!(labels.merges[0].id, 1);
+    assert_eq!(labels.merges[0].dropped, vec!["[PERSON_2]".to_string()]);
+    assert_eq!(labels.merges[0].forms_moved, 2);
+    assert!(labels.keep.contains(&"1С:ERP".to_string()));
+    // Формы приходят значениями: это зона пользователя (панель «Метки
+    // проекта» показывает их человеку), в журналы они не уходят.
+    assert!(labels.labels[0].forms.iter().any(|f| f.origin == "seen"));
 
     // keep_terms (D19)
     let terms = client.keep_terms().unwrap();
