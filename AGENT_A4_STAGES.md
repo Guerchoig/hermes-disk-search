@@ -7,8 +7,9 @@
 > порядок, границы, решения и состояние.
 >
 > **Дата среза:** 20.11.2026. **Ветка:** `agent-privacy-zone`.
-> **HEAD на входе A4.4:** `e436d5a6` (docs: A4.4 — контекст и промт), до него — A4.3
-> `d84571ee` + docs. Дерево чистое, push не делался.
+> **HEAD на входе A4.6:** docs-коммит A4.5 (сверить `git log -1 --oneline`), до него
+> `e676bb89` (A4.5, feat) + docs; A4.1–A4.4 закрыты раньше. Дерево чистое, push не
+> делался.
 > **Машина:** Windows 11, PowerShell 5.1, Rust 1.99, Node 24.18, Python 3.12
 > (`sidecar\venv-anonymize`); `llm_host` резидент (GPU отдаётся по аренде `anon`).
 
@@ -36,7 +37,7 @@
 | A4.2 | **Прямой путь** TR-7.1/7.3: обход дерева, `wait_stable` (2 с/0,5 с/30 с + `settle_age_sec` — ключи `agent.sync.*`, §4.3, они же в `config.example.yaml`), `anonymize_path` (RPC, метки **без** падежа), docx/xlsx/txt/md/xml → образ, pdf/pptx/mpp → `*.md` через `hds_extract` + `text_image`, `unsupported`/`too_big` по `index.max_file_mb`, удаление/переименование, `_attachments`/`_conflicts` не выпускаются | e2e на стенде 30–50 документов: структура повторена, имена с метками, текстовые образы читаются, повторный прогон — 0 изменений | **закрыт 20.11.2026** (§3.2) |
 | A4.3 | **Обратный путь** TR-7.5/7.7: `agent_new` → папка проекта (D5, суффикс ` (агент)`), `agent_changed` → вариант в `.hds-agent\pending` с восстановлением `docProps` и картинок из `.hds-agent\base`, маркер/`artifact_id`, защита от петель (`issued` vs `seen`) | e2e: правка `office_edit` → вариант в `pending`, sha256 оригиналов не изменились (I6); новый файл агента появился в папке; повторный обход не плодит записи | **закрыт 20.11.2026** (§3.3) |
 | A4.4 | **Решения TR-7.6**: «Принять» (backup → `replace_file` → `accepted` → пересоздать образ), три исхода конфликта, «файл занят» (os error 32), «Отклонить», очередь сообщений агенту `.hds-agent\messages.jsonl` | тесты на копиях: все четыре ситуации + занятый файл (открытый `File` handle), backup и восстановление; e2e стенда: accept → оригинал = вариант, backup есть, образ пересоздан, повторный `sync` — 0 изменений; reject → образ = оригинал, агент получил сообщение | **закрыт 20.11.2026** (§3.4); «Сравнить» — долг §4.2 п.17 |
-| A4.5 | **Валидатор** TR-7.8: отчёт `pending\<rel>.report.json`, метки вне проекта, несогласованный падеж, непомещённые `[IMAGE_n]`, порог «текст пропал» (40 %) | тест: подделанный вариант ловится, нормальный — нет; отчёт не блокирует выпуск | — |
+| A4.5 | **Валидатор** TR-7.8: отчёт `pending\<rel>.report.json`, метки вне проекта, несогласованный падеж, непомещённые `[IMAGE_n]`, порог «текст пропал» (40 %) | тест: подделанный вариант ловится, нормальный — нет; отчёт не блокирует выпуск | **закрыт 20.11.2026** (§3.5) |
 | A4.6 | **CLI и документация**: `hds agent sync [--once] [--interval SEC]` (дефолт `agent.sync.interval_sec` = 5 с), остановка по `index.stop`/Ctrl+C, журнал `agent-state\sync.log` без значений (I8), `README.md` — глава «Анонимная зона агента» **с таблицей смысла настроек `agent.sync`** (из §4.3), `AGENT_A4_REPORT.md`, `RELEASE_NOTES` | полный набор проверок §6 хендоффа + e2e стенда + I1/I2/I8 | — |
 
 **Зависимости:** A4.2 ← A4.1; A4.3 ← A4.2; A4.4 ← A4.3; A4.5 — параллельно A4.4; A4.6 —
@@ -51,6 +52,8 @@
 | A4.1 | закрыт 19.11.2026 | `00da7c54` (feat) | `crates/hds-agent`: `registry_db` (10 тестов), `settings::registry_dir/registry_db` (+тест), `rusqlite` в зависимости; `crates/hds-cli`: `agent_sync` + `hds agent sync --once` (4 интеграционных теста). Прогоны: `cargo test --workspace` — **122 набора / 781 passed / 0 failed** (лог `tools/parity/out/a41-cargo-test.log`), fmt/clippy чисто; python 307 OK (skip 1, `a41-python.log`); `npm test` 23/23 (`a41-npm.log`). |
 | A4.2 | закрыт 20.11.2026 | `81961936` (feat) | `crates/hds-agent`: `mirror` (**19 тестов**), `settings::sync_settings` (+2 теста, сверка с `config.example.yaml`), `hds-extract`/`sha2`/`hex` в зависимости; `hds-anonymize`: `anonymize_path`, `anonymize_agent_to`, `text_image_to`; python: `handlers.anonymize_path` + `sanitize_component`, capability, мок и тесты (**9 + 1** тестов); `crates/hds-cli`: проход в `agent sync`, ленивые воркеры, `HDS_EXTRACT_WORKER` (+1 e2e-тест). Прогоны: `cargo test --workspace` — **122 набора / 803 passed / 0 failed** (`a42-cargo-test.log`), fmt/clippy чисто; python **317 OK** (skip 1, `a42-python.log`); `npm test` 23/23 (`a42-npm.log`); e2e стенда — 32 образа, 1 `unsupported`, третий прогон 0 изменений (`tools/parity/out/agent_a42/`). |
 | A4.3 | закрыт 20.11.2026 | `d84571ee` (feat) | `crates/hds-agent`: обратный проход в `mirror` (**+9 тестов**: agent_new/коллизии ` (агент)`, pending+base, конфликт, orphan, служебные каталоги, маркер, `safe_components`, пересборка варианта), `read_marker`/`deanonymize_path`/`image_map`/`deanonymize_agent_to` в клиенте; python: `handlers.read_marker/deanonymize_path/image_map`, `deanonymize(restore_from, images)`, карта `[IMAGE_n]`→часть пакета, восстановление DOCX-картинок и docProps, маркер первой строкой у md/txt (**11 тестов**); mock и e2e CLI (+1). Прогоны: `cargo test --workspace` — **122 набора / 813 passed / 0 failed** (`a43-cargo-test.log`), fmt/clippy чисто; python **328 OK** (skip 1, `a43-python.log`); `npm test` 23/23 (`a43-npm.log`); e2e стенда — 2 варианта в `pending` (md и docx, docProps из основания, маркер снят), 1 файл агента выпущен, повторные проходы 0 изменений (`tools/parity/out/agent_a42/A43_E2E.md`). |
+| A4.4 | закрыт 20.11.2026 | `43305867` (feat) | `crates/hds-agent`: `results` (**+11 тестов**), `set_baseline`, `accepted` в наборе управляемых статусов, очередь `.hds-agent\messages.jsonl`; `hds_core::timefmt`; `crates/hds-cli`: `hds agent result accept\|reject\|conflict` (+4 e2e). Прогоны: `cargo test --workspace` — **123 набора / 830 passed / 0 failed** (`a44-cargo-test.log`), fmt/clippy чисто; python 328 OK (skip 1); `npm test` 23/23; e2e стенда — приём, отказ, занятый файл, повторные проходы 0 изменений (`A44_E2E.md`). |
+| A4.5 | закрыт 20.11.2026 | `e676bb89` (feat) | `crates/hds-agent`: `validator` (**11 тестов**) — четыре проверки, отчёт `pending\<rel>.report.json`; `Anonymizer::snapshot` (+`FakeAnon`: `labels`/`rev`/`fail_snapshot`), `validate_variant` в `mirror::make_variant`, удаление отчёта в `results::cleanup_decision`; `results` +1 тест, `mirror` +2, CLI e2e — проверки отчёта. Прогоны: `cargo test --workspace` — **123 набора / 844 passed / 0 failed** (`a45-cargo-test.log`), fmt/clippy чисто; python 328 OK (skip 1, `a45-python.log`); `npm test` 23/23 (`a45-npm.log`); e2e стенда — отчёт `ok` и `check`, accept/reject удаляют отчёт, повторные проходы 0 изменений (`tools/parity/out/agent_a42/A45_E2E.md`). |
 
 ### 3.1. A4.1: что именно сделано (факты)
 
@@ -269,6 +272,79 @@
   **анонимные** (метки), иначе текст уносил бы значения в анонимную зону;
   (4) `_conflicts` — плоская копия файла (без подкаталогов); (5) «Сравнить»
   (данные: пути, ячейки xlsx, diff md/txt) не делалось — долг §4.2 п.17.
+
+### 3.5. A4.5: что именно сделано (факты)
+
+* **Модуль `validator`** (`crates/hds-agent/src/validator.rs`, новый): `Report`
+  (`rel`, `anon_rel`, `ts`, `rev`, `verdict`, `checks`), `Check` (`name`,
+  `verdict`, `detail`), `Verdict::{Ok, Check}` (serde `snake_case`),
+  `Inputs` (пути двух сторон + `kind`), `Outcome` (отчёт + `problems`).
+  `report_path(variant)` = `<variant>.report.json`, `Report::write/read`.
+  Вердикт отчёта — худший из проверок (`verdict_of`), порядок проверок
+  постоянный: `labels_outside_project`, `label_grammar`, `unplaced_images`,
+  `text_lost`.
+* **Проверки** (две стороны не путаются — грабля №24):
+  * `labels_outside_project` — по **образу** (метки): сравниваются части
+    `hds_core::labels::label_parts`, а не строки, поэтому `[PERSON_3|дат]` и
+    `[PERSON_3]` — одна сущность; `[IMAGE_n]` исключены (это картинки, их
+    проверяет `unplaced_images`); источник — `Snapshot.labels[].label`
+    (`Snapshot.others` — **значения** форм, а не метки, поэтому в проверке не
+    участвуют);
+  * `label_grammar` — `[X_n|падеж]` без базовой формы `[X_n]` ни в документе,
+    ни в снимке; `|nomn` приводится к пустому суффиксу через `gram_to_suffix`
+    (своей регулярки нет, AG-1);
+  * `unplaced_images` — у `Kind::Image` метки `[IMAGE_n]`, оставшиеся в
+    **варианте**; сверяются с картой `.hds-agent\base\<rel>.images.json`
+    (массив от `image_map` или `{"images": […]}`): «есть в карте, но картинка
+    не восстановлена» / «нет в карте основания». У `Kind::TextImage` —
+    «не применимо» (картинок там нет);
+  * `text_lost` — слова основания против варианта: регистр, пунктуация и
+    служебные комментарии `<!-- … -->` (страницы текстового образа, маркер)
+    не влияют; порог — доля `> 40 %` слов основания, которых нет в варианте
+    (В-8), в детали — округлённый процент.
+  * Края порога проверены: 39 % — `ok`, 41 % — `check` (11 юнит-тестов
+    валидатора на копиях; `[IMAGE_1]` в карте и вне карты, TextImage,
+    валидатор-сбой → `check` + `problems`).
+* **Точка вызова — `mirror.rs::make_variant`** сразу после
+  `set_issued(seen, PendingAccept)`: `validate_variant` берёт снимок меток
+  (`Anonymizer::snapshot`), считает отчёт и пишет его рядом с вариантом.
+  Ошибка валидатора **не отменяет выпуск**: строка
+  `<rel>: валидатор — …` уходит в `SyncReport::problems`, отчёт получает
+  `verdict: "check"` (проверено тестом `validator_failure_does_not_block_variant`
+  и снимком с `rev = 0`). Новых счётчиков нет — повторный проход по
+  неизменённой папке остаётся «0 изменений».
+* **`Anonymizer::snapshot`** (`Client`/`LazyAnonymizer`): `vault_snapshot` —
+  единственный источник «меток проекта». `FakeAnon` научился отдавать снимок
+  (`labels`, `rev = 7`) и падать по флагу `fail_snapshot`. Mock-воркер **не**
+  менялся: в нём уже был `vault_snapshot` с `[PERSON_1]`, и добавлять
+  `[PERSON_2]` нельзя — сломается `refresh::snapshot_is_refreshed_by_vault_rev`
+  (проверено на практике, откат).
+* **Жизненный цикл**: `results.rs::cleanup_decision` удаляет
+  `<rel>.report.json` **до** `prune_under` (иначе каталог, где остался только
+  отчёт, не считался бы пустым) — accept/reject/все три исхода конфликта.
+  Пересборка варианта перезаписывает отчёт (тест
+  `variant_gets_validator_report_and_stays_pending`: `ok` → новая правка →
+  `check`).
+* **I8**: в отчёте нет текста документа — `detail` собирается из меток,
+  `rel`/`anon_rel` — пути (в папке пользователя, как `base`/`pending`), `ts` и
+  `rev` — числа. Ассерт в тестах: в JSON нет значения из основания и нет
+  текста варианта.
+* **Тесты:** `validator` +11, `mirror` +2, `results` +1, CLI e2e — отчёт в
+  `make_variant` и его отсутствие после `accept`. Прогоны: `cargo test
+  --workspace` — **123 набора / 844 passed / 0 failed** (13 ignored),
+  fmt/clippy чисто; python 328 OK (skip 1); `npm test` 23/23.
+* **Стенд** (`A45_E2E.md`): правка md-образа → `pending` + `report.json`
+  (`verdict: ok`, `rev 114`); правка с `[IMAGE_1]` → `verdict: check`
+  («нет в карте основания»), вариант остался `pending_accept`; `accept` и
+  `reject` → отчёта нет, `pending`/`base` пусты, `sync` — 0 изменений.
+* **Осознанные отклонения:** (1) `unplaced_images` смотрит в **вариант**, а не
+  в образ: в образе `[IMAGE_n]` стоят по построению (В-4); (2) `Snapshot.others`
+  в проверках не используется — это значения, а не метки (в плане было
+  «labels + others»); (3) `ts` в тестах сравнивается с допуском: разбор JSON во
+  `f64` не обязан давать тот же бит (грабля №26); (4) команда
+  `hds agent result report [--json]` (В-10) не делалась — долг §4.2 п.23;
+  (5) для docx/xlsx-варианта текст берётся `hds_extract` трижды (образ,
+  основание, вариант) — это цена проверки, воркер переиспользуется.
 
 ## 4. Решения и долги
 
@@ -540,6 +616,24 @@ COM-автоматизация: нужен установленный Word, не
 22. **A4.4: своя копия `civil_from_days` в `hds-ui`.** После переноса даты-времени в
     `hds_core::timefmt` в `crates/hds-ui/src/lib.rs` осталась вторая реализация —
     убрать (мелкий технический долг, не блокирует A4).
+23. **A4.5: команды `hds agent result report` нет.** В-10 («если успеваем») не
+    сделали: отчёт читает только `validator::Report::read` (A5). Пользователь
+    сейчас видит пометку «проверить» лишь в UI A5 или глазами в JSON.
+24. **A4.5: `Snapshot.others` в проверке меток не используется.** Это **значения**
+    форм «прочих» сущностей (`sidecar/hds_anonymize/vault.py`), а не метки; метки
+    чужих проектов снимок не перечисляет. Если понадобится ловить «метка из другой
+    базы» — нужен отдельный источник.
+25. **A4.5: `text_lost` сравнивает множества слов.** Повторяемость не учитывается:
+    если слово встречается в варианте хоть раз, потеря его повторов не видна. Для
+    «документ пересобран с нуля» этого достаточно; точнее — мультимножество.
+26. **A4.5: mock-воркер и `[PERSON_2]`.** `vault_snapshot` мока отдаёт только
+    `[PERSON_1]`; «дополнить» его нельзя — `refresh::snapshot_is_refreshed_by_vault_rev`
+    проверяет, что до выдачи метки значения нет в словаре (проверено, откат).
+    Поэтому CLI-тест с `[PERSON_2]` в образе получит `verdict: check` — и это верно.
+27. **A4.5: три извлечения текста на вариант.** Для docx/xlsx вариант вызывает
+    `hds_extract` для образа, основания и варианта. Воркер ленивый и
+    переиспользуется, но на больших xlsx это заметно; кэш по sha256 в пределах
+    прохода — A4.6/фаза 2.
 
 ## 5. Контракты A4 (не ломать)
 
@@ -555,6 +649,7 @@ COM-автоматизация: нужен установленный Word, не
 | **Индекс** | при `agent.enabled` корни — только `<agent.root>\P*\workspace`; `.hds-agent`, `_conflicts` исключены неявно; образы индексирует **существующий** `hds watch` — очередь не дублировать |
 | **Журналы** | событие `agent_egress_redacted` и `sync.log` — пути/метки/статусы, **без значений** (I8); секреты только в `secrets.json` |
 | **Решения (A4.4)** | `hds_agent::results`: `Mirror::decide(rel, Decision)`. Порядок «Принять»: backup → `replace_file` → `accepted` → образ из нового оригинала (`set_baseline`) → очистка `pending`/`base`. Занятый файл (`PermissionDenied`) → `ResultsError::Busy`, **ничего** не меняется и backup не остаётся. `reject`/`new`/`delegate` дают `synced`; `delegate` копирует **образ** (метки) в `<P>\workspace\_conflicts\<имя> (вариант агента)<ext>`. `accepted` — управляемый статус (прямой путь + сбор вариантов) |
+| **Валидатор (A4.5)** | `hds_agent::validator`: отчёт `pending\<rel>.report.json` (`rel`, `anon_rel`, `ts`, `rev`, `verdict: ok\|check`, `checks[4]` в постоянном порядке `labels_outside_project`, `label_grammar`, `unplaced_images`, `text_lost`). Пишется **после** `set_issued(seen, PendingAccept)`, ничего не блокирует; сбой валидатора → строка в `SyncReport::problems` + `verdict: check`; удаляется `results::cleanup_decision`, перезаписывается при пересборке варианта. `Snapshot.others` — значения, в проверках не участвуют. В деталях только метки, пути и числа (I8) |
 | **Сообщения агенту (В-6)** | `.hds-agent\messages.jsonl`, по строке `{ts, kind: document_rejected\|conflict_delegated, rel, text}`; `rel` и `text` — только метки и пути, без значений (I8); повторный проход сообщений не плодит |
 | **Дата-время** | одна реализация — `hds_core::timefmt` (`now_epoch`, `fmt_local_datetime`, `stamp_local`); `hds_cli::support` реэкспортирует; новых копий не заводить |
 | **Атомарная замена** | `hds_core::config::replace_file` (ретраи на `PermissionDenied`); между дисками `rename` падает — нужен fallback copy+replace |
@@ -632,6 +727,23 @@ COM-автоматизация: нужен установленный Word, не
     маркер-заглушка удобны, но легко получить дубль заголовка теста или
     незакрытую скобку модуля: после каждой пачки — `cargo fmt --check` и число
     тестов (A4.4 поймал `unclosed delimiter`).
+24. **Две стороны документа не путать.** В `pending` лежит вариант со
+    **значениями**, в `workspace` — образ с **метками**. Метки проверяются по
+    образу и снимку; «доля пропавшего текста» — вариант против **основания**
+    (`base`). Сравнение образ ↔ основание даёт ложные «потери» на каждой метке.
+25. **`[IMAGE_n]` в образе — норма, а не «непомещённая картинка».** Так в образе
+    стоит место картинки (В-4). Проверять надо **вариант**: если метка осталась
+    в варианте — картинка не восстановлена (или её не было: «нет в карте»).
+26. **`serde_json` и `f64`: разбор не гарантирует тот же бит.** `ts` расходился
+    на 1 ULP (`…6035585` → `…6035583`), тест падал примерно раз на прогон
+    workspace. Сравнивать `ts` с допуском, остальные поля — точно.
+27. **Отчёт удалять до `prune_under`.** Иначе каталог, в котором остался один
+    `report.json`, не пуст: не удаляется, и `pending` копит пустые папки
+    (A4.5 `cleanup_decision`).
+28. **Mock-воркер `vault_snapshot` — часть тестов фильтра.** Добавление «лишней»
+    метки (`[PERSON_2]`) в мок ломает `refresh::snapshot_is_refreshed_by_vault_rev`
+    («до выдачи метки значения нет»): проверено, откатили. Для CLI-тестов
+    валидатора хватает `[PERSON_1]`, которой мок метит «Иванов Иван».
 
 ## 7. Окружение и команды
 
@@ -712,81 +824,127 @@ $fs=[System.IO.File]::Open($orig,'Open','Read','Read'); # FileShare.Read
 & '<repo>\target\debug\hds.exe' agent sync --project P0001 --once   # 0 изменений
 ```
 
-## 8. Контекст и промт для A4.5 (копировать целиком в новый чат, режим Act)
+A4.5 (валидатор) на том же стенде — отчёт к варианту и его удаление решением:
 
-> **Самодостаточный файл для нового чата:** `AGENT_A4_5_HANDOFF_PROMPT.md` —
-> полный контекст (фазы A0–A6, состояние репозитория, опора кода, методика TR-7.8
-> с форматом отчёта, критерии, грабли, вопросы владельцу В-8…В-11) и тот же промт
-> в §10. Ниже — короткая версия для журнала; при расхождении прав
-> `AGENT_A4_5_HANDOFF_PROMPT.md`.
+```powershell
+$env:HDS_ROOT='<repo>\tools\parity\out\agent_a42\root'
+$env:HDS_CONFIG='<repo>\tools\parity\out\agent_a42\config.yaml'
+$pend='<repo>\tools\parity\out\agent_a42\project\.hds-agent\pending'
+$ws='<repo>\tools\parity\out\agent_a42\zone\P0001\workspace'
+# 1. «Агент» правит образ: дописать строку, маркер оставить первой строкой.
+$img=(Get-ChildItem -LiteralPath $ws -Recurse -File -Filter *.md |
+  Where-Object Name -NotLike '*pdf.md' | Select-Object -First 1)
+$t=[IO.File]::ReadAllText($img.FullName,[Text.Encoding]::UTF8)
+[IO.File]::WriteAllText($img.FullName,$t.TrimEnd()+"`r`n`r`nAgent edit.`r`n",
+  (New-Object Text.UTF8Encoding($false)))
+& '<repo>\target\debug\hds.exe' agent sync --project P0001 --once      # pending: 1
+# 2. Отчёт рядом с вариантом (JSON, UTF-8):
+$rep=(Get-ChildItem -LiteralPath $pend -Recurse -File -Filter *.report.json | Select-Object -First 1)
+[IO.File]::ReadAllText($rep.FullName,[Text.Encoding]::UTF8)
+# 3. Решение: отчёт удаляется вместе с вариантом, повторный проход — 0.
+$v=Get-ChildItem -LiteralPath $pend -Recurse -File | Where-Object Name -NotLike '*.report.json' | Select-Object -First 1
+$rel=$v.FullName.Substring($pend.Length).TrimStart('\')
+& '<repo>\target\debug\hds.exe' agent result accept --project P0001 --path $rel
+& '<repo>\target\debug\hds.exe' agent sync --project P0001 --once
+Remove-Item Env:HDS_ROOT, Env:HDS_CONFIG -ErrorAction SilentlyContinue   # грабля 12
+```
+
+* Проверить «подделанный» вариант можно, дописав в образ `[IMAGE_1]` или метку
+  не из проекта: отчёт получит `verdict: "check"`, а выпуск и решения не
+  изменятся (A4.5 `A45_E2E.md`).
+
+## 8. Контекст и промт для A4.6 (копировать целиком в новый чат, режим Act)
+
+> **Самодостаточный файл для нового чата:** `AGENT_A4_6_HANDOFF_PROMPT.md` —
+> создать в начале A4.6 по образцу `AGENT_A4_5_HANDOFF_PROMPT.md` (фазы A0–A6,
+> состояние репозитория, опора кода, методика TR-7.1…7.9, критерии приёмки A4,
+> грабли, вопросы владельцу В-8…В-11). Ниже — короткая версия для журнала; при
+> расхождении прав файл-хендофф.
 
 ### 8.1. Состояние на 20.11.2026 (сверить в новом чате)
 
-* Ветка `agent-privacy-zone`, HEAD — docs-коммит A4.4 (сверить
+* Ветка `agent-privacy-zone`, HEAD — docs-коммит A4.5 (сверить
   `git log -1 --oneline`), дерево чистое; push не делался.
-* Коммиты фазы: A4.1 — `00da7c54`, A4.2 — `81961936`, A4.3 — `d84571ee`, A4.4 —
-  A4.4 — `43305867` (+ docs после каждого). Журнал, решения и долги — этот файл.
-* Проверки A4.4: `cargo test --workspace` — **123 набора / 830 passed / 0 failed**,
-  fmt/clippy чисто; python **328 OK** (skip 1); `npm test` 23/23.
+* Коммиты фазы: A4.1 — `00da7c54`, A4.2 — `81961936`, A4.3 — `d84571ee`,
+  A4.4 — `43305867`, A4.5 — `e676bb89` (+ docs после каждого). Журнал, решения и
+  долги — этот файл.
+* Проверки A4.5: `cargo test --workspace` — **123 набора / 844 passed / 0 failed**
+  (13 ignored), fmt/clippy чисто; python **328 OK** (skip 1); `npm test` 23/23.
   Известный флейк: `agent_acceptance::acceptance_a3_end_to_end` снимает mtime
   `~/.cline`, а IDE туда пишет; отдельный прогон зелёный (грабля 12).
-* Стенд `tools\parity\out\agent_a42`: после A4.4 `pending`/`base` пусты,
-  `sync` — `34 файла, 33 без изменений, 1 unsupported, 0 изменений`; два
-  документа в статусе `accepted` (второй — после проверки «файл занят»),
-  один `document_rejected` в `.hds-agent\messages.jsonl`. Отчёты `A43_E2E.md`,
-  `A44_E2E.md`, логи `a44-*.log`. `HDS_ROOT` = `root` (junction
-  `sidecar`/`models`/`hds`), `HDS_CONFIG` = `config.yaml`; env стенда снимать
-  перед `cargo test` (грабля 12).
-* Опора кода для A4.5: `crates/hds-agent/src/results.rs` (`Mirror::decide`,
-  `DecisionReport`, `cleanup_decision` — там же удалять отчёт валидатора),
-  `mirror.rs::make_variant` (сборка варианта: снимок основания → `pending` →
-  `set_issued`; сюда добавляется отчёт), `registry_db.rs`
-  (`upsert`/`set_issued`/`set_baseline`), `hds_core::labels` (`label_parts`,
-  `is_label` — единственный разбор, AG-1), `hds_anonymize::Snapshot`
-  (`labels[].label`/`forms`, `rev` — источник «меток проекта»),
-  `crates/hds-cli/src/cmd/agent_result.rs` (образец разбора флагов и вывода),
-  e2e `crates/hds-cli/tests/agent_result.rs` (mock-воркер, `ENV_LOCK`).
+* Стенд `tools\parity\out\agent_a42`: после A4.5 `pending`/`base` пусты,
+  `sync` — `34 файла, 33 без изменений, 1 unsupported, 0 изменений`;
+  в реестре 34 записи, часть — `accepted` (приёмы A4.4/A4.5), в
+  `.hds-agent\messages.jsonl` два `document_rejected`. Отчёты `A43_E2E.md`,
+  `A44_E2E.md`, `A45_E2E.md`, логи `a45-sync-0..4.log`, `a45-accept.log`,
+  `a45-reject.log`. `HDS_ROOT` = `root` (junction `sidecar`/`models`/`hds`),
+  `HDS_CONFIG` = `config.yaml`; env стенда снимать перед `cargo test`
+  (грабля 12).
+* Опора кода для A4.6:
+  * `crates/hds-cli/src/cmd/agent_sync.rs` — сейчас только `--once`;
+    `usage()` уже говорит «`--interval` и цикл — A4.6», `unknown_flag` и
+    `anonymizer_factory`/`extractor_factory` готовы;
+  * `crates/hds-cli/src/cmd/agent.rs::stop_daemon` — остановка через
+    `<root>\index.stop`; `crates/hds-index/src/watch.rs::run_watch` (≈ стр. 496)
+    — образец цикла и кооперативной остановки (сигнал снимает сам индексатор);
+  * `hds_agent::mirror::{Mirror::sync_once, SyncReport}` — один проход и
+    счётчики (`changes`, `problems`), `settings::sync_settings` — `interval_sec`
+    уже читается (в A4.2 только хранился);
+  * `config.example.yaml` — блок `agent.sync` (дефолты совпадают с §4.3);
+  * `README.md` — главы про анонимную зону ещё нет; `AGENT_A4_REPORT.md` —
+    создать (`A43_E2E.md`/`A44_E2E.md`/`A45_E2E.md` — материал).
+* **Чего в A4.6 не делать:** автозапуск (Планировщик/служба) — фаза A6;
+  подписка на изменения ФС — фаза 2 (`PLAN_AGENT_PRIVACY_ZONE.md` §8); кнопки
+  вкладки «Агент» — A5; `hds agent result report` — долг §4.2 п.23.
 
 ### 8.2. Промт (копировать целиком)
 
 ```text
 Ты — ведущий разработчик проекта hermes-disk-search (Rust + Python/Node sidecar).
-Ветка agent-privacy-zone. Фаза A4 идёт по под-этапам: A4.1 (реестр) — 00da7c54,
-A4.2 (прямой путь) — 81961936, A4.3 (обратный путь, TR-7.5/7.7) — d84571ee,
-A4.4 (решения TR-7.6) — 43305867; журнал, решения и долги — в
-AGENT_A4_STAGES.md (§2, §3.1–3.4, §4.2, §5–§7).
+Это продолжение основного проекта «ИИ-агент в анонимной зоне»
+(PLAN_AGENT_PRIVACY_ZONE.md). Ветка agent-privacy-zone, HEAD — docs-коммит A4.5
+(сверить git log -1 --oneline), дерево чистое, push не делался.
 
-Задача: под-этап A4.5 — валидатор результата агента (TR-7.8). Отчёт к каждому
-выпущенному варианту, рядом с вариантом: .hds-agent\pending\<rel>.report.json.
-Отчёт НЕ блокирует выпуск варианта и не мешает «Принять/Отклонить»: он только
-помечает «проверить» (UI — A5).
+Фаза A4 (демон двустороннего зеркала hds agent sync) идёт под-этапами:
+A4.1 (реестр) — 00da7c54, A4.2 (прямой путь) — 81961936, A4.3 (обратный путь,
+TR-7.5/7.7) — d84571ee, A4.4 (решения TR-7.6) — 43305867, A4.5 (валидатор
+TR-7.8) — e676bb89. Журнал, решения и долги — AGENT_A4_STAGES.md (§2, §3.1–3.5,
+§4.2, §4.3 — таблица настроек, §5–§7); контекст и методика этого под-этапа —
+AGENT_A4_6_HANDOFF_PROMPT.md (создать по образцу AGENT_A4_5_HANDOFF_PROMPT.md),
+этот промт — её последний параграф.
 
-1. Прочитай AGENT_A4_STAGES.md целиком (§2, §3.4, §4.2 — особенно пункты 17–22,
-   §5–§7), затем AGENT_A4_HANDOFF_PROMPT.md §4.7 и
-   PLAN_AGENT_PRIVACY_ZONE.md §5.7 (TR-7.8).
-2. Новый модуль crates/hds-agent/src/validator.rs: структура отчёта
-   {rel, ts, verdict: ok|check, checks:[{name, verdict, detail}]}, JSON
-   сериализуется serde_json (как messages.jsonl в A4.4). Проверки:
-   а) метки варианта, которых нет в снимке проекта (hds_anonymize::Snapshot:
-      labels[].label + others) — «метка выдумана/искажена»;
-   б) метки с несогласованным падежом: [X_n|дат] без базовой формы [X_n]
-      (разбор — только hds_core::labels, второй регулярки не заводить, AG-1);
-   в) непомещённые [IMAGE_n]: метка картинки осталась в тексте варианта;
-   г) доля пропавшего текста: нормализованный текст основания
-      (`.hds-agent\base\<rel>`) против варианта, порог 40 % — «документ
-      пересобран с нуля».
-3. Точка вызова — mirror.rs::make_variant после успешной сборки варианта:
-   отчёт пишется рядом (pending\<rel>.report.json), ошибка валидатора НЕ
-   отменяет выпуск (идёт в problems и в отчёт), статус остаётся pending_accept.
-4. Жизненный цикл: отчёт удаляется вместе с вариантом — cleanup_decision в
-   results.rs (принять/отклонить/конфликт), иначе он переживёт решение.
-5. Тексты проверок — только метки и пути, без значений (I8); в отчёт не попадает
-   ни одного исходного значения.
-6. Проверки: cargo fmt --check, clippy -D warnings, cargo test --workspace,
-   npm test, python unittest; тесты на копиях: подделанный вариант (метка вне
-   проекта, [IMAGE_n] в тексте, потерянный текст > 40 %) ловится, нормальный —
-   нет; отчёт не блокирует выпуск и удаляется решением; e2e стенда agent_a42
-   (правка образа → pending + report.json, «Принять» → отчёта нет).
-7. Коммиты: feat(agent): A4.5 — ...; docs(agent): A4.5 закрыт — ...; в сообщении —
-   что проверено. Журнал и долги обнови в AGENT_A4_STAGES.md.
+Задача: под-этап A4.6 — демон, CLI и документация (последний под-этап A4).
+
+1. Прочитай AGENT_A4_STAGES.md (§2, §3.5, §4.2 — особенно пункты 17–27, §4.3,
+   §5–§7), AGENT_A4_HANDOFF_PROMPT.md (§4.1, §6 — критерии приёмки A4, §7),
+   PLAN_AGENT_PRIVACY_ZONE.md §5.7 и §8 (подписка на ФС — фаза 2, не сейчас).
+2. `hds agent sync --project P [--once] [--interval SEC]`:
+   а) без `--once` — цикл: проход `Mirror::sync_once`, сон `interval_sec`
+      (дефолт `agent.sync.interval_sec` = 5 с), остановка по
+      `<root>\index.stop` и Ctrl+C (образец — `hds_index::watch::run_watch`;
+      свой сигнальный файл не заводить, `index.stop` снимает индексатор);
+   б) `--interval 0` и отрицательный — ошибка аргумента (код 2), а не «цикл
+      без сна»; `--once` и `--interval` вместе — понятная ошибка;
+   в) журнал `agent-state\sync.log` (в каталоге состояния): строка на проход —
+      время, счётчики (файлы, образы, variants, problems), не больше 10 проблем;
+      только пути, метки и статусы, без значений и текста документов (I8);
+      журнал не растёт бесконечно (ротация по размеру или по числу строк).
+3. README.md — глава «Анонимная зона агента»: что такое зеркало, что попадает
+   в `.hds-agent` (pending/base/backup/messages.jsonl) и что не зеркалится,
+   таблица смысла настроек `agent.sync` (перенести из §4.3 этого журнала:
+   interval_sec, wait_stable_sec, wait_poll_ms, wait_max_sec, settle_age_sec),
+   примеры команд (`agent init`, `agent project add`, `agent sync`,
+   `agent result accept|reject|conflict`) и что видит агент в workspace.
+4. `AGENT_A4_REPORT.md` — отчёт фазы A4: итоги под-этапов A4.1–A4.6, контракты
+   §5, долги §4.2, отчёты стендов (`A43_E2E.md`, `A44_E2E.md`, `A45_E2E.md`);
+   RELEASE_NOTES — короткая запись фазы.
+5. Проверки: fmt --check, clippy -D warnings, cargo test --workspace, npm test,
+   python unittest; e2e стенда agent_a42: `--once` — 0 изменений; цикл с
+   `--interval 1` подхватывает правку образа без перезапуска; `index.stop`
+   останавливает демон в пределах интервала; повторный запуск не дублирует
+   записи реестра; I1/I2/I8 — в `<agent.root>` и в `sync.log` нет значений
+   fixtures (переиспользовать проверки приёмки A3).
+6. Коммиты: feat(agent): A4.6 — ...; docs(agent): A4.6 закрыт — ... (+ README,
+   AGENT_A4_REPORT.md, RELEASE_NOTES); в сообщении — что проверено. Журнал
+   AGENT_A4_STAGES.md — §2 (статус A4.6 и A4 целиком), §3.6, §4.2, §6, §7.
 ```
