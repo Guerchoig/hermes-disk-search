@@ -18,7 +18,8 @@
 //! HTTP-слой поверх него тонкий (разбор тела + `ApiError` → статус).
 
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -390,6 +391,119 @@ fn wait_idle(api: &AgentApi, project: &str, timeout: Duration) -> Value {
     }
 }
 
+/// Общее состояние вкладки для сокет-тестов: сервер (`stream_events`) читает
+/// именно его. Корень поставки — репозиторий (в `HDS_ROOT` нет `dist/worker.mjs`).
+fn global_api(stand: &Stand) -> std::sync::Arc<AgentApi> {
+    let _ = hds_ui::agent_session::install_global(AgentApi::for_tests_at(repo_root()));
+    std::sync::Arc::clone(hds_ui::agent_session::global(&stand.cfg))
+}
+
+/// Поднять настоящий HTTP-сервер на эфемерном порту (`run_http_listener`).
+fn spawn_ui() -> SocketAddr {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).expect("порт 0");
+    let addr = listener.local_addr().expect("локальный адрес");
+    std::thread::spawn(move || {
+        let _ = hds_ui::run_http_listener(listener);
+    });
+    addr
+}
+
+/// Открыть SSE и читать до `needle` (или таймаута). Возвращает весь ответ,
+/// включая строку статуса и заголовки — тест проверяет и их.
+fn sse_read(addr: SocketAddr, path: &str, needle: &str, timeout: Duration) -> String {
+    let mut stream = TcpStream::connect(addr).expect("соединение");
+    stream
+        .set_read_timeout(Some(Duration::from_millis(200)))
+        .expect("таймаут чтения");
+    let req = format!("GET {path} HTTP/1.1\r\nHost: test\r\nAccept: text/event-stream\r\n\r\n");
+    stream.write_all(req.as_bytes()).expect("запрос");
+    read_until(&mut stream, needle, timeout)
+}
+
+fn read_until(stream: &mut TcpStream, needle: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        if Instant::now() > deadline {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                buf.extend_from_slice(&chunk[..n]);
+                if String::from_utf8_lossy(&buf).contains(needle) {
+                    break;
+                }
+            }
+            // Таймаут чтения — норма: ждём следующее событие.
+            Err(_) => {}
+        }
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+}
+
+/// POST с CSRF-заголовками через реальный сокет: `(статус, тело)`.
+fn http_post(addr: SocketAddr, path: &str, body: &str) -> (u16, String) {
+    http_post_with(addr, path, body, true)
+}
+
+fn http_post_with(addr: SocketAddr, path: &str, body: &str, csrf: bool) -> (u16, String) {
+    let mut stream = TcpStream::connect(addr).expect("соединение");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(30)))
+        .expect("таймаут чтения");
+    let extra = if csrf {
+        "Origin: http://127.0.0.1:8765\r\nContent-Type: application/json\r\nX-HDS-UI: 1\r\n"
+    } else {
+        ""
+    };
+    let req = format!(
+        "POST {path} HTTP/1.1\r\nHost: test\r\n{extra}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(req.as_bytes()).expect("запрос");
+    let mut resp = String::new();
+    let _ = stream.read_to_string(&mut resp);
+    let status = resp
+        .lines()
+        .next()
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|c| c.parse().ok())
+        .unwrap_or(0);
+    let body = resp
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_string())
+        .unwrap_or_default();
+    (status, body)
+}
+
+/// `ask_id` из кадра SSE (`"ask_id":2`).
+fn ask_id_of(text: &str) -> u64 {
+    const KEY: &str = "\"ask_id\":";
+    let at = text.find(KEY).expect("ask_id в кадре");
+    text[at + KEY.len()..]
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .expect("номер вопроса")
+}
+
+/// Кадр `data:` потока, в котором встречается `needle` (SSE-кадры разделены
+/// пустой строкой). Нужен, чтобы проверять одно событие, а не весь поток: в
+/// соседних кадрах `raw` законно содержит метки («как видит модель»).
+fn frame_with<'a>(stream: &'a str, needle: &str) -> &'a str {
+    let at = stream.find(needle).expect("событие в потоке");
+    let start = stream[..at].rfind("data: ").map(|i| i + 6).unwrap_or(0);
+    let end = stream[start..]
+        .find("\n\n")
+        .map(|i| start + i)
+        .unwrap_or(stream.len());
+    &stream[start..end]
+}
+
 #[test]
 fn preview_shows_labels_and_paths() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -653,6 +767,10 @@ fn routes_gate_csrf_server_profile_and_project() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let stand = Stand::new("routes");
     stand.add_project();
+    // Состояние вкладки могло быть создано сокет-тестами этого бинаря —
+    // начинаем с чистого кольца (тест проверяет пустой ответ `/events`).
+    let _ = hds_ui::agent_session::install_global(AgentApi::for_tests_at(repo_root()));
+    hds_ui::agent_session::global(&stand.cfg).reset_for_tests();
 
     let body = json!({ "project": "P0001", "text": "привет" }).to_string();
     // Без `X-HDS-UI`/Origin POST отклоняется CSRF-гейтом.
@@ -736,5 +854,273 @@ fn routes_gate_csrf_server_profile_and_project() {
     assert!(
         body.contains("серверном профиле"),
         "текст про профиль: {body}"
+    );
+}
+
+/// A5.3: `ask_user` целиком через HTTP — вопрос с **значением** в ленте, ответ
+/// через `POST /api/agent/answer`, ход доходит до `turn_end`, а к провайдеру
+/// ответ уходит без исходных значений (фильтр в `egress_check`).
+#[test]
+fn ask_user_question_answer_and_turn_end() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !prerequisites("A5.3 ask") {
+        return;
+    }
+    let stand = Stand::new("ask");
+    stand.add_project();
+    stand.mirror_one();
+    // Шаг 1 — вызов `ask_user` с меткой в вопросе; шаг 2 — ответ модели.
+    let mock = Mock::start(
+        &stand.dir,
+        &[
+            json!({ "toolCalls": [{ "name": "ask_user",
+                "arguments": { "question": "Сколько дней? [PERSON_1]" } }] }),
+            json!({ "text": "Принято" }),
+        ],
+    );
+    stand.write_secrets(&mock.base_url);
+    let api = global_api(&stand);
+    api.reset_for_tests();
+    let addr = spawn_ui();
+
+    api.message(&stand.cfg, "P0001", "Подготовь письмо", None)
+        .expect("ход");
+
+    // Вопрос агента: деанонимизация в шлюзе — пользователь видит значение (AG-1).
+    let ask_text = sse_read(
+        addr,
+        "/api/agent/events?project=P0001&after=0",
+        "\"kind\":\"ask\"",
+        Duration::from_secs(90),
+    );
+    assert!(ask_text.contains("ask_id"), "{:.400}", ask_text);
+    // Смотрим именно кадр вопроса: в соседних `raw` законно содержит метку.
+    let ask_frame = frame_with(&ask_text, "\"kind\":\"ask\"");
+    assert!(
+        ask_frame.contains("Иванов Иван"),
+        "вопрос без значения: {ask_frame}"
+    );
+    assert!(
+        !ask_frame.contains("[PERSON_1]"),
+        "метка вместо значения: {ask_frame}"
+    );
+    let ask_id = ask_id_of(ask_frame);
+
+    // Ответ — исходный текст пользователя; фильтр заменит значение на выходе.
+    let (status, body) = http_post(
+        addr,
+        "/api/agent/answer",
+        &json!({
+            "project": "P0001",
+            "ask_id": ask_id,
+            "answer": "Три дня. Иванову Ивану подтвердить."
+        })
+        .to_string(),
+    );
+    assert_eq!(status, 200, "{body}");
+    assert!(body.contains("\"answered\":true"), "{body}");
+
+    let end = sse_read(
+        addr,
+        "/api/agent/events?project=P0001&after=0",
+        "\"kind\":\"turn_end\"",
+        Duration::from_secs(90),
+    );
+    assert!(end.contains("\"reason\":\"completed\""), "{:.800}", end);
+
+    // Значения не ушли модели: в логе провайдера только метки.
+    let requests = mock.raw();
+    assert!(!requests.is_empty(), "провайдер не получил запрос");
+    assert!(
+        !requests.contains("Иванову Ивану") && !requests.contains("Иванов Иван"),
+        "значение ушло модели: {:.800}",
+        requests
+    );
+    assert!(
+        requests.contains("[PERSON_1"),
+        "метки в запросе к провайдеру: {:.800}",
+        requests
+    );
+
+    api.reset_for_tests();
+}
+#[test]
+fn sse_stream_state_and_turn_events() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !prerequisites("A5.3 sse") {
+        return;
+    }
+    let stand = Stand::new("sse");
+    stand.add_project();
+    stand.mirror_one();
+    let mock = Mock::start(&stand.dir, &[json!({ "text": "Готово по письму" })]);
+    stand.write_secrets(&mock.base_url);
+    let api = global_api(&stand);
+    api.reset_for_tests();
+
+    let addr = spawn_ui();
+    let started = api
+        .message(&stand.cfg, "P0001", "Подготовь письмо Иванову Ивану", None)
+        .expect("первый ход");
+    assert_eq!(started["ok"], true, "{started}");
+
+    let text = sse_read(
+        addr,
+        "/api/agent/events?project=P0001&after=0",
+        "\"kind\":\"turn_end\"",
+        Duration::from_secs(90),
+    );
+    assert!(text.starts_with("HTTP/1.1 200"), "{:.400}", text);
+    assert!(
+        text.contains("Content-Type: text/event-stream"),
+        "{:.400}",
+        text
+    );
+    // Поток нельзя отдавать с длиной тела: браузер ждал бы конца.
+    assert!(
+        !text.to_ascii_lowercase().contains("content-length"),
+        "SSE без Content-Length: {:.400}",
+        text
+    );
+    assert!(text.contains("retry: 1500"), "{:.400}", text);
+    assert!(text.contains("event: state"), "{:.400}", text);
+    assert!(text.contains("event: item"), "{:.400}", text);
+    assert!(text.contains("id: "), "номер кадра: {:.400}", text);
+    for kind in [
+        "\"kind\":\"prompt\"",
+        "\"kind\":\"agent\"",
+        "\"kind\":\"turn_end\"",
+    ] {
+        assert!(text.contains(kind), "нет события {kind}: {:.600}", text);
+    }
+    // `prompt` — до первого события агента (подтверждённая реплика).
+    let prompt_at = text.find("\"kind\":\"prompt\"").unwrap();
+    let agent_at = text.find("\"kind\":\"agent\"").unwrap();
+    assert!(prompt_at < agent_at, "порядок событий");
+    assert!(
+        text.contains("\"ok\":true"),
+        "turn_end успешен: {:.600}",
+        text
+    );
+
+    api.reset_for_tests();
+}
+
+/// A5.3: `abort` при висящем вопросе. Вопрос снимается **до** `abort`, иначе
+/// поток чтения воркера не прочитал бы команду (грабля §6 п.5): в ленте
+/// `ask_cancelled`, `busy` снят, сессия жива.
+#[test]
+fn abort_cancels_pending_ask() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if !prerequisites("A5.3 abort-ask") {
+        return;
+    }
+    let stand = Stand::new("abort-ask");
+    stand.add_project();
+    stand.mirror_one();
+    let mock = Mock::start(
+        &stand.dir,
+        &[json!({ "toolCalls": [{ "name": "ask_user",
+            "arguments": { "question": "Продолжать? [PERSON_1]" } }] })],
+    );
+    stand.write_secrets(&mock.base_url);
+    let api = global_api(&stand);
+    api.reset_for_tests();
+    let addr = spawn_ui();
+
+    api.message(&stand.cfg, "P0001", "Подготовь письмо", None)
+        .expect("ход");
+    let ask_text = sse_read(
+        addr,
+        "/api/agent/events?project=P0001&after=0",
+        "\"kind\":\"ask\"",
+        Duration::from_secs(90),
+    );
+    assert!(ask_text.contains("ask_id"), "{:.400}", ask_text);
+
+    let aborted = api.abort(&stand.cfg, "P0001").expect("стоп");
+    assert_eq!(aborted["aborted"], true, "{aborted}");
+
+    let cancelled = sse_read(
+        addr,
+        "/api/agent/events?project=P0001&after=0",
+        "\"kind\":\"ask_cancelled\"",
+        Duration::from_secs(60),
+    );
+    assert!(cancelled.contains("ask_cancelled"), "{:.800}", cancelled);
+
+    let events = wait_idle(&api, "P0001", Duration::from_secs(60));
+    assert_eq!(events["busy"], false, "{events}");
+    // Сессия жива: `session_id` остался, следующий ход возобновится.
+    assert!(api.existing_turn("P0001").expect("ход").session().is_some());
+
+    api.reset_for_tests();
+}
+
+/// A5.3: гейты `answer` и SSE — без CSRF 403, в server-профиле 403 (D20),
+/// поток не отдаётся вовсе.
+#[test]
+fn sse_and_answer_gates() {
+    use hds_ui::{route, ReqHeaders};
+
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("sse-gates");
+    stand.add_project();
+    // Вопросов быть не должно: начинаем с чистого состояния (порядок тестов
+    // в бинаре не задан, а `OnceLock` общий для процесса).
+    let _ = hds_ui::agent_session::install_global(AgentApi::for_tests_at(repo_root()));
+    hds_ui::agent_session::global(&stand.cfg).reset_for_tests();
+    let addr = spawn_ui();
+
+    // Без CSRF-заголовков POST отклоняется до обработчика.
+    let body = json!({ "project": "P0001", "ask_id": 1, "answer": "да" }).to_string();
+    let (status, text) = http_post_with(addr, "/api/agent/answer", &body, false);
+    assert_eq!(status, 403, "{text}");
+    // С CSRF — доходит: вопроса нет → 404.
+    let (status, text) = http_post(addr, "/api/agent/answer", &body);
+    assert_eq!(status, 404, "{text}");
+    // Без ask_id — 400.
+    let (status, text) = http_post(
+        addr,
+        "/api/agent/answer",
+        &json!({ "project": "P0001", "answer": "да" }).to_string(),
+    );
+    assert_eq!(status, 400, "{text}");
+    // Пустой ответ — 400 (проверка раньше поиска вопроса).
+    let (status, text) = http_post(
+        addr,
+        "/api/agent/answer",
+        &json!({ "project": "P0001", "ask_id": 1, "answer": "  " }).to_string(),
+    );
+    assert_eq!(status, 400, "{text}");
+    // Через `route` без CSRF — тот же 403 (как у остальных маршрутов вкладки).
+    let (status, _, _) = route(
+        "POST",
+        "/api/agent/answer",
+        "",
+        &ReqHeaders::default(),
+        &body,
+    );
+    assert_eq!(status, 403, "CSRF answer");
+    drop(stand);
+
+    // Server-профиль: вкладка недоступна — поток SSE получает 403 и JSON.
+    let server = Stand::new("sse-gates-server");
+    let cfg_path = server.dir.join("config.yaml");
+    let mut cfg = fs::read_to_string(&cfg_path).unwrap();
+    cfg.push_str("profile: server\n");
+    fs::write(&cfg_path, cfg).unwrap();
+    let addr2 = spawn_ui();
+    let text = sse_read(
+        addr2,
+        "/api/agent/events?project=P0001&after=0",
+        "серверном профиле",
+        Duration::from_secs(20),
+    );
+    assert!(text.starts_with("HTTP/1.1 403"), "{:.300}", text);
+    assert!(
+        !text.contains("event: state"),
+        "в server-профиле поток не отдаётся: {:.300}",
+        text
     );
 }

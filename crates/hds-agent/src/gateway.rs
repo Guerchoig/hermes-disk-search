@@ -316,6 +316,25 @@ impl GatewayHost {
         }
     }
 
+    /// Вопрос модели → текст для пользователя (TR-5.3, AG-1).
+    ///
+    /// Разбирает метки только шлюз: берётся тот же [`DeAnonymizer`], что у
+    /// событий (`RefreshState.deanon`). В egress-only режиме (`refresh == None`,
+    /// стенды и тесты) снимка vault нет — вопрос уходит **как есть, с метками**;
+    /// это ожидаемо и видно в ленте.
+    fn deanon_question(&self, question: &str) -> String {
+        self.refresh
+            .as_ref()
+            .and_then(|state| {
+                state
+                    .deanon
+                    .lock()
+                    .ok()
+                    .map(|deanon| deanon.text(question).text)
+            })
+            .unwrap_or_else(|| question.to_string())
+    }
+
     fn office_read(&self, path: &str) -> Result<Value, String> {
         let real = check_within(&self.workspace, path).map_err(|e| e.reason())?;
         let client = self
@@ -439,7 +458,10 @@ impl HostHandler for GatewayHost {
                 kind,
                 content,
             } => self.office_create(&path, &kind, &content),
-            HostCall::AskUser { question } => self.ask.ask(&question),
+            // Вопрос формирует модель, значит он приходит с метками. Пользователь
+            // должен видеть значения, а UI метки не разбирает (AG-1, TR-5.3), —
+            // деанонимизируем здесь, в шлюзе.
+            HostCall::AskUser { question } => self.ask.ask(&self.deanon_question(&question)),
             HostCall::Unknown { .. } => Err(format!("неизвестный host_call: {call}")),
         }
     }
@@ -889,6 +911,103 @@ mod tests {
     fn no_ask_user_refuses() {
         let ask = NoAskUser;
         assert!(ask.ask("кто ты?").is_err());
+    }
+
+    /// Собирает вопросы так, как их увидит пользователь (UI).
+    struct FakeAsk {
+        seen: Mutex<Vec<String>>,
+    }
+
+    impl AskUser for FakeAsk {
+        fn ask(&self, question: &str) -> Result<Value, String> {
+            self.seen
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(question.to_string());
+            Ok(json!({ "answer": "три дня" }))
+        }
+    }
+
+    /// Снимок vault: `[PERSON_1]` = «Иванов Иван».
+    fn snapshot_person() -> Snapshot {
+        Snapshot {
+            rev: 1,
+            labels: vec![hds_anonymize::protocol::SnapshotLabel {
+                label: "[PERSON_1]".to_string(),
+                entity_type: "PERSON".to_string(),
+                forms: vec![hds_anonymize::protocol::SnapshotForm {
+                    value: "Иванов Иван".to_string(),
+                    gram: None,
+                    origin: "ner".to_string(),
+                }],
+            }],
+            others: Vec::new(),
+            keep: Vec::new(),
+        }
+    }
+
+    fn ask_host(refresh: bool) -> (GatewayHost, Arc<FakeAsk>) {
+        let dir = std::env::temp_dir().join(format!("hds-gw-ask-{}", std::process::id()));
+        let filter = Arc::new(Filter::new(
+            "p1",
+            Vec::new(),
+            crate::settings::UnknownPolicy::Label,
+            Duration::from_secs(60),
+            None,
+        ));
+        let ask = Arc::new(FakeAsk {
+            seen: Mutex::new(Vec::new()),
+        });
+        let host = GatewayHost::without_client("p1", &dir, filter, ask.clone(), None);
+        if !refresh {
+            return (host, ask);
+        }
+        let deanon = Arc::new(Mutex::new(DeAnonymizer::new(
+            &snapshot_person(),
+            &[],
+            &dir.join("workspace"),
+            &dir,
+        )));
+        let host = host.with_refresh(Arc::new(RefreshState {
+            system: Vec::new(),
+            projects: Vec::new(),
+            secrets: Vec::new(),
+            workspace: dir.join("workspace"),
+            project_root: dir,
+            deanon,
+        }));
+        (host, ask)
+    }
+
+    /// Вопрос модели приходит с метками, пользователь должен увидеть значение:
+    /// деанонимизация — в шлюзе, а не в UI (AG-1, TR-5.3).
+    #[test]
+    fn ask_user_question_is_deanonymized() {
+        let (host, ask) = ask_host(true);
+        let out = host
+            .handle(
+                "ask_user",
+                &json!({ "question": "Сколько дней? [PERSON_1]" }),
+            )
+            .expect("ответ пользователя");
+        assert_eq!(out["answer"], "три дня");
+        let seen = ask.seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0], "Сколько дней? Иванов Иван");
+    }
+
+    /// Egress-only (`refresh == None`): снимка нет — вопрос остаётся с метками.
+    /// Ожидаемое поведение стендов и тестов, документируется в A5.3.
+    #[test]
+    fn ask_user_without_refresh_keeps_labels() {
+        let (host, ask) = ask_host(false);
+        host.handle(
+            "ask_user",
+            &json!({ "question": "Сколько дней? [PERSON_1]" }),
+        )
+        .expect("ответ пользователя");
+        let seen = ask.seen.lock().unwrap();
+        assert_eq!(seen[0], "Сколько дней? [PERSON_1]");
     }
 
     #[test]

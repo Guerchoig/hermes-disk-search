@@ -318,8 +318,18 @@ pub const PAGE: &str = r#"<!doctype html>
     Отправляется исходный текст — предпросмотр нужен, чтобы проверить замены до отправки.</div>
    <pre id="agpreview" style="white-space:pre-wrap">…</pre>
    <div id="agpaths" class="muted"></div>
-   <div id="agstatus" class="muted"></div>
-   <pre id="agevents" class="muted" style="max-height:180px;overflow:auto"></pre></section>
+   <div class="row" style="margin-top:10px">
+    <label class="muted"><input type="checkbox" id="agraw" onchange="agentRawToggle()" style="min-width:0">
+     как видит модель (метки)</label>
+    <span id="agstatus" class="muted"></span></div>
+   <ul id="agfeed" style="list-style:none;margin:8px 0 0;padding:0;max-height:420px;overflow:auto"></ul>
+   <div id="agask" hidden style="margin-top:10px;border:1px solid #3a5a80;border-radius:10px;padding:10px">
+    <div><b>Вопрос агента:</b> <span id="agaskq"></span></div>
+    <div class="row" style="margin-top:6px">
+     <textarea id="agasktext" rows="2" style="min-width:420px"
+      placeholder="Ответ уйдёт агенту; значения на выходе заменит фильтр"></textarea></div>
+    <div class="row" style="margin-top:6px"><button onclick="agentAnswer()">Ответить</button>
+     <span id="agaskmsg" class="muted"></span></div></div></section>
 
   <section><h2>Состояние проекта</h2>
    <div id="agstate" class="muted">…</div>
@@ -586,15 +596,17 @@ function selectAgentProject(tr, id){
   AG_ID=id || (tr&&tr.getAttribute('data-id')) || '';
   Array.prototype.forEach.call(document.querySelectorAll('#agrows tr'), function(r){
     r.classList.toggle('sel', r.getAttribute('data-id')===AG_ID); });
-  AG_PREVIEW=null; AG_SEQ=0; AG_LINES=[];
+  agentStreamClose();
+  AG_PREVIEW=null; AG_SEQ=0;
+  agReset();
   document.getElementById('agpreview').textContent='…';
   document.getElementById('agpaths').textContent='';
-  document.getElementById('agevents').textContent='';
-  document.getElementById('agstatus').textContent='';
+  agStatus('');
   loadAgentState(); loadAgentFiles();
+  agentStreamOpen();
 }
 // --- Реплика (A5.2): предпросмотр, метки, вложения, отправка ---
-let AG_PREVIEW=null, AG_SEQ=0, AG_POLL=null, AG_LINES=[]; const NL=String.fromCharCode(10);
+let AG_PREVIEW=null, AG_POLL=null; const NL=String.fromCharCode(10);
 function agentMsg(text, isErr){
   const m=document.getElementById('agmsg2');
   if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text;
@@ -678,12 +690,16 @@ async function agentSend(){
     return;
   }
   agentMsg('…отправка');
+  // Лента — только текущий ход: AG_SEQ (номер до хода) сохраняем, DOM чистим.
+  agentStreamClose(); agReset();
   try{
     const j=await jpost('/api/agent/message',{project:AG_ID,text:text});
-    if(j.error){ agentMsg(j.error, true); return; }
-    AG_SEQ=0; document.getElementById('agevents').textContent='';
+    if(j.error){ agentMsg(j.error, true); agentStreamOpen(); return; }
+    AG_BUSY=true;
     agentMsg('ход принят · сессия '+(j.session_id||'-'));
-    agentPoll();
+    // Поток откроется с after=AG_SEQ: prompt и весь ход уже в кольце.
+    agentStreamOpen();
+    if(!AG_ES) agentPoll();
   }catch(e){ agentMsg('ошибка: '+e, true); }
 }
 async function agentStop(){
@@ -692,46 +708,291 @@ async function agentStop(){
     const j=await jpost('/api/agent/abort',{project:AG_ID});
     if(j.error){ agentMsg(j.error, true); return; }
     agentMsg('прерывание отправлено');
-    agentPoll();
+    if(!AG_ES) agentPoll();
   }catch(e){ agentMsg('ошибка: '+e, true); }
 }
-function agentEventText(ev){
-  const t=ev.text||{};
-  if(ev.kind==='prompt') return '→ модели: '+(t.text||'');
-  if(ev.kind==='session') return 'сессия: '+(t.session||'-')+(t.resumed? ' (возобновлена)':'');
-  if(ev.kind==='agent'){
-    const k=t.kind||'';
-    if(k==='text') return 'агент: '+(t.text||'');
-    if(k==='tool_use') return 'инструмент: '+(t.tool||'');
-    if(k==='tool_result') return 'инструмент '+(t.tool||'')+': '+(t.failed? 'ошибка':'готово');
-    return 'агент: '+k;
-  }
-  if(ev.kind==='turn_end') return (t.ok? 'готово':'сбой')+': '+(t.text||t.error||t.reason||'');
-  if(ev.kind==='done') return 'ответ воркера: '+(t.ok? 'ok':'ошибка')+(t.error? ' — '+t.error:'');
-  if(ev.kind==='redacted') return 'фильтр: '+((t.hits||[]).map(function(h){ return h.label; }).join(', '));
-  if(ev.kind==='notice') return t.text||'';
-  if(ev.kind==='error') return 'ошибка: '+(t.error||'');
-  return ev.kind;
+// --- Лента событий (A5.3): SSE, склейка дельт, переключатель «как видит модель» ---
+let AG_SEQ=0, AG_ES=null, AG_RAW=false, AG_BUSY=false;
+let AG_EVENTS=[], AG_TEXT=null, AG_REASON=null, AG_ASK=null;
+const AG_MAX=500, AG_CLIP=20000, AG_INPUT_CLIP=500;
+function agFeed(){ return document.getElementById('agfeed'); }
+function agStatus(s){ document.getElementById('agstatus').textContent=s||''; }
+function agLi(color){
+  const li=document.createElement('li');
+  li.style.margin='6px 0';
+  li.style.paddingLeft='8px';
+  if(color) li.style.borderLeft='3px solid '+color;
+  return li;
 }
-async function agentPoll(){
+function agAppend(li){
+  const box=agFeed();
+  if(!box) return;
+  box.appendChild(li);
+  // Не больше 500 узлов в DOM — как кольцо на сервере.
+  while(box.children.length>AG_MAX){ box.removeChild(box.firstChild); }
+  box.scrollTop=box.scrollHeight;
+}
+function agLine(text, cls){
+  const li=agLi('');
+  li.innerHTML='<span class="'+((cls&&cls!=='muted')? cls:'muted')+'">'+esc(text)+'</span>';
+  agAppend(li);
+}
+function agReset(){
+  AG_EVENTS=[]; AG_TEXT=null; AG_REASON=null; AG_BUSY=false;
+  const box=agFeed(); if(box) box.innerHTML='';
+  agAskHide();
+}
+// Принять событие: номер для переподключения, копия для перерисовки, показ.
+function agOnItem(ev){
+  if(!ev) return;
+  if(typeof ev.seq==='number' && ev.seq>AG_SEQ) AG_SEQ=ev.seq;
+  AG_EVENTS.push(ev);
+  while(AG_EVENTS.length>AG_MAX) AG_EVENTS.shift();
+  agApply(ev);
+}
+function agApply(ev){
+  const kind=ev.kind||'';
+  const raw=ev.raw||null;
+  // «Как видит модель» — сырое событие (метки); у prompt raw нет.
+  const t=(AG_RAW && raw)? raw : (ev.text||{});
+  if(kind==='agent'){ agAgentEvent(t); return; }
+  if(kind==='prompt'){
+    const li=agLi('#3a5a80');
+    li.innerHTML='<div class="muted">→ модели'+((AG_RAW && raw)?' (метки)':' (подтверждённая реплика)')+
+      ':</div><div style="white-space:pre-wrap">'+esc(t.text||'')+'</div>';
+    agAppend(li); return;
+  }
+  if(kind==='session'){
+    agLine('сессия '+(t.session||'-')+(t.resumed?' (возобновлена)':''),'muted'); return;
+  }
+  if(kind==='redacted'){ agRedacted(t); return; }
+  if(kind==='ask'){ agAsk(t); return; }
+  if(kind==='ask_timeout'){
+    agAskHide();
+    agLine('вопрос без ответа (таймаут '+(t.timeout_sec||'?')+' с) — агент продолжил','err');
+    return;
+  }
+  if(kind==='ask_cancelled'){
+    agAskHide(); agLine('вопрос снят: '+(t.reason||'ход остановлен'),'muted'); return;
+  }
+  if(kind==='turn_end'){ agTurnEnd(t); return; }
+  if(kind==='done'){
+    agLine('ответ воркера: '+(t.ok?'ok':'ошибка'+(t.error?': '+t.error:'')), t.ok?'ok':'err');
+    return;
+  }
+  if(kind==='error'){ agLine('ошибка: '+(t.error||''),'err'); return; }
+  if(kind==='notice'){ agLine(t.text||'','muted'); return; }
+  agLine(kind,'muted');
+}
+function agAgentEvent(t){
+  const k=t.kind||'';
+  if(k==='reasoning'||k==='reasoning_delta'){
+    AG_TEXT=null;
+    if(!AG_REASON){
+      const li=agLi('#3a5a80');
+      const det=document.createElement('details');
+      det.innerHTML='<summary class="muted">рассуждение</summary>';
+      const body=document.createElement('div');
+      body.className='muted';
+      body.style.whiteSpace='pre-wrap';
+      det.appendChild(body);
+      li.appendChild(det);
+      agAppend(li);
+      AG_REASON=body;
+    }
+    AG_REASON.textContent=(k==='reasoning')? String(t.text||'')
+      : AG_REASON.textContent+String(t.text||'');
+    return;
+  }
+  if(k==='text'||k==='text_delta'){
+    AG_REASON=null;
+    if(!AG_TEXT){
+      const li=agLi('#3a7a5a');
+      const body=document.createElement('div');
+      body.style.whiteSpace='pre-wrap';
+      li.appendChild(body);
+      agAppend(li);
+      AG_TEXT=body;
+    }
+    // `text` заменяет накопленные дельты, `text_delta` дописывается.
+    AG_TEXT.textContent=(k==='text')? String(t.text||'')
+      : AG_TEXT.textContent+String(t.text||'');
+    return;
+  }
+  if(k==='tool_use'){
+    AG_TEXT=null; AG_REASON=null;
+    const input=(typeof t.input==='string')? t.input : JSON.stringify(t.input===undefined? null : t.input);
+    const li=agLi('#4a4a6a');
+    li.innerHTML='<span class="muted">инструмент</span> <b>'+esc(t.tool||'?')+
+      '</b> ← <span class="muted">'+esc(String(input||'').slice(0,AG_INPUT_CLIP))+'</span>';
+    // «Открыть» = показать путь и скопировать (В-A5-7: UI не запускает процессы).
+    const path=(t.input && typeof t.input==='object' && t.input.path)? String(t.input.path) : '';
+    if(path){
+      const a=document.createElement('a');
+      a.href='#';
+      a.className='loc';
+      a.textContent=' скопировать путь';
+      a.onclick=function(ev){
+        if(ev && ev.preventDefault) ev.preventDefault();
+        agentCopyPath(path);
+        return false;
+      };
+      li.appendChild(a);
+    }
+    agAppend(li);
+    return;
+  }
+  if(k==='tool_result'){
+    const out=(typeof t.output==='string')? t.output : JSON.stringify(t.output===undefined? null : t.output);
+    const text=String(out||'');
+    const li=agLi(t.error? '#8a3a3a':'#4a4a6a');
+    const det=document.createElement('details');
+    det.innerHTML='<summary>результат <b>'+esc(t.tool||'')+'</b>'+
+      (t.error? ' <span class="err">ошибка: '+esc(t.error)+'</span>':'')+
+      ' <span class="muted">'+esc(text.length>200? text.slice(0,200)+'…' : text)+'</span></summary>';
+    const pre=document.createElement('pre');
+    pre.style.maxHeight='240px';
+    pre.style.overflow='auto';
+    // Потолок — как у воркера (20 000 символов), иначе лента съест память.
+    pre.textContent=text.slice(0,AG_CLIP);
+    det.appendChild(pre);
+    li.appendChild(det);
+    agAppend(li);
+    return;
+  }
+  if(k==='usage'){
+    const tokens=(t.total_input_tokens||0)+(t.total_output_tokens||0);
+    agStatus('ход: '+(AG_BUSY?'идёт':'свободен')+' · токены: '+tokens);
+    return;
+  }
+  if(k==='iteration'){ agStatus('ход: идёт · итерация '+(t.iteration||'?')); return; }
+  if(k==='status'||k==='agent_done'||k==='ended'){
+    agStatus('ход: '+(k==='agent_done'?'завершён':(k==='ended'?'закрыт':'идёт'))+
+      (t.reason? ' · '+t.reason:''));
+    return;
+  }
+  if(k==='notice'){ agLine(t.text||t.notice||'','muted'); return; }
+  if(k==='error'){ agLine('ошибка: '+(t.text||''),'err'); return; }
+  agStatus('событие: '+k);
+}
+function agRedacted(t){
+  const hits=(t.hits||[]).map(function(h){ return h.label+(h.source? ' ('+h.source+')':''); }).join(', ');
+  const li=agLi('#8a7a2a');
+  li.innerHTML='<span class="warnbox" style="margin:0">фильтр заменил: '+esc(hits||'метки')+'</span>';
+  agAppend(li);
+}
+function agTurnEnd(t){
+  const streamed=AG_TEXT? AG_TEXT.textContent.trim() : '';
+  AG_TEXT=null; AG_REASON=null; AG_BUSY=false;
+  const ok=t.ok!==false;
+  let line='итог хода: '+(ok?'готово':'сбой');
+  if(t.reason) line+=' · '+t.reason;
+  if(t.error) line+=' — '+t.error;
+  if(t.tools && t.tools.length) line+=' · инструменты: '+t.tools.join(', ');
+  agLine(line, ok?'ok':'err');
+  // Финальный текст модель могла не отдать дельтами — показываем, если его нет в ленте.
+  const final=String(t.text||'').trim();
+  if(ok && final && final!==streamed) agLine(final,'');
+  agStatus('ход: свободен'+(t.reason? ' · '+t.reason:''));
+  agAskHide();
+}
+function agAsk(t){
+  AG_ASK={id:t.ask_id, project:AG_ID};
+  document.getElementById('agaskq').textContent=t.question||'';
+  document.getElementById('agasktext').value='';
+  document.getElementById('agaskmsg').textContent='';
+  document.getElementById('agask').hidden=false;
+  const li=agLi('#8a7a2a');
+  li.innerHTML='<b>вопрос агента:</b> '+esc(t.question||'');
+  agAppend(li);
+  try{ document.getElementById('agasktext').focus(); }catch(e){}
+}
+function agAskHide(){
+  AG_ASK=null;
+  const panel=document.getElementById('agask');
+  if(panel) panel.hidden=true;
+}
+// Путь — в буфер обмена; процессов UI не запускает и файлов не открывает (В-A5-7).
+function agentCopyPath(path){
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(path).then(
+      function(){ agLine('путь скопирован: '+path,'ok'); },
+      function(){ agLine('путь: '+path,'muted'); });
+  } else {
+    agLine('путь: '+path,'muted');
+  }
+}
+async function agentAnswer(){
   if(!AG_ID) return;
+  const msg=document.getElementById('agaskmsg');
+  if(!AG_ASK){ msg.textContent='вопрос уже снят — ждите нового'; return; }
+  const text=document.getElementById('agasktext').value.trim();
+  if(!text){ msg.textContent='введите ответ'; return; }
+  msg.textContent='…';
+  try{
+    const j=await jpost('/api/agent/answer',{project:AG_ID,ask_id:AG_ASK.id,answer:text});
+    if(j.error){ msg.innerHTML='<span class="err">'+esc(j.error)+'</span>'; return; }
+    agLine('ответ отправлен','ok');
+    agAskHide();
+  }catch(e){ msg.textContent='ошибка: '+e; }
+}
+// Переключатель «как видит модель»: перерисовать ленту из принятых событий.
+function agentRawToggle(){
+  AG_RAW=document.getElementById('agraw').checked;
+  const box=agFeed(); if(box) box.innerHTML='';
+  AG_TEXT=null; AG_REASON=null;
+  agAskHide();
+  AG_EVENTS.forEach(agApply);
+}
+// Одна подписка на вкладку: при смене проекта/скрытии вкладки поток закрывается.
+function agentStreamClose(){
+  if(AG_ES){ try{ AG_ES.close(); }catch(e){} AG_ES=null; }
+}
+function agentStreamOpen(){
+  agentStreamClose();
+  if(!AG_ID) return;
+  if(typeof EventSource==='undefined'){ agentPoll(); return; }
+  const url='/api/agent/events?project='+encodeURIComponent(AG_ID)+
+    '&after='+AG_SEQ+'&limit='+AG_MAX;
+  let es=null;
+  try{ es=new EventSource(url); }catch(e){ agentPoll(); return; }
+  AG_ES=es;
+  es.addEventListener('state', function(e){
+    try{
+      const s=JSON.parse(e.data||'{}');
+      AG_BUSY=!!s.busy;
+      agStatus('ход: '+(s.busy?'идёт':'свободен')+' · сессия: '+(s.session||'-')+
+        ' · событие: '+(s.seq||0));
+    }catch(err){}
+  });
+  es.addEventListener('item', function(e){
+    // AG_SEQ — из `id:` кадра, а не из поля seq: переподключение не теряет и не дублирует.
+    const id=parseInt(e.lastEventId||'',10);
+    if(!isNaN(id) && id>AG_SEQ) AG_SEQ=id;
+    try{ agOnItem(JSON.parse(e.data||'{}')); }catch(err){}
+  });
+  // onerror: EventSource переподключится сам (сервер отдаёт retry: 1500).
+}
+// JSON-фолбэк: только если браузер не умеет EventSource.
+async function agentPoll(){
+  if(!AG_ID || AG_ES) return;
   try{
     const j=await jget('/api/agent/events?project='+encodeURIComponent(AG_ID)+'&after='+AG_SEQ);
     if(j.error) return;
-    (j.events||[]).forEach(function(ev){ if(ev.seq>AG_SEQ) AG_SEQ=ev.seq; });
-    const lines=(j.events||[]).map(function(ev){ return '['+ev.kind+'] '+agentEventText(ev); });
-    const box=document.getElementById('agevents');
-    if(lines.length){
-      AG_LINES=AG_LINES.concat(lines).slice(-20);
-      box.textContent=AG_LINES.join(NL);
-      box.scrollTop=box.scrollHeight;
-    }
-    document.getElementById('agstatus').textContent='ход: '+(j.busy? 'идёт':'свободен')+
-      ' · сессия: '+(j.session||'-')+' · последнее событие: '+(j.seq||0);
+    AG_BUSY=!!j.busy;
+    (j.events||[]).forEach(agOnItem);
+    agStatus('ход: '+(j.busy? 'идёт':'свободен')+' · сессия: '+(j.session||'-')+
+      ' · последнее событие: '+(j.seq||0));
     if(AG_POLL){ clearTimeout(AG_POLL); AG_POLL=null; }
     if(j.busy) AG_POLL=setTimeout(agentPoll, 1200);
   }catch(e){}
 }
+document.addEventListener('visibilitychange', function(){
+  if(document.hidden){ agentStreamClose(); return; }
+  const tab=document.getElementById('tab-agent');
+  if(AG_ID && tab && tab.style.display==='block') agentStreamOpen();
+});
+window.addEventListener('beforeunload', agentStreamClose);
 async function loadAgentState(){
   const box=document.getElementById('agstate'), pre=document.getElementById('agjournal');
   if(!AG_ID){ box.textContent='проект не выбран'; pre.textContent=''; return; }
@@ -787,7 +1048,8 @@ function showTab(name){
     if(document.getElementById('anopath').value.trim()) loadAnonLs(); else loadAnonInfo();
     loadAnonStatus();
   }
-  if(cur==='agent'){ loadAgentProjects(); }
+  if(cur==='agent'){ loadAgentProjects(); if(AG_ID) agentStreamOpen(); }
+  else { agentStreamClose(); }
 }
 function fmtSize(n){ n=n||0; return n>1048576? (n/1048576).toFixed(1)+' МБ' : (n>1024? Math.round(n/1024)+' КБ' : n+' Б'); }
 function fmtTime(t){ return t? new Date(t*1000).toLocaleString() : '—'; }

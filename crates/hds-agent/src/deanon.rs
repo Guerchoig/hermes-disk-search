@@ -168,13 +168,27 @@ impl DeAnonymizer {
     }
 
     /// Путь образа → путь папки проекта (TR-5.3).
+    /// Пути `<P>\workspace\…` → пути папки проекта.
+    ///
+    /// Путь из конфига может быть записан и через `/`, и через `\`, а модель
+    /// присылает его так, как видит ОС. Поэтому пробуем оба варианта: иначе
+    /// (A5.3, стенд) путь `agent.root: 'C:/…/zone'` не совпадал с текстом
+    /// `C:\…\zone\P0001\workspace\…` и в ленте оставался путь зоны.
     fn replace_paths(&self, text: &str) -> String {
         let ws = self.workspace.to_string_lossy().to_string();
-        let ws_fwd = ws.replace('\\', "/");
         let proj = self.project.to_string_lossy().to_string();
-        let mut out = text.replace(&ws, &proj);
-        if ws_fwd != ws {
-            out = out.replace(&ws_fwd, &proj.replace('\\', "/"));
+        let mut out = text.to_string();
+        let mut seen: Vec<String> = Vec::new();
+        for (from, to) in [
+            (ws.clone(), proj.clone()),
+            (ws.replace('\\', "/"), proj.replace('\\', "/")),
+            (ws.replace('/', "\\"), proj.replace('/', "\\")),
+        ] {
+            if from.is_empty() || seen.iter().any(|s| s == &from) {
+                continue;
+            }
+            seen.push(from.clone());
+            out = out.replace(&from, &to);
         }
         out
     }
@@ -332,6 +346,28 @@ mod tests {
         assert_eq!(out.text, "Файл C:\\Проект\\Отчёт.docx готов");
         let fwd = d.text("Файл C:/anon/P1/workspace/Отчёт.docx готов");
         assert_eq!(fwd.text, "Файл C:/Проект/Отчёт.docx готов");
+    }
+
+    /// Путь из конфига может быть записан через `/` (`agent.root: 'C:/zone'`),
+    /// а модель присылает `C:\zone\...`: заменять надо оба вида — иначе в
+    /// ленте остаётся путь зоны (найдено на стенде A5.3).
+    #[test]
+    fn workspace_path_matches_any_separator() {
+        let d = DeAnonymizer::new(
+            &snapshot(),
+            &[],
+            Path::new("C:/anon/P1/workspace"),
+            Path::new("C:/Проект"),
+        );
+        assert_eq!(
+            d.text("Файл C:\\anon\\P1\\workspace\\Отчёт.docx готов")
+                .text,
+            "Файл C:\\Проект\\Отчёт.docx готов"
+        );
+        assert_eq!(
+            d.text("Файл C:/anon/P1/workspace/Отчёт.docx готов").text,
+            "Файл C:/Проект/Отчёт.docx готов"
+        );
     }
 
     #[test]

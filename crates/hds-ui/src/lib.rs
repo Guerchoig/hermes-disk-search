@@ -197,6 +197,11 @@ pub struct ReqHeaders {
     /// Реальный клиентский IP (M3 T1): заполняется серверным циклом
     /// (`hds_core::net::real_client_ip`), не приходит из запроса.
     pub client_ip: Option<String>,
+    /// `Accept` (A5.3): `text/event-stream` — клиент ждёт поток SSE.
+    pub accept: Option<String>,
+    /// `Last-Event-ID` (A5.3): номер последнего события при переподключении
+    /// `EventSource` — используется как `after` для потока.
+    pub last_event_id: Option<String>,
 }
 
 /// CSRF-защита POST (аналог `_csrf_ok`): Origin пуст или loopback **и**
@@ -2075,6 +2080,11 @@ pub fn route_full(
                         Ok(cfg) => agent::stop_json(&cfg, body),
                         Err(reply) => reply,
                     },
+                    // A5.3: ответ на вопрос агента (`ask_user`).
+                    "/api/agent/answer" => match agent::gate() {
+                        Ok(cfg) => agent::answer_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
                     "/api/index/start" => {
                         let full = qp(query, "full")
                             .map(|v| v == "1" || v == "true")
@@ -2462,6 +2472,9 @@ fn read_request(stream: &mut TcpStream, max_body: usize) -> ReadOutcome {
                 "x-forwarded-for" => h.x_forwarded_for = Some(val),
                 "x-forwarded-proto" => h.x_forwarded_proto = Some(val),
                 "content-length" => content_length = val.parse().unwrap_or(0),
+                // A5.3: поток SSE (`Accept`) и переподключение (`Last-Event-ID`).
+                "accept" => h.accept = Some(val),
+                "last-event-id" => h.last_event_id = Some(val),
                 _ => {}
             }
         }
@@ -2614,6 +2627,38 @@ pub fn run_http_listener(listener: TcpListener) -> Result<(), String> {
                                 h.x_forwarded_for.as_deref(),
                                 trusted,
                             ));
+                            // A5.3: поток SSE идёт мимо `route_full` — там всегда
+                            // `Content-Length` (грабля §6 п.1). Гейты поэтому
+                            // вызываются вручную: без них в server-профиле поток
+                            // отдал бы данные без 403 (D20, грабля §6 п.4).
+                            let sse_path = ui_strip_prefix(&p);
+                            if m == "GET"
+                                && sse_path == "/api/agent/events"
+                                && agent::wants_stream(&h)
+                            {
+                                if let Err(reply) = ui_auth_gate(&h, None, &m, &p, &q) {
+                                    write_reply(&mut stream, reply);
+                                    return;
+                                }
+                                let cfg = match agent::gate() {
+                                    Ok(cfg) => cfg,
+                                    Err(reply) => {
+                                        write_reply(&mut stream, reply);
+                                        return;
+                                    }
+                                };
+                                let project = qp(&q, "project").unwrap_or_default();
+                                if project.trim().is_empty() {
+                                    write_reply(
+                                        &mut stream,
+                                        agent::events_json(&cfg, "", None, None),
+                                    );
+                                    return;
+                                }
+                                let after = agent::stream_after(&h, &q);
+                                agent::stream_events(&mut stream, &cfg, project.trim(), after);
+                                return;
+                            }
                             // M3 T3: лимит частоты (ключ — токен, иначе IP).
                             let token = h.authorization.as_deref().and_then(|a| {
                                 a.split_once(' ')

@@ -48,6 +48,10 @@ pub struct AgentSettings {
     pub max_live_projects: usize,
     pub idle_secs: u64,
     pub request_timeout_secs: u64,
+    /// `agent.ask_timeout_sec`: сколько ждать ответа на вопрос агента
+    /// (`ask_user`). По таймауту модели возвращается отказ, ход продолжается
+    /// (A5.3, В-A5.3-2). По умолчанию 600 с.
+    pub ask_timeout_secs: u64,
     /// `agent.filter.max_stale_sec`: снимок vault старше — фильтр отказывает
     /// (fail-closed, TR-6.5). По умолчанию 300 с (В-14).
     pub filter_max_stale_secs: u64,
@@ -73,6 +77,7 @@ impl Default for AgentSettings {
             max_live_projects: 2,
             idle_secs: 30 * 60,
             request_timeout_secs: 120,
+            ask_timeout_secs: 600,
             filter_max_stale_secs: 300,
             node_path: None,
             disk_search_enabled: true,
@@ -182,6 +187,7 @@ pub fn settings(cfg: &Config) -> AgentSettings {
         max_live_projects: u64_at(cfg, "agent.max_live_projects", 2) as usize,
         idle_secs: u64_at(cfg, "agent.idle_unload_min", 30) * 60,
         request_timeout_secs: u64_at(cfg, "agent.request_timeout_sec", 120),
+        ask_timeout_secs: u64_at(cfg, "agent.ask_timeout_sec", 600),
         filter_max_stale_secs: u64_at(cfg, "agent.filter.max_stale_sec", 300),
         node_path: str_at(cfg, "agent.node.path").map(PathBuf::from),
         disk_search_enabled: bool_at(cfg, "agent.mcp.disk_search.enabled", true),

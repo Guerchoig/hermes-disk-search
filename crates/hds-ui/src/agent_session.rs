@@ -23,7 +23,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -31,9 +31,7 @@ use serde_json::{json, Value};
 
 use hds_agent::deanon::DeAnonymizer;
 use hds_agent::filter::{sys_values, Labeler, Point};
-use hds_agent::gateway::{
-    Gateway, GatewayError, GatewayEvent, GatewayHost, NoAskUser, RefreshState,
-};
+use hds_agent::gateway::{AskUser, Gateway, GatewayError, GatewayEvent, GatewayHost, RefreshState};
 use hds_agent::history;
 use hds_agent::projects::{self, Project};
 use hds_agent::registry::AgentRegistry;
@@ -108,15 +106,27 @@ pub struct Turn {
     /// Процесс открыт (`start` уже отправлен) — повторный `open` дублировал бы
     /// историю (A0 §3.6).
     opened: AtomicBool,
-    /// Насосу пора выходить (`stop`, сброс состояния тестов).
+    /// Насосу пора выходить (`stop`, сброс состояния тестов), а висящий вопрос —
+    /// снять (иначе поток чтения воркера не прочитает `abort`).
     stop: AtomicBool,
     events: Mutex<VecDeque<Item>>,
     session: Mutex<Option<String>>,
     pump: Mutex<Option<JoinHandle<()>>>,
+    /// Сквозной номер события (общий счётчик процесса): номер выдаёт кольцо, а
+    /// не `AgentApi` — так событие можно положить из потока чтения воркера
+    /// (`ask_user`), не имея ссылки на состояние вкладки.
+    seq: Arc<AtomicU64>,
+    /// Будильник кольца (A5.3 §4.2): счётчик + `Condvar`. Поток SSE ждёт его до
+    /// 15 с, затем читает кольцо по `after` — насос и кольцо не меняются.
+    notify: Arc<(Mutex<u64>, Condvar)>,
+    /// Вопрос агента: одно состояние на проект, а не на ход — шлюз переживает
+    /// ходы (`get_or_open`), и `UiAskUser` первого хода должен видеть тот же
+    /// `AskState`, что `POST /api/agent/answer`.
+    ask: Mutex<Option<Arc<AskState>>>,
 }
 
 impl Turn {
-    fn new() -> Turn {
+    fn new(seq: Arc<AtomicU64>) -> Turn {
         Turn {
             busy: AtomicBool::new(false),
             opened: AtomicBool::new(false),
@@ -124,22 +134,85 @@ impl Turn {
             events: Mutex::new(VecDeque::with_capacity(RING)),
             session: Mutex::new(None),
             pump: Mutex::new(None),
+            seq,
+            notify: Arc::new((Mutex::new(0), Condvar::new())),
+            ask: Mutex::new(None),
         }
     }
 
     /// Добавить событие в кольцо; старые вытесняются (500 — граница §4.2).
-    fn push(&self, seq: u64, kind: &str, text: Option<Value>, raw: Option<Value>) {
-        let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
-        while events.len() >= RING {
-            events.pop_front();
+    /// После вставки будит поток SSE. Возвращает выданный номер.
+    fn push(&self, kind: &str, text: Option<Value>, raw: Option<Value>) -> u64 {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        {
+            let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+            while events.len() >= RING {
+                events.pop_front();
+            }
+            events.push_back(Item {
+                seq,
+                kind: kind.to_string(),
+                ts: now_ts(),
+                text,
+                raw,
+            });
         }
-        events.push_back(Item {
-            seq,
-            kind: kind.to_string(),
-            ts: now_ts(),
-            text,
-            raw,
-        });
+        let (lock, cv) = &*self.notify;
+        if let Ok(mut counter) = lock.lock() {
+            *counter = counter.wrapping_add(1);
+        }
+        cv.notify_all();
+        seq
+    }
+
+    /// Дождаться нового события (будильник из [`Turn::push`]) не дольше
+    /// `timeout`. `true` — что-то пришло, `false` — истёк таймаут (пора послать
+    /// heartbeat). Ошибка/отравление замка — тоже «ждать дальше».
+    pub fn wait_for_change(&self, timeout: Duration) -> bool {
+        let (lock, cv) = &*self.notify;
+        let mut seen = match lock.lock() {
+            Ok(guard) => guard,
+            Err(e) => e.into_inner(),
+        };
+        let start = *seen;
+        let deadline = Instant::now() + timeout;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return *seen != start;
+            }
+            let (guard, _) = match cv.wait_timeout(seen, left) {
+                Ok(pair) => pair,
+                Err(e) => e.into_inner(),
+            };
+            seen = guard;
+            if *seen != start {
+                return true;
+            }
+        }
+    }
+
+    /// `true` — ход остановлен пользователем (вопрос снимается, а не висит).
+    pub fn is_stopped(&self) -> bool {
+        self.stop.load(Ordering::SeqCst)
+    }
+
+    /// Состояние вопроса проекта (заводится при первом обращении).
+    fn ask_state(&self) -> Arc<AskState> {
+        let mut guard = self.ask.lock().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(guard.get_or_insert_with(|| Arc::new(AskState::default())))
+    }
+
+    /// Номер висящего вопроса агента, если он ждёт ответа.
+    pub fn pending_ask(&self) -> Option<u64> {
+        self.ask_state().pending()
+    }
+
+    /// Снять висящий вопрос (перед `abort`/`stop`): поток чтения воркера
+    /// проснётся с ошибкой, `done` на `abort` будет прочитан насосом, и `busy`
+    /// снимется (грабля §6 п.5). Событие `ask_cancelled` кладёт `UiAskUser`.
+    pub fn cancel_ask(&self) -> Option<u64> {
+        self.ask_state().cancel()
     }
 
     /// Занятость хода (ответ `/events` и проверка «второй ход»).
@@ -166,6 +239,174 @@ impl Turn {
     }
 }
 
+/// Внутреннее состояние вопроса: номер, висящий вопрос и ответ.
+#[derive(Debug, Default)]
+struct AskInner {
+    next_id: u64,
+    pending: Option<(u64, String)>,
+    answer: Option<String>,
+}
+
+/// Отказ `POST /api/agent/answer`: нет вопроса / номер устарел.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AskError {
+    /// Висящего вопроса нет (уже отвечен, снят или не задавался).
+    None,
+    /// Номер не совпал: агент ждёт другой вопрос.
+    Stale,
+}
+
+/// Итог ожидания ответа в [`AskState::wait`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AskWait {
+    Answered(String),
+    Cancelled,
+    Timeout,
+}
+
+/// Состояние вопроса агента пользователю (`ask_user`, A5.3 §4.3).
+///
+/// Одно на проект (`Turn::ask_state`). `ask` вызывается **в потоке чтения
+/// воркера** и блокирует его до ответа, поэтому здесь нет ни замка реестра, ни
+/// замка фильтра — только собственный `Mutex` + `Condvar`.
+#[derive(Debug, Default)]
+pub struct AskState {
+    inner: Mutex<AskInner>,
+    cv: Condvar,
+}
+
+impl AskState {
+    /// Задать вопрос: выдаёт номер и делает его висящим. `answer` — только
+    /// через [`AskState::answer`] (номер должен совпасть).
+    fn post(&self, question: &str) -> u64 {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.next_id += 1;
+        let id = inner.next_id;
+        inner.answer = None;
+        inner.pending = Some((id, question.to_string()));
+        id
+    }
+
+    /// Номер висящего вопроса (`None` — вопроса нет).
+    pub fn pending(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .pending
+            .as_ref()
+            .map(|(id, _)| *id)
+    }
+
+    /// Ответ пользователя: `None` — вопроса нет, `Stale` — номер не совпал.
+    /// Ответ забирает ожидающий поток (`ask`), поэтому повторный ответ по тому
+    /// же номеру снова получит `None`.
+    pub fn answer(&self, id: u64, answer: &str) -> Result<(), AskError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match inner.pending.as_ref() {
+            None => Err(AskError::None),
+            Some((pending, _)) if *pending != id => Err(AskError::Stale),
+            Some(_) => {
+                inner.pending = None;
+                inner.answer = Some(answer.to_string());
+                self.cv.notify_all();
+                Ok(())
+            }
+        }
+    }
+
+    /// Снять висящий вопрос (`abort`/`stop`, сброс состояния тестов).
+    /// `Some(id)` — что именно сняли.
+    pub fn cancel(&self) -> Option<u64> {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let id = inner.pending.take().map(|(id, _)| id);
+        if id.is_some() {
+            self.cv.notify_all();
+        }
+        id
+    }
+
+    /// Дождаться ответа не дольше `deadline`; `stopped` — выход по «Стоп».
+    ///
+    /// Проверка флага идёт кусочками по 250 мс: `notify_all` будит и по ответу,
+    /// и по отмене, а «Стоп» приходит из другого потока без уведомления.
+    fn wait(&self, deadline: Instant, stopped: impl Fn() -> bool) -> AskWait {
+        const SLICE: Duration = Duration::from_millis(250);
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            if let Some(text) = inner.answer.take() {
+                return AskWait::Answered(text);
+            }
+            if inner.pending.is_none() || stopped() {
+                inner.pending = None;
+                return AskWait::Cancelled;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                // По таймауту вопроса больше нет: поздний ответ не должен
+                // «повиснуть» в состоянии до следующего хода.
+                inner.pending = None;
+                return AskWait::Timeout;
+            }
+            let step = left.min(SLICE);
+            let (guard, _) = match self.cv.wait_timeout(inner, step) {
+                Ok(pair) => pair,
+                Err(e) => e.into_inner(),
+            };
+            inner = guard;
+        }
+    }
+}
+
+/// [`AskUser`] вкладки: вопрос — событием в ленту, ответ — из
+/// `POST /api/agent/answer`. Вопрос приходит **уже деанонимизированным**
+/// (разбирает шлюз, AG-1), поэтому в ленте видны значения.
+pub struct UiAskUser {
+    turn: Arc<Turn>,
+    ask: Arc<AskState>,
+    timeout: Duration,
+}
+
+impl UiAskUser {
+    /// Новый обработчик вопроса: `timeout` — `agent.ask_timeout_sec` (600 с).
+    pub fn new(turn: Arc<Turn>, ask: Arc<AskState>, timeout: Duration) -> UiAskUser {
+        UiAskUser { turn, ask, timeout }
+    }
+}
+
+impl AskUser for UiAskUser {
+    fn ask(&self, question: &str) -> Result<Value, String> {
+        let id = self.ask.post(question);
+        self.turn.push(
+            "ask",
+            Some(json!({ "ask_id": id, "question": question })),
+            None,
+        );
+        let deadline = Instant::now() + self.timeout;
+        match self.ask.wait(deadline, || self.turn.is_stopped()) {
+            AskWait::Answered(text) => Ok(json!({ "answer": text })),
+            AskWait::Cancelled => {
+                self.turn.push(
+                    "ask_cancelled",
+                    Some(json!({ "ask_id": id, "reason": "ход остановлен" })),
+                    None,
+                );
+                Err("вопрос снят: ход остановлен".to_string())
+            }
+            AskWait::Timeout => {
+                self.turn.push(
+                    "ask_timeout",
+                    Some(json!({
+                        "ask_id": id,
+                        "timeout_sec": self.timeout.as_secs(),
+                    })),
+                    None,
+                );
+                Err("вопрос без ответа: истёк таймаут".to_string())
+            }
+        }
+    }
+}
+
 /// Состояние вкладки «Агент» в процессе UI.
 pub struct AgentApi {
     /// Живые шлюзы: `max_live_projects`, выгрузка по `idle_unload_min`.
@@ -186,6 +427,16 @@ static GLOBAL: OnceLock<Arc<AgentApi>> = OnceLock::new();
 /// Общее состояние вкладки (прод): реестр из `agent.max_live_projects`.
 pub fn global(cfg: &Config) -> &'static Arc<AgentApi> {
     GLOBAL.get_or_init(|| AgentApi::new(AgentRegistry::from_settings(&settings::settings(cfg))))
+}
+
+/// Задать общее состояние вручную (тесты SSE/сокета).
+///
+/// `OnceLock` в процессе не сбрасывается, а корень поставки у теста —
+/// репозиторий, а не `HDS_ROOT` (там нет `sidecar/hds_agent/dist/worker.mjs`).
+/// Первый вызов выигрывает, дальше [`global`] отдаёт уже установленное.
+#[doc(hidden)]
+pub fn install_global(api: Arc<AgentApi>) -> bool {
+    GLOBAL.set(api).is_ok()
 }
 
 impl AgentApi {
@@ -223,7 +474,7 @@ impl AgentApi {
         Arc::clone(
             turns
                 .entry(project.to_string())
-                .or_insert_with(|| Arc::new(Turn::new())),
+                .or_insert_with(|| Arc::new(Turn::new(Arc::clone(&self.seq)))),
         )
     }
 
@@ -236,10 +487,23 @@ impl AgentApi {
             .cloned()
     }
 
-    /// Положить событие в кольцо проекта (номер выдаёт счётчик).
+    /// Положить событие в кольцо проекта (номер выдаёт кольцо, оно же будит
+    /// поток SSE).
     fn push(&self, turn: &Turn, kind: &str, text: Option<Value>, raw: Option<Value>) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        turn.push(seq, kind, text, raw);
+        turn.push(kind, text, raw);
+    }
+
+    /// `{busy, session, seq}` — заголовок SSE (`event: state`) и основа
+    /// JSON-фолбэка. Проекта нет — нули, а не ошибка.
+    pub fn state(&self, project: &str) -> Value {
+        match self.existing_turn(project) {
+            None => json!({ "busy": false, "session": Value::Null, "seq": 0 }),
+            Some(turn) => json!({
+                "busy": turn.is_busy(),
+                "session": turn.session(),
+                "seq": turn.last_seq(),
+            }),
+        }
     }
 
     /// `GET /api/agent/events`: `busy`, `session`, последний номер и события
@@ -762,13 +1026,21 @@ impl AgentApi {
             project_root: PathBuf::from(&rec.path),
             deanon: Arc::clone(&deanon),
         });
+        // Вопрос агента — в ленту вкладки (A5.3 §4.3): `AskState` один на
+        // проект (шлюз переживает ходы), таймаут — `agent.ask_timeout_sec`.
+        let ask_state = turn.ask_state();
+        let asker: Arc<dyn AskUser> = Arc::new(UiAskUser::new(
+            Arc::clone(turn),
+            Arc::clone(&ask_state),
+            Duration::from_secs(plan.settings.ask_timeout_secs),
+        ));
         let host = Arc::new(
             GatewayHost::new(
                 rec.id.clone(),
                 &plan.workspace,
                 Arc::clone(&filter),
                 Arc::clone(&client),
-                Arc::new(NoAskUser),
+                asker,
                 egress_log,
             )
             .with_refresh(refresh),
@@ -985,6 +1257,10 @@ impl AgentApi {
                 format!("у проекта {} ещё не было хода", rec.id),
             ));
         }
+        // Грабля §6 п.5: поток чтения воркера заблокирован в `ask_user`, пока
+        // висит вопрос, и `abort` не был бы прочитан. Снимаем вопрос первым.
+        let turn = self.turn(&rec.id);
+        turn.cancel_ask();
         let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
         let Some(gateway) = registry.get_mut(&rec.id) else {
             return Err(ApiError::new(
@@ -1010,6 +1286,9 @@ impl AgentApi {
                 format!("у проекта {} ещё не было хода", rec.id),
             ));
         };
+        // Вопрос снимаем до `stop`: поток чтения воркера иначе не прочитает
+        // команду (грабля §6 п.5).
+        turn.cancel_ask();
         {
             let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
             let Some(gateway) = registry.get_mut(&rec.id) else {
@@ -1034,6 +1313,58 @@ impl AgentApi {
         Ok(json!({ "ok": true, "stopped": true }))
     }
 
+    /// `POST /api/agent/answer` `{project, ask_id, answer}` — ответ на вопрос
+    /// агента (`ask_user`, A5.3 §4.3): 400 (пусто/длинно), 404 (вопроса нет),
+    /// 409 (номер устарел).
+    ///
+    /// Ответ — **исходный текст пользователя**: в модель он уйдёт результатом
+    /// инструмента и будет заменён фильтром в `egress_check` (проверять надо лог
+    /// провайдера, а не ленту — грабля §6 п.7).
+    pub fn answer(
+        &self,
+        cfg: &Config,
+        project: &str,
+        ask_id: u64,
+        answer: &str,
+    ) -> Result<Value, ApiError> {
+        zone(cfg)?;
+        let rec = require_project(cfg, project)?;
+        let text = answer.trim();
+        if text.is_empty() {
+            return Err(ApiError::new(400, "пустой ответ: введите текст для агента"));
+        }
+        let len = text.chars().count();
+        if len > MAX_TEXT {
+            return Err(ApiError::new(
+                400,
+                format!("ответ длиннее {MAX_TEXT} символов ({len}) — сократите его"),
+            ));
+        }
+        let Some(turn) = self.existing_turn(&rec.id) else {
+            return Err(ApiError::new(
+                404,
+                format!("у проекта {} нет вопроса агента", rec.id),
+            ));
+        };
+        match turn.ask_state().answer(ask_id, text) {
+            Ok(()) => Ok(json!({ "ok": true, "ask_id": ask_id, "answered": true })),
+            Err(AskError::None) => Err(ApiError::new(
+                404,
+                "нет висящего вопроса: он уже снят или отвечен",
+            )),
+            Err(AskError::Stale) => {
+                let pending = turn.pending_ask();
+                Err(ApiError::new(
+                    409,
+                    match pending {
+                        Some(id) => format!("вопрос {ask_id} устарел: агент ждёт вопрос {id}"),
+                        None => format!("вопрос {ask_id} устарел: агент уже не ждёт ответа"),
+                    },
+                ))
+            }
+        }
+    }
+
     /// Сбросить состояние между тестами (`OnceLock` не сбрасывается, §6 п.8):
     /// остановить насосы, выгрузить шлюзы и закрыть Python-воркер.
     #[doc(hidden)]
@@ -1045,6 +1376,8 @@ impl AgentApi {
         for turn in &turns {
             turn.stop.store(true, Ordering::SeqCst);
             turn.busy.store(false, Ordering::SeqCst);
+            // Висящий вопрос снять: поток чтения воркера иначе не выйдет.
+            turn.cancel_ask();
         }
         for turn in turns {
             let handle = turn.pump.lock().unwrap_or_else(|e| e.into_inner()).take();
@@ -1226,5 +1559,61 @@ mod tests {
         assert!(relative_to(&root, &root).is_none(), "сама папка — не файл");
         let outside = std::env::temp_dir().join("другой").join("файл.txt");
         assert!(relative_to(&root, &outside).is_none());
+    }
+
+    /// Ответ по номеру: чужой номер — `Stale` (409), без номера — `None` (404).
+    #[test]
+    fn ask_state_answer_by_id_only() {
+        let ask = AskState::default();
+        let id = ask.post("Сколько дней?");
+        assert_eq!(ask.pending(), Some(id));
+        assert_eq!(ask.answer(id + 1, "три"), Err(AskError::Stale));
+        assert_eq!(ask.pending(), Some(id), "вопрос остался висящим");
+        assert_eq!(ask.answer(id, "три дня"), Ok(()));
+        assert_eq!(ask.pending(), None, "ответ снял вопрос");
+        assert_eq!(ask.answer(id, "ещё"), Err(AskError::None));
+    }
+
+    /// Ответ приходит из другого потока (как `POST /api/agent/answer`) —
+    /// ожидающий `ask` просыпается и получает текст.
+    #[test]
+    fn ask_state_wait_returns_answer() {
+        let ask = Arc::new(AskState::default());
+        let id = ask.post("Сколько дней?");
+        let waiter = Arc::clone(&ask);
+        let handle = std::thread::spawn(move || {
+            waiter.wait(Instant::now() + Duration::from_secs(10), || false)
+        });
+        assert_eq!(ask.answer(id, "три дня"), Ok(()));
+        assert_eq!(
+            handle.join().unwrap(),
+            AskWait::Answered("три дня".to_string())
+        );
+    }
+
+    /// Таймаут и отмена: `ask` получает отказ, вопрос снимается (поздний ответ
+    /// не «повисает» в состоянии).
+    #[test]
+    fn ask_state_timeout_and_cancel() {
+        let ask = AskState::default();
+        ask.post("вопрос");
+        assert_eq!(ask.wait(Instant::now(), || false), AskWait::Timeout);
+        assert_eq!(ask.pending(), None);
+
+        let id = ask.post("второй вопрос");
+        assert_eq!(ask.cancel(), Some(id));
+        assert_eq!(ask.cancel(), None);
+        assert_eq!(
+            ask.wait(Instant::now() + Duration::from_secs(1), || false),
+            AskWait::Cancelled
+        );
+
+        // «Стоп» из другого потока: флаг снимает ожидание без `cancel()`.
+        ask.post("третий вопрос");
+        assert_eq!(
+            ask.wait(Instant::now() + Duration::from_secs(1), || true),
+            AskWait::Cancelled
+        );
+        assert_eq!(ask.pending(), None);
     }
 }

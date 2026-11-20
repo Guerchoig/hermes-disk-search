@@ -9,8 +9,11 @@
 //! журнал демона — пути/счётчики/причины. Значения из базы меток в A5.1 не
 //! читаются вообще (I8).
 
+use std::io::Write;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use hds_agent::registry_db::ArtifactRegistry;
 use hds_agent::{projects, settings};
@@ -18,7 +21,15 @@ use hds_core::config::{self, Config, Profile};
 use serde_json::{json, Value};
 
 use crate::agent_session::{self, AgentApi, ApiError};
-use crate::Reply;
+use crate::{Reply, ReqHeaders};
+
+/// Сколько живёт один поток SSE: дальше сервер закрывает соединение, а
+/// `EventSource` подключается заново с `Last-Event-ID` (A5.3 §4.1).
+pub const SSE_MAX_SEC: u64 = 300;
+/// Период heartbeat-комментария `: ping`, если событий нет.
+pub const SSE_HEARTBEAT_SEC: u64 = 15;
+/// Пауза переподключения, которую получает `EventSource` (`retry:`).
+pub const SSE_RETRY_MS: u64 = 1500;
 
 /// Сколько последних строк журнала отдаёт панель состояния.
 pub const JOURNAL_TAIL: usize = 20;
@@ -390,8 +401,151 @@ pub fn stop_json(cfg: &Config, body: &str) -> Reply {
     }
 }
 
+/// `POST /api/agent/answer` `{project, ask_id, answer}` — ответ на вопрос
+/// агента (`ask_user`, A5.3 §4.3). `ask_id` — номер из события `ask` в ленте.
+pub fn answer_json(cfg: &Config, body: &str) -> Reply {
+    let value: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => return err(400, format!("тело запроса не JSON: {e}")),
+    };
+    let project = value
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let answer = value.get("answer").and_then(Value::as_str).unwrap_or("");
+    // `ask_id` принимаем числом или строкой: страница шлёт число, curl — как удобно.
+    let ask_id = value.get("ask_id").and_then(|v| match v {
+        Value::Number(n) => n.as_u64(),
+        Value::String(s) => s.trim().parse().ok(),
+        _ => None,
+    });
+    let Some(ask_id) = ask_id else {
+        return err(400, "нужно поле ask_id — номер вопроса из ленты");
+    };
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    match api.answer(cfg, &project, ask_id, answer) {
+        Ok(v) => ok(v),
+        Err(e) => api_err(e),
+    }
+}
+
+/// `Accept: text/event-stream` — клиент ждёт поток, а не JSON.
+pub fn wants_stream(h: &ReqHeaders) -> bool {
+    h.accept
+        .as_deref()
+        .map(|a| a.to_ascii_lowercase().contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
+/// Кадр события: `id:` (для `Last-Event-ID` при переподключении), `event: item`,
+/// `data:` — JSON одного события в одну строку.
+///
+/// `serde_json` экранирует переводы строк внутри строк, поэтому кадр не рвётся
+/// даже на тексте с `\n` (иначе SSE-клиент получил бы обрезанный `data:`).
+pub fn sse_frame(seq: u64, item: &Value) -> String {
+    format!("id: {seq}\nevent: item\ndata: {item}\n\n")
+}
+
+/// Первый кадр потока — состояние хода: `{busy, session, seq}`.
+pub fn sse_state_frame(state: &Value) -> String {
+    format!("event: state\ndata: {state}\n\n")
+}
+
+/// `after` для потока: `Last-Event-ID` (EventSource при переподключении) важнее
+/// query `?after=`; нет ни того, ни другого — с нуля (В-A5.3-4).
+pub fn stream_after(h: &ReqHeaders, query: &str) -> u64 {
+    h.last_event_id
+        .as_deref()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .or_else(|| crate::qp(query, "after").and_then(|v| v.trim().parse::<u64>().ok()))
+        .unwrap_or(0)
+}
+
+/// Поток событий проекта (`GET /api/agent/events` + `Accept: text/event-stream`).
+///
+/// Пишет ответ **без `Content-Length`**: обычный `write_reply_with` для потока не
+/// годится (грабля §6 п.1). Источник данных — тот же `events_json`, поэтому
+/// JSON-фолбэк, тесты и `curl.exe` видят то же самое.
+///
+/// Поток закрывается по ошибке записи (клиент ушёл), по [`SSE_MAX_SEC`] (дальше
+/// `EventSource` переподключится) и когда ход проекта исчез из состояния
+/// (`reset_for_tests`): `None` из `existing_turn` — конец потока, а не паника
+/// (грабля §6 п.15).
+pub fn stream_events(stream: &mut TcpStream, cfg: &Config, project: &str, after: u64) {
+    // Мёртвый клиент не должен держать поток вечно (грабля §4.1).
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+    let head = "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream; charset=utf-8\r\n\
+                Cache-Control: no-cache\r\n\
+                Connection: close\r\n\
+                X-Accel-Buffering: no\r\n\r\n";
+    let retry = format!("retry: {SSE_RETRY_MS}\n\n");
+    if stream.write_all(head.as_bytes()).is_err() || stream.write_all(retry.as_bytes()).is_err() {
+        return;
+    }
+    let api: &'static Arc<AgentApi> = agent_session::global(cfg);
+    if stream
+        .write_all(sse_state_frame(&api.state(project)).as_bytes())
+        .is_err()
+    {
+        return;
+    }
+    let _ = stream.flush();
+    let deadline = Instant::now() + Duration::from_secs(SSE_MAX_SEC);
+    let mut after = after;
+    // Был ли ход в кольце: подписка до первого хода не должна закрываться
+    // (браузер подключается раньше, чем пользователь отправляет реплику).
+    let mut seen_turn = false;
+    let mut last_write = Instant::now();
+    while Instant::now() < deadline {
+        let Some(turn) = api.existing_turn(project) else {
+            if seen_turn {
+                // Ход исчез (сброс состояния) — закрываем поток состоянием, а не 500.
+                let _ = stream.write_all(sse_state_frame(&api.state(project)).as_bytes());
+                break;
+            }
+            // Хода ещё не было — ждём, изредка напоминая о себе `: ping`.
+            std::thread::sleep(Duration::from_millis(250));
+            if last_write.elapsed() >= Duration::from_secs(SSE_HEARTBEAT_SEC) {
+                if stream.write_all(b": ping\n\n").is_err() {
+                    return;
+                }
+                let _ = stream.flush();
+                last_write = Instant::now();
+            }
+            continue;
+        };
+        seen_turn = true;
+        // Событие приходит сразу (будильник из `push`), таймаут — повод для ping.
+        turn.wait_for_change(Duration::from_secs(SSE_HEARTBEAT_SEC));
+        let page = api.events_json(project, after, agent_session::RING);
+        let events = page["events"].as_array().cloned().unwrap_or_default();
+        if events.is_empty() {
+            if stream.write_all(b": ping\n\n").is_err() {
+                return;
+            }
+            let _ = stream.flush();
+            last_write = Instant::now();
+            continue;
+        }
+        for item in events {
+            let seq = item["seq"].as_u64().unwrap_or(after);
+            if stream.write_all(sse_frame(seq, &item).as_bytes()).is_err() {
+                return;
+            }
+            after = seq;
+        }
+        if stream.flush().is_err() {
+            return;
+        }
+        last_write = Instant::now();
+    }
+}
+
 /// `GET /api/agent/events?project=<P>&after=<seq>&limit=200` — события без SSE
-/// (транспорт A5.3 добавит `text/event-stream` тем же маршрутом).
+/// (JSON-фолбэк для тестов, `curl.exe` и страницы без `EventSource`).
 pub fn events_json(cfg: &Config, project: &str, after: Option<u64>, limit: Option<usize>) -> Reply {
     // Проект проверяем мягко: событий могло не быть вовсе — пустой ответ, а не
     // 404. Зона выключена — 503/RU-текст (как у остальных маршрутов вкладки).
@@ -468,5 +622,68 @@ mod tests {
         assert_eq!(tail_lines(&path, 10).len(), 3);
         assert!(tail_lines(&dir.join("нет.log"), 5).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Кадр SSE: `id:`/`event: item`/`data:` одной строкой и пустая строка в
+    /// конце; переводы строк внутри текста не рвут кадр (их экранирует JSON).
+    #[test]
+    fn sse_frame_has_id_event_and_blank_line() {
+        let item = json!({ "seq": 7, "kind": "agent", "text": { "text": "строка\nвторая" } });
+        let frame = sse_frame(7, &item);
+        assert!(frame.starts_with("id: 7\nevent: item\ndata: "), "{frame}");
+        assert!(frame.ends_with("\n\n"), "{frame:?}");
+        // Ровно одна строка `data:` — иначе SSE-клиент соберёт событие из двух.
+        assert_eq!(
+            frame.lines().filter(|l| l.starts_with("data: ")).count(),
+            1,
+            "{frame:?}"
+        );
+        let data = frame
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("data");
+        let parsed: Value = serde_json::from_str(data).expect("JSON одного события");
+        assert_eq!(parsed["seq"], 7);
+        assert_eq!(parsed["text"]["text"], "строка\nвторая");
+    }
+
+    #[test]
+    fn sse_state_frame_carries_state() {
+        let state = json!({ "busy": false, "session": Value::Null, "seq": 3 });
+        assert_eq!(
+            sse_state_frame(&state),
+            "event: state\ndata: {\"busy\":false,\"seq\":3,\"session\":null}\n\n"
+        );
+    }
+
+    #[test]
+    fn wants_stream_reads_accept() {
+        let with = |accept: Option<&str>| ReqHeaders {
+            accept: accept.map(str::to_string),
+            ..ReqHeaders::default()
+        };
+        assert!(wants_stream(&with(Some("text/event-stream"))));
+        assert!(wants_stream(&with(Some(
+            "text/event-stream, application/json;q=0.9"
+        ))));
+        assert!(wants_stream(&with(Some("TEXT/EVENT-STREAM"))));
+        assert!(!wants_stream(&with(Some("application/json"))));
+        assert!(!wants_stream(&with(None)));
+    }
+
+    #[test]
+    fn stream_after_prefers_last_event_id() {
+        let h = |id: Option<&str>| ReqHeaders {
+            last_event_id: id.map(str::to_string),
+            ..ReqHeaders::default()
+        };
+        // Переподключение: `Last-Event-ID` важнее `?after=`.
+        assert_eq!(stream_after(&h(Some("42")), "after=7"), 42);
+        // Первое подключение: заголовка нет — берём `?after=`.
+        assert_eq!(stream_after(&h(None), "after=7&limit=500"), 7);
+        // Ни того, ни другого — с нуля.
+        assert_eq!(stream_after(&h(None), ""), 0);
+        // Мусор в заголовке не ломает поток — падаем на query.
+        assert_eq!(stream_after(&h(Some("abc")), "after=5"), 5);
     }
 }
