@@ -303,6 +303,12 @@ pub fn wait_stable_at(path: &Path, opts: &SyncSettings, now: SystemTime) -> Stab
 pub trait Anonymizer {
     /// `anonymize_path`: относительный путь → путь с метками (без `|`).
     fn anonymize_path(&mut self, project_id: &str, rel: &str) -> Result<String, MirrorError>;
+    /// `deanonymize_path`: путь с метками → реальные значения проекта (TR-7.5).
+    fn deanonymize_path(
+        &mut self,
+        project_id: &str,
+        rel: &str,
+    ) -> Result<hds_anonymize::DeanonymizedPath, MirrorError>;
     /// Образ того же формата: `anonymize mode:"agent"` c явным `out_path`.
     fn anonymize_agent(
         &mut self,
@@ -320,6 +326,21 @@ pub trait Anonymizer {
         artifact_id: i64,
         text: Option<&str>,
     ) -> Result<(), MirrorError>;
+    /// `read_marker`: маркер `hds-agent/<P>/<id>` образа (TR-7.4/7.7).
+    fn read_marker(&mut self, path: &Path) -> Result<hds_anonymize::MarkerInfo, MirrorError>;
+    /// `image_map` (В-4): карта `[IMAGE_n]` → часть пакета.
+    fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError>;
+    /// Обратный акт (TR-7.5): деанонимизировать образ в файл пользователя.
+    ///
+    /// `restore_from` — снимок основания: из него возвращаются `docProps` и
+    /// картинки тела на места меток `[IMAGE_n]`; `None` — новый файл агента.
+    fn deanonymize_agent(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        restore_from: Option<&Path>,
+    ) -> Result<hds_anonymize::DeanonymizeResult, MirrorError>;
 }
 
 /// Извлечение текста для `pdf`/`pptx`/`mpp` (воркер `hds-extract`).
@@ -358,6 +379,43 @@ impl Anonymizer for hds_anonymize::Client {
         hds_anonymize::Client::text_image_to(self, in_path, out_path, project_id, Some(&id), text)
             .map(|_| ())
             .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn deanonymize_path(
+        &mut self,
+        project_id: &str,
+        rel: &str,
+    ) -> Result<hds_anonymize::DeanonymizedPath, MirrorError> {
+        hds_anonymize::Client::deanonymize_path(self, project_id, rel)
+            .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn read_marker(&mut self, path: &Path) -> Result<hds_anonymize::MarkerInfo, MirrorError> {
+        hds_anonymize::Client::read_marker(self, path)
+            .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError> {
+        hds_anonymize::Client::image_map(self, path)
+            .map_err(|e| MirrorError::Anonymizer(e.to_string()))
+    }
+
+    fn deanonymize_agent(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        restore_from: Option<&Path>,
+    ) -> Result<hds_anonymize::DeanonymizeResult, MirrorError> {
+        hds_anonymize::Client::deanonymize_agent_to(
+            self,
+            in_path,
+            out_path,
+            project_id,
+            restore_from,
+            restore_from.is_some(),
+        )
+        .map_err(|e| MirrorError::Anonymizer(e.to_string()))
     }
 }
 
@@ -453,6 +511,32 @@ impl Anonymizer for LazyAnonymizer {
             text,
         )
     }
+
+    fn deanonymize_path(
+        &mut self,
+        project_id: &str,
+        rel: &str,
+    ) -> Result<hds_anonymize::DeanonymizedPath, MirrorError> {
+        Anonymizer::deanonymize_path(self.get()?, project_id, rel)
+    }
+
+    fn read_marker(&mut self, path: &Path) -> Result<hds_anonymize::MarkerInfo, MirrorError> {
+        Anonymizer::read_marker(self.get()?, path)
+    }
+
+    fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, MirrorError> {
+        Anonymizer::image_map(self.get()?, path)
+    }
+
+    fn deanonymize_agent(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        restore_from: Option<&Path>,
+    ) -> Result<hds_anonymize::DeanonymizeResult, MirrorError> {
+        Anonymizer::deanonymize_agent(self.get()?, in_path, out_path, project_id, restore_from)
+    }
 }
 
 /// Ленивый воркер извлечения: нужен только `pdf`/`pptx`/`mpp`.
@@ -543,6 +627,10 @@ pub struct SyncReport {
     pub agent_changed: usize,
     pub conflicts: usize,
     pub errors: usize,
+    /// A4.3: файлов агента выпущено в папку проекта (`agent_new`).
+    pub emitted: usize,
+    /// A4.3: вариантов изменённых документов собрано в `.hds-agent\pending`.
+    pub variants: usize,
     /// «Файл: причина» — без значений PII (I8).
     pub problems: Vec<String>,
 }
@@ -559,6 +647,8 @@ impl SyncReport {
             + self.agent_changed
             + self.conflicts
             + self.errors
+            + self.emitted
+            + self.variants
     }
 }
 
@@ -630,8 +720,15 @@ impl<'a> Mirror<'a> {
         self.max_file_mb.saturating_mul(1024 * 1024)
     }
 
-    /// Один проход (A4.2): обход, прямой путь, удаления и переименования.
+    /// Один проход (A4.2 + A4.3): прямой путь, затем обратный.
     pub fn sync_once(&mut self) -> Result<SyncReport, MirrorError> {
+        let mut report = self.sync_forward()?;
+        self.sync_reverse(&mut report)?;
+        Ok(report)
+    }
+
+    /// Прямой путь (A4.2): папка проекта → workspace.
+    fn sync_forward(&mut self) -> Result<SyncReport, MirrorError> {
         let mut report = SyncReport::default();
         let files = walk_files(&self.project_root)?;
         report.scanned = files.len();
@@ -804,6 +901,23 @@ impl<'a> Mirror<'a> {
                 }
                 return;
             }
+            if row.orig_sha256.as_deref() != Some(sha) && row.anon_sha256_issued.is_some() {
+                // Оригинал изменился. Если параллельно правился и образ —
+                // это конфликт TR-7.6 (случай 2): образ агента не затираем.
+                if let Ok(current) = sha256_file(&self.workspace.join(&row.anon_rel)) {
+                    if row.anon_sha256_issued.as_deref() != Some(current.as_str()) {
+                        if row.status != Status::Conflict
+                            && self
+                                .registry
+                                .set_status_by_orig(&file.rel, Status::Conflict)
+                                .is_ok()
+                        {
+                            report.conflicts += 1;
+                        }
+                        return;
+                    }
+                }
+            }
             if row.orig_sha256.as_deref() == Some(sha) {
                 let image = self.workspace.join(&row.anon_rel);
                 match sha256_file(&image) {
@@ -838,8 +952,23 @@ impl<'a> Mirror<'a> {
                         }
                         return;
                     }
+                    Err(_) if row.anon_sha256_issued.is_some() => {
+                        // Образ исчез: считаем это удалением агентом — оригинал
+                        // не трогаем и образ заново не создаём (TR-7.5; решение
+                        // «удалить оригинал?» — A5). Пересоздание вернуло бы
+                        // файл, который агент осознанно удалил.
+                        if row.status != Status::Orphan
+                            && self
+                                .registry
+                                .set_status_by_orig(&file.rel, Status::Orphan)
+                                .is_ok()
+                        {
+                            report.orphans += 1;
+                        }
+                        return;
+                    }
                     Err(_) => {
-                        // Образ потерян — дальше пересоздаём (forward healing).
+                        // Образа ещё не было (прошлый проход упал) — пересоздаём.
                     }
                 }
             }
@@ -1058,6 +1187,365 @@ impl<'a> Mirror<'a> {
         }
     }
 
+    // ── обратный путь (A4.3, TR-7.5/7.7) ───────────────────────────────
+
+    /// Обратный путь: workspace → папка проекта.
+    ///
+    /// * новый файл без нашего маркера (`agent_new`) — деанонимизируется и
+    ///   кладётся на своё место (суффикс ` (агент)` при занятом имени);
+    /// * образ изменён агентом (`seen != issued`) — снимок основания и
+    ///   вариант в `.hds-agent\pending` (TR-7.5), оригинал не трогается;
+    /// * образ исчез — оригинал остаётся, запись `orphan` (A5 предложит
+    ///   удалить оригинал);
+    /// * наш маркер `hds-agent/<P>/<id>` повторно не выпускается (TR-7.7).
+    fn sync_reverse(&mut self, report: &mut SyncReport) -> Result<(), MirrorError> {
+        if !self.workspace.is_dir() {
+            // До первого образа анонимной зоны может не быть вовсе.
+            return Ok(());
+        }
+        let files = walk_files(&self.workspace)?;
+        let rows = self.registry.list()?;
+        let mut by_anon: BTreeMap<String, Artifact> = BTreeMap::new();
+        let mut by_id: BTreeMap<i64, Artifact> = BTreeMap::new();
+        for row in &rows {
+            if !row.anon_rel.is_empty() {
+                by_anon.insert(row.anon_rel.clone(), row.clone());
+            }
+            by_id.insert(row.id, row.clone());
+        }
+        let mut present: BTreeSet<String> = BTreeSet::new();
+        for file in &files {
+            present.insert(file.rel.clone());
+            let Some(row) = by_anon.get(&file.rel).cloned() else {
+                self.consider_new_file(file, &by_id, report);
+                continue;
+            };
+            let Ok(sha) = sha256_file(&file.abs) else {
+                continue;
+            };
+            if row.anon_sha256_issued.as_deref() == Some(sha.as_str()) {
+                continue;
+            }
+            if matches!(
+                row.status,
+                Status::Synced | Status::Error | Status::AgentChanged | Status::PendingAccept
+            ) {
+                self.make_variant(&row, file, &sha, report);
+            }
+        }
+        for row in by_anon.values() {
+            if present.contains(&row.anon_rel) {
+                continue;
+            }
+            if !matches!(
+                row.status,
+                Status::Synced | Status::Error | Status::AgentChanged
+            ) {
+                continue;
+            }
+            // Образа не было (упавший первый проход) — запись не «осиротела».
+            if row.anon_sha256_issued.is_none() {
+                continue;
+            }
+            if self
+                .registry
+                .set_status_by_orig(&row.orig_rel, Status::Orphan)
+                .is_ok()
+            {
+                report.orphans += 1;
+            }
+        }
+        Ok(())
+    }
+
+    /// Файл workspace без записи по `anon_rel`: новый файл агента или образ.
+    fn consider_new_file(
+        &mut self,
+        file: &ScannedFile,
+        by_id: &BTreeMap<i64, Artifact>,
+        report: &mut SyncReport,
+    ) {
+        let marker = match self.anonymizer.read_marker(&file.abs) {
+            Ok(marker) => marker,
+            Err(e) => {
+                report.errors += 1;
+                report.problems.push(format!("{}: маркер — {e}", file.rel));
+                return;
+            }
+        };
+        if marker.project_id.as_deref() == Some(self.project_id.as_str()) {
+            // Наш маркер: файл выпущен демоном. Повторно его не выпускаем
+            // (TR-7.7), а неизвестный id значит «реестр потерян» — это не
+            // повод продублировать файл в папке проекта.
+            if let Some(id) = marker.artifact_id {
+                if !by_id.contains_key(&id) {
+                    report.problems.push(format!(
+                        "{}: маркер hds-agent/{}/{id} без записи реестра — пропущен",
+                        file.rel, self.project_id
+                    ));
+                }
+            }
+            return;
+        }
+        self.emit_agent_new(file, report);
+    }
+
+    /// Изменённый агентом образ → снимок основания + вариант в `pending`.
+    fn make_variant(
+        &mut self,
+        row: &Artifact,
+        file: &ScannedFile,
+        sha: &str,
+        report: &mut SyncReport,
+    ) {
+        // Основание — версия оригинала, из которой сделан образ. Если
+        // пользователь успел изменить оригинал, вариант собрать нельзя:
+        // это конфликт TR-7.6, случай 2 (молча ничего не теряем).
+        let original = self.project_root.join(rel_to_path(&row.orig_rel));
+        let original_sha = sha256_file(&original).ok();
+        let base_ok = original_sha
+            .as_deref()
+            .zip(row.orig_sha256.as_deref())
+            .map(|(seen, base)| seen == base)
+            .unwrap_or(false);
+        if !base_ok {
+            if row.status != Status::Conflict
+                && self
+                    .registry
+                    .set_status_by_orig(&row.orig_rel, Status::Conflict)
+                    .is_ok()
+            {
+                report.conflicts += 1;
+            }
+            return;
+        }
+
+        let base_path = self.base_path(&row.orig_rel);
+        if !base_path.is_file() {
+            if let Err(e) = copy_file(&original, &base_path) {
+                report.errors += 1;
+                report
+                    .problems
+                    .push(format!("{}: снимок основания — {e}", row.orig_rel));
+                return;
+            }
+            let map_path = self.image_map_path(&base_path);
+            match self.anonymizer.image_map(&base_path) {
+                Ok(map) => {
+                    let text =
+                        serde_json::to_string_pretty(&map).unwrap_or_else(|_| "[]".to_string());
+                    if let Err(e) = fs::write(&map_path, text) {
+                        report.problems.push(format!(
+                            "{}: карта картинок не записана ({e})",
+                            row.orig_rel
+                        ));
+                    }
+                }
+                Err(e) => report
+                    .problems
+                    .push(format!("{}: карта картинок — {e}", row.orig_rel)),
+            }
+        }
+
+        let pending = self.pending_path(&row.orig_rel);
+        if let Some(parent) = pending.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                report.errors += 1;
+                report
+                    .problems
+                    .push(format!("{}: каталог варианта — {e}", row.orig_rel));
+                return;
+            }
+        }
+        match self.anonymizer.deanonymize_agent(
+            &file.abs,
+            &pending,
+            &self.project_id,
+            Some(&base_path),
+        ) {
+            Ok(result) => {
+                for warning in &result.warnings {
+                    report.problems.push(format!("{}: {warning}", row.orig_rel));
+                }
+                match self.registry.set_issued(row.id, sha, Status::PendingAccept) {
+                    Ok(()) => report.variants += 1,
+                    Err(e) => {
+                        report.errors += 1;
+                        report
+                            .problems
+                            .push(format!("{}: реестр — {e}", row.orig_rel));
+                    }
+                }
+            }
+            Err(e) => {
+                // Статус не портим: следующий проход повторит сборку.
+                report.errors += 1;
+                report
+                    .problems
+                    .push(format!("{}: вариант не собран — {e}", row.orig_rel));
+            }
+        }
+    }
+
+    /// Новый файл агента → папка проекта (D5, TR-7.5/7.9).
+    fn emit_agent_new(&mut self, file: &ScannedFile, report: &mut SyncReport) {
+        let deanon = match self
+            .anonymizer
+            .deanonymize_path(&self.project_id, &file.rel)
+        {
+            Ok(path) => path,
+            Err(e) => {
+                report.errors += 1;
+                report.problems.push(format!("{}: имя — {e}", file.rel));
+                return;
+            }
+        };
+        for token in &deanon.unresolved {
+            report.problems.push(format!(
+                "{}: метка {token} не найдена в базе проекта (оставлена в имени)",
+                file.rel
+            ));
+        }
+        let Some(mut components) = safe_components(&deanon.components) else {
+            report.errors += 1;
+            report.problems.push(format!(
+                "{}: небезопасный путь после деанонимизации — пропущен",
+                file.rel
+            ));
+            return;
+        };
+        if components.is_empty() {
+            components = split_path(&file.rel);
+        }
+        let separator = std::path::MAIN_SEPARATOR.to_string();
+        let rel = components.join(&separator);
+        let (target_rel, target) = self.free_project_name(&rel);
+
+        let tmp_root = self.tmp_root();
+        if let Err(e) = fs::create_dir_all(&tmp_root) {
+            report.errors += 1;
+            report
+                .problems
+                .push(format!("{}: каталог обмена — {e}", file.rel));
+            return;
+        }
+        let tmp = self.tmp_path(&file.rel);
+        match self
+            .anonymizer
+            .deanonymize_agent(&file.abs, &tmp, &self.project_id, None)
+        {
+            Ok(result) => {
+                for warning in &result.warnings {
+                    report.problems.push(format!("{}: {warning}", file.rel));
+                }
+                if let Err(e) = move_file(&tmp, &target) {
+                    let _ = fs::remove_file(&tmp);
+                    report.errors += 1;
+                    report
+                        .problems
+                        .push(format!("{}: выпуск в проект — {e}", file.rel));
+                    return;
+                }
+                let orig_sha = sha256_file(&target);
+                let anon_sha = sha256_file(&file.abs);
+                let (Ok(orig_sha), Ok(anon_sha)) = (orig_sha, anon_sha) else {
+                    report.errors += 1;
+                    report
+                        .problems
+                        .push(format!("{}: выпуск не прочитан", file.rel));
+                    return;
+                };
+                let artifact = Artifact {
+                    id: 0,
+                    orig_rel: target_rel,
+                    anon_rel: file.rel.clone(),
+                    kind: Kind::AgentNew,
+                    orig_sha256: Some(orig_sha),
+                    anon_sha256_issued: Some(anon_sha.clone()),
+                    anon_sha256_seen: Some(anon_sha),
+                    status: Status::Synced,
+                    ts: 0.0,
+                };
+                if let Err(e) = self.registry.upsert(&artifact) {
+                    report.errors += 1;
+                    report.problems.push(format!("{}: реестр — {e}", file.rel));
+                } else {
+                    report.emitted += 1;
+                }
+            }
+            Err(e) => {
+                let _ = fs::remove_file(&tmp);
+                report.errors += 1;
+                report
+                    .problems
+                    .push(format!("{}: деанонимизация — {e}", file.rel));
+            }
+        }
+    }
+
+    /// Свободное имя в папке проекта: `имя (агент).ext`, `имя (агент 2).ext`.
+    fn free_project_name(&self, rel: &str) -> (String, PathBuf) {
+        let separator = std::path::MAIN_SEPARATOR.to_string();
+        let mut components = split_path(rel);
+        let Some(last) = components.last().cloned() else {
+            return (rel.to_string(), self.project_root.join(rel_to_path(rel)));
+        };
+        let (stem, ext) = split_name(&last);
+        let (stem, ext) = (stem.to_string(), ext.to_string());
+        let mut candidate_rel = components.join(&separator);
+        let mut candidate = self.project_root.join(rel_to_path(&candidate_rel));
+        if !candidate.exists() {
+            return (candidate_rel, candidate);
+        }
+        let index = components.len() - 1;
+        for n in 1..10_000u32 {
+            components[index] = if n == 1 {
+                format!("{stem} (агент){ext}")
+            } else {
+                format!("{stem} (агент {n}){ext}")
+            };
+            candidate_rel = components.join(&separator);
+            candidate = self.project_root.join(rel_to_path(&candidate_rel));
+            if !candidate.exists() {
+                return (candidate_rel, candidate);
+            }
+        }
+        (candidate_rel, candidate)
+    }
+
+    fn base_path(&self, orig_rel: &str) -> PathBuf {
+        self.project_root
+            .join(".hds-agent")
+            .join("base")
+            .join(rel_to_path(orig_rel))
+    }
+
+    fn pending_path(&self, orig_rel: &str) -> PathBuf {
+        self.project_root
+            .join(".hds-agent")
+            .join("pending")
+            .join(rel_to_path(orig_rel))
+    }
+
+    fn tmp_root(&self) -> PathBuf {
+        self.project_root.join(".hds-agent").join("tmp")
+    }
+
+    fn tmp_path(&self, anon_rel: &str) -> PathBuf {
+        let hash = &sha256_hex(anon_rel.as_bytes())[..12];
+        let mut candidate = self.tmp_root().join(format!("{hash}.tmp"));
+        let mut n = 2u32;
+        while candidate.exists() {
+            candidate = self.tmp_root().join(format!("{hash}-{n}.tmp"));
+            n += 1;
+        }
+        candidate
+    }
+
+    fn image_map_path(&self, base_path: &Path) -> PathBuf {
+        PathBuf::from(format!("{}.images.json", base_path.to_string_lossy()))
+    }
+
     /// Убрать опустевшие каталоги образа (но не сам workspace).
     fn prune_empty_dirs(&self, mut dir: Option<&Path>) {
         while let Some(current) = dir {
@@ -1086,6 +1574,60 @@ fn is_forward_managed(status: Status) -> bool {
         status,
         Status::Synced | Status::Error | Status::Unsupported | Status::TooBig | Status::Orphan
     )
+}
+
+/// Относительный путь (`a\b\c`) → `PathBuf` без обращения к ФС.
+fn rel_to_path(rel: &str) -> PathBuf {
+    let mut path = PathBuf::new();
+    for part in split_path(rel) {
+        path.push(part);
+    }
+    path
+}
+
+/// Компоненты после деанонимизации: без `..`, абсолютных путей и `:`.
+///
+/// `None` — путь небезопасен (значение метки содержит `..`/`:`/разделитель):
+/// такой файл лучше пропустить с ошибкой, чем выпустить вне папки проекта.
+fn safe_components(components: &[String]) -> Option<Vec<String>> {
+    let mut out = Vec::with_capacity(components.len());
+    for part in components {
+        if part.is_empty() || part == "." {
+            continue;
+        }
+        if part == ".." || part.contains(':') {
+            return None;
+        }
+        if part.contains('\\') || part.contains('/') {
+            return None;
+        }
+        if Path::new(part).is_absolute() {
+            return None;
+        }
+        out.push(part.clone());
+    }
+    Some(out)
+}
+
+/// Скопировать файл, создав каталоги назначения (снимок основания).
+fn copy_file(src: &Path, dst: &Path) -> Result<(), MirrorError> {
+    if let Some(parent) = dst.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| MirrorError::Io(parent.to_path_buf(), e.to_string()))?;
+    }
+    fs::copy(src, dst)
+        .map(|_| ())
+        .map_err(|e| MirrorError::Io(dst.to_path_buf(), e.to_string()))
+}
+
+/// Перенести файл (выпуск в папку проекта). `rename` — атомарно в пределах тома;
+/// на другой том — копирование с удалением источника.
+fn move_file(src: &Path, dst: &Path) -> Result<(), MirrorError> {
+    if let Ok(()) = fs::rename(src, dst) {
+        return Ok(());
+    }
+    copy_file(src, dst)?;
+    fs::remove_file(src).map_err(|e| MirrorError::Io(src.to_path_buf(), e.to_string()))
 }
 
 /// Есть ли у записи образ (кандидат на удаление/переименование).
@@ -1154,6 +1696,12 @@ mod tests {
             fs::write(path, text).unwrap();
         }
 
+        fn write_ws(&self, rel: &str, text: &str) {
+            let path = self.workspace.join(rel);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, text).unwrap();
+        }
+
         fn remove(&self, rel: &str) {
             fs::remove_file(self.project.join(rel)).unwrap();
         }
@@ -1204,6 +1752,7 @@ mod tests {
         path_calls: usize,
         image_calls: usize,
         text_calls: usize,
+        deanon_calls: usize,
         fail_on: Option<String>,
         collide: bool,
     }
@@ -1212,6 +1761,11 @@ mod tests {
         fn map(text: &str) -> String {
             text.replace("Иванов Иван", "[PERSON_1]")
                 .replace("Петров Пётр", "[PERSON_2]")
+        }
+
+        fn deanon(text: &str) -> String {
+            text.replace("[PERSON_1]", "Иванов Иван")
+                .replace("[PERSON_2]", "Петров Пётр")
         }
     }
 
@@ -1273,6 +1827,65 @@ mod tests {
             );
             fs::write(out_path, body)
                 .map_err(|e| MirrorError::Io(out_path.to_path_buf(), e.to_string()))
+        }
+
+        fn deanonymize_path(
+            &mut self,
+            _project: &str,
+            rel: &str,
+        ) -> Result<hds_anonymize::DeanonymizedPath, MirrorError> {
+            let path = Self::deanon(rel);
+            Ok(hds_anonymize::DeanonymizedPath {
+                path: path.clone(),
+                components: split_path(&path),
+                unresolved: Vec::new(),
+            })
+        }
+
+        fn read_marker(&mut self, path: &Path) -> Result<hds_anonymize::MarkerInfo, MirrorError> {
+            // Настоящий маркер живёт в properties/первой строке; фейк пишет
+            // его первой строкой, поэтому распознаём так же — и после
+            // переименования образа маркер остаётся.
+            let text = fs::read_to_string(path).unwrap_or_default();
+            let first = text.lines().next().unwrap_or("");
+            let Some(rest) = first.strip_prefix("<!-- hds-agent/") else {
+                return Ok(hds_anonymize::MarkerInfo::default());
+            };
+            let marker = rest.trim_end_matches(" -->").to_string();
+            let mut parts = marker.split('/');
+            let project = parts.next().unwrap_or_default().to_string();
+            let artifact_id = parts.next().and_then(|id| id.parse::<i64>().ok());
+            Ok(hds_anonymize::MarkerInfo {
+                marker: Some(marker),
+                project_id: Some(project),
+                artifact_id,
+            })
+        }
+
+        fn image_map(&mut self, _path: &Path) -> Result<serde_json::Value, MirrorError> {
+            Ok(serde_json::json!([]))
+        }
+
+        fn deanonymize_agent(
+            &mut self,
+            in_path: &Path,
+            out_path: &Path,
+            _project: &str,
+            _restore_from: Option<&Path>,
+        ) -> Result<hds_anonymize::DeanonymizeResult, MirrorError> {
+            self.deanon_calls += 1;
+            let text = fs::read_to_string(in_path)
+                .map_err(|e| MirrorError::Io(in_path.to_path_buf(), e.to_string()))?;
+            fs::write(out_path, Self::deanon(&text))
+                .map_err(|e| MirrorError::Io(out_path.to_path_buf(), e.to_string()))?;
+            Ok(hds_anonymize::DeanonymizeResult {
+                out_path: out_path.to_string_lossy().into_owned(),
+                restored: Vec::new(),
+                unmatched: Vec::new(),
+                warnings: Vec::new(),
+                images_restored: 0,
+                elapsed_ms: 0.0,
+            })
         }
     }
 
@@ -1565,6 +2178,7 @@ mod tests {
         fs::write(&image_path, "правка агента").unwrap();
         let report = stand.run(&mut anon, &mut ext, 200);
         assert_eq!(report.agent_changed, 1, "{report:?}");
+        assert_eq!(report.variants, 1, "A4.3 собрал вариант: {report:?}");
         assert_eq!(
             fs::read_to_string(&image_path).unwrap(),
             "правка агента",
@@ -1575,7 +2189,7 @@ mod tests {
             .by_orig("Письмо Иванов Иван.md")
             .unwrap()
             .unwrap();
-        assert_eq!(row.status, Status::AgentChanged);
+        assert_eq!(row.status, Status::PendingAccept);
 
         // Повторный прогон статус уже не меняет.
         assert_eq!(stand.run(&mut anon, &mut ext, 200).changes(), 0);
@@ -1723,5 +2337,268 @@ mod tests {
         let report = stand.run(&mut anon, &mut ext, 200);
         assert_eq!(report.removed, 1, "{report:?}");
         assert_eq!(stand.registry().count().unwrap(), 0);
+    }
+
+    // ── A4.3: обратный путь ─────────────────────────────────────────────
+
+    #[test]
+    fn agent_new_is_emitted_into_project_once() {
+        let stand = Stand::new("new");
+        stand.write_ws("Отчёт [PERSON_1].md", "[PERSON_1] пишет отчёт\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.emitted, 1, "{report:?}");
+        assert_eq!(report.errors, 0, "{:?}", report.problems);
+        let emitted = stand.project.join("Отчёт Иванов Иван.md");
+        assert!(emitted.is_file(), "файл агента на своём месте");
+        assert_eq!(
+            fs::read_to_string(&emitted).unwrap(),
+            "Иванов Иван пишет отчёт\n"
+        );
+
+        let registry = stand.registry();
+        let row = registry
+            .by_orig("Отчёт Иванов Иван.md")
+            .unwrap()
+            .expect("запись agent_new");
+        assert_eq!(row.kind, Kind::AgentNew);
+        assert_eq!(row.status, Status::Synced);
+        assert_eq!(row.anon_rel, "Отчёт [PERSON_1].md");
+        assert_eq!(row.orig_sha256, Some(sha256_file(&emitted).unwrap()));
+        drop(registry);
+
+        // Петля TR-7.7: повторный проход ничего не выпускает и не пересоздаёт.
+        let second = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(second.changes(), 0, "{second:?}");
+        assert_eq!(second.emitted, 0);
+        assert!(!stand.project.join("Отчёт Иванов Иван (агент).md").exists());
+    }
+
+    #[test]
+    fn agent_new_collision_gets_agent_suffix() {
+        let stand = Stand::new("agent-suffix");
+        // Имена заняты: оригинал и уже выпущенный вариант агента.
+        stand.write("Смета Иванов Иван.md", "версия пользователя");
+        stand.write("Смета Иванов Иван (агент).md", "уже есть вариант");
+        // Новый файл агента занимает «базовое» имя образа, поэтому прямой
+        // путь кладёт образ оригинала под «(2)», а выпуск получает «(агент 2)».
+        stand.write_ws("Смета [PERSON_1].md", "[PERSON_1] прислал правку");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.emitted, 1, "{report:?}");
+        assert_eq!(report.errors, 0, "{:?}", report.problems);
+        let emitted = stand.project.join("Смета Иванов Иван (агент 2).md");
+        assert!(emitted.is_file(), "третье имя — (агент 2)");
+        assert_eq!(
+            fs::read_to_string(&emitted).unwrap(),
+            "Иванов Иван прислал правку"
+        );
+        assert_eq!(
+            fs::read_to_string(stand.project.join("Смета Иванов Иван.md")).unwrap(),
+            "версия пользователя",
+            "существующий файл не перезаписан"
+        );
+    }
+
+    #[test]
+    fn agent_changed_makes_pending_variant_and_base_snapshot() {
+        let stand = Stand::new("variant");
+        stand.write("Письмо Иванов Иван.md", "версия 1\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        let original = stand.project.join("Письмо Иванов Иван.md");
+        let original_sha = sha256_file(&original).unwrap();
+        stand.write_ws("Письмо [PERSON_1].md", "правка агента\n");
+
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.variants, 1, "{report:?}");
+        assert_eq!(report.errors, 0, "{:?}", report.problems);
+
+        // Оригинал не тронут (I6), снимок основания — его точная копия.
+        assert_eq!(sha256_file(&original).unwrap(), original_sha);
+        let base = stand
+            .project
+            .join(".hds-agent\\base\\Письмо Иванов Иван.md");
+        assert_eq!(fs::read_to_string(&base).unwrap(), "версия 1\n");
+        assert!(PathBuf::from(format!("{}.images.json", base.to_string_lossy())).is_file());
+
+        let pending = stand
+            .project
+            .join(".hds-agent\\pending\\Письмо Иванов Иван.md");
+        assert_eq!(
+            fs::read_to_string(&pending).unwrap(),
+            "правка агента\n",
+            "вариант деанонимизирован"
+        );
+        let row = stand
+            .registry()
+            .by_orig("Письмо Иванов Иван.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, Status::PendingAccept);
+        assert_eq!(
+            row.anon_sha256_issued,
+            Some(sha256_file(&stand.workspace.join("Письмо [PERSON_1].md")).unwrap())
+        );
+
+        let second = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(second.changes(), 0, "{second:?}");
+    }
+
+    #[test]
+    fn agent_changed_with_user_edit_is_conflict_without_variant() {
+        let stand = Stand::new("variant-conflict");
+        stand.write("Договор Иванов Иван.md", "версия 1\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        // Пока агент правил образ, пользователь изменил оригинал.
+        stand.write_ws("Договор [PERSON_1].md", "правка агента\n");
+        stand.write("Договор Иванов Иван.md", "версия 2 — пользователь\n");
+
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.conflicts, 1, "{report:?}");
+        assert_eq!(report.variants, 0);
+        assert!(!stand
+            .project
+            .join(".hds-agent\\pending\\Договор Иванов Иван.md")
+            .exists());
+        let row = stand
+            .registry()
+            .by_orig("Договор Иванов Иван.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, Status::Conflict);
+    }
+
+    #[test]
+    fn deleted_image_keeps_original_and_marks_orphan() {
+        let stand = Stand::new("image-deleted");
+        stand.write("Письмо Иванов Иван.md", "текст\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        fs::remove_file(stand.workspace.join("Письмо [PERSON_1].md")).unwrap();
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.orphans, 1, "{report:?}");
+        assert!(
+            stand.project.join("Письмо Иванов Иван.md").is_file(),
+            "оригинал не удаляется"
+        );
+        assert!(
+            !stand.workspace.join("Письмо [PERSON_1].md").exists(),
+            "образ не пересоздаётся"
+        );
+        let row = stand
+            .registry()
+            .by_orig("Письмо Иванов Иван.md")
+            .unwrap()
+            .unwrap();
+        assert_eq!(row.status, Status::Orphan);
+        // Повторный проход не плодит изменений.
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).changes(), 0);
+    }
+
+    #[test]
+    fn service_workspace_dirs_are_not_emitted() {
+        let stand = Stand::new("service-ws");
+        stand.write_ws("_attachments\\вложение [PERSON_1].md", "[PERSON_1]");
+        stand.write_ws("_conflicts\\вариант [PERSON_1].md", "[PERSON_1]");
+        stand.write_ws("_attachments\\tmp.tmp", "tmp");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.emitted, 0, "{report:?}");
+        assert_eq!(report.changes(), 0);
+        let names: Vec<String> = fs::read_dir(&stand.project)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.is_empty(), "в проекте ничего не появилось: {names:?}");
+    }
+
+    #[test]
+    fn marked_file_of_known_artifact_is_not_emitted() {
+        let stand = Stand::new("marked");
+        stand.write("Акт Иванов Иван.md", "текст\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+        let id = stand
+            .registry()
+            .by_orig("Акт Иванов Иван.md")
+            .unwrap()
+            .unwrap()
+            .id;
+
+        // Копия образа под другим именем: наш маркер, id существует.
+        stand.write_ws(
+            "Копия [PERSON_1].md",
+            &format!("<!-- hds-agent/P0001/{id} -->\n[PERSON_1]\n"),
+        );
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.emitted, 0, "{report:?}");
+        assert!(!stand.project.join("Копия Иванов Иван.md").exists());
+    }
+
+    #[test]
+    fn safe_components_rejects_escapes() {
+        let bad = |part: &str| safe_components(&[part.to_string()]).is_none();
+        assert!(bad(".."));
+        assert!(bad("C:"));
+        assert!(bad("a/b"));
+        assert!(bad("a\\b"));
+        assert!(bad("/abs"));
+        let ok = safe_components(&["Протоколы".to_string(), "Отчёт Иванов Иван.md".to_string()])
+            .expect("обычный путь");
+        assert_eq!(ok.len(), 2);
+    }
+
+    #[test]
+    fn repeated_agent_edit_rebuilds_pending_with_same_base() {
+        let stand = Stand::new("variant-again");
+        stand.write("ТЗ Иванов Иван.md", "версия 1\n");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).created, 1);
+
+        stand.write_ws("ТЗ [PERSON_1].md", "правка 1\n");
+        assert_eq!(stand.run(&mut anon, &mut ext, 200).variants, 1);
+        let base = stand.project.join(".hds-agent\\base\\ТЗ Иванов Иван.md");
+        let base_sha = sha256_file(&base).unwrap();
+
+        stand.write_ws("ТЗ [PERSON_1].md", "правка 2\n");
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(report.variants, 1, "{report:?}");
+        let pending = stand.project.join(".hds-agent\\pending\\ТЗ Иванов Иван.md");
+        assert_eq!(fs::read_to_string(&pending).unwrap(), "правка 2\n");
+        assert_eq!(
+            sha256_file(&base).unwrap(),
+            base_sha,
+            "основание не перезаписывается"
+        );
+        // Оригинал по-прежнему версия 1, статус — ждёт решения.
+        assert_eq!(
+            fs::read_to_string(stand.project.join("ТЗ Иванов Иван.md")).unwrap(),
+            "версия 1\n"
+        );
+        assert_eq!(
+            stand
+                .registry()
+                .by_orig("ТЗ Иванов Иван.md")
+                .unwrap()
+                .unwrap()
+                .status,
+            Status::PendingAccept
+        );
     }
 }

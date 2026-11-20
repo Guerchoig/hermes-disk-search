@@ -275,6 +275,8 @@ class Worker:
                 "anonymize_text", "text_image", "label_for_value",
                 # A4.2 (TR-7.1): анонимизация имён файлов и папок
                 "anonymize_path",
+                # A4.3 (TR-7.5/7.7): обратный путь — маркер, имена, карта картинок
+                "read_marker", "deanonymize_path", "image_map",
                 "vault_snapshot", "vault_rev", "vault_drop_project",
                 "merge_entities", "keep_terms",
                 "office_read", "office_edit", "office_create",
@@ -349,6 +351,8 @@ class Worker:
                         "deanonymize_values" else None,
                         progress=self._progress,
                         project_id=project_id or None,
+                        restore_from=params.get("restore_from"),
+                        images=bool(params.get("images", False)),
                     ))
                 else:
                     res = run(self.handlers.inspect(in_path))
@@ -365,6 +369,17 @@ class Worker:
                     bool(params.get("suffix", False)),
                     bool(params.get("ner", True)),
                 ))
+            elif method == "deanonymize_path":
+                res = self.handlers.deanonymize_path(
+                    project_id,
+                    str(params.get("path") or params.get("in_path") or ""),
+                )
+            elif method == "read_marker":
+                res = self.handlers.read_marker(
+                    str(params.get("path") or params.get("in_path") or ""))
+            elif method == "image_map":
+                res = self.handlers.image_map(
+                    str(params.get("path") or params.get("in_path") or ""))
             elif method == "text_image":
                 if not in_path:
                     raise ValueError("text_image: не задан in_path")
@@ -441,6 +456,7 @@ class Worker:
                       "deanonymize", "deanonymize_values", "inspect",
                       "anonymize_text", "text_image", "label_for_value",
                       "anonymize_path",
+                      "read_marker", "deanonymize_path", "image_map",
                       "vault_snapshot", "vault_rev", "merge_entities",
                       "vault_drop_project", "keep_terms", "vault_stats",
                       "office_read", "office_edit", "office_create"):

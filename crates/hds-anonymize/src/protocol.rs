@@ -199,6 +199,8 @@ pub struct DeanonymizeResult {
     pub restored: Vec<String>,
     pub unmatched: Vec<String>,
     pub warnings: Vec<String>,
+    /// Сколько картинок тела возвращено из основания (TR-7.5, A4.3).
+    pub images_restored: i64,
     pub elapsed_ms: f64,
 }
 
@@ -212,6 +214,10 @@ pub fn deanonymize_from(v: &Value) -> DeanonymizeResult {
         restored: str_list(v, "restored"),
         unmatched: str_list(v, "unmatched"),
         warnings: str_list(v, "warnings"),
+        images_restored: v
+            .get("images_restored")
+            .and_then(|n| n.as_i64())
+            .unwrap_or(0),
         elapsed_ms: v.get("elapsed_ms").and_then(|e| e.as_f64()).unwrap_or(0.0),
     }
 }

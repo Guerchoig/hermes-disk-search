@@ -58,6 +58,7 @@ def _handle(req):
                              "deanonymize_values", "inspect", "warmup",
                              "anonymize_text", "text_image", "label_for_value",
                              "anonymize_path",
+                             "read_marker", "deanonymize_path", "image_map",
                              "vault_snapshot", "vault_rev", "vault_drop_project",
                              "merge_entities", "keep_terms",
                              "office_read", "office_edit", "office_create",
@@ -110,6 +111,13 @@ def _handle(req):
             count = text.count(v)
             anon = anon.replace(v, token)
             tokens.append({"token": token, "type": etype, "count": count})
+        if agent:
+            # Реальный воркер пишет маркер в свойства (docx/xlsx) или первой
+            # строкой (`*.md`): обратный путь узнаёт свой образ по нему.
+            marker = "hds-agent/" + (params.get("project_id") or "")
+            if params.get("artifact_id"):
+                marker = marker + "/" + str(params["artifact_id"])
+            anon = "<!-- %s -->\n%s" % (marker, anon)
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             f.write(anon)
         stdio.ok(mid, {
@@ -162,6 +170,57 @@ def _handle(req):
                         "count": 1}],
             "project_id": project,
         })
+        return False
+
+    if method == "deanonymize_path":
+        project = params.get("project_id") or ""
+        raw = str(params.get("path") or "")
+        if not project:
+            stdio.err(mid, -32602, "deanonymize_path: не задан project_id",
+                      kind="internal")
+            return False
+        if not raw:
+            stdio.err(mid, -32602, "deanonymize_path: пустой path", kind="internal")
+            return False
+        parts = [p for p in re.split(r"[\\/]+", raw) if p]
+        out = []
+        for part in parts:
+            value = part
+            for token, real in MOCK_MAPPINGS.items():
+                value = value.replace(token, real)
+            out.append(value)
+        sep = "\\" if "\\" in raw else "/"
+        stdio.ok(mid, {
+            "path": sep.join(out),
+            "components": out,
+            "unresolved": [],
+            "project_id": project,
+        })
+        return False
+
+    if method == "read_marker":
+        path = params.get("path") or params.get("in_path") or ""
+        marker = None
+        project = artifact = None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                first = (f.readline() or "").strip()
+        except OSError:
+            first = ""
+        if first.startswith("<!-- hds-agent/") and first.endswith("-->"):
+            marker = first[len("<!-- "):-len(" -->")]
+            parts = marker.split("/")
+            project = parts[1] if len(parts) > 1 else None
+            artifact = parts[2] if len(parts) > 2 else None
+        stdio.ok(mid, {
+            "marker": marker,
+            "project_id": project,
+            "artifact_id": artifact,
+        })
+        return False
+
+    if method == "image_map":
+        stdio.ok(mid, {"images": []})
         return False
 
     if method == "vault_snapshot":
@@ -249,6 +308,8 @@ def _handle(req):
         unmatched = [
             t for t in (params.get("tokens") or []) if t not in allowed
         ] if method == "deanonymize_values" else []
+        # Служебный маркер образа наружу не отдаём (как реальный воркер).
+        de = re.sub(r"^<!--\s*hds-agent/[^\n>]*-->\r?\n?", "", de)
         with open(out_path, "w", encoding="utf-8", newline="") as f:
             f.write(de)
         stdio.ok(mid, {

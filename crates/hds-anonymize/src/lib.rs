@@ -23,7 +23,7 @@ pub mod lease;
 pub mod protocol;
 pub mod settings;
 
-pub use client::{discover_python, Client, ClientConfig};
+pub use client::{discover_python, Client, ClientConfig, DeanonymizedPath, MarkerInfo};
 pub use error::{AnonymizeError, ErrorKind};
 pub use folder::list_files;
 pub use lease::{LeaseError, LeaseGrant, LeaseGuard};

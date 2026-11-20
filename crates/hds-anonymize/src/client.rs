@@ -61,6 +61,26 @@ impl ClientConfig {
     }
 }
 
+/// Маркер образа `hds-agent/<P>/<id>` (TR-7.4/7.7).
+///
+/// `marker == None` — файл создан агентом (нет маркера демона): это
+/// `agent_new` обратного пути (TR-7.5). Маркер чужого проекта тоже не наш.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MarkerInfo {
+    pub marker: Option<String>,
+    pub project_id: Option<String>,
+    pub artifact_id: Option<i64>,
+}
+
+/// Обратное к `anonymize_path`: путь с реальными значениями проекта (TR-7.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeanonymizedPath {
+    pub path: String,
+    pub components: Vec<String>,
+    /// Метки, которых нет в базе проекта: остались в имени как есть.
+    pub unresolved: Vec<String>,
+}
+
 /// Интерпретатор воркера анонимизации:
 /// `HDS_ANONYMIZE_PYTHON` → `venv-anonymize` → `sidecar/python` → `.venv`.
 pub fn discover_python(root: &Path) -> Option<PathBuf> {
@@ -276,6 +296,96 @@ impl Client {
         };
         let value = self.call(method, params)?;
         Ok(deanonymize_from(&value))
+    }
+
+    /// Деанонимизация образа в файл пользователя с явным `out_path` (TR-7.5).
+    ///
+    /// `restore_from` — снимок основания `.hds-agent\base`: из него Python
+    /// возвращает `docProps` и (при `images=true`) картинки тела на места
+    /// меток `[IMAGE_n]`. `None` — новый файл агента: восстанавливать нечего,
+    /// маркер вычищается.
+    pub fn deanonymize_agent_to(
+        &mut self,
+        in_path: &Path,
+        out_path: &Path,
+        project_id: &str,
+        restore_from: Option<&Path>,
+        images: bool,
+    ) -> Result<DeanonymizeResult, AnonymizeError> {
+        let mut params = json!({
+            "in_path": path_str(in_path),
+            "out_dir": path_str(out_path.parent().unwrap_or_else(|| Path::new("."))),
+            "out_path": path_str(out_path),
+            "project_id": project_id,
+            "images": images,
+        });
+        if let Some(base) = restore_from {
+            params["restore_from"] = json!(path_str(base));
+        }
+        let value = self.call("deanonymize", params)?;
+        Ok(deanonymize_from(&value))
+    }
+
+    /// `read_marker` (TR-7.4/7.7): маркер образа из свойств файла или первой
+    /// строки текстового образа.
+    pub fn read_marker(&mut self, path: &Path) -> Result<MarkerInfo, AnonymizeError> {
+        let value = self.call("read_marker", json!({"path": path_str(path)}))?;
+        let text = |key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        };
+        Ok(MarkerInfo {
+            marker: text("marker"),
+            project_id: text("project_id"),
+            artifact_id: value.get("artifact_id").and_then(|a| {
+                a.as_i64()
+                    .or_else(|| a.as_str().and_then(|s| s.parse().ok()))
+            }),
+        })
+    }
+
+    /// `deanonymize_path` (TR-7.5): метки проекта → реальные значения.
+    ///
+    /// Неизвестные метки остаются в имени и возвращаются в `unresolved`:
+    /// терять компонент пути нельзя.
+    pub fn deanonymize_path(
+        &mut self,
+        project_id: &str,
+        path: &str,
+    ) -> Result<DeanonymizedPath, AnonymizeError> {
+        let value = self.call(
+            "deanonymize_path",
+            json!({"project_id": project_id, "path": path}),
+        )?;
+        let list = |key: &str| {
+            value
+                .get(key)
+                .and_then(|v| v.as_array())
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(|item| item.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok(DeanonymizedPath {
+            path: value
+                .get("path")
+                .and_then(|p| p.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            components: list("components"),
+            unresolved: list("unresolved"),
+        })
+    }
+
+    /// `image_map` (TR-7.4, В-4): `[IMAGE_n]` → часть пакета (медиа/якорь).
+    pub fn image_map(&mut self, path: &Path) -> Result<serde_json::Value, AnonymizeError> {
+        let value = self.call("image_map", json!({"path": path_str(path)}))?;
+        Ok(value.get("images").cloned().unwrap_or_else(|| json!([])))
     }
 
     /// `anonymize_text` (TR-1.7): реплики, вложения и текстовые образы.

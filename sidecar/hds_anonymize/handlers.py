@@ -23,7 +23,10 @@ from .file_parser import (
     ANON_MARKER,
     FileAssembler,
     FileParser,
+    image_map_for_path,
     read_anon_marker,
+    restore_doc_props,
+    restore_images,
     strip_body_images,
 )
 from .name_fixer import fix_glued_full_names
@@ -37,7 +40,7 @@ from .text_image import (
     image_path as text_image_path,
     write_text_image,
 )
-from .vault import LABEL_RE, MAX_WARNINGS, Vault
+from .vault import LABEL_RE, MAX_WARNINGS, Vault, label_of, parse_label
 
 # Форматы P1 + XML/MS Project (P1b; слой парсера уже готов)
 FORMATS = ["docx", "xlsx", "txt", "md", "xml"]
@@ -360,6 +363,10 @@ class AnonymizeHandlers:
             strip_hf_images=True, scrub_metadata=True,
             marker=marker_value,
         )
+        if agent and marker_value and path.suffix.lower() in (".md", ".txt"):
+            # В тексте нет docProps: маркер — первой строкой (обратный путь
+            # узнаёт свой образ, TR-7.7). Деанонимизация её убирает.
+            anon_content = f"<!-- {marker_value} -->\n".encode("utf-8") + anon_content
         _atomic_write_bytes(target, anon_content)
 
         if verify:
@@ -491,6 +498,90 @@ class AnonymizeHandlers:
             "warnings": warnings,
         }
 
+    # ── обратный путь: маркер, имена, карта картинок (TR-7.5, A4.3) ─────
+
+    def read_marker(self, in_path: str) -> dict:
+        """Маркер образа `hds-agent/<P>/<id>` (TR-7.4/7.7).
+
+        DOCX/XLSX — из свойств пакета (`read_anon_marker`); текстовый образ
+        (`*.pdf.md` и т.п.) — первая строка `<!-- hds-agent/P0001/42 -->`.
+        Маркера нет — `project_id`/`artifact_id` = None: файл создан агентом,
+        а не демоном (TR-7.5 `agent_new`).
+        """
+        path = Path(in_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Файл не найден: {path}")
+        marker = read_anon_marker(path)
+        if not marker and path.suffix.lower() in (".md", ".txt"):
+            try:
+                first = path.read_text(
+                    encoding="utf-8", errors="replace").splitlines()[:1]
+            except OSError:
+                first = []
+            if first:
+                found = re.match(r"<!--\s*(hds-agent/[^\s>]+)\s*-->", first[0])
+                if found:
+                    marker = found.group(1)
+        project_id = None
+        artifact_id = None
+        if marker and marker.startswith("hds-agent/"):
+            parts = marker.split("/")
+            project_id = parts[1] if len(parts) > 1 else None
+            artifact_id = parts[2] if len(parts) > 2 else None
+        return {
+            "marker": marker,
+            "project_id": project_id,
+            "artifact_id": artifact_id,
+        }
+
+    def deanonymize_path(self, project_id: str, path: str) -> dict:
+        """Обратное к `anonymize_path`: метки → значения проекта (TR-7.5).
+
+        В именах файлов метки без падежного суффикса; если метки нет в базе
+        проекта, она остаётся в имени и попадает в `unresolved` — терять
+        компонент пути нельзя (иначе файл уедет не на своё место).
+        """
+        project_id = (project_id or "").strip()
+        if not project_id:
+            raise ValueError("deanonymize_path: не задан project_id")
+        raw = (path or "").strip()
+        if not raw:
+            raise ValueError("deanonymize_path: пустой path")
+        mappings = self.store.project_mappings(project_id)
+        unresolved: list[str] = []
+
+        def replace(text: str) -> str:
+            def one(match: re.Match) -> str:
+                token = match.group(0)
+                parsed = parse_label(token)
+                base = label_of(parsed[0], parsed[1]) if parsed else token
+                value = mappings.get(base) or mappings.get(token)
+                if value is None:
+                    if token not in unresolved:
+                        unresolved.append(token)
+                    return token
+                return value
+
+            return LABEL_RE.sub(one, text)
+
+        components = [
+            replace(part) for part in re.split(r"[\\/]+", raw) if part
+        ]
+        separator = "\\" if "\\" in raw else "/"
+        return {
+            "path": separator.join(components),
+            "components": components,
+            "unresolved": unresolved,
+            "project_id": project_id,
+        }
+
+    def image_map(self, in_path: str) -> dict:
+        """Карта картинок `[IMAGE_n]` → часть пакета для `.images.json` (В-4)."""
+        path = Path(in_path)
+        if not path.is_file():
+            raise FileNotFoundError(f"Файл не найден: {path}")
+        return {"images": image_map_for_path(path)}
+
     # ── детерминированный поиск значений («скрой указанное») ────────────
 
     @staticmethod
@@ -558,6 +649,8 @@ class AnonymizeHandlers:
         tokens: Optional[list[str]] = None,
         progress: Optional[ProgressFn] = None,
         project_id: Optional[str] = None,
+        restore_from: Optional[str] = None,
+        images: bool = False,
     ) -> dict:
         """Деанонимизировать файл: заменить плейсхолдеры на значения из БД
         (все или подмножество `tokens`) → сборка (strip_hf_images=False,
@@ -566,12 +659,20 @@ class AnonymizeHandlers:
         `project_id` — подстановка меток проекта с падежными суффиксами
         (TR-2.4): «[PERSON_3|дат]» → форма в дательном падеже; неизвестные
         метки уходят в `unmatched`, сомнительные падежи — в `warnings`.
+
+        `restore_from` (TR-7.5, A4.3) — снимок основания `.hds-agent\\base`:
+        из него возвращаются `docProps` (автор, организация, заголовок) и —
+        при `images=True` — картинки тела на места меток `[IMAGE_n]`
+        (карта строится тем же обходом, что у `strip_body_images`, В-4).
         """
         path = Path(in_path)
         if not path.is_file():
             raise FileNotFoundError(f"Файл не найден: {path}")
         self._check_supported(path)
         target = Path(out_path)
+        base_path = Path(restore_from) if restore_from else None
+        if base_path is not None and not base_path.is_file():
+            raise FileNotFoundError(f"Основание не найдено: {base_path}")
 
         if progress:
             progress(path.name, "parse", 0, 3)
@@ -613,6 +714,20 @@ class AnonymizeHandlers:
             strip_hf_images=False, scrub_metadata=False,
         )
 
+        # TR-7.5: основание возвращает docProps и (по флагу) картинки тела.
+        images_restored = 0
+        if base_path is not None:
+            base_content = self._read_bytes(base_path)
+            if images:
+                entries = image_map_for_path(base_path)
+                assembled, images_restored, image_warnings = restore_images(
+                    assembled, path.name, entries, base_content)
+                warnings.extend(image_warnings)
+            assembled = restore_doc_props(assembled, base_content)
+        elif path.suffix.lower() in (".md", ".txt"):
+            # Маркер текстового образа — служебная строка, наружу не идёт.
+            assembled = restore_doc_props(assembled, None)
+
         if progress:
             progress(path.name, "write", 2, 3)
         _atomic_write_bytes(target, assembled)
@@ -629,6 +744,8 @@ class AnonymizeHandlers:
             "restored": restored_tokens,
             "unmatched": unmatched,
             "warnings": warnings,
+            "images_restored": images_restored,
+            "restore_from": str(base_path) if base_path is not None else None,
         }
 
     async def inspect(self, in_path: str) -> dict:

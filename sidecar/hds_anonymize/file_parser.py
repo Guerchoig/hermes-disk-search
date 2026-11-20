@@ -1386,6 +1386,363 @@ def strip_body_images(content: bytes, filename: str) -> tuple[bytes, int]:
     return content, 0
 
 
+# ── карта картинок `[IMAGE_n]` → часть пакета (TR-7.4, В-4) ────────────────
+
+
+def _docx_image_entries(content: bytes) -> list[dict]:
+    """`[IMAGE_n]` → `word/media/...` в DOCX; порядок = `_strip_docx_images`."""
+    doc = Document(io.BytesIO(content))
+    entries: list[dict] = []
+    counter = 0
+
+    def handle(paragraph) -> None:
+        nonlocal counter
+        for node in _paragraph_image_nodes(paragraph._p):
+            part_name = None
+            for element in node.iter():
+                for attr in (qn("r:embed"), qn("r:id"), qn("r:link")):
+                    rid = element.get(attr)
+                    if not rid:
+                        continue
+                    try:
+                        part = paragraph.part.related_parts[rid]
+                    except (KeyError, AttributeError):
+                        part = None
+                    if part is not None:
+                        part_name = str(part.partname).lstrip("/")
+                        break
+                if part_name:
+                    break
+            counter += 1
+            entry = {"label": f"[IMAGE_{counter}]"}
+            if part_name:
+                entry["part"] = part_name
+            entries.append(entry)
+
+    targets = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                targets.extend(cell.paragraphs)
+    for paragraph in targets:
+        handle(paragraph)
+    return entries
+
+
+def _xlsx_drawing_anchors(xml: bytes) -> list[tuple[int, int, Optional[str]]]:
+    """Якоря рисунка: `(row, col, rId первой картинки)` в порядке XML."""
+    root = _lxml.fromstring(xml)
+    anchors: list[tuple[int, int, Optional[str]]] = []
+    for parent in list(root.iter()):
+        for anchor in list(parent):
+            if anchor.tag not in _XDR_ANCHORS:
+                continue
+            pics = [node for node in anchor.iter()
+                    if node.tag == f"{{{_XDR_NS}}}pic"]
+            if not pics:
+                continue
+            rid = None
+            for pic in pics:
+                for blip in pic.iter(f"{{{_A_NS}}}blip"):
+                    candidate = blip.get(f"{{{_R_NS}}}embed")
+                    if candidate and rid is None:
+                        rid = candidate
+            col = row = 0
+            start = anchor.find(f"{{{_XDR_NS}}}from")
+            if start is not None:
+                col_node = start.find(f"{{{_XDR_NS}}}col")
+                row_node = start.find(f"{{{_XDR_NS}}}row")
+                if col_node is not None and col_node.text:
+                    col = int(col_node.text)
+                if row_node is not None and row_node.text:
+                    row = int(row_node.text)
+            anchors.append((row, col, rid))
+    return anchors
+
+
+def _xlsx_drawing_targets(rels_xml: bytes) -> dict[str, str]:
+    """`Id` → `Target` из `xl/drawings/_rels/*.rels`."""
+    if not rels_xml:
+        return {}
+    try:
+        root = _lxml.fromstring(rels_xml)
+    except Exception:  # noqa: BLE001 — битые связи не роняют карту
+        return {}
+    return {rel.get("Id") or "": rel.get("Target") or "" for rel in root}
+
+
+def _xlsx_image_entries(content: bytes) -> list[dict]:
+    """`[IMAGE_n]` → лист/якорь/media в XLSX; порядок = `_strip_xlsx_images`."""
+    with zipfile.ZipFile(io.BytesIO(content)) as zin:
+        data = {info.filename: zin.read(info.filename) for info in zin.infolist()}
+    drawing_sheets = _xlsx_drawing_sheets(data)
+    sheet_names = _xlsx_sheet_names(data)
+    entries: list[dict] = []
+    counter = 0
+    for name in sorted(data):
+        if not name.startswith("xl/drawings/") or not name.endswith(".xml"):
+            continue
+        anchors = _xlsx_drawing_anchors(data[name])
+        if not anchors:
+            continue
+        rels_name = "xl/drawings/_rels/" + name[len("xl/drawings/"):] + ".rels"
+        targets = _xlsx_drawing_targets(data.get(rels_name, b""))
+        sheet = sheet_names.get(drawing_sheets.get(name, ""), "")
+        for row, col, rid in anchors:
+            counter += 1
+            media = posixpath.normpath(
+                posixpath.join("xl/drawings", targets.get(rid or "", "")))
+            entries.append({
+                "label": f"[IMAGE_{counter}]",
+                "sheet": sheet,
+                "row": row,
+                "col": col,
+                "drawing": name,
+                "rel_id": rid,
+                "part": media.lstrip("/"),
+            })
+    return entries
+
+
+def image_map(content: bytes, filename: str) -> list[dict]:
+    """Карта картинок файла для `.images.json` (В-4): `[IMAGE_n]` → часть."""
+    ext = Path(filename).suffix.lower()
+    if ext == ".docx":
+        return _docx_image_entries(content)
+    if ext == ".xlsx":
+        return _xlsx_image_entries(content)
+    return []
+
+
+def image_map_for_path(path) -> list[dict]:
+    """Карта картинок существующего файла (пустой список для txt/md/xml)."""
+    path = Path(path)
+    return image_map(path.read_bytes(), path.name)
+
+
+# ── восстановление картинок и docProps при деанонимизации (TR-7.5) ─────────
+
+_IMAGE_LABEL_RE = re.compile(r"\[IMAGE_\d+\]")
+# Маркер текстового образа живёт первой строкой (`<!-- hds-agent/P0001/7 -->`).
+_MARKER_LINE_RE = re.compile(rb"^<!--\s*hds-agent/[^\n>]*-->\r?\n?")
+_DOCPROPS_PARTS = ("docProps/core.xml", "docProps/app.xml")
+# Маркер образа `hds-agent/<P>/<id>` не должен попасть ни в вариант, ни
+# в выпущенный файл: он служебный и выдаёт анонимную зону (TR-7.4).
+_MARKER_IN_XML_RE = re.compile(rb"hds-agent/[^\s<\"']*")
+
+
+def _rewrite_zip(content: bytes, replacements: dict[str, bytes]) -> bytes:
+    """Переписать/добавить части пакета, не трогая остальные."""
+    with zipfile.ZipFile(io.BytesIO(content)) as zin:
+        infos = zin.infolist()
+        data = {info.filename: zin.read(info.filename) for info in infos}
+    for name, blob in replacements.items():
+        if name not in data:
+            infos.append(zipfile.ZipInfo(name))
+        data[name] = blob
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zout:
+        for info in infos:
+            if info.filename in data:
+                zout.writestr(info, data[info.filename])
+    return buffer.getvalue()
+
+
+def restore_doc_props(content: bytes, base_content: Optional[bytes]) -> bytes:
+    """Вернуть `docProps` из основания и вычистить маркер `hds-agent/…`.
+
+    Копируются `docProps/core.xml` и `docProps/app.xml` (автор, организация,
+    заголовок): в образе они обезличены (TR-7.4), а вариант и выпущенный файл
+    должны выглядеть как оригинал. Если основания нет (новый файл агента),
+    маркер всё равно вычищается — служебная строка не должна уехать к
+    пользователю.
+    """
+    replacements: dict[str, bytes] = {}
+    if base_content:
+        try:
+            with zipfile.ZipFile(io.BytesIO(base_content)) as zbase:
+                for name in _DOCPROPS_PARTS:
+                    try:
+                        replacements[name] = zbase.read(name)
+                    except KeyError:
+                        continue
+        except zipfile.BadZipFile:
+            replacements = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zin:
+            data = {info.filename: zin.read(info.filename) for info in zin.infolist()}
+    except zipfile.BadZipFile:
+        # Текст/MD: docProps нет, но служебную строку маркера убрать надо —
+        # иначе она уедет в вариант/выпущенный файл (TR-7.5).
+        return _MARKER_LINE_RE.sub(b"", content, count=1)
+    for name in _DOCPROPS_PARTS:
+        blob = replacements.get(name, data.get(name))
+        if blob is None:
+            continue
+        replacements[name] = _MARKER_IN_XML_RE.sub(b"", blob)
+    if not replacements:
+        return content
+    return _rewrite_zip(content, replacements)
+
+
+
+
+def _docx_body_paragraphs(doc) -> list:
+    """Абзацы, в которых `strip_body_images` оставлял метки (тело и таблицы)."""
+    targets = list(doc.paragraphs)
+    for table in doc.tables:
+        for row in table.rows:
+            for cell in row.cells:
+                targets.extend(cell.paragraphs)
+    return targets
+
+
+def restore_docx_images(
+    content: bytes, entries: list[dict], base_content: bytes
+) -> tuple[bytes, int]:
+    """Вернуть картинки DOCX на место меток `[IMAGE_n]` (TR-7.5).
+
+    Медиа берётся из основания (снимок `.hds-agent\\base`), порядок меток
+    совпадает с `strip_body_images`. Метка заменяется картинкой в том же
+    абзаце; если агент удалил метку — картинка не возвращается (это
+    осмысленное удаление, а не потеря).
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(base_content)) as zbase:
+            blobs = {}
+            for entry in entries:
+                part = entry.get("part")
+                if not part:
+                    continue
+                try:
+                    blobs[entry["label"]] = zbase.read(part)
+                except KeyError:
+                    continue
+    except zipfile.BadZipFile:
+        return content, 0
+    if not blobs:
+        return content, 0
+    doc = Document(io.BytesIO(content))
+    restored = 0
+
+    def handle(paragraph) -> None:
+        nonlocal restored
+        for run in list(paragraph.runs):
+            text = run.text or ""
+            match = _IMAGE_LABEL_RE.search(text)
+            if not match:
+                continue
+            label = match.group(0)
+            blob = blobs.get(label)
+            if blob is None:
+                continue
+            run.text = text.replace(label, "")
+            try:
+                picture_run = paragraph.add_run()
+                picture_run.add_picture(io.BytesIO(blob))
+                # `add_run` добавляет в конец абзаца — переносим к месту метки,
+                # иначе картинка уедет из своего абзаца/порядка.
+                run._r.addnext(picture_run._r)
+                restored += 1
+            except Exception as exc:  # noqa: BLE001 — картинка не должна ронять акт
+                logger.warning("Не удалось вернуть картинку %s: %s", label, exc)
+
+    for paragraph in _docx_body_paragraphs(doc):
+        handle(paragraph)
+    output = io.BytesIO()
+    doc.save(output)
+    return output.getvalue(), restored
+
+
+def restore_xlsx_images(
+    content: bytes, entries: list[dict], base_content: bytes
+) -> tuple[bytes, int, list[str]]:
+    """Вернуть картинки XLSX по карте якорей (В-4).
+
+    Требуется Pillow (openpyxl не умеет вставлять картинки без него).
+    Если Pillow нет, карта `.images.json` уже сохранена демоном — картинки
+    восстановит A4.4/A5 на машине с Pillow; здесь возвращается предупреждение,
+    а не молчаливая потеря.
+    """
+    try:
+        from openpyxl.drawing.image import Image as XLImage  # noqa: PLC0415
+        from openpyxl.utils import get_column_letter  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — нет Pillow
+        return content, 0, [
+            "xlsx: Pillow отсутствует — картинки не восстановлены (карта сохранена)"
+        ]
+    try:
+        with zipfile.ZipFile(io.BytesIO(base_content)) as zbase:
+            blobs = {}
+            for entry in entries:
+                part = entry.get("part")
+                if not part:
+                    continue
+                try:
+                    blobs[entry["label"]] = zbase.read(part)
+                except KeyError:
+                    continue
+    except zipfile.BadZipFile:
+        return content, 0, []
+    if not blobs:
+        return content, 0, []
+    wb = load_workbook(io.BytesIO(content))
+    restored = 0
+    warnings: list[str] = []
+    try:
+        for entry in entries:
+            blob = blobs.get(entry["label"])
+            if blob is None:
+                continue
+            sheet = entry.get("sheet") or ""
+            ws = wb[sheet] if sheet in wb.sheetnames else wb.worksheets[0]
+            row = int(entry.get("row") or 0) + 1
+            col = int(entry.get("col") or 0) + 1
+            # метка могла уехать вправо, если якорная ячейка была занята
+            for candidate in range(col, col + 50):
+                if ws.cell(row=row, column=candidate).value == entry["label"]:
+                    ws.cell(row=row, column=candidate).value = None
+                    break
+            try:
+                image = XLImage(io.BytesIO(blob))
+                ws.add_image(image, f"{get_column_letter(col)}{row}")
+                restored += 1
+            except Exception as exc:  # noqa: BLE001
+                warnings.append(
+                    f"xlsx: картинка {entry['label']} не восстановлена: {exc}")
+        output = io.BytesIO()
+        wb.save(output)
+    finally:
+        wb.close()
+    return output.getvalue(), restored, warnings
+
+
+def restore_images(
+    content: bytes,
+    filename: str,
+    entries: list[dict],
+    base_content: Optional[bytes],
+) -> tuple[bytes, int, list[str]]:
+    """Вернуть картинки тела по карте; для txt/md/xml — ничего не делает."""
+    if not entries or base_content is None:
+        return content, 0, []
+    ext = Path(filename).suffix.lower()
+    expected = len([entry for entry in entries if entry.get("part")])
+    if ext == ".docx":
+        out, restored = restore_docx_images(content, entries, base_content)
+        warnings = []
+        if expected and restored < expected:
+            warnings.append(
+                f"docx: восстановлено картинок {restored} из {expected} "
+                "(остальные метки удалены или не найдены)"
+            )
+        return out, restored, warnings
+    if ext == ".xlsx":
+        return restore_xlsx_images(content, entries, base_content)
+    return content, 0, []
+
+
+
 class FileAssembler:
     """Сборщик файлов обратно из анонимизированного текста"""
     

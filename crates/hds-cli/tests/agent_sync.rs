@@ -286,3 +286,112 @@ fn sync_forward_path_creates_labeled_images() {
     let registry = ArtifactRegistry::open(&stand.registry_path("P0001")).unwrap();
     assert_eq!(registry.count().unwrap(), records, "реестр не раздулся");
 }
+
+/// A4.3 e2e на mock-воркере: новый файл агента → папка проекта, правка
+/// образа → вариант в `.hds-agent\pending` со снимком основания.
+///
+/// Проверяется «снаружи»: маркер образа не даёт повторного выпуска, оригинал
+/// при сборке варианта не меняется (I6), служебная папка `.hds-agent` не
+/// зеркалится обратно.
+#[test]
+fn sync_reverse_emits_agent_files_and_pending_variant() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let root = repo_root();
+    let Some(python) = hds_anonymize::discover_python(&root) else {
+        eprintln!("skip: нет интерпретатора воркера анонимизации");
+        return;
+    };
+    let mock = root
+        .join("crates")
+        .join("hds-anonymize")
+        .join("tests")
+        .join("mock_worker.py");
+    let _env = EnvGuard::set(&[
+        ("HDS_ANONYMIZE_PYTHON", python),
+        ("HDS_ANONYMIZE_WORKER", mock),
+    ]);
+
+    let stand = Stand::new("reverse", true);
+    let letter = "Письмо Иванов Иван.md";
+    fs::write(stand.project_dir.join(letter), "Контакт: Иванов Иван\n").unwrap();
+    assert_eq!(stand.register("P0001"), 0);
+    assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
+
+    let workspace = stand.dir.join("zone").join("P0001").join("workspace");
+    let image = workspace.join("Письмо [PERSON_1].md");
+    let original = stand.project_dir.join(letter);
+    let original_sha = hds_agent::mirror::sha256_file(&original).unwrap();
+    let image_text = fs::read_to_string(&image).expect("образ письма");
+    assert!(image_text.contains("[PERSON_1]"), "{image_text}");
+    assert!(
+        image_text.starts_with("<!-- hds-agent/P0001/"),
+        "маркер образа: {image_text}"
+    );
+    let marker_line = image_text.lines().next().unwrap().to_string();
+
+    // Агент правит образ (маркер остаётся) и создаёт новый файл.
+    fs::write(&image, format!("{marker_line}\n[PERSON_1] правка агента\n")).unwrap();
+    fs::write(
+        workspace.join("Отчёт [PERSON_1].md"),
+        "[PERSON_1] подготовил отчёт\n",
+    )
+    .unwrap();
+
+    assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
+
+    // Новый файл — на своём месте в папке проекта, с реальным именем.
+    let emitted = stand.project_dir.join("Отчёт Иванов Иван.md");
+    let emitted_text = fs::read_to_string(&emitted).expect("выпущенный файл агента");
+    assert!(emitted_text.contains("Иванов Иван"), "{emitted_text}");
+    assert!(!emitted_text.contains("[PERSON_"), "{emitted_text}");
+    assert!(
+        !emitted_text.contains("hds-agent"),
+        "маркер не уехал: {emitted_text}"
+    );
+
+    // Изменённый образ — вариант в pending, оригинал не тронут (I6).
+    let pending = stand
+        .project_dir
+        .join(".hds-agent")
+        .join("pending")
+        .join(letter);
+    let pending_text = fs::read_to_string(&pending).expect("вариант в pending");
+    assert!(pending_text.contains("Иванов Иван"), "{pending_text}");
+    assert!(pending_text.contains("правка агента"), "{pending_text}");
+    assert!(
+        !pending_text.contains("hds-agent"),
+        "маркер не уехал: {pending_text}"
+    );
+    let base = stand
+        .project_dir
+        .join(".hds-agent")
+        .join("base")
+        .join(letter);
+    assert!(base.is_file(), "снимок основания");
+    assert_eq!(
+        hds_agent::mirror::sha256_file(&original).unwrap(),
+        original_sha,
+        "оригинал не изменился"
+    );
+
+    let registry = ArtifactRegistry::open(&stand.registry_path("P0001")).unwrap();
+    let row = registry.by_orig(letter).unwrap().expect("запись письма");
+    assert_eq!(row.status, Status::PendingAccept);
+    let new_row = registry
+        .by_orig("Отчёт Иванов Иван.md")
+        .unwrap()
+        .expect("запись agent_new");
+    assert_eq!(new_row.kind, Kind::AgentNew);
+    let records = registry.count().unwrap();
+    let project_files = fs::read_dir(&stand.project_dir).unwrap().count();
+    drop(registry);
+
+    // Петля TR-7.7: повторный проход ничего не выпускает и не плодит записей.
+    assert_eq!(stand.sync(&["--project", "P0001", "--once"]), 0);
+    let registry = ArtifactRegistry::open(&stand.registry_path("P0001")).unwrap();
+    assert_eq!(registry.count().unwrap(), records);
+    assert_eq!(
+        fs::read_dir(&stand.project_dir).unwrap().count(),
+        project_files
+    );
+}
