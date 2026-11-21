@@ -31,6 +31,15 @@ pub struct DeAnonymizer {
     system: Vec<String>,
     workspace: PathBuf,
     project: PathBuf,
+    /// Относительные имена образов → пути оригиналов в папке проекта (AG-26).
+    relative: Vec<RelativePath>,
+}
+
+/// Пара «имя образа (как в реестре) → путь оригинала» (AG-26).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RelativePath {
+    from: String,
+    to: String,
 }
 
 impl DeAnonymizer {
@@ -45,21 +54,58 @@ impl DeAnonymizer {
             system: system.to_vec(),
             workspace: workspace.to_path_buf(),
             project: project.to_path_buf(),
+            relative: Vec::new(),
         }
+    }
+
+    /// Добавить карту относительных путей образа (AG-26).
+    ///
+    /// В ленте результат `disk-search` и вызовы инструментов приходят
+    /// относительными именами образов (`Протоколы\\Встреча с [PERSON_3].docx`),
+    /// а не абсолютным путём workspace: без этой карты пользователь видел путь
+    /// зоны и не мог открыть файл. Метки внутри имени разворачиваются вместе с
+    /// остальным текстом — поэтому имя маскируется **до** разворота меток.
+    pub fn with_relative_paths(
+        mut self,
+        pairs: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        let mut relative: Vec<RelativePath> = Vec::new();
+        for (from, to) in pairs {
+            if from.trim().is_empty() {
+                continue;
+            }
+            for variant in separator_variants(&from) {
+                if !relative.iter().any(|pair| pair.from == variant) {
+                    relative.push(RelativePath {
+                        from: variant,
+                        to: to.clone(),
+                    });
+                }
+            }
+        }
+        // Длинные имена — первыми: `dir\\file` не должно быть съедено `file`.
+        relative.sort_by_key(|pair| std::cmp::Reverse(pair.from.chars().count()));
+        self.relative = relative;
+        self
     }
 
     /// Развернуть метки и пути в строке.
     pub fn text(&self, text: &str) -> DeAnonText {
+        // AG-26: сначала абсолютный путь зоны → папка проекта, затем маскируем
+        // относительные имена образов (в них бывают метки), разворачиваем метки
+        // и возвращаем пути оригиналов.
+        let prepared = self.replace_abs_paths(text);
+        let (masked, targets) = self.mask_relative(&prepared);
         let mut unknown = Vec::new();
-        let mut out = String::with_capacity(text.len());
-        let mut rest = text;
+        let mut out = String::with_capacity(masked.len());
+        let mut rest = masked.as_str();
         while let Some(open) = rest.find('[') {
             out.push_str(&rest[..open]);
             let after = &rest[open..];
             let Some(close) = after.find(']') else {
                 out.push_str(after);
                 return DeAnonText {
-                    text: self.replace_paths(&out),
+                    text: self.restore_relative(&out, &targets),
                     unknown,
                 };
             };
@@ -79,7 +125,7 @@ impl DeAnonymizer {
         }
         out.push_str(rest);
         DeAnonText {
-            text: self.replace_paths(&out),
+            text: self.restore_relative(&out, &targets),
             unknown,
         }
     }
@@ -174,7 +220,7 @@ impl DeAnonymizer {
     /// присылает его так, как видит ОС. Поэтому пробуем оба варианта: иначе
     /// (A5.3, стенд) путь `agent.root: 'C:/…/zone'` не совпадал с текстом
     /// `C:\…\zone\P0001\workspace\…` и в ленте оставался путь зоны.
-    fn replace_paths(&self, text: &str) -> String {
+    fn replace_abs_paths(&self, text: &str) -> String {
         let ws = self.workspace.to_string_lossy().to_string();
         let proj = self.project.to_string_lossy().to_string();
         let mut out = text.to_string();
@@ -192,6 +238,104 @@ impl DeAnonymizer {
         }
         out
     }
+
+    /// Замаскировать относительные имена образов маркерами (AG-26).
+    ///
+    /// Маркер `\u{1}<n>\u{1}` не содержит `[`, поэтому разворот меток его не
+    /// трогает; после него маркер заменяется путём оригинала. Заменяем только
+    /// вхождение в начале пути: если перед именем стоит `\` или `/`, это хвост
+    /// уже заменённого абсолютного пути — второй раз его менять нельзя.
+    fn mask_relative(&self, text: &str) -> (String, Vec<String>) {
+        if self.relative.is_empty() {
+            return (text.to_string(), Vec::new());
+        }
+        let mut out = text.to_string();
+        let mut targets: Vec<String> = Vec::new();
+        for pair in &self.relative {
+            let marker = format!("\u{1}{}\u{1}", targets.len());
+            if let Some(replaced) = replace_at_path_start(&out, &pair.from, &marker) {
+                out = replaced;
+                targets.push(pair.to.clone());
+            }
+        }
+        (out, targets)
+    }
+
+    /// Вернуть пути оригиналов вместо маркеров.
+    fn restore_relative(&self, text: &str, targets: &[String]) -> String {
+        if targets.is_empty() {
+            return text.to_string();
+        }
+        let mut out = text.to_string();
+        for (idx, target) in targets.iter().enumerate() {
+            out = out.replace(&format!("\u{1}{idx}\u{1}"), target);
+        }
+        out
+    }
+}
+
+/// Варианты имени образа с обоими разделителями (реестр пишет платформенный,
+/// модель может прислать любой).
+fn separator_variants(text: &str) -> Vec<String> {
+    let mut out = vec![text.to_string()];
+    let forward = text.replace('\\', "/");
+    if forward != text {
+        out.push(forward);
+    }
+    let backward = text.replace('/', "\\");
+    if backward != text && !out.contains(&backward) {
+        out.push(backward);
+    }
+    out
+}
+
+/// Заменить `from` в начале пути: предыдущий символ не `\` и не `/`.
+///
+/// Так `Протоколы\Встреча.docx` не подменяет хвост уже заменённого
+/// `C:\Проект\Протоколы\Встреча.docx` (AG-26).
+fn replace_at_path_start(text: &str, from: &str, to: &str) -> Option<String> {
+    let mut result = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut changed = false;
+    while let Some(pos) = rest.find(from) {
+        let at_path_start = rest[..pos]
+            .chars()
+            .next_back()
+            .map(|c| c != '\\' && c != '/')
+            .unwrap_or(true);
+        result.push_str(&rest[..pos]);
+        if at_path_start {
+            result.push_str(to);
+            changed = true;
+        } else {
+            result.push_str(from);
+        }
+        rest = &rest[pos + from.len()..];
+    }
+    result.push_str(rest);
+    changed.then_some(result)
+}
+
+/// Карта «имя образа → путь оригинала» для [`DeAnonymizer::with_relative_paths`].
+///
+/// Только записи с непустым образом; путь строится как
+/// `<папка проекта>\<orig_rel>` (разделители платформы). Значений из базы
+/// меток здесь нет — только имена файлов (AG-26, I8).
+pub fn registry_paths(
+    registry: &crate::registry_db::ArtifactRegistry,
+    project_root: &Path,
+) -> Vec<(String, String)> {
+    let Ok(rows) = registry.list() else {
+        return Vec::new();
+    };
+    rows.into_iter()
+        .filter(|row| !row.anon_rel.is_empty())
+        .map(|row| {
+            let rel = row.orig_rel.replace('/', std::path::MAIN_SEPARATOR_STR);
+            let target = project_root.join(rel);
+            (row.anon_rel, target.to_string_lossy().into_owned())
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -381,5 +525,61 @@ mod tests {
         assert_eq!(out["text"], "Иванов Иван");
         assert_eq!(out["nested"][0], "DESKTOP-ABC");
         assert_eq!(out["nested"][1]["path"], "C:\\Проект\\a.txt");
+    }
+
+    /// AG-26: относительное имя образа (результат `disk-search`) становится
+    /// путём оригинала; метки в имени разворачиваются; абсолютный путь зоны
+    /// не заменяется дважды.
+    #[test]
+    fn relative_image_paths_become_project_paths() {
+        let d = deanon().with_relative_paths(vec![(
+            "Протоколы\\Встреча [PERSON_1].docx".to_string(),
+            "C:\\Проект\\Протоколы\\Встреча.docx".to_string(),
+        )]);
+        assert_eq!(
+            d.text("Файл Протоколы\\Встреча [PERSON_1].docx готов").text,
+            "Файл C:\\Проект\\Протоколы\\Встреча.docx готов"
+        );
+        // Разделители — любые: модель может вернуть `/`.
+        assert_eq!(
+            d.text("Файл Протоколы/Встреча [PERSON_1].docx готов").text,
+            "Файл C:\\Проект\\Протоколы\\Встреча.docx готов"
+        );
+        // Абсолютный путь зоны: префикс меняется один раз, хвост не дублируется
+        // (метка разворачивается как обычно).
+        assert_eq!(
+            d.text("Файл C:\\anon\\P1\\workspace\\Протоколы\\Встреча [PERSON_1].docx готов")
+                .text,
+            "Файл C:\\Проект\\Протоколы\\Встреча Иванов Иван.docx готов"
+        );
+    }
+
+    /// AG-26: карта строится из реестра, каталог проекта — из `orig_rel`.
+    #[test]
+    fn registry_paths_map_images_to_originals() {
+        use crate::registry_db::{Artifact, ArtifactRegistry, Kind, Status};
+
+        let dir = std::env::temp_dir().join(format!("hds-deanon-reg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("P0001.db");
+        let registry = ArtifactRegistry::open(&db).unwrap();
+        let sep = std::path::MAIN_SEPARATOR;
+        let orig = format!("Протоколы{sep}Встреча.docx");
+        let anon = format!("Протоколы{sep}Встреча [PERSON_1].docx");
+        registry
+            .insert(&Artifact::new(&orig, &anon, Kind::Image, Status::Synced))
+            .unwrap();
+
+        let paths = registry_paths(&registry, Path::new("C:\\Проект"));
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].0, anon);
+        assert!(
+            paths[0].1.ends_with(&orig),
+            "путь оригинала: {:?}",
+            paths[0].1
+        );
+        drop(registry);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

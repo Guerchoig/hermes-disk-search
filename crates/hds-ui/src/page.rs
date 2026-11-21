@@ -1092,7 +1092,9 @@ async function loadAgentState(){
       '\nпровайдер: '+j.provider+' · '+j.model+
       '\nзона: '+(j.root||'не задана')+(j.enabled?'':' (выключена)')+
       '\nдемон зеркала: '+(j.daemon?'работает':'не запущен')+
-      '\nфайлов: '+j.files+' · ждут решения: '+j.pending)+'</pre>';
+      '\nфайлов: '+j.files+' · ждут решения: '+j.pending+
+      '\nистория: '+((j.history&&j.history.uncleaned)?('не очищена — '+j.history.hint):
+        (j.history&&j.history.session?'очищена':'сессии нет')))+'</pre>';
     pre.textContent=(j.journal||[]).join('\n')||'(журнал пуст)';
   }catch(e){ box.textContent='ошибка: '+e; }
 }
@@ -2264,6 +2266,10 @@ mod tests {
         assert!(
             PAGE.contains("stopPropagation"),
             "кнопка должна гасить клик по строке (selectAgentProject)"
+        );
+        assert!(
+            PAGE.contains("не очищена"),
+            "панель состояния должна показывать предупреждение AG-32"
         );
     }
 }

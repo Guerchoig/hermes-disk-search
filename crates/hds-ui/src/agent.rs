@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use hds_agent::factory::{anonymizer_factory, extractor_factory};
 use hds_agent::labels::{self, LabelsError, LabelsReport};
 use hds_agent::mirror::{canonical_clean, LazyAnonymizer, LazyExtractor, Mirror};
-use hds_agent::registry_db::{ArtifactRegistry, Status};
+use hds_agent::registry_db::Status;
 use hds_agent::results::{
     self, append_message, Decision, DecisionReport, MessageKind, ResultsError, BACKUP_SUBDIR,
     CONFLICTS_DIR, SERVICE_DIR,
@@ -114,6 +114,9 @@ fn project_item(cfg: &Config, p: &projects::Project) -> Value {
 }
 
 /// Числа реестра: файлов и ждущих решения. Нет БД — нули (ещё не зеркалился).
+///
+/// Реестр берётся из кэша `AgentApi` (AG-25): таблица проектов опрашивается
+/// вместе с `/state`, и открывать SQLite на каждый вызов незачем.
 fn registry_counts(cfg: &Config, id: &str) -> (i64, i64) {
     let Some(db) = settings::registry_db(cfg, id) else {
         return (0, 0);
@@ -121,13 +124,14 @@ fn registry_counts(cfg: &Config, id: &str) -> (i64, i64) {
     if !db.is_file() {
         return (0, 0);
     }
-    match ArtifactRegistry::open(&db) {
-        Ok(registry) => (
-            registry.count().unwrap_or(0),
-            registry.list_pending().map(|v| v.len() as i64).unwrap_or(0),
-        ),
-        Err(_) => (0, 0),
-    }
+    let Ok(cached) = agent_session::global(cfg).open_registry(id, &db) else {
+        return (0, 0);
+    };
+    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
+    (
+        registry.count().unwrap_or(0),
+        registry.list_pending().map(|v| v.len() as i64).unwrap_or(0),
+    )
 }
 
 /// `P` + 4 цифры (D21) — та же проверка, что у CLI и `settings::registry_db`.
@@ -329,6 +333,10 @@ pub fn project_rm_json(cfg: &Config, body: &str) -> Reply {
         }
     }
     api.unload(&rec.id);
+    // AG-25/A6.5: открытый реестр держит файл БД — на Windows удаление
+    // упрётся в «файл занят». Кэш сбрасываем до удаления; в полёте другие
+    // запросы вкладки к этому проекту уже не идут (сессия остановлена).
+    api.drop_registry(&rec.id);
     let daemon_alive = settings::state_dir_for(cfg, &rec.id)
         .map(|state| {
             let lock = state.join("sync.lock");
@@ -399,6 +407,10 @@ pub fn state_json(cfg: &Config, project: &str) -> Reply {
         .map(|d| tail_lines(&d.join("sync.log"), JOURNAL_TAIL))
         .unwrap_or_default();
     let (files, pending) = registry_counts(cfg, id);
+    let history = state_dir
+        .as_ref()
+        .map(|dir| history_state(cfg, id, dir))
+        .unwrap_or_else(|| json!({ "session": Value::Null, "uncleaned": false }));
     let agent = settings::settings(cfg);
     ok(json!({
         "id": p.id,
@@ -413,7 +425,36 @@ pub fn state_json(cfg: &Config, project: &str) -> Reply {
         "journal": journal,
         "files": files,
         "pending": pending,
+        "history": history,
     }))
+}
+
+/// Предупреждение о неочищенной истории сессии (AG-32, В-A6-10).
+///
+/// Сессия берётся из хода в памяти, иначе — последняя на диске. `uncleaned`
+/// значит: файлы истории есть и менялись после «Очистить историю». Значения
+/// не читаются (I8), поэтому это `warn`: ничего не блокируется и не чистится
+/// автоматически.
+fn history_state(cfg: &Config, project: &str, state_dir: &Path) -> Value {
+    let session = agent_session::global(cfg)
+        .state(project)
+        .get("session")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| hds_agent::history::latest_session(state_dir).ok());
+    let Some(session) = session else {
+        return json!({ "session": Value::Null, "uncleaned": false, "hint": "" });
+    };
+    let uncleaned = hds_agent::history::needs_cleanup(state_dir, &session);
+    json!({
+        "session": session,
+        "uncleaned": uncleaned,
+        "hint": if uncleaned {
+            "история сессии содержит открытые значения — нажмите «Очистить историю» (TR-6.6)"
+        } else {
+            ""
+        },
+    })
 }
 
 /// `GET /api/agent/files?project=<P>`: файлы проекта по реестру артефактов.
@@ -435,10 +476,11 @@ pub fn files_json(cfg: &Config, project: &str) -> Reply {
         // Проект ещё не зеркалился — пустая таблица, а не ошибка.
         return ok(json!({ "count": 0, "pending": 0, "files": [] }));
     }
-    let registry = match ArtifactRegistry::open(&db) {
+    let cached = match agent_session::global(cfg).open_registry(id, &db) {
         Ok(registry) => registry,
-        Err(e) => return err(500, format!("{e}")),
+        Err(e) => return err(e.status, e.message),
     };
+    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
     let rows = match registry.list() {
         Ok(rows) => rows,
         Err(e) => return err(500, format!("{e}")),
@@ -608,6 +650,9 @@ fn results_err(e: ResultsError) -> Reply {
                 path.display()
             ),
         ),
+        // AG-23: решение отменено, оригинал возвращён — это не «файл занят»,
+        // но и не успех: 500 с текстом (пользователь видит, что вернулось).
+        ResultsError::RolledBack { .. } => err(500, e.to_string()),
         ResultsError::Io(..) | ResultsError::Registry(_) | ResultsError::Mirror(_) => {
             err(500, e.to_string())
         }
@@ -643,7 +688,10 @@ fn with_mirror<T>(
             format!("проект {id} ещё не зеркалился — запустите hds agent sync"),
         ));
     }
-    let registry = ArtifactRegistry::open(&db).map_err(|e| err(500, format!("{e}")))?;
+    let cached = agent_session::global(cfg)
+        .open_registry(id, &db)
+        .map_err(api_err)?;
+    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
     let root = hds_core::config::project_root();
     let mut anonymizer = LazyAnonymizer::new(anonymizer_factory(cfg, &root));
     let mut extractor = LazyExtractor::new(extractor_factory(&root));
@@ -689,7 +737,10 @@ fn with_client_mirror<T>(
             format!("проект {id} ещё не зеркалился — запустите hds agent sync"),
         ));
     }
-    let registry = ArtifactRegistry::open(&db).map_err(|e| err(500, format!("{e}")))?;
+    let cached = agent_session::global(cfg)
+        .open_registry(id, &db)
+        .map_err(api_err)?;
+    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
     let Some(state_dir) = settings::state_dir_for(cfg, id) else {
         return Err(err(503, "agent.root не задан: анонимная зона не настроена"));
     };
@@ -1136,10 +1187,11 @@ pub fn pending_json(cfg: &Config, project: &str) -> Reply {
         // Проект ещё не зеркалился — пустой список, а не ошибка (как `files`).
         return ok(json!({ "count": 0, "pending": 0, "conflicts": false, "items": [] }));
     }
-    let registry = match ArtifactRegistry::open(&db) {
+    let cached = match agent_session::global(cfg).open_registry(id, &db) {
         Ok(registry) => registry,
-        Err(e) => return err(500, format!("{e}")),
+        Err(e) => return err(e.status, e.message),
     };
+    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
     let mut rows = match registry.list_pending() {
         Ok(rows) => rows,
         Err(e) => return err(500, format!("{e}")),

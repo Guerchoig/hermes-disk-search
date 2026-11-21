@@ -101,12 +101,24 @@ pub fn run(
         &secrets,
         &snapshot,
     ));
-    let deanon = Arc::new(Mutex::new(DeAnonymizer::new(
+    let mut deanon = DeAnonymizer::new(
         &snapshot,
         &sys_values(&plan.system, &plan.project_names),
         &plan.workspace,
         Path::new(&plan.project.path),
-    )));
+    );
+    // AG-26: относительные имена образов → пути папки проекта (если реестр уже есть).
+    if let Some(db) = &plan.registry_db {
+        if db.is_file() {
+            if let Ok(registry) = hds_agent::registry_db::ArtifactRegistry::open(db) {
+                deanon = deanon.with_relative_paths(hds_agent::deanon::registry_paths(
+                    &registry,
+                    Path::new(&plan.project.path),
+                ));
+            }
+        }
+    }
+    let deanon = Arc::new(Mutex::new(deanon));
     let egress_log = plan
         .settings
         .egress_log

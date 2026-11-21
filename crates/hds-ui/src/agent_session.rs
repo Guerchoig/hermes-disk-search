@@ -422,12 +422,39 @@ pub struct AgentApi {
     turns: Mutex<HashMap<String, Arc<Turn>>>,
     /// Один Python-воркер анонимизации на процесс UI (снимок vault, метки).
     client: Mutex<Option<Arc<Mutex<Client>>>>,
+    /// Открытые реестры артефактов по проектам (AG-25): вкладка опрашивает
+    /// `/files|/pending|/state`, а `ArtifactRegistry::open` каждый раз создаёт
+    /// схему и выставляет PRAGMA.
+    registries: Mutex<HashMap<String, CachedRegistry>>,
     /// Сквозной номер события: не переиспользуется.
     seq: Arc<AtomicU64>,
     /// Корень поставки (`sidecar/`, портативный Node): в проде совпадает с
     /// `hds_core::config::project_root()`, в тестах данные живут в `HDS_ROOT`,
     /// а воркеры берутся из репозитория.
     root: PathBuf,
+}
+
+/// Открытый реестр проекта в кэше UI (AG-25).
+struct CachedRegistry {
+    path: PathBuf,
+    /// `(mtime, размер)` файла БД: удаление/замена реестра — новый `open`.
+    stamp: (u128, u64),
+    registry: Arc<Mutex<ArtifactRegistry>>,
+}
+
+/// Отпечаток файла БД для инвалидации кэша: нет файла — `(0, 0)`.
+fn registry_stamp(path: &Path) -> (u128, u64) {
+    match std::fs::metadata(path) {
+        Ok(meta) => (
+            meta.modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0),
+            meta.len(),
+        ),
+        Err(_) => (0, 0),
+    }
 }
 
 static GLOBAL: OnceLock<Arc<AgentApi>> = OnceLock::new();
@@ -461,6 +488,7 @@ impl AgentApi {
             registry: Arc::new(Mutex::new(registry)),
             turns: Mutex::new(HashMap::new()),
             client: Mutex::new(None),
+            registries: Mutex::new(HashMap::new()),
             seq: Arc::new(AtomicU64::new(0)),
             root: root.into(),
         })
@@ -493,6 +521,52 @@ impl AgentApi {
             .unwrap_or_else(|e| e.into_inner())
             .get(project)
             .cloned()
+    }
+
+    /// Открытый реестр проекта из кэша (AG-25).
+    ///
+    /// `ArtifactRegistry::open` создаёт схему и выставляет `PRAGMA` (WAL,
+    /// `busy_timeout`), а вкладка опрашивает `/files`, `/pending`, `/state`
+    /// постоянно. Кэш — один открытый реестр на проект; записи демона видны
+    /// без переоткрытия (WAL + каждое чтение — своя транзакция), поэтому
+    /// инвалидация нужна только при удалении/замене файла: отпечаток
+    /// `(mtime, размер)`. `project rm` (A6.5) вызывает [`Self::drop_registry`]
+    /// **до** удаления: открытый на Windows файл БД иначе не удалится.
+    pub fn open_registry(
+        &self,
+        project: &str,
+        db: &Path,
+    ) -> Result<Arc<Mutex<ArtifactRegistry>>, ApiError> {
+        let stamp = registry_stamp(db);
+        let mut cache = self.registries.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(entry) = cache.get(project) {
+            if entry.path == db && entry.stamp == stamp {
+                return Ok(Arc::clone(&entry.registry));
+            }
+        }
+        let registry = ArtifactRegistry::open(db).map_err(|e| ApiError::new(500, e.to_string()))?;
+        // Отпечаток — **после** открытия: `open` создаёт файл и WAL, и
+        // отпечаток, снятый до него, не совпал бы со следующим вызовом.
+        let stamp = registry_stamp(db);
+        let registry = Arc::new(Mutex::new(registry));
+        cache.insert(
+            project.to_string(),
+            CachedRegistry {
+                path: db.to_path_buf(),
+                stamp,
+                registry: Arc::clone(&registry),
+            },
+        );
+        Ok(registry)
+    }
+
+    /// Забыть открытый реестр проекта (AG-25, A6.5): вызывается перед удалением.
+    pub fn drop_registry(&self, project: &str) -> bool {
+        self.registries
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(project)
+            .is_some()
     }
 
     /// Живые процессы проекта: идентификатор и секунды с последнего обращения.
@@ -1090,12 +1164,25 @@ impl AgentApi {
             &secrets,
             &snapshot,
         ));
-        let deanon = Arc::new(Mutex::new(DeAnonymizer::new(
+        let mut deanon = DeAnonymizer::new(
             &snapshot,
             &sys_values(&plan.system, &plan.project_names),
             &plan.workspace,
             Path::new(&rec.path),
-        )));
+        );
+        // AG-26: относительные имена образов в ленте → пути папки проекта.
+        if let Some(db) = settings::registry_db(cfg, &rec.id) {
+            if db.is_file() {
+                if let Ok(cached) = self.open_registry(&rec.id, &db) {
+                    let registry = cached.lock().unwrap_or_else(|e| e.into_inner());
+                    deanon = deanon.with_relative_paths(hds_agent::deanon::registry_paths(
+                        &registry,
+                        Path::new(&rec.path),
+                    ));
+                }
+            }
+        }
+        let deanon = Arc::new(Mutex::new(deanon));
         let egress_log = plan
             .settings
             .egress_log
@@ -1726,5 +1813,56 @@ mod tests {
             AskWait::Cancelled
         );
         assert_eq!(ask.pending(), None);
+    }
+
+    /// AG-25: реестр открывается один раз на проект, видит записи демона через
+    /// WAL и забывается по `drop_registry` (перед удалением проекта).
+    #[test]
+    fn registry_cache_reuses_connection_and_sees_writes() {
+        use hds_agent::registry_db::{Artifact, ArtifactRegistry, Kind, Status};
+
+        let dir = std::env::temp_dir().join(format!("hds-regcache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("P0001.db");
+        let api = AgentApi::for_tests_at(&dir);
+
+        let first = api.open_registry("P0001", &db).expect("реестр");
+        let second = api.open_registry("P0001", &db).expect("реестр");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "повторный вызов должен вернуть то же соединение"
+        );
+
+        // «Демон» пишет другим соединением; WAL отдаёт запись кэшированному.
+        {
+            let other = ArtifactRegistry::open(&db).unwrap();
+            other
+                .insert(&Artifact::new(
+                    "a.txt",
+                    "a [PERSON_1].txt",
+                    Kind::Image,
+                    Status::Synced,
+                ))
+                .unwrap();
+        }
+        assert_eq!(first.lock().unwrap().count().unwrap(), 1);
+
+        assert!(api.drop_registry("P0001"), "запись в кэше была");
+        assert!(!api.drop_registry("P0001"));
+        drop(first);
+        drop(second);
+        // Файл БД после `drop_registry` не держится — удаляется.
+        std::fs::remove_file(&db).expect("файл БД не занят кэшем");
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(PathBuf::from(format!("{}{suffix}", db.display())));
+        }
+        let fresh = api.open_registry("P0001", &db).expect("новый реестр");
+        assert_eq!(
+            fresh.lock().unwrap().count().unwrap(),
+            0,
+            "пересозданный файл — пустой реестр, кэш не отдал старое соединение"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

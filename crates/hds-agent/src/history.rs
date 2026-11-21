@@ -9,11 +9,54 @@
 //! `rename`. Ошибка на любом шаге возвращается вызывающему; частично
 //! перезаписанных файлов не остаётся.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::filter::Filter;
+
+/// Отметка «история очищена» (AG-32): `<agent-state>\history.cleared.json`.
+///
+/// Внутри только идентификаторы сессий и время — значений из истории файл не
+/// содержит (I8). По ней `state_json` показывает предупреждение «история не
+/// очищена» (В-A6-10: `warn`, без блокировки и автоочистки).
+pub const CLEARED_FILE: &str = "history.cleared.json";
+
+/// Отметки очистки по сессиям: `session_id → unix-время` (секунды).
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct ClearedMarks {
+    #[serde(default)]
+    sessions: BTreeMap<String, f64>,
+}
+
+fn cleared_path(state_dir: &Path) -> PathBuf {
+    state_dir.join(CLEARED_FILE)
+}
+
+fn read_marks(state_dir: &Path) -> ClearedMarks {
+    std::fs::read_to_string(cleared_path(state_dir))
+        .ok()
+        .and_then(|text| serde_json::from_str(text.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or_default()
+}
+
+/// Записать отметку очистки (ошибка — не повод отменять очистку).
+fn mark_cleared(state_dir: &Path, session_id: &str, ts: f64) -> std::io::Result<()> {
+    let mut marks = read_marks(state_dir);
+    marks.sessions.insert(session_id.to_string(), ts);
+    let text = serde_json::to_string_pretty(&marks)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    atomic_write(&cleared_path(state_dir), &text)
+}
+
+fn now_secs() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
 
 /// Результат очистки.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -133,7 +176,37 @@ pub fn clear(
         outcome.backups.push(backup);
         outcome.files.push(path);
     }
+    // AG-32: отметка «очищено» — по ней `state_json` перестаёт предупреждать.
+    let _ = mark_cleared(state_dir, session_id, now_secs());
     Ok(outcome)
+}
+
+/// История сессии на диске есть и менялась после последней очистки (AG-32).
+///
+/// Читаются только время изменения и отметка `history.cleared.json`; значения
+/// из истории не разбираются (I8). Предупреждение ничего не блокирует и не
+/// очищает автоматически — решение В-A6-10.
+pub fn needs_cleanup(state_dir: &Path, session_id: &str) -> bool {
+    if !valid_session_id(session_id) {
+        return false;
+    }
+    let newest = session_files(state_dir, session_id)
+        .iter()
+        .filter_map(|path| std::fs::metadata(path).ok()?.modified().ok())
+        .max();
+    let Some(newest) = newest else {
+        return false;
+    };
+    let cleared = read_marks(state_dir)
+        .sessions
+        .get(session_id)
+        .copied()
+        .unwrap_or(0.0);
+    let modified = newest
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0);
+    modified > cleared + 1e-3
 }
 
 /// Прочитать массив сообщений из `.messages.json` для `initialMessages`.
@@ -221,5 +294,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("hds-history-{}", std::process::id()));
         let err = read_messages(&dir, "..\\..\\secret").unwrap_err();
         assert!(matches!(err, HistoryError::InvalidSession(_)), "{err}");
+    }
+
+    /// AG-32: предупреждение «история не очищена» — по файлам сессии и отметке
+    /// `history.cleared.json`; значения из истории не читаются.
+    #[test]
+    fn cleanup_state_follows_marker() {
+        let dir = std::env::temp_dir().join(format!("hds-history-clean-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let session = "S-CLEAN_1";
+        let messages = session_dir(&dir, session).join(format!("{session}.messages.json"));
+        std::fs::create_dir_all(messages.parent().unwrap()).unwrap();
+
+        assert!(!needs_cleanup(&dir, session), "файлов нет — чистить нечего");
+        std::fs::write(&messages, r#"{"messages":[]}"#).unwrap();
+        assert!(needs_cleanup(&dir, session), "история появилась");
+
+        mark_cleared(&dir, session, now_secs() + 5.0).expect("отметка");
+        assert!(!needs_cleanup(&dir, session), "отметка новее файла");
+
+        // «SDK дописал историю после очистки» — предупреждение возвращается.
+        mark_cleared(&dir, session, 1.0).expect("старая отметка");
+        assert!(needs_cleanup(&dir, session), "файл новее отметки");
+
+        assert!(!needs_cleanup(&dir, "../evil"), "плохой id — не читаем");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

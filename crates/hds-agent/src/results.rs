@@ -199,6 +199,9 @@ pub enum MessageKind {
     LabelsMerged,
     /// Склейка меток отменена: метки снова самостоятельные (A5.5).
     LabelsUnmerged,
+    /// Решение не выполнено (AG-23): замена откатана или вариант сохранён —
+    /// агент должен знать, что образ не пересоздан.
+    DecisionFailed,
 }
 
 impl MessageKind {
@@ -209,6 +212,7 @@ impl MessageKind {
             MessageKind::ConflictDelegated => "conflict_delegated",
             MessageKind::LabelsMerged => "labels_merged",
             MessageKind::LabelsUnmerged => "labels_unmerged",
+            MessageKind::DecisionFailed => "decision_failed",
         }
     }
 
@@ -219,6 +223,7 @@ impl MessageKind {
             "conflict_delegated" => Some(MessageKind::ConflictDelegated),
             "labels_merged" => Some(MessageKind::LabelsMerged),
             "labels_unmerged" => Some(MessageKind::LabelsUnmerged),
+            "decision_failed" => Some(MessageKind::DecisionFailed),
             _ => None,
         }
     }
@@ -390,6 +395,13 @@ pub enum ResultsError {
     NoImage(String),
     /// Маркер образа не наш: чужой проект, чужой `artifact_id` или его нет.
     BadMarker(String),
+    /// Решение отменено (AG-23): замена оригинала откатана из копии, образ не
+    /// пересоздан. `message` — что именно случилось (без значений из меток).
+    RolledBack {
+        rel: String,
+        stamp: Option<String>,
+        message: String,
+    },
     Io(PathBuf, String),
     Registry(RegistryError),
     Mirror(MirrorError),
@@ -493,6 +505,17 @@ impl std::fmt::Display for ResultsError {
                 "'{rel}': маркер образа не наш (нужен hds-agent/<P>/<id> этого проекта) — \
                  запись не восстановлена"
             ),
+            ResultsError::RolledBack {
+                rel,
+                stamp,
+                message,
+            } => {
+                write!(f, "'{rel}': решение отменено")?;
+                if let Some(stamp) = stamp {
+                    write!(f, " (оригинал возвращён из копии {stamp})")?;
+                }
+                write!(f, " — образ не пересоздан: {message}")
+            }
             ResultsError::Io(path, why) => write!(f, "{}: {why}", path.display()),
             ResultsError::Registry(err) => write!(f, "{err}"),
             ResultsError::Mirror(err) => write!(f, "{err}"),
@@ -819,7 +842,12 @@ impl<'a> Mirror<'a> {
         }
         let mut report = DecisionReport::new(row);
         self.replace_with_variant(row, &mut report)?;
-        let anon_rel = self.rebuild_image(row, Status::Accepted)?;
+        // AG-23: сбой пересборки образа после замены оригинала — откат из
+        // копии и сообщение, а не «ошибка при уже заменённом файле».
+        let anon_rel = match self.rebuild_image(row, Status::Accepted) {
+            Ok(rel) => rel,
+            Err(cause) => return Err(self.rollback_accept(row, &report, &cause)),
+        };
         report.anon_rel = anon_rel;
         report.status = Status::Accepted;
         self.cleanup_decision(row);
@@ -839,7 +867,14 @@ impl<'a> Mirror<'a> {
         let mut report = DecisionReport::new(row);
         // Сначала образ, потом удаление: сбой воркера не должен стоить
         // пользователю последнего варианта (§3.4 журнала).
-        let anon_rel = self.rebuild_image(row, Status::Synced)?;
+        let anon_rel = match self.rebuild_image(row, Status::Synced) {
+            Ok(rel) => rel,
+            Err(cause) => {
+                // AG-23: ничего не изменено; агент получает след о сбое.
+                self.note_failed(row, "отклонение", &cause);
+                return Err(cause);
+            }
+        };
         report.anon_rel = anon_rel;
         report.status = Status::Synced;
         self.cleanup_decision(row);
@@ -876,13 +911,23 @@ impl<'a> Mirror<'a> {
                     ));
                 }
                 self.replace_with_variant(row, &mut report)?;
-                let anon_rel = self.rebuild_image(row, Status::Accepted)?;
+                // AG-23: как «Принять» — сбой образа откатывает замену.
+                let anon_rel = match self.rebuild_image(row, Status::Accepted) {
+                    Ok(rel) => rel,
+                    Err(cause) => return Err(self.rollback_accept(row, &report, &cause)),
+                };
                 report.anon_rel = anon_rel;
                 report.status = Status::Accepted;
                 self.cleanup_decision(row);
             }
             ConflictChoice::New => {
-                let anon_rel = self.rebuild_image(row, Status::Synced)?;
+                let anon_rel = match self.rebuild_image(row, Status::Synced) {
+                    Ok(rel) => rel,
+                    Err(cause) => {
+                        self.note_failed(row, "«взять новую версию»", &cause);
+                        return Err(cause);
+                    }
+                };
                 report.anon_rel = anon_rel;
                 report.status = Status::Synced;
                 self.cleanup_decision(row);
@@ -896,7 +941,15 @@ impl<'a> Mirror<'a> {
             ConflictChoice::Delegate => {
                 let copy = self.copy_variant_to_conflicts(row)?;
                 report.conflict_copy = Some(copy.clone());
-                let anon_rel = self.rebuild_image(row, Status::Synced)?;
+                let anon_rel = match self.rebuild_image(row, Status::Synced) {
+                    Ok(rel) => rel,
+                    Err(cause) => {
+                        // AG-23: копия в `_conflicts` без решения не нужна.
+                        let _ = fs::remove_file(self.workspace.join(rel_to_path(&copy)));
+                        self.note_failed(row, "перенос правок", &cause);
+                        return Err(cause);
+                    }
+                };
                 report.anon_rel = anon_rel;
                 report.status = Status::Synced;
                 self.cleanup_decision(row);
@@ -1068,6 +1121,81 @@ impl<'a> Mirror<'a> {
     }
 
     /// Дописать сообщение агенту в `.hds-agent\messages.jsonl` (В-6).
+    /// Компенсация после сбоя `rebuild_image` при «Принять» (AG-23).
+    ///
+    /// Копия прежнего оригинала уже создана, и оригинал уже заменён вариантом.
+    /// Возвращаем оригинал из копии, статус — прежний, агенту — сообщение
+    /// `decision_failed` (только имя образа, штамп и статус — I8). Возвращается
+    /// готовая ошибка [`ResultsError::RolledBack`] с тем, что удалось.
+    fn rollback_accept(
+        &mut self,
+        row: &Artifact,
+        report: &DecisionReport,
+        cause: &ResultsError,
+    ) -> ResultsError {
+        let original = self.project_root.join(rel_to_path(&row.orig_rel));
+        let mut notes: Vec<String> = Vec::new();
+        if let Some(backup) = &report.backup {
+            // Оригинал сейчас — это вариант: возвращаем его в `pending`, иначе
+            // откат «съел» бы последний вариант пользователя.
+            let pending = self.pending_path(&row.orig_rel);
+            if let Err(_e) = copy_file(&original, &pending) {
+                notes.push("вариант в pending не возвращён".to_string());
+            }
+            match replace_file(backup, &original) {
+                Ok(()) => {
+                    // Каталог копии опустел — прибираем, как при занятом файле.
+                    rollback_backup(backup);
+                    notes.push(format!(
+                        "оригинал возвращён из копии {}",
+                        report.stamp.as_deref().unwrap_or("-")
+                    ));
+                }
+                Err(_e) => {
+                    notes.push("оригинал вернуть не удалось (ошибка ввода-вывода)".to_string())
+                }
+            }
+        }
+        match self.registry.set_status_by_orig(&row.orig_rel, row.status) {
+            Ok(true) => notes.push(format!("статус снова {}", row.status.as_str())),
+            Ok(false) => notes.push("записи реестра уже нет".to_string()),
+            Err(_e) => notes.push("статус не возвращён".to_string()),
+        }
+        let text = format!(
+            "решение по {} не выполнено: образ не пересоздан; {}",
+            report.anon_rel,
+            notes.join("; ")
+        );
+        let _ = append_message(
+            &self.project_root,
+            MessageKind::DecisionFailed,
+            &report.anon_rel,
+            text.clone(),
+        );
+        ResultsError::RolledBack {
+            rel: row.orig_rel.clone(),
+            stamp: report.stamp.clone(),
+            message: format!("{cause}; {text}"),
+        }
+    }
+
+    /// След агенту, что решение не выполнено (AG-23: reject/конфликт).
+    ///
+    /// В очередь — только метки, путь образа и вид сбоя: текст ошибки может
+    /// содержать путь с именем файла пользователя (I8).
+    fn note_failed(&self, row: &Artifact, action: &str, cause: &ResultsError) {
+        let text = format!(
+            "{action} не выполнено: образ не пересоздан ({}); вариант и статус не изменены",
+            failure_reason(cause)
+        );
+        let _ = append_message(
+            &self.project_root,
+            MessageKind::DecisionFailed,
+            &row.anon_rel,
+            text,
+        );
+    }
+
     fn notify(
         &self,
         report: &mut DecisionReport,
@@ -1576,6 +1704,19 @@ fn require_replaceable(row: &Artifact) -> Result<(), ResultsError> {
     }
 }
 
+/// Вид сбоя для сообщения агенту (AG-23): без пути и текста ошибки — в
+/// очереди только метки и безопасные слова (I8).
+fn failure_reason(cause: &ResultsError) -> &'static str {
+    match cause {
+        ResultsError::Mirror(MirrorError::Anonymizer(_)) => "воркер анонимизации",
+        ResultsError::Mirror(MirrorError::Extractor(_)) => "воркер извлечения",
+        ResultsError::Mirror(MirrorError::Registry(_)) | ResultsError::Registry(_) => {
+            "реестр артефактов"
+        }
+        _ => "ввод-вывод",
+    }
+}
+
 /// Откатить созданную копию: при занятом файле backup оставаться не должен
 /// (TR-7.6, случай 3 — «backup не создаётся»).
 fn rollback_backup(backup: &Path) {
@@ -1767,6 +1908,73 @@ mod tests {
         assert_eq!(stand.run(&mut anon, &mut ext, 200).changes(), 0);
         assert!(!service(&stand, MESSAGES_FILE).exists(), "приём молчаливый");
     }
+
+    /// AG-23: сбой пересборки образа после замены оригинала — оригинал
+    /// возвращается из копии, статус прежний, агенту — `decision_failed`.
+    #[test]
+    fn accept_rolls_back_when_rebuild_fails() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a66-rollback");
+        // Воркер падает на пересборке образа: вход — файл проекта.
+        anon.fail_on = Some("Письмо Иванов Иван.md".to_string());
+        let err =
+            decide(&stand, &mut anon, &mut ext, Decision::Accept).expect_err("образ не пересоздан");
+        assert!(
+            matches!(err, ResultsError::RolledBack { .. }),
+            "ожидался RolledBack: {err}"
+        );
+
+        // Оригинал — прежняя версия (замена откатана), вариант и статус на месте.
+        assert_eq!(
+            fs::read_to_string(stand.project.join(rel())).unwrap(),
+            "Контакт: Иванов Иван\n"
+        );
+        assert!(
+            service(&stand, "pending").join(rel()).is_file(),
+            "вариант цел"
+        );
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            Status::PendingAccept
+        );
+        assert!(
+            !service(&stand, BACKUP_SUBDIR).exists(),
+            "пустой каталог копий прибран"
+        );
+
+        // Агенту — след без значений (I8).
+        let messages = messages(&stand);
+        assert!(messages.contains("decision_failed"), "{messages}");
+        assert!(messages.contains("образ не пересоздан"), "{messages}");
+        assert!(!messages.contains("Иванов Иван"), "I8: {messages}");
+    }
+
+    /// AG-23: «Отклонить» при сбое образа ничего не меняет, но оставляет след.
+    #[test]
+    fn reject_failure_keeps_variant_and_notes_agent() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a66-reject-fail");
+        anon.fail_on = Some("Письмо Иванов Иван.md".to_string());
+        let err =
+            decide(&stand, &mut anon, &mut ext, Decision::Reject).expect_err("образ не пересоздан");
+        assert!(matches!(err, ResultsError::Mirror(_)), "{err}");
+
+        assert!(
+            service(&stand, "pending").join(rel()).is_file(),
+            "вариант цел"
+        );
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            Status::PendingAccept
+        );
+        let messages = messages(&stand);
+        assert!(messages.contains("decision_failed"), "{messages}");
+        assert!(messages.contains("отклонение"), "{messages}");
+        assert!(!messages.contains("Иванов Иван"), "I8: {messages}");
+        assert_eq!(
+            MessageKind::parse("decision_failed"),
+            Some(MessageKind::DecisionFailed)
+        );
+    }
+
     /// Принятый артефакт живёт дальше: правка пользователя обновляет образ,
     /// новая правка агента снова даёт вариант (статус `accepted` не «замирает»).
     #[test]

@@ -81,6 +81,9 @@ pub struct RunPlan {
     pub workspace: PathBuf,
     pub config_dir: PathBuf,
     pub state_dir: PathBuf,
+    /// Реестр артефактов `data\agent\registry\<P>.db`, если зона настроена
+    /// (AG-26: деанонимайзер берёт из него карту «образ → оригинал»).
+    pub registry_db: Option<PathBuf>,
     pub node: PathBuf,
     pub worker: PathBuf,
     pub spec: WorkerSpec,
@@ -387,6 +390,7 @@ pub fn plan_with(
     agent.subagents = agent.subagents || opts.subagents;
 
     Ok(RunPlan {
+        registry_db: settings::registry_db(cfg, &project.id),
         project,
         provider,
         workspace,

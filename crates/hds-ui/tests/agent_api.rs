@@ -305,6 +305,57 @@ fn agent_project_rm_removes_zone_registry_secret_and_record() {
 }
 
 #[test]
+fn agent_project_rm_works_with_warm_registry_cache() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("rmcache", None);
+    register(&stand);
+    seed_project_traces(&stand);
+    // Настоящий реестр вместо файла-заглушки: `/files` должен открыться.
+    let db = stand
+        .dir
+        .join("data")
+        .join("agent")
+        .join("registry")
+        .join("P0001.db");
+    for path in [
+        db.clone(),
+        PathBuf::from(format!("{}-wal", db.display())),
+        PathBuf::from(format!("{}-shm", db.display())),
+    ] {
+        let _ = fs::remove_file(path);
+    }
+    {
+        use hds_agent::registry_db::{Artifact, ArtifactRegistry, Kind, Status};
+        let registry = ArtifactRegistry::open(&db).unwrap();
+        registry
+            .insert(&Artifact::new(
+                "a.txt",
+                "a [PERSON_1].txt",
+                Kind::Image,
+                Status::Synced,
+            ))
+            .unwrap();
+    }
+
+    // AG-25: панель уже открывала реестр — соединение в кэше процесса UI.
+    // Удаление обязано сбросить его до `remove_file`, иначе на Windows файл
+    // БД «занят» и проект остаётся.
+    let (status, v) = get("/api/agent/files", "project=P0001");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["count"], 1, "{v}");
+    assert_eq!(get("/api/agent/state", "project=P0001").0, 200);
+    assert_eq!(get("/api/agent/pending", "project=P0001").0, 200);
+
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 200, "{v}");
+    assert!(!stand.zone().join("P0001").exists());
+    assert!(!db.exists());
+}
+
+#[test]
 fn agent_project_rm_refuses_live_daemon_and_accepts_force() {
     let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let stand = Stand::new("rmdaemon", None);
@@ -391,4 +442,45 @@ fn agent_project_rm_is_forbidden_in_server_profile() {
         &serde_json::json!({ "project": "P0001" }),
     );
     assert_eq!(status, 403, "серверный профиль — 403 (D20): {v}");
+}
+
+/// AG-32: `state_json` предупреждает, если история сессии есть и не очищена;
+/// отметка `history.cleared.json` снимает предупреждение (значения не читаются).
+#[test]
+fn agent_state_warns_when_session_history_is_uncleaned() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("hist", None);
+    register(&stand);
+    let session = "S-UnClean_1";
+    let state = stand.zone().join("P0001").join("agent-state");
+    let messages = state
+        .join(".cline")
+        .join("data")
+        .join("sessions")
+        .join(session)
+        .join(format!("{session}.messages.json"));
+    fs::create_dir_all(messages.parent().unwrap()).unwrap();
+    fs::write(&messages, r#"{"messages":[]}"#).unwrap();
+
+    let (status, v) = get("/api/agent/state", "project=P0001");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["history"]["session"], session, "{v}");
+    assert_eq!(v["history"]["uncleaned"], true, "{v}");
+    assert!(
+        v["history"]["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Очистить историю"),
+        "{v}"
+    );
+
+    // «Очистить историю» оставила отметку новее файлов — предупреждения нет.
+    fs::write(
+        state.join("history.cleared.json"),
+        format!(r#"{{"sessions":{{"{session}":1e18}}}}"#),
+    )
+    .unwrap();
+    let (status, v) = get("/api/agent/state", "project=P0001");
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["history"]["uncleaned"], false, "{v}");
 }
