@@ -16,6 +16,11 @@ hds-transcribe = { path = "../hds-transcribe" }
 # и каталог моделей берём из того же клиента, что UI и CLI (`hds-anonymize`).
 hds-anonymize = { path = "../hds-anonymize" }
 hds-clip = { path = "../hds-clip" }
+# A6.1: пункты `agent-*` в `hds check` — настройки зоны, Node-воркер, реестр и
+# секреты берутся из единственного источника истины (`hds-agent`), чтобы
+# диагностика не повторяла пути и правила разрешения. Цикла нет: `hds-agent`
+# зависит только от hds-core, hds-anonymize и hds-extract.
+hds-agent = { path = "../hds-agent" }
 # W5: константы/проверка модели Nemotron-3 (размер, sha256) и поиск пути по
 # каталогам моделей — один источник истины для `llm_host` и `hds check`.
 # Новых внешних зависимостей не добавляет: `hds-diarize` уже в бинарях `hds`

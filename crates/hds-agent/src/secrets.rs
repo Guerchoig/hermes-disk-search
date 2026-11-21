@@ -157,6 +157,25 @@ impl Secrets {
             .is_some_and(|key| !key.trim().is_empty())
     }
 
+    /// Задан ли plain-токен проекта — **без** значения (В-A5.6-2).
+    ///
+    /// Хэш есть, plain нет — токен выдан прежней версией: маршрут
+    /// `/mcp/agent/<P>` работает, а `disk-search` у агента не подключится
+    /// (`hds agent token <P>` перевыпустит токен).
+    pub fn has_project_token(&self, project: &str) -> bool {
+        self.project_token(project)
+            .is_some_and(|t| !t.trim().is_empty())
+    }
+
+    /// Есть ли хэш токена проекта (`projects.<p>.token_sha256`) — признак, без
+    /// значения (диагностика A6.1: «задан/нет», никогда не печатать).
+    pub fn has_project_token_hash(&self, project: &str) -> bool {
+        self.raw
+            .pointer(&format!("/projects/{project}/token_sha256"))
+            .and_then(Value::as_str)
+            .is_some_and(|h| !h.trim().is_empty())
+    }
+
     /// `providers.<name>.base_url` (пусто — база API по умолчанию).
     pub fn provider_base_url(&self, name: &str) -> Option<String> {
         self.raw

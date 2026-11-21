@@ -27,20 +27,36 @@ pub fn cmd_check(json: bool) -> i32 {
     let ok = !checks.iter().any(|c| c.status == "fail");
 
     if json {
-        let items: Vec<serde_json::Value> = checks
-            .iter()
-            .map(|c| {
-                serde_json::json!({
-                    "id": c.id, "status": c.status, "title": c.title, "msg": c.msg, "fix": c.fix
-                })
-            })
-            .collect();
-        println!("{}", serde_json::json!({ "ok": ok, "checks": items }));
+        println!(
+            "{}",
+            serde_json::json!({ "ok": ok, "checks": checks_json(&checks) })
+        );
         return if ok { 0 } else { 1 };
     }
 
     println!("== hermes-disk-search: проверка окружения ==");
-    for c in &checks {
+    print_checks(&checks);
+    println!(
+        "Итог: {}",
+        if ok {
+            "основные компоненты готовы"
+        } else {
+            "есть критические проблемы"
+        }
+    );
+    if ok {
+        0
+    } else {
+        1
+    }
+}
+
+/// Пункты в человекочитаемом виде (`[ok]`/`[--]`/`[!!]`, `msg`, `-> fix`).
+///
+/// A6.1: тот же формат печатает `hds agent check` — вывод `hds check` от
+/// выделения не меняется.
+pub(crate) fn print_checks(checks: &[hds_index::diag::Check]) {
+    for c in checks {
         if c.status == "ok" {
             println!("[ok] {}", c.title);
             continue;
@@ -57,17 +73,16 @@ pub fn cmd_check(json: bool) -> i32 {
             println!("     -> {}", c.fix);
         }
     }
-    println!(
-        "Итог: {}",
-        if ok {
-            "основные компоненты готовы"
-        } else {
-            "есть критические проблемы"
-        }
-    );
-    if ok {
-        0
-    } else {
-        1
-    }
+}
+
+/// Пункты для `--json` (`{"id","status","title","msg","fix"}`).
+pub(crate) fn checks_json(checks: &[hds_index::diag::Check]) -> Vec<serde_json::Value> {
+    checks
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.id, "status": c.status, "title": c.title, "msg": c.msg, "fix": c.fix
+            })
+        })
+        .collect()
 }

@@ -6,13 +6,20 @@
 //! без запуска второго бинаря.
 //!
 //! Покрываем: БД, корни, чат-роль, embedding-роль (+контекст), OCR (tesseract),
-//! ffmpeg, лемматизатор (через `capabilities` воркера), реранк. Осознанно **не**
-//! покрываем whisper/mpxj/vulkan — их проверяет Python-версия до W5.
+//! ffmpeg, лемматизатор (через `capabilities` воркера), реранк, зону агента
+//! (`agent-*`, A6.1 — при выключенном агенте одна строка «агент выключен»).
+//! Осознанно **не** покрываем whisper/mpxj/vulkan — их проверяет Python-версия
+//! до W5.
 
 use std::fs;
+use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use hds_agent::{
+    projects as agent_projects, run as agent_run, secrets as agent_secrets,
+    settings as agent_settings, ArtifactRegistry,
+};
 use hds_core::config::{self, dig, Config};
 use hds_core::error::{CoreError, Result};
 use hds_core::roots::roots_from_cfg;
@@ -2839,6 +2846,821 @@ fn check_anonymize(cfg: &Config) -> Check {
     }
 }
 
+// ── A6.1: зона агента (`agent-*` в `hds check`, `hds agent check`) ───────────
+//
+// Проверки читают только конфиг, файлы и (если сервер запущен) локальный
+// `mcp_http`; значения секретов и токенов в сообщения не попадают — только
+// «задан/нет» (I7, I8).
+
+/// Сколько символов пути или строки журнала попадает в сообщение проверки.
+const AGENT_MSG_CHARS: usize = 160;
+
+/// Все пункты `agent-*` (`hds check`): все зарегистрированные проекты.
+///
+/// При `agent.enabled: false` — ровно одна строка `[--]` «агент выключен»:
+/// остальное не проверяется (зона не настроена, шум в `hds check` не нужен).
+pub fn check_agent(cfg: &Config) -> Vec<Check> {
+    check_agent_in(cfg, None, &config::state_dir(cfg), &config::project_root())
+}
+
+/// Те же пункты, но только по одному проекту (`hds agent check --project P`).
+pub fn check_agent_for(cfg: &Config, only: Option<&str>) -> Vec<Check> {
+    let only = only.map(str::trim).filter(|p| !p.is_empty());
+    check_agent_in(cfg, only, &config::state_dir(cfg), &config::project_root())
+}
+
+/// Ядро [`check_agent`] с явными каталогом состояния и корнем поставки —
+/// так тесты не зависят от `HDS_ROOT`/`HDS_STATE_DIR` процесса.
+fn check_agent_in(
+    cfg: &Config,
+    only: Option<&str>,
+    state: &Path,
+    sidecar_root: &Path,
+) -> Vec<Check> {
+    let agent = agent_settings::settings(cfg);
+    if !agent.enabled {
+        return vec![Check::new(
+            "agent",
+            "warn",
+            "агент выключен: agent.enabled=false",
+        )
+        .msg("зона агента не настроена — пункты agent-* не проверяются (TR-8.3)")
+        .fix("agent.enabled: true и agent.root в config.yaml (секция agent, config.example.yaml)")];
+    }
+
+    let root = agent.root.as_deref();
+    let projects_file = agent_settings::projects_file_in(state);
+    let registry = agent_projects::load_at(&projects_file);
+    let all: Vec<&agent_projects::Project> = registry
+        .as_ref()
+        .map(|r| r.projects.iter().collect())
+        .unwrap_or_default();
+    let selected: Vec<&agent_projects::Project> = match only {
+        Some(id) => all
+            .iter()
+            .copied()
+            .filter(|p| p.id.eq_ignore_ascii_case(id))
+            .collect(),
+        None => all.clone(),
+    };
+    // Секреты читаются один раз: признак ключа провайдера и токен маршрута.
+    let secrets = agent_secrets::Secrets::load_or_empty(&agent_settings::secrets_file_in(state));
+
+    let mut checks = vec![
+        agent_root_check(&agent),
+        agent_node_check(&agent, sidecar_root),
+        agent_worker_check(sidecar_root),
+        agent_python_check(sidecar_root),
+        agent_vault_check(cfg, sidecar_root),
+        agent_projects_check(&registry, &projects_file, &selected, only),
+        agent_provider_check(&secrets, &selected),
+        agent_token_check(&secrets, &selected),
+    ];
+    // Пункты «на проект» (маршрут, индекс, демон, очередь) без проекта не
+    // проверяются: маршрут и индексация живут в разрезе `P`.
+    if !selected.is_empty() {
+        let host = dig(cfg, "mcp_http.host")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+        let port = agent_run::mcp_port(cfg);
+        let base = agent_run::mcp_base_path(cfg);
+        let items: Vec<(String, Option<String>)> = selected
+            .iter()
+            .map(|p| {
+                (
+                    p.id.clone(),
+                    secrets
+                        .as_ref()
+                        .ok()
+                        .and_then(|s| s.project_token(&p.id))
+                        .filter(|t| !t.trim().is_empty()),
+                )
+            })
+            .collect();
+        checks.push(agent_route_check(&host, port, &base, &items));
+        checks.push(agent_index_check(cfg, root, &selected));
+        if let Some(root) = root {
+            checks.push(agent_sync_check(root, &selected));
+        }
+        checks.push(agent_pending_check(state, &selected));
+    }
+    checks
+}
+
+/// Обрезка длинного значения для сообщения (журнал `sync.log`, списки путей).
+fn short(text: &str) -> String {
+    let t = text.trim();
+    if t.chars().count() <= AGENT_MSG_CHARS {
+        return t.to_string();
+    }
+    let cut: String = t.chars().take(AGENT_MSG_CHARS).collect();
+    format!("{cut}…")
+}
+
+/// Путь — общий или системный каталог (TR-8.3: `agent.root` — личная зона).
+///
+/// Общими считаются: корень диска/ФС, UNC-ресурс, каталоги Windows, Program
+/// Files и ProgramData (писать туда без прав администратора нельзя), личный
+/// профиль, его родитель (`C:\Users`, `/home`), `PUBLIC` и временный каталог.
+/// Внутри профиля (`%USERPROFILE%\hds-anon`) зона допустима — это личный путь.
+fn is_shared_dir(path: &Path) -> bool {
+    fn env_dir(key: &str) -> Option<PathBuf> {
+        std::env::var_os(key)
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+    }
+    let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    // Корень диска (`D:\`) или корень ФС (`/`): родителя нет.
+    if abs.parent().is_none() {
+        return true;
+    }
+    if abs.to_string_lossy().starts_with(r"\\") {
+        return true; // сетевой ресурс (`\\server\share`)
+    }
+    for key in [
+        "SystemRoot",
+        "windir",
+        "ProgramFiles",
+        "ProgramFiles(x86)",
+        "ProgramData",
+    ] {
+        if let Some(dir) = env_dir(key) {
+            if abs.starts_with(&dir) {
+                return true;
+            }
+        }
+    }
+    let mut common: Vec<PathBuf> = Vec::new();
+    if let Some(home) = env_dir("USERPROFILE").or_else(|| env_dir("HOME")) {
+        if let Some(parent) = home.parent() {
+            common.push(parent.to_path_buf()); // `C:\Users`, `/home`
+        }
+        common.push(home);
+    }
+    for key in ["PUBLIC", "TEMP", "TMP"] {
+        if let Some(dir) = env_dir(key) {
+            common.push(dir);
+        }
+    }
+    let norm = |p: &Path| norm_path(&p.to_string_lossy());
+    let target = norm(&abs);
+    common.iter().any(|dir| norm(dir) == target)
+}
+
+/// Последняя непустая строка файла (журнал `sync.log`); `None` — файла нет.
+fn last_line(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    text.lines().rev().find(|l| !l.trim().is_empty()).map(short)
+}
+
+/// Проекты индекса с числом файлов (`files.project` не пуст).
+fn index_project_rows(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT project, COUNT(*) FROM files WHERE project IS NOT NULL \
+         GROUP BY project ORDER BY project",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    Ok(rows.filter_map(std::result::Result::ok).collect())
+}
+
+/// Первый путь файла проекта в индексе (для проверки, что индекс смотрит в зону).
+fn index_first_path(conn: &rusqlite::Connection, project: &str) -> Option<String> {
+    conn.query_row(
+        "SELECT path FROM files WHERE project = ?1 LIMIT 1",
+        [project],
+        |r| r.get::<_, String>(0),
+    )
+    .ok()
+}
+
+/// Пункт `agent-root`: задан, абсолютный, не общий каталог (TR-8.3).
+fn agent_root_check(agent: &agent_settings::AgentSettings) -> Check {
+    const FIX: &str =
+        "agent.root: '<диск>:\\<папка>' в config.yaml (секция agent; не C:\\, не профиль, не Program Files)";
+    let Some(root) = agent.root.as_deref() else {
+        return Check::new("agent-root", "fail", "agent.root не задан")
+            .msg("зона агента не настроена — агент не сможет открыть проект")
+            .fix(FIX);
+    };
+    let text = root.display().to_string();
+    if !root.is_absolute() {
+        return Check::new("agent-root", "fail", "agent.root — не абсолютный путь")
+            .msg(text)
+            .fix(FIX);
+    }
+    if is_shared_dir(root) {
+        return Check::new(
+            "agent-root",
+            "fail",
+            "agent.root указывает на общий каталог",
+        )
+        .msg(format!(
+            "{text} — корень диска, профиль, системный или сетевой каталог"
+        ))
+        .fix(FIX);
+    }
+    if root.is_dir() {
+        return Check::new("agent-root", "ok", format!("зона агента: {text}"));
+    }
+    Check::new("agent-root", "warn", "зона агента ещё не создана")
+        .msg(format!("{text} — каталога нет"))
+        .fix("hds agent init (создаст каталог и индекс <agent.root>\\P*\\workspace)")
+}
+
+/// Пункт `agent-node`: `resolve_node` + проверка, что файл действительно есть
+/// (для `node` из PATH — поиск в `PATH`, иначе он «найден» только на словах).
+fn agent_node_check(agent: &agent_settings::AgentSettings, sidecar_root: &Path) -> Check {
+    const FIX: &str = "Установите Node 20+ в PATH, положите портативный в sidecar\\node \
+                       или задайте agent.node.path; сборка sidecar: \
+                       installers\\build_agent_sidecar.ps1";
+    match agent_run::resolve_node(agent, sidecar_root) {
+        Ok(path) if path.is_absolute() => {
+            if path.is_file() {
+                Check::new("agent-node", "ok", format!("Node: {}", path.display()))
+            } else {
+                Check::new(
+                    "agent-node",
+                    "fail",
+                    format!("Node не найден: {}", path.display()),
+                )
+                .msg("agent.node.path / sidecar\\node указывает на отсутствующий файл")
+                .fix(FIX)
+            }
+        }
+        Ok(name) => match which(&name.to_string_lossy()) {
+            Some(found) => Check::new("agent-node", "ok", format!("Node: {}", found.display())),
+            None => Check::new("agent-node", "fail", "Node не найден")
+                .msg("в PATH нет node, agent.node.path не задан, sidecar\\node отсутствует")
+                .fix(FIX),
+        },
+        Err(e) => Check::new("agent-node", "fail", "Node не найден")
+            .msg(e)
+            .fix(FIX),
+    }
+}
+
+/// Пункт `agent-worker`: собранный `sidecar/hds_agent/dist/worker.mjs`.
+fn agent_worker_check(sidecar_root: &Path) -> Check {
+    match agent_run::resolve_worker(sidecar_root) {
+        Ok(p) => Check::new(
+            "agent-worker",
+            "ok",
+            format!("воркер агента: {}", p.display()),
+        ),
+        Err(e) => Check::new("agent-worker", "fail", "воркер агента не собран")
+            .msg(e)
+            .fix(
+                "npm --prefix sidecar/hds_agent ci; npm --prefix sidecar/hds_agent run build \
+                 (или installers\\build_agent_sidecar.ps1)",
+            ),
+    }
+}
+
+/// Пункт `agent-python`: интерпретатор воркера анонимизации (`venv-anonymize`).
+fn agent_python_check(sidecar_root: &Path) -> Check {
+    match hds_anonymize::discover_python(sidecar_root) {
+        Some(p) => Check::new(
+            "agent-python",
+            "ok",
+            format!("Python-воркер анонимизации: {}", p.display()),
+        ),
+        None => Check::new(
+            "agent-python",
+            "fail",
+            "Python-воркер анонимизации не найден",
+        )
+        .msg("нет sidecar\\venv-anonymize (и sidecar\\python, .venv)")
+        .fix("installers\\build_anonymize_sidecar.ps1 -Profile cpu|cuda"),
+    }
+}
+
+/// Пункт `agent-vault`: `anonymize.db` и схема v2 (`meta.schema_version`).
+///
+/// Прежняя схема переименовывается при первом акте без переноса меток (D4),
+/// поэтому это `warn`, а не `fail`: работа продолжится, но метки пропадут.
+fn agent_vault_check(cfg: &Config, sidecar_root: &Path) -> Check {
+    let db = hds_anonymize::Settings::from_config(cfg).db_abs(sidecar_root);
+    if !db.is_file() {
+        return Check::new("agent-vault", "warn", "база меток ещё не создана").msg(format!(
+            "{} — база появится первым актом (первым зеркалированием)",
+            db.display()
+        ));
+    }
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Check::new("agent-vault", "warn", "база меток не читается")
+                .msg(format!("{}: {e}", db.display()))
+                .fix("закройте воркер анонимизации и повторите (база — data\\anonymize.db)");
+        }
+    };
+    let _ = conn.busy_timeout(Duration::from_millis(500));
+    let version: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    match version.as_deref().map(str::trim) {
+        Some("2") => Check::new(
+            "agent-vault",
+            "ok",
+            format!("база меток: схема v2 ({})", db.display()),
+        ),
+        Some(v) => Check::new(
+            "agent-vault",
+            "warn",
+            format!("база меток прежней схемы (v{v})"),
+        )
+        .msg(format!(
+            "{}: при следующем акте база будет переименована в *.v1-<метка>.bak \
+             без переноса меток (D4)",
+            db.display()
+        )),
+        None => Check::new("agent-vault", "warn", "в базе меток нет schema_version")
+            .msg(format!(
+                "{}: похоже на схему v1 или не базу меток",
+                db.display()
+            ))
+            .fix("hds agent init (метки схемы v1 всё равно не переносятся, D4)"),
+    }
+}
+
+/// Пункт `agent-projects`: `projects.json` читается, проекты и их папки есть.
+fn agent_projects_check(
+    registry: &std::result::Result<agent_projects::Projects, String>,
+    projects_file: &Path,
+    selected: &[&agent_projects::Project],
+    only: Option<&str>,
+) -> Check {
+    const FIX: &str = "hds agent project add P0001 --name NAME --path <папка проекта>";
+    let list = match registry {
+        Err(e) => {
+            return Check::new("agent-projects", "fail", "projects.json не читается")
+                .msg(e)
+                .fix(format!("исправьте JSON или создайте проект заново: {FIX}"));
+        }
+        Ok(l) => l,
+    };
+    if let Some(id) = only {
+        if list.get(id).is_none() {
+            return Check::new(
+                "agent-projects",
+                "fail",
+                format!("проект {id} не зарегистрирован"),
+            )
+            .msg(projects_file.display().to_string())
+            .fix(FIX);
+        }
+    }
+    if selected.is_empty() {
+        return Check::new("agent-projects", "warn", "проектов зоны нет")
+            .msg(format!("{}: реестр пуст", projects_file.display()))
+            .fix(FIX);
+    }
+    let ids: Vec<&str> = selected.iter().map(|p| p.id.as_str()).collect();
+    let missing: Vec<String> = selected
+        .iter()
+        .filter(|p| !Path::new(&p.path).is_dir())
+        .map(|p| format!("{} → {}", p.id, short(&p.path)))
+        .collect();
+    if missing.is_empty() {
+        return Check::new(
+            "agent-projects",
+            "ok",
+            format!("проекты: {}", ids.join(", ")),
+        )
+        .msg(projects_file.display().to_string());
+    }
+    Check::new(
+        "agent-projects",
+        "warn",
+        format!("папки проектов не найдены: {}", missing.join("; ")),
+    )
+    .msg(format!("{}: {}", projects_file.display(), ids.join(", ")))
+    .fix("верните папку на место или укажите новую: hds agent project add <P> --path DIR")
+}
+
+/// Пункт `agent-provider`: ключ провайдера проекта задан — **без значения**.
+///
+/// Отсутствие ключа — `warn` (как у анонимизации: установка без ключа ещё
+/// настраивается); значение ключа диагностика не читает и не печатает.
+fn agent_provider_check(
+    secrets: &std::result::Result<agent_secrets::Secrets, agent_secrets::SecretsError>,
+    selected: &[&agent_projects::Project],
+) -> Check {
+    const FIX: &str = "Ключ задаётся в «Настройки агента» (hds ui, вкладка «Агент») — \
+                       он пишется в data\\agent\\secrets.json, не в config.yaml";
+    let secrets = match secrets {
+        Err(e) => {
+            return Check::new("agent-provider", "warn", "секреты агента не прочитать")
+                .msg(e.to_string())
+                .fix(FIX);
+        }
+        Ok(s) => s,
+    };
+    if selected.is_empty() {
+        return Check::new("agent-provider", "warn", "нет проектов — ключ не проверен").fix(FIX);
+    }
+    let mut have: Vec<String> = Vec::new();
+    let mut missing: Vec<String> = Vec::new();
+    for p in selected {
+        let name = if p.provider.trim().is_empty() {
+            agent_projects::DEFAULT_PROVIDER
+        } else {
+            p.provider.trim()
+        };
+        if secrets.has_provider_key(name) {
+            have.push(format!("{} ({name})", p.id));
+        } else {
+            missing.push(format!("{}: {name}", p.id));
+        }
+    }
+    if missing.is_empty() {
+        return Check::new(
+            "agent-provider",
+            "ok",
+            format!("ключ провайдера задан — {}", have.join(", ")),
+        );
+    }
+    Check::new(
+        "agent-provider",
+        "warn",
+        format!("ключ провайдера не задан: {}", missing.join("; ")),
+    )
+    .msg("значение ключа диагностика не читает и не печатает")
+    .fix(FIX)
+}
+
+/// Пункт `agent-token`: plain-токен `disk-search` (предупреждение, если только
+/// хэш — маршрут работает, а MCP у агента не подключится).
+fn agent_token_check(
+    secrets: &std::result::Result<agent_secrets::Secrets, agent_secrets::SecretsError>,
+    selected: &[&agent_projects::Project],
+) -> Check {
+    const FIX: &str =
+        "hds agent token <P> — plain печатается один раз, в файл пишутся и хэш, и токен";
+    let secrets = match secrets {
+        Err(e) => {
+            return Check::new("agent-token", "warn", "секреты агента не прочитать")
+                .msg(e.to_string())
+                .fix(FIX);
+        }
+        Ok(s) => s,
+    };
+    if selected.is_empty() {
+        return Check::new("agent-token", "warn", "нет проектов — токен не проверен");
+    }
+    let mut plain: Vec<&str> = Vec::new();
+    let mut only_hash: Vec<&str> = Vec::new();
+    let mut none: Vec<&str> = Vec::new();
+    for p in selected {
+        if secrets.has_project_token(&p.id) {
+            plain.push(p.id.as_str());
+        } else if secrets.has_project_token_hash(&p.id) {
+            only_hash.push(p.id.as_str());
+        } else {
+            none.push(p.id.as_str());
+        }
+    }
+    if only_hash.is_empty() && none.is_empty() {
+        return Check::new(
+            "agent-token",
+            "ok",
+            format!("plain-токен disk-search: {}", plain.join(", ")),
+        );
+    }
+    let mut notes: Vec<String> = Vec::new();
+    for id in &only_hash {
+        notes.push(format!(
+            "{id}: только хэш — маршрут работает, disk-search у агента не подключится"
+        ));
+    }
+    for id in &none {
+        notes.push(format!("{id}: токена нет"));
+    }
+    Check::new(
+        "agent-token",
+        "warn",
+        if plain.is_empty() {
+            "plain-токен disk-search не выдан"
+        } else {
+            "plain-токен disk-search не у всех проектов"
+        },
+    )
+    .msg(notes.join("; "))
+    .fix(FIX)
+}
+
+/// Пункт `agent-route`: `POST <mcp-path>/agent/<P>` — health, 401 без токена,
+/// 200 с токеном.
+///
+/// Маршрут проверяется только если `mcp_http` слушает порт: иначе сервер не
+/// запущен, и это нормально (`hds ui` / `hds mcp-http` поднимают его по
+/// требованию). Значение токена берётся из `secrets.json` и в сообщения не
+/// попадает.
+fn agent_route_check(
+    host: &str,
+    port: u16,
+    base: &str,
+    items: &[(String, Option<String>)],
+) -> Check {
+    const FIX: &str = "перезапустите сервер (hds ui / hds mcp-http) с agent.enabled: true; \
+                       токен — hds agent token <P>";
+    let addr = format!("{host}:{port}");
+    let listening = (host, port)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut it| it.next())
+        .map(|a| TcpStream::connect_timeout(&a, PROBE_TIMEOUT).is_ok())
+        .unwrap_or(false);
+    if !listening {
+        return Check::new(
+            "agent-route",
+            "ok",
+            format!("маршрут {base}/agent/<P>: сервер не слушает {addr}"),
+        )
+        .msg("проверка пропущена: mcp-http не запущен (`hds ui` или `hds mcp-http`)");
+    }
+    match http::request(host, port, "GET", "/health", &[], None, PROBE_TIMEOUT) {
+        Ok(r) if r.status == 200 && r.body.contains(config::APP_NAME) => {}
+        Ok(r) => {
+            return Check::new(
+                "agent-route",
+                "warn",
+                format!("на {addr} отвечает не hermes-disk-search"),
+            )
+            .msg(format!("GET /health → {}: {}", r.status, short(&r.body)))
+            .fix("освободите порт mcp_http.port или укажите другой");
+        }
+        Err(e) => {
+            return Check::new("agent-route", "warn", "health mcp-http не отвечает")
+                .msg(format!("GET http://{addr}/health: {}", e.message()));
+        }
+    }
+    // Минимальный `tools/list`: сервер отвечает и без аргументов инструмента.
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let mut problems: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+    for (id, token) in items {
+        let path = format!("{}/agent/{id}", base.trim_end_matches('/'));
+        match http::request(
+            host,
+            port,
+            "POST",
+            &path,
+            &[("Content-Type", "application/json")],
+            Some(body),
+            PROBE_TIMEOUT,
+        ) {
+            Ok(r) if r.status == 401 => {}
+            Ok(r) => problems.push(format!("{id}: без токена {} (ожидалось 401)", r.status)),
+            Err(e) => problems.push(format!("{id}: без токена — {}", e.message())),
+        }
+        let Some(token) = token.as_deref() else {
+            problems.push(format!(
+                "{id}: plain-токена нет — ответ 200 с токеном не проверен"
+            ));
+            continue;
+        };
+        let auth = format!("Bearer {token}");
+        let headers = [
+            ("Content-Type", "application/json"),
+            ("Authorization", auth.as_str()),
+        ];
+        match http::request(
+            host,
+            port,
+            "POST",
+            &path,
+            &headers,
+            Some(body),
+            PROBE_TIMEOUT,
+        ) {
+            Ok(r) if r.status == 200 => {
+                checked += 1;
+                if !r.body.contains("search_local_files") {
+                    problems.push(format!("{id}: в tools/list нет search_local_files"));
+                }
+                if r.body.contains("ask_my_files") {
+                    problems.push(format!("{id}: в tools/list есть ask_my_files (TR-4.4)"));
+                }
+            }
+            Ok(r) => problems.push(format!("{id}: с токеном {} (ожидалось 200)", r.status)),
+            Err(e) => problems.push(format!("{id}: с токеном — {}", e.message())),
+        }
+    }
+    if problems.is_empty() {
+        return Check::new(
+            "agent-route",
+            "ok",
+            format!("маршрут {base}/agent/<P>: health, 401 и 200 — норма"),
+        )
+        .msg(format!("{addr}; проектов проверено: {checked}"));
+    }
+    Check::new(
+        "agent-route",
+        "warn",
+        format!("маршрут {base}/agent/<P>: есть отклонения"),
+    )
+    .msg(problems.join("; "))
+    .fix(FIX)
+}
+
+/// Пункт `agent-index`: `db_path`, проекты в индексе и то, что индекс смотрит
+/// в зону агента (I1: оригиналы в индекс агента попадать не должны).
+fn agent_index_check(
+    cfg: &Config,
+    root: Option<&Path>,
+    selected: &[&agent_projects::Project],
+) -> Check {
+    let db_path = config::db_abs_path(cfg);
+    if !db_path.is_file() {
+        return Check::new("agent-index", "warn", "индекс зоны не построен")
+            .msg(format!("db_path: {}", db_path.display()))
+            .fix("hds agent init (индексирует <agent.root>\\P*\\workspace)");
+    }
+    let conn = match db::open_ro(
+        &db_path,
+        &db::DbOptions {
+            // Диагностика не должна ждать живого индексатора полминуты.
+            busy_timeout_ms: 1_500,
+            ..db::DbOptions::default()
+        },
+    ) {
+        Ok(c) => c,
+        Err(e) => {
+            return Check::new("agent-index", "warn", "индекс не читается")
+                .msg(format!("{}: {}", db_path.display(), e.message()))
+                .fix("остановите индексацию (hds stop) и повторите");
+        }
+    };
+    let rows = match index_project_rows(&conn) {
+        Ok(r) => r,
+        Err(e) => {
+            return Check::new("agent-index", "warn", "индекс не читается")
+                .msg(format!("{}: {e}", db_path.display()))
+                .fix("hds agent init — пересоберёт индекс с текущей схемой");
+        }
+    };
+    if rows.is_empty() {
+        return Check::new("agent-index", "warn", "индекс пуст (ни одного проекта)")
+            .msg(format!("db_path: {}", db_path.display()))
+            .fix("hds agent init / hds index");
+    }
+    let listed: Vec<String> = rows.iter().map(|(p, n)| format!("{p} ({n})")).collect();
+    let missing: Vec<&str> = selected
+        .iter()
+        .map(|p| p.id.as_str())
+        .filter(|id| !rows.iter().any(|(p, _)| p.eq_ignore_ascii_case(id)))
+        .collect();
+    // Выборка путей: индекс агента обязан указывать внутрь зоны (I1).
+    let mut outside: Vec<String> = Vec::new();
+    if let Some(root) = root {
+        let zone = format!(
+            "{}/",
+            norm_path(&root.to_string_lossy()).trim_end_matches('/')
+        );
+        for p in selected {
+            if let Some(path) = index_first_path(&conn, &p.id) {
+                if !norm_path(&path).starts_with(&zone) {
+                    outside.push(format!("{}: {}", p.id, short(&path)));
+                }
+            }
+        }
+    }
+    if !outside.is_empty() {
+        return Check::new("agent-index", "fail", "индекс указывает не в зону агента")
+            .msg(format!(
+                "db_path: {}; вне {}: {}",
+                db_path.display(),
+                root.map(|r| r.display().to_string()).unwrap_or_default(),
+                outside.join("; ")
+            ))
+            .fix(
+                "постройте индекс зоны: hds agent init (I1: оригиналы в индекс агента не попадают)",
+            );
+    }
+    let msg = format!(
+        "db_path: {}; проекты: {}",
+        db_path.display(),
+        listed.join(", ")
+    );
+    if missing.is_empty() {
+        return Check::new("agent-index", "ok", "индекс зоны указывает на проекты").msg(msg);
+    }
+    Check::new(
+        "agent-index",
+        "warn",
+        format!("в индексе нет файлов: {}", missing.join(", ")),
+    )
+    .msg(msg)
+    .fix("hds agent init (или дождитесь зеркалирования и запустите hds index)")
+}
+
+/// Пункт `agent-sync`: демон зеркала — `sync.lock` (жив/залип) и хвост
+/// `sync.log` (`start`/`pass`/`problem`/`error`/`stop`, без значений — I8).
+fn agent_sync_check(root: &Path, selected: &[&agent_projects::Project]) -> Check {
+    let mut running = 0usize;
+    let mut stale: Vec<&str> = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
+    for p in selected {
+        let state = root.join(&p.id).join("agent-state");
+        let lock = state.join("sync.lock");
+        if lock.is_file() && !crate::watch::lock_is_stale(&lock) {
+            running += 1;
+            notes.push(format!("{}: демон работает (sync.lock)", p.id));
+        } else if lock.is_file() {
+            stale.push(p.id.as_str());
+            notes.push(format!("{}: залипший sync.lock (процесса нет)", p.id));
+        } else {
+            notes.push(format!("{}: демон не запущен", p.id));
+        }
+        if let Some(line) = last_line(&state.join("sync.log")) {
+            notes.push(format!("{}: журнал: {line}", p.id));
+        }
+    }
+    if !stale.is_empty() {
+        return Check::new(
+            "agent-sync",
+            "warn",
+            format!("залипший sync.lock: {}", stale.join(", ")),
+        )
+        .msg(notes.join("; "))
+        .fix(
+            "удалите <P>\\agent-state\\sync.lock (процесса нет) и запустите \
+             hds agent sync --project <P>",
+        );
+    }
+    let check = Check::new(
+        "agent-sync",
+        "ok",
+        format!("демон зеркала: {running} из {} запущен", selected.len()),
+    )
+    .msg(notes.join("; "));
+    if running == 0 {
+        check.fix(
+            "hds agent sync --project <P> --interval 5 (или задача Планировщика: \
+             installers\\install_agent_sync_task.ps1)",
+        )
+    } else {
+        check
+    }
+}
+
+/// Пункт `agent-pending`: сколько вариантов агента ждут решения (`pending`).
+fn agent_pending_check(state: &Path, selected: &[&agent_projects::Project]) -> Check {
+    let mut total = 0usize;
+    let mut notes: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+    for p in selected {
+        let Some(db) = agent_settings::registry_db_in(state, &p.id) else {
+            continue;
+        };
+        if !db.is_file() {
+            notes.push(format!("{}: реестра нет (не зеркалился)", p.id));
+            continue;
+        }
+        match ArtifactRegistry::open(&db) {
+            Ok(registry) => match registry.list_pending() {
+                Ok(list) => {
+                    total += list.len();
+                    notes.push(format!("{}: {}", p.id, list.len()));
+                }
+                Err(e) => errors.push(format!("{}: {e}", p.id)),
+            },
+            Err(e) => errors.push(format!("{}: {e}", p.id)),
+        }
+    }
+    if !errors.is_empty() {
+        return Check::new("agent-pending", "warn", "реестр артефактов не читается")
+            .msg(errors.join("; "))
+            .fix("закройте hds agent sync и повторите (реестр — data\\agent\\registry\\<P>.db)");
+    }
+    let check = Check::new(
+        "agent-pending",
+        "ok",
+        if total == 0 {
+            "ожидают решения: нет".to_string()
+        } else {
+            format!("ожидают решения: {total}")
+        },
+    )
+    .msg(notes.join("; "));
+    if total == 0 {
+        check
+    } else {
+        check.fix("hds ui → вкладка «Агент» → «Результаты» («Принять» / «Отклонить»)")
+    }
+}
+
 pub fn run_checks(cfg: &Config) -> Vec<Check> {
     let mut checks = vec![
         check_profile(cfg),
@@ -2862,6 +3684,10 @@ pub fn run_checks(cfg: &Config) -> Vec<Check> {
     checks.push(check_transcribe_llm(cfg));
     // P6: анонимизация — venv/веса/БД/lease (`hds anon check` — та же сводка).
     checks.push(check_anonymize(cfg));
+    // A6.1: зона агента — конфиг, Node-воркер, Python, база меток v2, реестр
+    // проектов, ключи и токены, маршрут /mcp/agent/<P>, индекс, демон зеркала.
+    // При `agent.enabled: false` — ровно одна строка «агент выключен».
+    checks.extend(check_agent(cfg));
 
     // embedding-роль пробуем один раз — переиспользуем для контекста (как Python)
     let emb_probe = probe_role(cfg, "embedding", PROBE_TIMEOUT);
@@ -3752,5 +4578,185 @@ mod tests {
         assert!(present("ONNX"), "{:?}", s.models);
         assert!(!present("wav2vec2-ru"), "{:?}", s.models);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+/// A6.1: пункты `agent-*`. Конфиг временный, каталог состояния и корень
+/// поставки передаются явно (`check_agent_in`) — тесты не трогают env процесса
+/// и не стучатся в живой `mcp_http` (порт `1` заведомо закрыт).
+#[cfg(test)]
+mod agent_diag_tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use hds_core::config::Config;
+
+    use super::*;
+
+    fn cfg(yaml: &str) -> Config {
+        serde_yaml::from_str(yaml).unwrap()
+    }
+
+    /// Путь для YAML в одинарных кавычках (Windows-разделители → `/`).
+    fn ypath(p: &Path) -> String {
+        p.to_string_lossy().replace('\\', "/")
+    }
+
+    fn tmpdir(tag: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "hds-agent-diag-{tag}-{}-{nanos}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn find<'a>(checks: &'a [Check], id: &str) -> &'a Check {
+        checks.iter().find(|c| c.id == id).unwrap_or_else(|| {
+            panic!(
+                "нет пункта {id}: {:?}",
+                checks.iter().map(|c| c.id).collect::<Vec<_>>()
+            )
+        })
+    }
+
+    /// Конфиг стенда: зона в `zone`, порт заведомо закрыт (`1`), индекс — в зоне.
+    fn stand_cfg(zone: &Path) -> Config {
+        cfg(&format!(
+            "agent:\n  enabled: true\n  root: '{}'\n\
+             db_path: '{}'\n\
+             mcp_http:\n  host: '127.0.0.1'\n  port: 1\n\
+             anonymize:\n  db_path: '{}'\n",
+            ypath(zone),
+            ypath(&zone.join("index.db")),
+            ypath(&zone.join("anonymize.db")),
+        ))
+    }
+
+    #[test]
+    fn disabled_agent_is_single_skip_line() {
+        let checks = check_agent(&cfg("agent:\n  enabled: false\n"));
+        assert_eq!(checks.len(), 1, "должна быть ровно одна строка");
+        assert_eq!(checks[0].status, "warn", "[--] «агент выключен»");
+        assert!(checks[0].title.contains("выключен"), "{}", checks[0].title);
+        assert!(
+            checks.iter().all(|c| c.id == "agent"),
+            "выключенный агент не проверяет agent-*: {:?}",
+            checks.iter().map(|c| c.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn missing_root_fails() {
+        let dir = tmpdir("root");
+        let checks = check_agent_in(&cfg("agent:\n  enabled: true\n"), None, &dir, &dir);
+        let c = find(&checks, "agent-root");
+        assert_eq!(c.status, "fail", "title: {}", c.title);
+        assert!(c.fix.contains("agent.root"), "fix: {}", c.fix);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn missing_node_fails() {
+        let dir = tmpdir("node");
+        let zone = dir.join("zone");
+        fs::create_dir_all(&zone).unwrap();
+        let missing = dir.join("node-missing.exe");
+        let c = cfg(&format!(
+            "agent:\n  enabled: true\n  root: '{}'\n  node:\n    path: '{}'\n\
+             db_path: '{}'\n\
+             mcp_http:\n  port: 1\n",
+            ypath(&zone),
+            ypath(&missing),
+            ypath(&zone.join("index.db")),
+        ));
+        let checks = check_agent_in(&c, None, &dir.join("state"), &dir);
+        let node = find(&checks, "agent-node");
+        assert_eq!(node.status, "fail", "title: {}", node.title);
+        assert!(node.msg.contains("node-missing.exe"), "msg: {}", node.msg);
+        // Проектов нет — пункты «на проект» не появляются.
+        assert!(!checks.iter().any(|c| c.id == "agent-route"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn shared_directory_is_rejected_as_root() {
+        let dir = tmpdir("shared");
+        let disk_root = if cfg!(windows) {
+            Path::new("C:\\")
+        } else {
+            Path::new("/")
+        };
+        assert!(is_shared_dir(disk_root), "корень диска — общий каталог");
+        assert!(!is_shared_dir(&dir), "{} — личный каталог", dir.display());
+        let c = cfg(&format!(
+            "agent:\n  enabled: true\n  root: '{}'\n",
+            ypath(disk_root)
+        ));
+        let checks = check_agent_in(&c, None, &dir, &dir);
+        assert_eq!(find(&checks, "agent-root").status, "fail");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_with_hash_only_token_warns_without_leaking() {
+        let dir = tmpdir("token");
+        let zone = dir.join("zone");
+        let proj = dir.join("project");
+        fs::create_dir_all(&zone).unwrap();
+        fs::create_dir_all(&proj).unwrap();
+        let state = dir.join("state");
+        let agent_data = state.join("data").join("agent");
+        fs::create_dir_all(&agent_data).unwrap();
+        fs::write(
+            agent_data.join("projects.json"),
+            format!(
+                r#"{{"projects":[{{"id":"P0001","name":"Тест","path":"{}",
+                   "provider":"openrouter","model":"m"}}]}}"#,
+                ypath(&proj)
+            ),
+        )
+        .unwrap();
+        let hash = "ab".repeat(32);
+        fs::write(
+            agent_data.join("secrets.json"),
+            format!(
+                r#"{{"providers":{{"openrouter":{{"api_key":"sk-СЕКРЕТ-не-печатать"}}}},
+                   "projects":{{"P0001":{{"token_sha256":"{hash}"}}}}}}"#
+            ),
+        )
+        .unwrap();
+
+        let checks = check_agent_in(&stand_cfg(&zone), Some("P0001"), &state, &dir);
+        let token = find(&checks, "agent-token");
+        assert_eq!(token.status, "warn", "title: {}", token.title);
+        assert!(token.msg.contains("P0001"), "msg: {}", token.msg);
+        assert!(
+            token.msg.contains("только хэш"),
+            "ожидалось предупреждение «только хэш»: {}",
+            token.msg
+        );
+        // Значения секретов и хэша в пункты не попадают (I7, I8).
+        for c in &checks {
+            let text = format!("{} {} {}", c.title, c.msg, c.fix);
+            assert!(!text.contains(&hash), "хэш токена попал в пункт {}", c.id);
+            assert!(
+                !text.contains("sk-СЕКРЕТ"),
+                "ключ провайдера попал в пункт {}",
+                c.id
+            );
+        }
+        assert_eq!(find(&checks, "agent-provider").status, "ok");
+
+        // Проект не из реестра: `hds agent check --project` обязан ругаться.
+        let other = check_agent_in(&stand_cfg(&zone), Some("P0002"), &state, &dir);
+        assert_eq!(find(&other, "agent-projects").status, "fail");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

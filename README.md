@@ -1092,6 +1092,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | `hds agent history clear --project <P> [--session <ID>]` | очистить историю сессии; рядом остаётся бэкап `.json.bak`; без `--session` — последняя сессия |
 | `hds agent sync --project <P> [--once \| --interval SEC]` | зеркало папки проекта и `<P>\workspace`: без флагов и с `--once` — один проход (прямой путь, обратный путь, повторный прогон — 0 изменений), `--interval SEC` — демон по таймеру (по умолчанию `agent.sync.interval_sec`, 5 с); остановка — `hds stop` или Ctrl+C; журнал — `<P>\agent-state\sync.log` |
 | `hds agent result accept\|reject\|conflict --project <P> --path <отн. путь> [--choice agent\|new\|delegate]` | решение по варианту агента из `.hds-agent\pending`: «Принять» (копия в `backup` и замена оригинала), «Отклонить» (сообщение агенту), «Конфликт» — три исхода |
+| `hds agent check [--project <P>] [--json]` | диагностика зоны агента (пункты `agent-*` из `hds check`): зона, Node и `dist/worker.mjs`, Python-воркер, база меток (схема v2), `projects.json`, ключ провайдера и токен `disk-search` («задан/нет», без значений), маршрут `/mcp/agent/<P>` (health, 401 без токена, 200 с токеном), индекс зоны, демон зеркала и очередь решений; код 1 — есть критическая проблема |
 
 ### Страница управления и подключение ассистентов
 

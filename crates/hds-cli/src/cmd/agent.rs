@@ -44,6 +44,7 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
     };
     match sub {
         "init" => cmd_init(cfg, rest),
+        "check" => cmd_check(cfg, rest),
         "token" => cmd_token(cfg, rest),
         "project" => crate::cmd::agent_run::cmd_project(cfg, rest),
         "run" => crate::cmd::agent_run::cmd_run(cfg, rest),
@@ -72,6 +73,10 @@ fn usage() -> String {
      \x20 token <P> [--ttl-days N]\n\
      \x20       (токен проекта для /mcp/agent/<P>: в файл — хэш, plain печатается один раз;\n\
      \x20        без --ttl-days токен бессрочный)\n\
+     \x20 check [--project <P>] [--json]\n\
+     \x20       (пункты agent-* из `hds check`: зона, Node-воркер, Python, база меток,\n\
+     \x20        реестр проектов, ключи и токены, маршрут /mcp/agent/<P>, индекс,\n\
+     \x20        демон зеркала; значения секретов не печатаются; A6.1)\n\
      \x20 project add <P> --name NAME --path DIR [--provider NAME] [--model M]\n\
      \x20       (реестр проектов data\\agent\\projects.json; провайдер по умолчанию\n\
      \x20        openrouter, модель — из В-12; имя — имя папки, если не задано)\n\
@@ -486,5 +491,56 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
             eprintln!("индексация: {}", e.message());
             1
         }
+    }
+}
+
+/// `hds agent check [--project <P>] [--json]` — пункты `agent-*` из `hds check`
+/// (A6.1); с `--project` — только по одному проекту.
+///
+/// Коды: 0 — нет `fail`, 1 — есть, 2 — плохие аргументы. Значения секретов и
+/// токенов не печатаются (I7, I8) — пункты говорят только «задан/нет».
+fn cmd_check(cfg: &Config, args: &[String]) -> i32 {
+    let json = has(args, "--json");
+    let project = match flag_val(args, "--project") {
+        Some(raw) => {
+            let id = raw.trim();
+            if !is_agent_project(id) {
+                eprintln!("agent check: идентификатор проекта — P + 4 цифры (D21): '{id}'");
+                return 2;
+            }
+            Some(id.to_string())
+        }
+        None => None,
+    };
+    let checks = hds_index::diag::check_agent_for(cfg, project.as_deref());
+    let ok = !checks.iter().any(|c| c.status == "fail");
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "ok": ok,
+                "project": project,
+                "checks": crate::cmd::check::checks_json(&checks),
+            })
+        );
+        return if ok { 0 } else { 1 };
+    }
+    println!("== hermes-disk-search: проверки зоны агента ==");
+    if let Some(id) = &project {
+        println!("проект: {id}");
+    }
+    crate::cmd::check::print_checks(&checks);
+    println!(
+        "Итог: {}",
+        if ok {
+            "зона готова"
+        } else {
+            "есть критические проблемы"
+        }
+    );
+    if ok {
+        0
+    } else {
+        1
     }
 }

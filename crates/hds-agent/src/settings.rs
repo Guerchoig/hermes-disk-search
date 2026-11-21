@@ -225,10 +225,13 @@ pub fn state_dir_for(cfg: &Config, project: &str) -> Option<PathBuf> {
 
 /// `projects.json` в зоне пользователя: `<state_dir>/data/agent/projects.json`.
 pub fn projects_file(cfg: &Config) -> PathBuf {
-    state_dir(cfg)
-        .join("data")
-        .join("agent")
-        .join("projects.json")
+    projects_file_in(&state_dir(cfg))
+}
+
+/// То же от явного каталога состояния (A6.1: диагностика подставляет свой —
+/// так тесты не зависят от `HDS_ROOT`/`HDS_STATE_DIR` процесса).
+pub fn projects_file_in(state: &Path) -> PathBuf {
+    state.join("data").join("agent").join("projects.json")
 }
 
 /// Каталог реестров артефактов: `<state_dir>/data/agent/registry` (TR-7.2).
@@ -236,7 +239,12 @@ pub fn projects_file(cfg: &Config) -> PathBuf {
 /// Реестр — зона пользователя: он хранит пути проекта (с настоящими именами),
 /// поэтому в анонимную зону (`<agent.root>`) не попадает.
 pub fn registry_dir(cfg: &Config) -> PathBuf {
-    state_dir(cfg).join("data").join("agent").join("registry")
+    registry_dir_in(&state_dir(cfg))
+}
+
+/// То же от явного каталога состояния (A6.1: пункт `agent-pending`).
+pub fn registry_dir_in(state: &Path) -> PathBuf {
+    state.join("data").join("agent").join("registry")
 }
 
 /// БД реестра артефактов проекта: `.../registry/<P>.db` (TR-7.2).
@@ -244,10 +252,15 @@ pub fn registry_dir(cfg: &Config) -> PathBuf {
 /// `None`, если `project` не похож на идентификатор проекта (`P` + 4 цифры,
 /// D21): иначе значение вида `..\..\x` построило бы путь за пределы каталога.
 pub fn registry_db(cfg: &Config, project: &str) -> Option<PathBuf> {
+    registry_db_in(&state_dir(cfg), project)
+}
+
+/// То же от явного каталога состояния (A6.1: диагностика проекта).
+pub fn registry_db_in(state: &Path, project: &str) -> Option<PathBuf> {
     if !hds_core::roots::is_agent_project(project) {
         return None;
     }
-    Some(registry_dir(cfg).join(format!("{project}.db")))
+    Some(registry_dir_in(state).join(format!("{project}.db")))
 }
 
 /// Путь к `secrets.json` (провайдеры, MCP, токены) — `data\agent\secrets.json`.
@@ -258,10 +271,12 @@ pub fn secrets_file(cfg: &Config) -> PathBuf {
             return PathBuf::from(p);
         }
     }
-    state_dir(cfg)
-        .join("data")
-        .join("agent")
-        .join("secrets.json")
+    secrets_file_in(&state_dir(cfg))
+}
+
+/// То же от явного каталога состояния (A6.1: диагностика без env-перекрытия).
+pub fn secrets_file_in(state: &Path) -> PathBuf {
+    state.join("data").join("agent").join("secrets.json")
 }
 
 /// Существует ли путь как каталог (мелкая утилита для сообщений об ошибках).
