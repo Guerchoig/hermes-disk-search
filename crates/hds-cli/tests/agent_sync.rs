@@ -60,6 +60,11 @@ impl Stand {
     }
 
     fn register(&self, id: &str) -> i32 {
+        self.register_with_path(id, &self.project_dir)
+    }
+
+    /// Зарегистрировать проект с явной папкой (A6.2: стенд из двух проектов).
+    fn register_with_path(&self, id: &str, path: &Path) -> i32 {
         cmd_agent_cfg(
             &self.cfg,
             &[
@@ -67,9 +72,9 @@ impl Stand {
                 "add".to_string(),
                 id.to_string(),
                 "--name".to_string(),
-                "Пилот".to_string(),
+                format!("Проект {id}"),
                 "--path".to_string(),
-                self.project_dir.to_string_lossy().to_string(),
+                path.to_string_lossy().to_string(),
             ],
         )
     }
@@ -92,7 +97,12 @@ impl Stand {
 
     /// Каталог `agent-state` проекта (`settings::state_dir_for`, A4.6).
     fn state_dir(&self) -> PathBuf {
-        self.dir.join("zone").join("P0001").join("agent-state")
+        self.state_dir_of("P0001")
+    }
+
+    /// То же для любого проекта (`--all`, A6.2).
+    fn state_dir_of(&self, id: &str) -> PathBuf {
+        self.dir.join("zone").join(id).join("agent-state")
     }
 }
 
@@ -531,5 +541,153 @@ fn sync_journal_has_paths_but_no_values() {
     assert!(
         !log.contains("Контакт:"),
         "текст документа в журнале (I8): {log}"
+    );
+}
+
+/// A6.2: `--all --once` обходит все проекты реестра.
+///
+/// Недоступная папка проекта — пропуск со строкой `problem` в его журнале:
+/// остальные проекты обрабатываются (критерий A6.2), реестр пропущенного
+/// проекта не создаётся, а код команды — 0 (пропуск не ошибка).
+#[test]
+fn sync_all_once_covers_projects_and_reports_missing_folder() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-once", true);
+    let second = stand.dir.join("Проект-2");
+    fs::create_dir_all(&second).unwrap();
+    assert_eq!(stand.register("P0001"), 0);
+    assert_eq!(stand.register_with_path("P0002", &second), 0);
+    // Папку второго проекта «потеряли» уже после регистрации.
+    fs::remove_dir_all(&second).unwrap();
+
+    assert_eq!(
+        stand.sync(&["--all", "--once"]),
+        0,
+        "пропуск проекта не валит остальные"
+    );
+
+    let first_log = fs::read_to_string(stand.state_dir().join("sync.log")).expect("журнал P0001");
+    assert!(
+        first_log.contains("start mode=once project=P0001"),
+        "{first_log}"
+    );
+    assert!(
+        first_log.lines().any(|l| l.contains(" pass ")),
+        "у проекта с папкой прошёл проход: {first_log}"
+    );
+    assert!(first_log.contains("stop reason=once"), "{first_log}");
+    assert!(
+        stand.registry_path("P0001").is_file(),
+        "реестр обработанного проекта создан"
+    );
+
+    let second_log = fs::read_to_string(stand.state_dir_of("P0002").join("sync.log"))
+        .expect("журнал пропущенного проекта");
+    assert!(
+        second_log.contains("problem project=P0002 missing"),
+        "пропуск недоступной папки — строка problem: {second_log}"
+    );
+    assert!(
+        !second_log.contains("start "),
+        "проект без папки не запускается: {second_log}"
+    );
+    assert!(
+        !stand.registry_path("P0002").exists(),
+        "реестр пропущенного проекта не создаётся"
+    );
+}
+
+/// A6.2: `--all` без `--once` — демон с `sync.lock` на каждый проект.
+///
+/// Второй запуск при живом демоне не уходит в цикл: проекты уже под
+/// наблюдением — «уже запущен» и код 0 (повторный запуск задачи автозапуска не
+/// конфликтует с ручным). `hds stop` (`index.stop`) останавливает все проекты,
+/// `sync.lock` снимаются, файл сигнала не трогается (AG-27).
+#[test]
+fn sync_all_daemon_holds_per_project_locks_and_stops_on_signal() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-daemon", true);
+    let second = stand.dir.join("Проект-2");
+    fs::create_dir_all(&second).unwrap();
+    assert_eq!(stand.register("P0001"), 0);
+    assert_eq!(stand.register_with_path("P0002", &second), 0);
+
+    let cfg = stand.cfg.clone();
+    let args: Vec<String> = ["sync", "--all", "--interval", "1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let daemon = std::thread::spawn(move || cmd_agent_cfg(&cfg, &args));
+
+    // Демон занимает по `sync.lock` на каждый проект.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let p1 = stand.state_dir_of("P0001").join("sync.lock").is_file();
+        let p2 = stand.state_dir_of("P0002").join("sync.lock").is_file();
+        if p1 && p2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "демон не занял sync.lock (P0001: {p1}, P0002: {p2})"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    // Второй запуск: все проекты уже под наблюдением — быстро и с кодом 0.
+    let started = std::time::Instant::now();
+    assert_eq!(
+        stand.sync(&["--all", "--interval", "1"]),
+        0,
+        "повторный запуск — «уже запущен», код 0"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "второй запуск не должен крутиться в цикле: {:?}",
+        started.elapsed()
+    );
+
+    let stop_file = stand.dir.path.join("index.stop");
+    fs::write(&stop_file, b"").unwrap();
+    assert_eq!(daemon.join().unwrap(), 0, "остановка по сигналу — код 0");
+    assert!(
+        stop_file.exists(),
+        "index.stop не снимается демоном зеркала: его ждёт hds watch (AG-27)"
+    );
+    for id in ["P0001", "P0002"] {
+        let state = stand.state_dir_of(id);
+        assert!(!state.join("sync.lock").exists(), "{id}: sync.lock снят");
+        let log = fs::read_to_string(state.join("sync.log")).expect("журнал демона");
+        assert!(
+            log.contains(&format!("start mode=daemon project={id} interval=1s")),
+            "{id}: {log}"
+        );
+        assert!(
+            log.lines().any(|l| l.contains(" pass ")),
+            "{id}: проход был: {log}"
+        );
+        assert!(log.contains("stop reason=index.stop"), "{id}: {log}");
+    }
+}
+
+/// A6.2: отказы `--all` — противоречивые флаги (код 2, до файлов) и пустой
+/// реестр проектов (код 1: зеркалить нечего).
+#[test]
+fn sync_all_rejects_conflicting_flags_and_empty_registry() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-reject", true);
+    assert_eq!(stand.sync(&["--all", "--project", "P0001"]), 2);
+    assert_eq!(stand.sync(&["--all", "--once", "--interval", "5"]), 2);
+    assert_eq!(
+        stand.sync(&["--all", "--once"]),
+        1,
+        "пустой projects.json — зеркалить нечего"
+    );
+    assert!(
+        fs::read_dir(stand.dir.join("zone"))
+            .unwrap()
+            .next()
+            .is_none(),
+        "отказы не создают каталогов проектов в зоне"
     );
 }

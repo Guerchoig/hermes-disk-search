@@ -30,6 +30,14 @@
 //! процесса: `sync.lock` остаётся и снимается следующим стартом как устаревший
 //! (`hds_index::watch::lock_is_stale`), строка `stop` не пишется — журнал
 //! сохраняет всё до последнего начатого прохода.
+//!
+//! **A6.2:** `--all` — все проекты `projects.json` в одном процессе (В-A6-2).
+//! У каждого проекта свой `sync.lock`, свой журнал `<P>\agent-state\sync.log`,
+//! свой реестр и свои воркеры: несколько демонов по разным проектам не мешают
+//! друг другу. Недоступная папка — строка `problem` в журнале проекта и
+//! пропуск, остальные проекты обрабатываются. `--all` без `--once` — демон
+//! (задача автозапуска запускает именно эту команду): интервал берётся из
+//! `agent.sync.interval_sec`, `--interval SEC` перекрывает.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -86,6 +94,9 @@ impl StopSignal {
 }
 
 /// Точка входа `hds agent sync ...`.
+///
+/// `--project <P>` — один проект (A4.1…A4.6), `--all` — все проекты
+/// `projects.json` в одном процессе (A6.2, В-A6-2).
 pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         println!("{}", usage());
@@ -99,15 +110,24 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
             return 2;
         }
     };
-    let id = parsed.project.clone();
-    let Some(db_path) = settings::registry_db(cfg, &id) else {
+    if parsed.all {
+        return sync_all(cfg, &parsed);
+    }
+    sync_one(cfg, &parsed)
+}
+
+/// `--project <P>`: прежний путь A4.1…A4.6 — коды и сообщения не меняются.
+fn sync_one(cfg: &Config, parsed: &SyncArgs) -> i32 {
+    let id = parsed.project.clone().unwrap_or_default();
+    // Не идентификатор проекта — отказ до построения пути (D21).
+    if settings::registry_db(cfg, &id).is_none() {
         eprintln!("agent sync: '{id}' не похож на идентификатор проекта (P + 4 цифры, D21)");
         return 2;
-    };
-    let project_path = match projects::get(cfg, &id) {
+    }
+    let project = match projects::get(cfg, &id) {
         Some(project) => {
             println!("[i] проект {} — папка {}", project.id, project.path);
-            PathBuf::from(project.path)
+            project
         }
         None => {
             eprintln!("agent sync: проект {id} не зарегистрирован (hds agent project add)");
@@ -118,6 +138,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         eprintln!("agent sync: анонимная зона выключена (agent.enabled: false)");
         return 1;
     }
+    let project_path = PathBuf::from(&project.path);
     if !project_path.is_dir() {
         eprintln!(
             "agent sync: папка проекта не найдена: {}",
@@ -125,32 +146,94 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         );
         return 1;
     }
-
     let sync = settings::sync_settings(cfg);
     let interval_sec = parsed.interval.unwrap_or(sync.interval_sec);
-    let Some(state_dir) = settings::state_dir_for(cfg, &id) else {
+    let root = hds_core::config::project_root();
+    let stop = StopSignal::new(root.join("index.stop"), SystemTime::now());
+    run_project(
+        cfg,
+        &project,
+        &project_path,
+        parsed.daemon(),
+        interval_sec,
+        &stop,
+    )
+    .code
+}
+
+/// Что вышло с одним проектом (`--all` продолжает остальные).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProjectOutcome {
+    /// Код по проекту (`0/1/2` — как у одиночной команды).
+    code: i32,
+    /// Проходы/цикл действительно шли (не «уже запущен» и не отказ).
+    started: bool,
+}
+
+impl ProjectOutcome {
+    fn failed(code: i32) -> ProjectOutcome {
+        ProjectOutcome {
+            code,
+            started: false,
+        }
+    }
+
+    /// Lock занят: проект ведёт другой демон — это норма, не ошибка (A4.6).
+    fn busy() -> ProjectOutcome {
+        ProjectOutcome {
+            code: 0,
+            started: false,
+        }
+    }
+
+    fn done(code: i32) -> ProjectOutcome {
+        ProjectOutcome {
+            code,
+            started: true,
+        }
+    }
+}
+
+/// Один проект: lock → журнал → реестр → зеркало → проходы → остановка.
+///
+/// Одна реализация для `--project` и `--all`: иначе `sync.log` и коды двух
+/// режимов со временем разъедутся.
+fn run_project(
+    cfg: &Config,
+    project: &projects::Project,
+    project_path: &Path,
+    daemon: bool,
+    interval_sec: u64,
+    stop: &StopSignal,
+) -> ProjectOutcome {
+    let id = project.id.as_str();
+    let Some(db_path) = settings::registry_db(cfg, id) else {
+        eprintln!("agent sync: '{id}' не похож на идентификатор проекта (P + 4 цифры, D21)");
+        return ProjectOutcome::failed(2);
+    };
+    let Some(state_dir) = settings::state_dir_for(cfg, id) else {
         eprintln!("agent sync: не задан agent.root — нет каталога agent-state для журнала");
-        return 1;
+        return ProjectOutcome::failed(1);
     };
     // Каталог нужен до lock: `WatchLock` занимает файл через `create_new`, а
     // на отсутствующем каталоге это ошибка, которую он трактует как «занято».
     if let Err(e) = std::fs::create_dir_all(&state_dir) {
         eprintln!("agent sync: не создать {}: {e}", state_dir.display());
-        return 1;
+        return ProjectOutcome::failed(1);
     }
     // Lock демона — свой файл: боевой `watch.lock` индексатора не мешает, а
     // второй демон зеркала по тому же проекту не нужен. Занят — «уже запущен»
     // и код 0, как у `hds watch` (A4.6).
-    let lock = if parsed.daemon() {
+    let lock = if daemon {
         match WatchLock::acquire_named(&state_dir, "sync.lock", 3) {
             Ok(Some(lock)) => Some(lock),
             Ok(None) => {
                 println!("[i] демон зеркала уже запущен (sync.lock) — выхожу");
-                return 0;
+                return ProjectOutcome::busy();
             }
             Err(e) => {
                 eprintln!("agent sync: не занять sync.lock: {}", e.message());
-                return 1;
+                return ProjectOutcome::failed(1);
             }
         }
     } else {
@@ -161,7 +244,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         Ok(log) => log,
         Err(e) => {
             eprintln!("agent sync: журнал {}: {e}", log_path.display());
-            return 1;
+            return ProjectOutcome::failed(1);
         }
     };
 
@@ -169,7 +252,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         Ok(r) => r,
         Err(e) => {
             eprintln!("agent sync: {e}");
-            return 1;
+            return ProjectOutcome::failed(1);
         }
     };
 
@@ -177,7 +260,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         (Ok(count), Ok(pending)) => (count, pending.len()),
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("agent sync: {e}");
-            return 1;
+            return ProjectOutcome::failed(1);
         }
     };
     println!("[ok] реестр: {}", registry.path().display());
@@ -185,13 +268,13 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     println!("[ok] журнал: {}", log.path().display());
 
     let root = hds_core::config::project_root();
-    let workspace = settings::workspace_dir(cfg, &id).unwrap_or_default();
+    let workspace = settings::workspace_dir(cfg, id).unwrap_or_default();
     let mut anonymizer = LazyAnonymizer::new(anonymizer_factory(cfg, &root));
     let mut extractor = LazyExtractor::new(extractor_factory(&root));
     let mut mirror = match Mirror::from_config(
         cfg,
-        &id,
-        &project_path,
+        id,
+        project_path,
         &registry,
         &mut anonymizer,
         &mut extractor,
@@ -199,7 +282,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         Ok(m) => m,
         Err(e) => {
             eprintln!("agent sync: {e}");
-            return 1;
+            return ProjectOutcome::failed(1);
         }
     };
 
@@ -208,14 +291,14 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     //
     // AG-27: `index.stop` — общий файл с `hds watch`/`hds stop`. Демон его
     // **не снимает** (иначе второй демон никогда не увидит сигнал) и не
-    // считает сигналом файл, который лежал до старта.
-    let stop = StopSignal::new(root.join("index.stop"), SystemTime::now());
-    let (passes, changes, reason, code) = if parsed.daemon() {
+    // считает сигналом файл, который лежал до старта. Сигнал передаётся
+    // снаружи: в `--all` он общий для всех проектов.
+    let (passes, changes, reason, code) = if daemon {
         let interval = Duration::from_secs(interval_sec);
-        log.start("daemon", &id, &project_path, &workspace, Some(interval));
+        log.start("daemon", id, project_path, &workspace, Some(interval));
         println!(
-            "[..] демон зеркала: интервал {interval_sec} с; остановка — `hds stop` \
-             (index.stop) или Ctrl+C"
+            "[..] демон зеркала: проект {id}, интервал {interval_sec} с; остановка — \
+             `hds stop` (index.stop) или Ctrl+C"
         );
         let summary = run_loop(
             interval,
@@ -235,7 +318,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
             0,
         )
     } else {
-        log.start("once", &id, &project_path, &workspace, None);
+        log.start("once", id, project_path, &workspace, None);
         match mirror.sync_once() {
             Ok(report) => {
                 log.pass(&report);
@@ -262,11 +345,152 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     drop(lock);
     log.stop(reason.as_str(), passes, changes);
     println!(
-        "[ok] остановлено: проходов {passes}, изменений {changes}, причина {}; журнал {}",
+        "[ok] остановлено: проект {id}, проходов {passes}, изменений {changes}, причина {}; журнал {}",
         reason.as_str(),
         log.path().display()
     );
-    code
+    ProjectOutcome::done(code)
+}
+
+/// `--all` (A6.2, В-A6-2): все проекты `projects.json` в одном процессе.
+///
+/// * демон — по потоку на проект: у каждого свой `sync.lock`, журнал, реестр и
+///   воркеры, сон интервала свой, а остановка общая (`index.stop`);
+/// * `--once` — по одному проходу на проект подряд, без потоков и без lock
+///   (как у `--project <P> --once`);
+/// * папка проекта недоступна — `problem` в журнале проекта и пропуск:
+///   остальные проекты обрабатываются (критерий A6.2). В демоне пропуск не
+///   мешает проекту подняться позже — `sync.lock` не занимается;
+/// * проект уже под наблюдением другого демона (`sync.lock` занят) — это
+///   норма: задача автозапуска и ручной запуск не конфликтуют.
+fn sync_all(cfg: &Config, parsed: &SyncArgs) -> i32 {
+    if !settings::settings(cfg).enabled {
+        eprintln!("agent sync: анонимная зона выключена (agent.enabled: false)");
+        return 1;
+    }
+    let registry = match projects::load(cfg) {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("agent sync: projects.json: {e}");
+            return 1;
+        }
+    };
+    if registry.projects.is_empty() {
+        eprintln!(
+            "agent sync: в projects.json нет проектов (hds agent project add P0001 --path DIR)"
+        );
+        return 1;
+    }
+    let sync = settings::sync_settings(cfg);
+    let interval_sec = parsed.interval.unwrap_or(sync.interval_sec);
+    let root = hds_core::config::project_root();
+    let stop = StopSignal::new(root.join("index.stop"), SystemTime::now());
+    println!(
+        "[i] проектов в реестре: {}; режим: {}",
+        registry.projects.len(),
+        if parsed.daemon() {
+            "демон"
+        } else {
+            "один проход"
+        }
+    );
+
+    if parsed.daemon() {
+        // Один процесс, по потоку на проект: каждый проект живёт своим
+        // ритмом, но `hds stop` останавливает все сразу.
+        let mut handles = Vec::new();
+        let mut missing = 0usize;
+        for project in &registry.projects {
+            let path = PathBuf::from(&project.path);
+            if !path.is_dir() {
+                note_missing_project(cfg, project, &path);
+                missing += 1;
+                continue;
+            }
+            println!("[i] проект {} — папка {}", project.id, project.path);
+            let cfg = cfg.clone();
+            let project = project.clone();
+            let stop = stop.clone();
+            handles.push(std::thread::spawn(move || {
+                run_project(&cfg, &project, &path, true, interval_sec, &stop)
+            }));
+        }
+        let mut started = 0usize;
+        let mut busy = 0usize;
+        let mut failed = 0usize;
+        for handle in handles {
+            match handle.join() {
+                Ok(outcome) if outcome.started => started += 1,
+                Ok(outcome) if outcome.code == 0 => busy += 1,
+                _ => failed += 1,
+            }
+        }
+        println!(
+            "[ok] --all: запущено {started}, уже работали {busy}, пропущено (папка) {missing}, \
+             отказов {failed}"
+        );
+        if started > 0 {
+            return 0;
+        }
+        // Ни один проект не запустился: либо все уже под наблюдением (это
+        // норма — повторный запуск задачи автозапуска), либо делать нечего.
+        if failed == 0 && busy > 0 {
+            println!("[i] демон зеркала уже запущен для всех проектов (sync.lock) — выхожу");
+            return 0;
+        }
+        return 1;
+    }
+
+    // `--once`: один проход по каждому проекту подряд.
+    let mut ok = true;
+    let mut processed = 0usize;
+    for project in &registry.projects {
+        let path = PathBuf::from(&project.path);
+        if !path.is_dir() {
+            note_missing_project(cfg, project, &path);
+            continue;
+        }
+        println!("[i] проект {} — папка {}", project.id, project.path);
+        let outcome = run_project(cfg, project, &path, false, interval_sec, &stop);
+        processed += 1;
+        if outcome.code != 0 {
+            ok = false;
+        }
+    }
+    println!(
+        "[ok] --all: проектов {}, прошли проход {processed}",
+        registry.projects.len()
+    );
+    if ok && processed > 0 {
+        0
+    } else {
+        1
+    }
+}
+
+/// Проект без папки: `problem` в его журнале и пропуск (критерий A6.2).
+///
+/// `sync.lock` не занимается: как только папка вернётся, проект поднимется
+/// обычным порядком — следующим проходом демона или ручным запуском.
+fn note_missing_project(cfg: &Config, project: &projects::Project, path: &Path) {
+    eprintln!(
+        "[!] проект {}: папка проекта не найдена — пропуск ({})",
+        project.id,
+        path.display()
+    );
+    let Some(state_dir) = settings::state_dir_for(cfg, &project.id) else {
+        return;
+    };
+    if std::fs::create_dir_all(&state_dir).is_err() {
+        return;
+    }
+    if let Ok(mut log) = SyncLog::open(&state_dir.join("sync.log")) {
+        log.problem(&format!(
+            "project={} missing source={}",
+            project.id,
+            path.display()
+        ));
+    }
 }
 
 /// Фабрики воркеров живут в `hds-agent` (A5.1): тем же способом поднимает
@@ -502,6 +726,11 @@ impl SyncLog {
         }
     }
 
+    /// `problem`: одна строка о проблеме (пропуск проекта в `--all`, A6.2).
+    pub fn problem(&mut self, problem: &str) {
+        self.line(&format!("problem {problem}"));
+    }
+
     /// `error`: проход целиком не удался (в режиме демона это не смертельно).
     pub fn error(&mut self, message: &str) {
         self.line(&format!("error {message}"));
@@ -549,11 +778,14 @@ fn print_report(report: &SyncReport) {
     );
 }
 
-/// Разобранные аргументы `hds agent sync` (A4.6: `--once | --interval SEC`).
+/// Разобранные аргументы `hds agent sync` (A4.6: `--once | --interval SEC`;
+/// A6.2: `--all` — все проекты `projects.json` в одном процессе).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SyncArgs {
-    /// Идентификатор проекта (`P` + 4 цифры, D21).
-    pub project: String,
+    /// Идентификатор проекта (`P` + 4 цифры, D21); `None` при `--all`.
+    pub project: Option<String>,
+    /// `--all` — все проекты реестра в одном процессе (A6.2, В-A6-2).
+    pub all: bool,
     /// `--once` — один проход (тот же режим, что и без флагов).
     pub once: bool,
     /// `--interval SEC` — демон; `None` — разовый проход.
@@ -561,26 +793,35 @@ pub struct SyncArgs {
 }
 
 impl SyncArgs {
-    /// Демон ли это (задан `--interval`).
+    /// Демон ли это (`--interval`).
+    ///
+    /// `--all` без `--once` — тоже демон: задачу автозапуска запускают как
+    /// `hds agent sync --all`, и разовый проход там не имел бы смысла (A6.2).
     pub fn daemon(&self) -> bool {
-        self.interval.is_some()
+        self.interval.is_some() || (self.all && !self.once)
     }
 }
 
-/// Разбор аргументов: `--project <P>`/`--project=<P>`, `--once`,
+/// Разбор аргументов: `--project <P>`/`--project=<P>`, `--all`, `--once`,
 /// `--interval SEC`/`--interval=SEC`.
 ///
 /// Отказы (код 2) — те же, что были в A4.1, плюс правила A4.6: `--interval`
 /// без значения, `0`, отрицательное или не число, и `--once` вместе с
 /// `--interval` (один проход и демон — разные режимы, угадывать нечего).
+/// A6.2: `--all` и `--project` вместе — тоже отказ (один режим на запуск).
 pub fn parse_args(args: &[String]) -> Result<SyncArgs, String> {
     let mut project: Option<String> = None;
+    let mut all = false;
     let mut once = false;
     let mut interval: Option<u64> = None;
     let mut i = 0usize;
     while i < args.len() {
         let arg = args[i].as_str();
         i += 1;
+        if arg == "--all" {
+            all = true;
+            continue;
+        }
         if arg == "--once" {
             once = true;
             continue;
@@ -614,11 +855,15 @@ pub fn parse_args(args: &[String]) -> Result<SyncArgs, String> {
     if once && interval.is_some() {
         return Err("--once и --interval вместе: выберите один режим".to_string());
     }
-    let Some(project) = project else {
-        return Err("нужен --project <P0001>".to_string());
-    };
+    if all && project.is_some() {
+        return Err("--all и --project вместе: выберите один режим".to_string());
+    }
+    if !all && project.is_none() {
+        return Err("нужен --project <P0001> или --all".to_string());
+    }
     Ok(SyncArgs {
         project,
+        all,
         once,
         interval,
     })
@@ -636,7 +881,7 @@ fn parse_interval(raw: &str) -> Result<u64, String> {
 }
 
 fn usage() -> String {
-    "использование: hds agent sync --project <P> [--once | --interval SEC]\n\
+    "использование: hds agent sync (--project <P> | --all) [--once | --interval SEC]\n\
      \x20 (один проход: обход папки проекта, wait_stable, образы docx/xlsx/txt/md/xml\n\
      \x20  и текстовые образы pdf/pptx/mpp, unsupported/too_big, удаление и\n\
      \x20  переименование, обратный путь: agent_new → папка проекта, agent_changed →\n\
@@ -645,6 +890,11 @@ fn usage() -> String {
      \x20 --interval SEC — демон: проход, сон SEC (дефолт agent.sync.interval_sec = 5),\n\
      \x20  остановка — `hds stop` (index.stop) или Ctrl+C; lock — <P>\\agent-state\\sync.lock;\n\
      \x20  журнал — <agent.root>\\P<NNNN>\\agent-state\\sync.log (без содержимого, I8);\n\
+     \x20 --all — все проекты data\\agent\\projects.json в одном процессе (A6.2):\n\
+     \x20  у каждого свой sync.lock, журнал, реестр и воркеры; папка проекта\n\
+     \x20  недоступна — пропуск со строкой problem в его журнале; без --once — демон\n\
+     \x20  с интервалом agent.sync.interval_sec (автозапуск:\n\
+     \x20  installers\\install_agent_sync_task.ps1);\n\
      \x20 путь реестра: <state_dir>\\data\\agent\\registry\\<P>.db, TR-7.2)"
         .to_string()
 }
@@ -701,7 +951,8 @@ mod tests {
             items.iter().map(|s| s.to_string()).collect()
         }
         let daemon = parse_args(&args(&["--project", "P0001", "--interval", "7"])).unwrap();
-        assert_eq!(daemon.project, "P0001");
+        assert_eq!(daemon.project.as_deref(), Some("P0001"));
+        assert!(!daemon.all);
         assert!(daemon.daemon());
         assert_eq!(daemon.interval, Some(7));
         assert!(parse_args(&args(&["--project", "P0001", "--interval=3"]))
@@ -709,6 +960,19 @@ mod tests {
             .daemon());
         let once = parse_args(&args(&["--project=P0001", "--once"])).unwrap();
         assert!(once.once && !once.daemon());
+
+        // A6.2: `--all` — все проекты реестра в одном процессе.
+        let all = parse_args(&args(&["--all"])).unwrap();
+        assert!(all.all && all.project.is_none());
+        assert!(
+            all.daemon(),
+            "--all без --once — демон (задача автозапуска)"
+        );
+        assert!(!parse_args(&args(&["--all", "--once"])).unwrap().daemon());
+        assert!(parse_args(&args(&["--all", "--interval", "9"]))
+            .unwrap()
+            .daemon());
+
         for bad in [
             vec!["--project", "P0001", "--interval", "0"],
             vec!["--project", "P0001", "--interval", "-5"],
@@ -717,6 +981,8 @@ mod tests {
             vec!["--project", "P0001", "--once", "--interval", "5"],
             vec!["--project", "P0001", "--bogus"],
             vec!["--once"],
+            vec!["--all", "--project", "P0001"],
+            vec!["--all", "--once", "--interval", "5"],
         ] {
             assert!(
                 parse_args(&args(&bad)).is_err(),
@@ -754,6 +1020,7 @@ mod tests {
         log.pass(&report);
         log.problems(&report);
         log.error("реестр: занят");
+        log.problem("project=P0002 missing source=D:/нет");
         log.stop(StopReason::Once.as_str(), 1, report.changes());
         drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -766,10 +1033,14 @@ mod tests {
         );
         assert!(text.contains("error реестр: занят"), "{text}");
         assert!(
+            text.contains("problem project=P0002 missing source=D:/нет"),
+            "пропуск проекта в --all пишется строкой problem (A6.2): {text}"
+        );
+        assert!(
             text.contains("stop reason=once passes=1 changes=3"),
             "{text}"
         );
-        assert_eq!(text.lines().count(), 5, "одна запись — одна строка: {text}");
+        assert_eq!(text.lines().count(), 6, "одна запись — одна строка: {text}");
         cleanup(&dir);
     }
 

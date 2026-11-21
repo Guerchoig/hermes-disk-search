@@ -3607,8 +3607,8 @@ fn agent_sync_check(root: &Path, selected: &[&agent_projects::Project]) -> Check
     .msg(notes.join("; "));
     if running == 0 {
         check.fix(
-            "hds agent sync --project <P> --interval 5 (или задача Планировщика: \
-             installers\\install_agent_sync_task.ps1)",
+            "hds agent sync --all (все проекты; автозапуск: \
+             installers\\install_agent_sync_task.ps1) или hds agent sync --project <P> --interval 5",
         )
     } else {
         check

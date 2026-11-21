@@ -1091,6 +1091,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_app_versi
 | `hds agent run --project <P> [--prompt <текст>] [--session <ID>] [--max-iterations N] [--subagents] [--json] [--quiet] [--dry-run]` | ход агента по проекту; без `--prompt` реплика читается со stdin; `--session` возобновляет сессию вместе с историей; `--dry-run` печатает план (снимок vault, MCP, правила) и не запускает воркер |
 | `hds agent history clear --project <P> [--session <ID>]` | очистить историю сессии; рядом остаётся бэкап `.json.bak`; без `--session` — последняя сессия |
 | `hds agent sync --project <P> [--once \| --interval SEC]` | зеркало папки проекта и `<P>\workspace`: без флагов и с `--once` — один проход (прямой путь, обратный путь, повторный прогон — 0 изменений), `--interval SEC` — демон по таймеру (по умолчанию `agent.sync.interval_sec`, 5 с); остановка — `hds stop` или Ctrl+C; журнал — `<P>\agent-state\sync.log` |
+| `hds agent sync --all [--once \| --interval SEC]` | все проекты `projects.json` в одном процессе: у каждого свой `sync.lock`, журнал, реестр и воркеры; недоступная папка — пропуск со строкой `problem`; без `--once` — демон (автозапуск: `installers\install_agent_sync_task.ps1`) |
 | `hds agent result accept\|reject\|conflict --project <P> --path <отн. путь> [--choice agent\|new\|delegate]` | решение по варианту агента из `.hds-agent\pending`: «Принять» (копия в `backup` и замена оригинала), «Отклонить» (сообщение агенту), «Конфликт» — три исхода |
 | `hds agent check [--project <P>] [--json]` | диагностика зоны агента (пункты `agent-*` из `hds check`): зона, Node и `dist/worker.mjs`, Python-воркер, база меток (схема v2), `projects.json`, ключ провайдера и токен `disk-search` («задан/нет», без значений), маршрут `/mcp/agent/<P>` (health, 401 без токена, 200 с токеном), индекс зоны, демон зеркала и очередь решений; код 1 — есть критическая проблема |
 
@@ -1527,6 +1528,41 @@ hds anon check
   друг другу. Занятый lock — сообщение «уже запущен» и код 0;
 * ошибка прохода (нет доступа к папке, упал воркер) демон не убивает: строка `error`
   в журнал — и следующий проход.
+
+### Все проекты сразу и автозапуск зеркала
+
+`hds agent sync --all` — один процесс на все проекты из `data\agent\projects.json`
+(решение В-A6-2):
+
+* у каждого проекта свой `sync.lock` в `<P>\agent-state`, свой журнал `sync.log`,
+  свой реестр и свои воркеры: демоны по разным проектам друг другу не мешают;
+* `--all` без `--once` — это **демон** (интервал из `agent.sync.interval_sec`,
+  `--interval SEC` перекрывает): именно так его запускает задача автозапуска.
+  `--all --once` — по одному проходу на проект, без lock;
+* папка проекта недоступна — проект пропускается со строкой
+  `problem project=<P> missing source=<путь>` в **его** журнале, остальные
+  проекты обрабатываются; `sync.lock` при пропуске не занимается, поэтому проект
+  поднимется следующим проходом (или ручным запуском), когда папка вернётся;
+* повторный запуск при живом демоне не конфликтует: занятые `sync.lock` —
+  «уже запущен», код 0. Поэтому задача на вход в систему и ручной запуск
+  спокойно сосуществуют.
+
+Автозапуск — задача Планировщика на вход в систему (В-A6-1):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_agent_sync_task.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_agent_sync_task.ps1 -Start
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_agent_sync_task.ps1 -Status
+powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_agent_sync_task.ps1 -Remove
+```
+
+Задача `HermesDiskSearchAgentSync` запускает `hds.exe agent sync --all` при входе в
+систему (без окна, без ограничения времени работы, перезапуск при сбое). Если
+Планировщик недоступен, скрипт пишет ярлык в «Автозагрузку» через
+`hidden_launch.vbs` — тот же приём, что у `install_ui_task.ps1`; `-Remove` снимает и
+задачу, и ярлык. Состояние демона (lock, хвост `sync.log`, очередь решений)
+показывает `hds agent check` — пункты `agent-sync` и `agent-pending`.
+
 
 Журнал — `<agent.root>\P0001\agent-state\sync.log` (пишется и в режиме `--once`):
 
