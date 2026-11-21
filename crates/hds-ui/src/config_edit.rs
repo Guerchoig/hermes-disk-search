@@ -410,8 +410,18 @@ fn set_nested(
 /// [`replace_scalar`]): меняется ровно строка нужного ключа, отсутствующий
 /// ключ/подсекция вставляется. Нет самой секции — она дописывается в конец
 /// файла.
+///
+/// A5.7: файл может быть записан с CRLF (Блокнот, редактор Windows). Раньше
+/// первая строка `agent:\r` не распознавалась заголовком секции, редактор
+/// дописывал **вторую** секцию `agent:` и `config.yaml` становился
+/// некорректным (`duplicate entry with key "agent"`). Теперь `\r` снимается
+/// при чтении, а переводы строк сохраняются как были.
 pub fn apply_scalars(text: &str, section: &str, values: &[(&str, &str)]) -> Result<String, String> {
-    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    let crlf = text.contains("\r\n");
+    let mut lines: Vec<String> = text
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_string())
+        .collect();
     let head = format!("{section}:");
     if !lines.iter().any(|line| is_section_header(line, &head)) {
         if !lines.last().is_some_and(|line| line.trim().is_empty()) {
@@ -432,7 +442,7 @@ pub fn apply_scalars(text: &str, section: &str, values: &[(&str, &str)]) -> Resu
         let end = child_end(&lines, header);
         set_nested(&mut lines, header + 1, end, &keys, literal, 2)?;
     }
-    Ok(lines.join("\n"))
+    Ok(lines.join(if crlf { "\r\n" } else { "\n" }))
 }
 
 /// Строка — заголовок секции `head` (`agent:`, `agent: # комментарий`).
@@ -596,5 +606,24 @@ mod tests {
             "{out}"
         );
         assert_eq!(out.matches("filter:").count(), 1, "дубль подсекции: {out}");
+    }
+
+    /// A5.7: `config.yaml` с CRLF (Блокнот, редактор Windows) не должен
+    /// получать вторую секцию `agent:` — раньше первая строка `agent:\r` не
+    /// распознавалась заголовком и `set_agent_values` падал на «duplicate
+    /// entry with key "agent"». Переводы строк сохраняются как были.
+    #[test]
+    fn agent_scalars_keep_crlf_and_single_section() {
+        let src =
+            "agent:\r\n  enabled: true\r\n  root: 'C:/zone'\r\ndb_path: 'C:/state/index.db'\r\n";
+        let out = apply_scalars(src, "agent", &[("egress_log", "true")]).unwrap();
+        assert_eq!(out.matches("agent:").count(), 1, "дубль секции: {out:?}");
+        assert!(out.contains("\r\n  egress_log: true\r\n"), "{out:?}");
+        assert!(!out.contains("\n\r"), "смешанные переводы строк: {out:?}");
+        let cfg: Config = serde_yaml::from_str(&out).unwrap();
+        assert_eq!(
+            dig(&cfg, "agent.egress_log").and_then(|v| v.as_bool()),
+            Some(true)
+        );
     }
 }
