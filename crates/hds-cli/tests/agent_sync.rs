@@ -691,3 +691,108 @@ fn sync_all_rejects_conflicting_flags_and_empty_registry() {
         "отказы не создают каталогов проектов в зоне"
     );
 }
+
+/// Ждать условия не дольше 20 с (горячее перечитывание идёт по тикам демона).
+fn wait_for(what: &str, mut ok: impl FnMut() -> bool) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !ok() {
+        assert!(std::time::Instant::now() < deadline, "не дождались: {what}");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// Конфиг стенда с явными значениями (A6.3 правит его на ходу).
+fn write_agent_config(
+    path: &Path,
+    root: &Path,
+    db: &Path,
+    enabled: bool,
+    interval: u64,
+    max_file_mb: u64,
+) {
+    fs::write(
+        path,
+        format!(
+            "agent:\n  enabled: {enabled}\n  root: '{}'\n  sync:\n    interval_sec: {interval}\n\
+             db_path: '{}'\n\
+             embedding:\n  dim: 4\n  base_url: 'http://127.0.0.1:9/v1'\n\
+             index:\n  clip: false\n  max_file_mb: {max_file_mb}\n",
+            slash(root),
+            slash(db)
+        ),
+    )
+    .unwrap();
+}
+
+/// A6.3: демон перечитывает `config.yaml` между проходами.
+///
+/// * правка `agent.sync.interval_sec` и `index.max_file_mb` подхватывается без
+///   перезапуска — строки `config reload …` в журнале;
+/// * смена `agent.root` на лету **не** применяется: `config root ignored …`,
+///   демон продолжает работать на прежнем каталоге;
+/// * `agent.enabled: false` — остановка с причиной `disabled`, код 0, общий
+///   `index.stop` не создаётся и не трогается (AG-27).
+#[test]
+fn sync_daemon_reloads_config_and_stops_on_disabled() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("reload", true);
+    assert_eq!(stand.register("P0001"), 0);
+    let cfg_path = stand.dir.path.join("config.yaml");
+    let other_zone = stand.dir.join("zone-other");
+    fs::create_dir_all(&other_zone).unwrap();
+    let db = stand.dir.path.join("index.db");
+    let log_path = stand.state_dir().join("sync.log");
+
+    let cfg = stand.cfg.clone();
+    let args: Vec<String> = ["sync", "--project", "P0001", "--interval", "1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let daemon = std::thread::spawn(move || cmd_agent_cfg(&cfg, &args));
+    wait_for("первый проход демона", || {
+        fs::read_to_string(&log_path)
+            .map(|t| t.contains(" pass "))
+            .unwrap_or(false)
+    });
+
+    // 1. Правка интервала и предела размера + смена `agent.root` в том же файле.
+    write_agent_config(&cfg_path, &other_zone, &db, true, 2, 5);
+    wait_for("строка config reload interval=2s", || {
+        fs::read_to_string(&log_path)
+            .map(|t| t.contains("config reload interval=2s"))
+            .unwrap_or(false)
+    });
+    wait_for("строка config reload index.max_file_mb=5", || {
+        fs::read_to_string(&log_path)
+            .map(|t| t.contains("config reload index.max_file_mb=5"))
+            .unwrap_or(false)
+    });
+    let text = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        text.contains("config root ignored"),
+        "смена agent.root — предупреждение, а не переезд: {text}"
+    );
+    assert!(!daemon.is_finished(), "демон работает на прежнем корне");
+
+    // 2. `agent.enabled: false` — остановка с причиной disabled.
+    write_agent_config(&cfg_path, &other_zone, &db, false, 2, 5);
+    wait_for("строка stop reason=disabled", || {
+        fs::read_to_string(&log_path)
+            .map(|t| t.contains("stop reason=disabled"))
+            .unwrap_or(false)
+    });
+    assert_eq!(daemon.join().unwrap(), 0, "выключение агента — код 0");
+    assert!(
+        !stand.dir.path.join("index.stop").exists(),
+        "агент выключен, а не остановлен по `hds stop`: index.stop не создаётся (AG-27)"
+    );
+    assert!(
+        !stand.state_dir().join("sync.lock").exists(),
+        "sync.lock снят"
+    );
+    let text = fs::read_to_string(&log_path).unwrap();
+    assert!(
+        text.contains("config disabled agent.enabled=false"),
+        "выключение пишется строкой config: {text}"
+    );
+}

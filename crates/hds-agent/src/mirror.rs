@@ -752,6 +752,17 @@ impl<'a> Mirror<'a> {
         ))
     }
 
+    /// Применить перечитанные `agent.sync.*` на лету (A6.3): демон не
+    /// перезапускается, следующий проход идёт с новыми задержками.
+    pub fn set_sync_settings(&mut self, sync: SyncSettings) {
+        self.sync = sync;
+    }
+
+    /// Применить перечитанный `index.max_file_mb` на лету (A6.3).
+    pub fn set_max_file_mb(&mut self, max_file_mb: u64) {
+        self.max_file_mb = max_file_mb;
+    }
+
     fn max_bytes(&self) -> u64 {
         self.max_file_mb.saturating_mul(1024 * 1024)
     }

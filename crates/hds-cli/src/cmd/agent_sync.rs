@@ -38,6 +38,12 @@
 //! пропуск, остальные проекты обрабатываются. `--all` без `--once` — демон
 //! (задача автозапуска запускает именно эту команду): интервал берётся из
 //! `agent.sync.interval_sec`, `--interval SEC` перекрывает.
+//!
+//! **A6.3:** между проходами демон сверяет `mtime` и размер `config.yaml`
+//! ([`LiveConfig`]) и применяет `agent.sync.*` (новый интервал — со следующего
+//! сна) и `index.max_file_mb` на лету. `agent.enabled: false` останавливает
+//! демон с причиной `disabled`, смена `agent.root` — предупреждение `[!]` и
+//! работа на прежнем корне. Каждое применение — строка `config` в журнале (I8).
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -47,7 +53,7 @@ use std::time::{Duration, SystemTime};
 use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror, SyncReport};
 use hds_agent::registry_db::ArtifactRegistry;
 use hds_agent::{projects, settings};
-use hds_core::config::Config;
+use hds_core::config::{self, dig, Config};
 use hds_core::timefmt::{fmt_local_datetime, now_epoch};
 use hds_index::watch::WatchLock;
 
@@ -91,6 +97,63 @@ impl StopSignal {
             .map(|mtime| mtime >= self.since)
             .unwrap_or(false)
     }
+}
+
+/// Снимок `config.yaml` для горячего перечитывания (A6.3).
+///
+/// Демон сверяет `mtime` и размер файла между проходами; если они не
+/// изменились, файл не читается вовсе. Ошибка разбора не валит демон: строка
+/// `error` в журнал — и работа на прежних настройках.
+#[derive(Debug)]
+pub struct LiveConfig {
+    path: PathBuf,
+    stamp: Option<(SystemTime, u64)>,
+}
+
+impl LiveConfig {
+    /// Запомнить текущее состояние файла (путь — [`config::config_path`]).
+    pub fn new(path: PathBuf) -> LiveConfig {
+        let stamp = fingerprint(&path);
+        LiveConfig { path, stamp }
+    }
+
+    /// Перечитать, если файл изменился. `None` — изменений нет.
+    ///
+    /// Пустой (или не-словарь) файл — ошибка, а не «агент выключен»: так
+    /// выглядит недописанный `config.yaml` (`fs::write` сначала усекает файл),
+    /// и демон не должен из-за этого останавливаться.
+    pub fn reload(&mut self) -> Option<Result<Config, String>> {
+        let now = fingerprint(&self.path);
+        if now == self.stamp {
+            return None;
+        }
+        self.stamp = now;
+        let path = self.path.display().to_string();
+        Some(
+            config::load_from(&self.path)
+                .map_err(|e| format!("{path}: {e}"))
+                .and_then(|fresh| {
+                    if fresh.is_mapping() {
+                        Ok(fresh)
+                    } else {
+                        Err(format!("{path}: пустой config.yaml (правка не завершена?)"))
+                    }
+                }),
+        )
+    }
+}
+
+/// Отпечаток файла: `mtime` и размер; `None` — файла нет.
+fn fingerprint(path: &Path) -> Option<(SystemTime, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    Some((meta.modified().ok()?, meta.len()))
+}
+
+/// `index.max_file_mb` (В-3) — предел размера файла для зеркала.
+fn index_max_file_mb(cfg: &Config) -> u64 {
+    dig(cfg, "index.max_file_mb")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(200)
 }
 
 /// Точка входа `hds agent sync ...`.
@@ -298,15 +361,77 @@ fn run_project(
         log.start("daemon", id, project_path, &workspace, Some(interval));
         println!(
             "[..] демон зеркала: проект {id}, интервал {interval_sec} с; остановка — \
-             `hds stop` (index.stop) или Ctrl+C"
+             `hds stop` (index.stop), Ctrl+C или agent.enabled: false в config.yaml"
         );
+        // A6.3: конфиг перечитывается между проходами. Интервал живёт в `Cell`:
+        // его меняет проход (перечитанные `agent.sync.*`), читает сон цикла.
+        let interval_sec = std::cell::Cell::new(interval_sec);
+        let mut live = LiveConfig::new(config::config_path());
+        let mut sync_now = settings::sync_settings(cfg);
+        let mut max_mb_now = index_max_file_mb(cfg);
+        let root_now = settings::settings(cfg).root;
         let summary = run_loop(
-            interval,
+            || Duration::from_secs(interval_sec.get()),
             None,
             || stop.triggered(),
-            || match mirror.sync_once() {
-                Ok(report) => PassResult::Report(report),
-                Err(e) => PassResult::Failed(e.to_string()),
+            |log| {
+                // A6.3: правка `config.yaml` подхватывается без перезапуска.
+                // Ошибка разбора не валит демон — строка `error` в журнал.
+                if let Some(reloaded) = live.reload() {
+                    match reloaded {
+                        Err(e) => log.error(&format!("config: {e}")),
+                        Ok(fresh) => {
+                            let agent = settings::settings(&fresh);
+                            if !agent.enabled {
+                                log.config("disabled agent.enabled=false");
+                                return PassResult::Stop(StopReason::Disabled);
+                            }
+                            // `agent.root` на лету не меняется: workspace и
+                            // реестр уже открыты (TR-8.1, критерий A6.3).
+                            if agent.root != root_now {
+                                let new = agent
+                                    .root
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_else(|| "не задан".to_string());
+                                let old = root_now
+                                    .as_ref()
+                                    .map(|p| p.display().to_string())
+                                    .unwrap_or_default();
+                                log.config(&format!("root ignored new={new} keep={old}"));
+                                eprintln!(
+                                    "[!] agent.root изменён: {new} — демон продолжает на прежнем \
+                                     {old} (нужен перезапуск)"
+                                );
+                            }
+                            let fresh_sync = settings::sync_settings(&fresh);
+                            if fresh_sync != sync_now {
+                                interval_sec.set(fresh_sync.interval_sec);
+                                log.config(&format!(
+                                    "reload interval={}s wait_stable={}s wait_poll={}ms \
+                                     wait_max={}s settle_age={}s",
+                                    fresh_sync.interval_sec,
+                                    fresh_sync.wait_stable_sec,
+                                    fresh_sync.wait_poll_ms,
+                                    fresh_sync.wait_max_sec,
+                                    fresh_sync.settle_age_sec
+                                ));
+                                mirror.set_sync_settings(fresh_sync);
+                                sync_now = fresh_sync;
+                            }
+                            let fresh_max = index_max_file_mb(&fresh);
+                            if fresh_max != max_mb_now {
+                                log.config(&format!("reload index.max_file_mb={fresh_max}"));
+                                mirror.set_max_file_mb(fresh_max);
+                                max_mb_now = fresh_max;
+                            }
+                        }
+                    }
+                }
+                match mirror.sync_once() {
+                    Ok(report) => PassResult::Report(report),
+                    Err(e) => PassResult::Failed(e.to_string()),
+                }
             },
             &mut log,
         );
@@ -509,6 +634,9 @@ pub enum StopReason {
     Once,
     /// Разовый проход не удался (код 1, как в A4.1…A4.5).
     Error,
+    /// `agent.enabled: false` в перечитанном конфиге (A6.3): зону выключили,
+    /// демон останавливается без `index.stop` — общий файл не трогаем (AG-27).
+    Disabled,
 }
 
 impl StopReason {
@@ -519,16 +647,20 @@ impl StopReason {
             StopReason::StopFile => "index.stop",
             StopReason::Once => "once",
             StopReason::Error => "error",
+            StopReason::Disabled => "disabled",
         }
     }
 }
 
-/// Результат одного прохода для цикла: отчёт или текст ошибки (без значений).
+/// Результат одного прохода для цикла: отчёт, текст ошибки (без значений) или
+/// требование остановиться (`agent.enabled: false`, A6.3).
 pub enum PassResult {
     /// Проход удался — счётчики [`SyncReport`].
     Report(SyncReport),
     /// Проход не удался; текст пишется в журнал строкой `error`.
     Failed(String),
+    /// Демон должен остановиться с этой причиной (`disabled` — A6.3).
+    Stop(StopReason),
 }
 
 /// Итог цикла: сколько проходов, сколько изменений и почему остановились.
@@ -549,8 +681,14 @@ pub struct LoopSummary {
 ///
 /// Ошибка прохода (`PassResult::Failed`) демон не убивает: строка `error` в
 /// журнал — и следующий проход. Это прямое требование TR-7.2.
-pub fn run_loop<F, P>(
-    interval: Duration,
+///
+/// * интервал — функция: A6.3 перечитывает `agent.sync.interval_sec` между
+///   проходами, и следующий сон берёт уже новое значение;
+/// * проход получает журнал: проверка конфига пишет строку `config` до обхода;
+/// * `PassResult::Stop` — проход сам просит остановиться (например
+///   `agent.enabled: false` → `disabled`).
+pub fn run_loop<F, I, P>(
+    interval: I,
     max_passes: Option<usize>,
     should_stop: F,
     mut one_pass: P,
@@ -558,7 +696,8 @@ pub fn run_loop<F, P>(
 ) -> LoopSummary
 where
     F: Fn() -> bool,
-    P: FnMut() -> PassResult,
+    I: Fn() -> Duration,
+    P: FnMut(&mut SyncLog) -> PassResult,
 {
     let mut passes = 0usize;
     let mut changes = 0usize;
@@ -568,7 +707,7 @@ where
             reason = StopReason::StopFile;
             break;
         }
-        match one_pass() {
+        match one_pass(log) {
             PassResult::Report(report) => {
                 log.pass(&report);
                 log.problems(&report);
@@ -579,6 +718,11 @@ where
                 log.error(&message);
                 eprintln!("[!] проход не удался (демон продолжает): {message}");
             }
+            PassResult::Stop(why) => {
+                // Проход не состоялся: счётчики не растут, причина — от прохода.
+                reason = why;
+                break;
+            }
         }
         passes += 1;
         if let Some(max) = max_passes {
@@ -587,7 +731,7 @@ where
                 break;
             }
         }
-        if !sleep_interval(interval, &should_stop) {
+        if !sleep_interval(interval(), &should_stop) {
             reason = StopReason::StopFile;
             break;
         }
@@ -617,7 +761,8 @@ fn sleep_interval(interval: Duration, should_stop: &impl Fn() -> bool) -> bool {
 ///
 /// Строки: `start` (режим, проект, интервал, папки), `pass` (все счётчики
 /// [`SyncReport`] + `changes` + `problems`), `problem` (не больше
-/// [`LOG_PROBLEMS`] штук за проход), `error` (проход не удался), `stop`
+/// [`LOG_PROBLEMS`] штук за проход и пропуски проекта в `--all`), `config`
+/// (перечитывание конфига, A6.3), `error` (проход не удался), `stop`
 /// (причина, проходы, изменения). Содержимого документов и значений из базы
 /// меток здесь нет — только пути, метки, статусы и числа.
 ///
@@ -724,6 +869,12 @@ impl SyncLog {
                 "problem … ещё {rest} (в журнал пишутся первые {LOG_PROBLEMS})"
             ));
         }
+    }
+
+    /// `config`: горячее перечитывание `config.yaml` (A6.3) — только имена
+    /// настроек и числа (`interval=2s`, `index.max_file_mb=50`, `disabled`).
+    pub fn config(&mut self, note: &str) {
+        self.line(&format!("config {note}"));
     }
 
     /// `problem`: одна строка о проблеме (пропуск проекта в `--all`, A6.2).
@@ -895,6 +1046,9 @@ fn usage() -> String {
      \x20  недоступна — пропуск со строкой problem в его журнале; без --once — демон\n\
      \x20  с интервалом agent.sync.interval_sec (автозапуск:\n\
      \x20  installers\\install_agent_sync_task.ps1);\n\
+     \x20 между проходами перечитывается config.yaml (A6.3): agent.sync.*,\n\
+     \x20  index.max_file_mb, agent.enabled (false — остановка `stop reason=disabled`);\n\
+     \x20  agent.root на лету не меняется (`[!]`, работа на прежнем);\n\
      \x20 путь реестра: <state_dir>\\data\\agent\\registry\\<P>.db, TR-7.2)"
         .to_string()
 }
@@ -1021,6 +1175,7 @@ mod tests {
         log.problems(&report);
         log.error("реестр: занят");
         log.problem("project=P0002 missing source=D:/нет");
+        log.config("reload interval=2s");
         log.stop(StopReason::Once.as_str(), 1, report.changes());
         drop(log);
         let text = std::fs::read_to_string(&path).unwrap();
@@ -1037,10 +1192,14 @@ mod tests {
             "пропуск проекта в --all пишется строкой problem (A6.2): {text}"
         );
         assert!(
+            text.contains("config reload interval=2s"),
+            "перечитывание конфига пишется строкой config (A6.3): {text}"
+        );
+        assert!(
             text.contains("stop reason=once passes=1 changes=3"),
             "{text}"
         );
-        assert_eq!(text.lines().count(), 6, "одна запись — одна строка: {text}");
+        assert_eq!(text.lines().count(), 7, "одна запись — одна строка: {text}");
         cleanup(&dir);
     }
 
@@ -1063,6 +1222,39 @@ mod tests {
         assert!(text.contains("ещё 3"), "{text}");
         cleanup(&dir);
     }
+
+    /// A6.3: конфиг перечитывается только после правки файла (`mtime`/размер),
+    /// битый YAML — ошибка, а не паника: демон остаётся на прежних настройках.
+    #[test]
+    fn live_config_reloads_only_after_edit() {
+        let dir = temp_dir("live-config");
+        let path = dir.join("config.yaml");
+        std::fs::write(&path, "agent:\n  enabled: true\n").unwrap();
+        let mut live = LiveConfig::new(path.clone());
+        assert!(live.reload().is_none(), "без правки файл не перечитывается");
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(
+            &path,
+            "agent:\n  enabled: true\n  sync:\n    interval_sec: 9\n",
+        )
+        .unwrap();
+        let fresh = live
+            .reload()
+            .expect("правка замечена")
+            .expect("конфиг разобран");
+        assert_eq!(settings::sync_settings(&fresh).interval_sec, 9);
+        assert!(settings::settings(&fresh).enabled);
+        assert!(live.reload().is_none(), "повторно не перечитывается");
+
+        std::thread::sleep(Duration::from_millis(20));
+        std::fs::write(&path, "agent: [broken").unwrap();
+        assert!(
+            live.reload().expect("правка замечена").is_err(),
+            "битый YAML — ошибка, а не паника"
+        );
+        cleanup(&dir);
+    }
 }
 #[cfg(test)]
 mod loop_tests {
@@ -1078,10 +1270,10 @@ mod loop_tests {
         let mut log = SyncLog::open(&path).unwrap();
         let mut done = 0usize;
         let summary = run_loop(
-            Duration::from_millis(1),
+            || Duration::from_millis(1),
             Some(2),
             || false,
-            || {
+            |_log| {
                 done += 1;
                 PassResult::Report(report(1))
             },
@@ -1115,10 +1307,10 @@ mod loop_tests {
         let raised = Arc::clone(&stop);
         let started = std::time::Instant::now();
         let summary = run_loop(
-            Duration::from_secs(60),
+            || Duration::from_secs(60),
             None,
             move || checked.load(Ordering::Relaxed),
-            move || {
+            move |_log| {
                 raised.store(true, Ordering::Relaxed);
                 PassResult::Report(report(1))
             },
@@ -1139,10 +1331,10 @@ mod loop_tests {
         let path = dir.join("sync.log");
         let mut log = SyncLog::open(&path).unwrap();
         let summary = run_loop(
-            Duration::from_millis(1),
+            || Duration::from_millis(1),
             Some(2),
             || false,
-            || PassResult::Failed("обход: отказано в доступе".to_string()),
+            |_log| PassResult::Failed("обход: отказано в доступе".to_string()),
             &mut log,
         );
         assert_eq!(summary.passes, 2, "демон не умирает от ошибки прохода");
@@ -1155,6 +1347,34 @@ mod loop_tests {
             2,
             "{text}"
         );
+        cleanup(&dir);
+    }
+
+    /// A6.3: проход сам просит остановиться (`agent.enabled: false`) — причина
+    /// `disabled` в итоге цикла, проход не считается, сон не наступает.
+    #[test]
+    fn loop_stops_when_pass_asks() {
+        let dir = temp_dir("pass-stop");
+        let path = dir.join("sync.log");
+        let mut log = SyncLog::open(&path).unwrap();
+        let started = std::time::Instant::now();
+        let summary = run_loop(
+            || Duration::from_secs(60),
+            None,
+            || false,
+            |log| {
+                log.config("disabled agent.enabled=false");
+                PassResult::Stop(StopReason::Disabled)
+            },
+            &mut log,
+        );
+        assert_eq!(summary.reason, StopReason::Disabled);
+        assert_eq!(summary.passes, 0, "прохода не было");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "остановка без выжидания интервала"
+        );
+        assert_eq!(summary.reason.as_str(), "disabled");
         cleanup(&dir);
     }
 }
