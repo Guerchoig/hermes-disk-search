@@ -237,6 +237,145 @@ pub fn project_add_json(cfg: &Config, body: &str) -> Reply {
     ok(json!({ "ok": true, "project": project_item(cfg, &project) }))
 }
 
+/// Тело `POST /api/agent/project/rm`: `(project, force, purge_meta)`.
+fn remove_request(body: &str) -> Result<(String, bool, bool), Reply> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| err(400, format!("тело запроса не JSON: {e}")))?;
+    let project = field_str(&value, "project")?.unwrap_or_default();
+    if project.is_empty() {
+        return Err(err(400, "нужно поле project"));
+    }
+    if !is_project_id(&project) {
+        return Err(err(
+            400,
+            format!("идентификатор проекта — P + 4 цифры (D21): {project}"),
+        ));
+    }
+    let force = field_bool(&value, "force")?.unwrap_or(false);
+    let purge_meta = field_bool(&value, "purge_meta")?.unwrap_or(false);
+    Ok((project, force, purge_meta))
+}
+
+/// Отчёт об удалении для вкладки: пути и `bool`, без значений (I8).
+fn remove_body(report: &hds_agent::remove::RemoveReport) -> Value {
+    json!({
+        "ok": true,
+        "project": report.project,
+        "removed": {
+            "zone": report.zone.as_ref().map(|p| p.display().to_string()),
+            "registry": report.registry.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+            "token": report.token,
+            "record": report.record,
+            "labels": report.labels,
+        },
+        "left": report.left.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+    })
+}
+
+/// Ошибка удаления → HTTP-ответ (A6.5): 404 — повтор, 409 — демон/занятый
+/// файл, 500 — ввод-вывод и воркер (в тексте — что осталось).
+fn remove_err(e: hds_agent::remove::RemoveError) -> Reply {
+    let status = match &e {
+        hds_agent::remove::RemoveError::NotRegistered(_) => 404,
+        hds_agent::remove::RemoveError::DaemonAlive(_)
+        | hds_agent::remove::RemoveError::Busy { .. } => 409,
+        hds_agent::remove::RemoveError::Io { .. }
+        | hds_agent::remove::RemoveError::Worker { .. } => 500,
+    };
+    let mut message = e.to_string();
+    if let Some(report) = e.report() {
+        let left: Vec<String> = report
+            .left
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect();
+        if !left.is_empty() {
+            message.push_str(&format!("; не удалено: {}", left.join(", ")));
+        }
+    }
+    err(status, message)
+}
+
+/// `POST /api/agent/project/rm {project, force?, purge_meta?}` — кнопка
+/// «Удалить…» (A6.5).
+///
+/// Перед удалением (как `history_clear_json`): если ход идёт — `stop` (не
+/// удалось — 409), затем `unload` шлюза: SDK не должен держать файлы сессии.
+/// При живом демоне зеркала — 409 с подсказкой; `force: true` — принудительно.
+/// `purge_meta: true` удаляет метки проекта через общий воркер UI.
+pub fn project_rm_json(cfg: &Config, body: &str) -> Reply {
+    let (project, force, purge_meta) = match remove_request(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    let Some(rec) = projects::get(cfg, &project) else {
+        return err(
+            404,
+            format!("проект {project} не зарегистрирован — удалять нечего"),
+        );
+    };
+    let api = agent_session::global(cfg);
+    if let Some(turn) = api.existing_turn(&rec.id) {
+        if turn.is_busy() {
+            if let Err(e) = api.stop(cfg, &rec.id) {
+                return err(
+                    409,
+                    format!(
+                        "ход идёт и остановить его не удалось: {} — нажмите «Стоп» и повторите",
+                        e.message
+                    ),
+                );
+            }
+        }
+    }
+    api.unload(&rec.id);
+    let daemon_alive = settings::state_dir_for(cfg, &rec.id)
+        .map(|state| {
+            let lock = state.join("sync.lock");
+            lock.is_file() && !hds_index::watch::lock_is_stale(&lock)
+        })
+        .unwrap_or(false);
+    // --purge-meta: общий клиент воркера UI (A5.5, как `with_client_mirror`):
+    // второй Python-процесс на ту же `anonymize.db` не поднимаем.
+    let mut client = None;
+    if purge_meta {
+        let Some(state_dir) = settings::state_dir_for(cfg, &rec.id) else {
+            return err(503, "agent.root не задан: анонимная зона не настроена");
+        };
+        match api.client(cfg, &state_dir) {
+            Ok(shared) => client = Some(shared),
+            Err(e) => return api_err(e),
+        }
+    }
+    let mut purge = |id: &str| -> Result<(), String> {
+        let Some(client) = client.as_ref() else {
+            return Ok(());
+        };
+        let mut guard = client
+            .lock()
+            .map_err(|_| "воркер анонимизации занят".to_string())?;
+        guard
+            .drop_project(id)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    let options = hds_agent::remove::RemoveOptions {
+        force,
+        daemon_alive,
+        purge_labels: purge_meta,
+    };
+    let outcome = {
+        let hook: Option<&mut hds_agent::remove::PurgeHook<'_>> =
+            if purge_meta { Some(&mut purge) } else { None };
+        hds_agent::remove::remove_project(cfg, &project, options, hook)
+    };
+    drop(client);
+    match outcome {
+        Ok(report) => ok(remove_body(&report)),
+        Err(e) => remove_err(e),
+    }
+}
+
 /// `GET /api/agent/state?project=<P>`: демон зеркала, журнал, числа реестра.
 pub fn state_json(cfg: &Config, project: &str) -> Reply {
     let id = project.trim();

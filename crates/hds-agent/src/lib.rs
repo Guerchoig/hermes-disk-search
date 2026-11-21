@@ -15,6 +15,7 @@
 //! * [`registry`] — реестр живых процессов (TR-3.9): `max_live_projects`,
 //!   выгрузка по простою, переиспользование процесса;
 //! * [`projects`] — `projects.json` (TR-8.1);
+//! * [`remove`] — удаление проекта: зона, реестр, секреты, запись (A6.5);
 //! * [`mcp`] — `cline_mcp_settings.json` (TR-3.6) с подстановкой токена;
 //! * [`rules`] — `privacy.md` и `1c-domain.md` (TR-3.8, TR-3.8a);
 //! * [`paths`], [`env`] — матрица опасных путей (TR-3.4/TR-3.10а) и окружение
@@ -37,6 +38,7 @@ pub mod projects;
 pub mod protocol;
 pub mod registry;
 pub mod registry_db;
+pub mod remove;
 pub mod results;
 pub mod rules;
 pub mod run;
@@ -50,6 +52,7 @@ pub use gateway::{Gateway, GatewayEvent};
 pub use projects::{Project, Projects};
 pub use registry::AgentRegistry;
 pub use registry_db::{Artifact, ArtifactRegistry, RegistryError};
+pub use remove::{remove_project, RemoveError, RemoveOptions, RemoveReport};
 pub use results::{
     ConflictChoice, Decision, DecisionReport, Message, MessageKind, RebuiltImage, RefreshReport,
     ResultsError, BACKUP_SUBDIR, CONFLICTS_DIR, MESSAGES_FILE,

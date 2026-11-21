@@ -167,6 +167,15 @@ impl Secrets {
             .is_some_and(|t| !t.trim().is_empty())
     }
 
+    /// Есть ли запись проекта (`projects.<p>`) — **без** значений (A6.5:
+    /// перечисление удаляемого до удаления и `token: true/false` в отчёте).
+    pub fn has_project(&self, project: &str) -> bool {
+        self.raw
+            .get("projects")
+            .and_then(Value::as_object)
+            .is_some_and(|map| map.keys().any(|k| k.eq_ignore_ascii_case(project)))
+    }
+
     /// Есть ли хэш токена проекта (`projects.<p>.token_sha256`) — признак, без
     /// значения (диагностика A6.1: «задан/нет», никогда не печатать).
     pub fn has_project_token_hash(&self, project: &str) -> bool {
@@ -374,6 +383,58 @@ impl Secrets {
             .and_then(Value::as_str)
             .map(str::to_string)
     }
+}
+
+/// Хирургическое удаление проекта из `secrets.json` (A6.5).
+///
+/// **AG-22.** [`Secrets::save`] и `hds_mcp::agent::save_at` сливаются с диском
+/// и удалять ключи не умеют: после `projects.remove(P)` токен «воскрес» бы из
+/// файла. Поэтому здесь читается **весь** JSON, из него убирается только
+/// `/projects/<P>` (весь объект: `token`, `token_sha256`, `provider`, `model`),
+/// а остальное (`providers`, `mcp`, другие проекты) записывается как было —
+/// через временный файл и `replace_file`.
+///
+/// * файла нет — `Ok(false)`;
+/// * записи нет (или `project` не `P` + 4 цифры) — `Ok(false)`;
+/// * ошибки называют путь и причину, но не содержимое файла.
+pub fn remove_project_at(path: &Path, project: &str) -> Result<bool, SecretsError> {
+    // Идентификатор подставляется в JSON-pointer (`/projects/{project}`):
+    // принимать что-то кроме `P` + 4 цифры (D21) нельзя.
+    if !hds_core::roots::is_agent_project(project) {
+        return Ok(false);
+    }
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(SecretsError::Write(path.to_path_buf(), e.to_string())),
+    };
+    let mut value: Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .map_err(|e| SecretsError::Invalid(e.to_string()))?;
+    let Some(projects) = value.get_mut("projects").and_then(Value::as_object_mut) else {
+        return Ok(false);
+    };
+    // Регистр не важен — как у `Projects::get` и `is_agent_project`.
+    let key = projects
+        .keys()
+        .find(|k| k.eq_ignore_ascii_case(project))
+        .cloned();
+    let Some(key) = key else {
+        return Ok(false);
+    };
+    projects.remove(&key);
+    let text = serde_json::to_string_pretty(&value)
+        .map_err(|e| SecretsError::Write(path.to_path_buf(), e.to_string()))?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| SecretsError::Write(dir.to_path_buf(), e.to_string()))?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, text).map_err(|e| SecretsError::Write(tmp.clone(), e.to_string()))?;
+    replace_file(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        SecretsError::Write(path.to_path_buf(), e.message())
+    })?;
+    Ok(true)
 }
 
 /// Ключ объекта, значение которого — секрет.
@@ -705,6 +766,67 @@ mod tests {
         assert_eq!(secrets.provider_names(), vec!["openrouter".to_string()]);
         let message = SecretsError::Write(path.clone(), "занят".to_string()).to_string();
         assert!(message.contains("secrets.json") && !message.contains("sk-created-123456"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A6.5: удаление проекта из общего `secrets.json` — только `/projects/<P>`;
+    /// `providers`, `mcp` и соседние проекты остаются (AG-22).
+    #[test]
+    fn remove_project_at_removes_only_target() {
+        let dir = std::env::temp_dir().join(format!("hds-agent-secrets-rm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "projects": {
+                "P0001": { "token_sha256": "aaa", "token": "tok-P0001-abcdef", "provider": "openrouter", "model": "m1" },
+                "P0002": { "token_sha256": "bbb", "token": "tok-P0002-abcdef", "provider": "openrouter", "model": "m2" }
+              },
+              "providers": { "openrouter": { "api_key": "sk-or-abcdefgh" } },
+              "mcp": { "tavily": { "api_key": "tvly-abcdefgh" } }
+            }"#,
+        )
+        .unwrap();
+
+        assert!(remove_project_at(&path, "P0001").unwrap(), "запись была");
+        let saved: Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(saved.pointer("/projects/P0001").is_none());
+        assert!(saved.pointer("/projects/P0002").is_some(), "сосед цел");
+        assert!(
+            saved.pointer("/providers/openrouter/api_key").is_some(),
+            "providers целы"
+        );
+        assert!(saved.pointer("/mcp/tavily/api_key").is_some(), "mcp целы");
+
+        // Повтор и отсутствие файла — `false`, не ошибка.
+        assert!(!remove_project_at(&path, "P0001").unwrap());
+        assert!(!remove_project_at(&path.join("none.json"), "P0001").unwrap());
+        // Не идентификатор проекта (D21) — ничего не трогаем.
+        assert!(!remove_project_at(&path, "../P0001").unwrap());
+        assert!(Secrets::load(&path).unwrap().has_project("P0002"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A6.5: битый файл не перезаписывается, а ошибка не печатает содержимое.
+    #[test]
+    fn remove_project_at_reports_invalid_without_contents() {
+        let dir =
+            std::env::temp_dir().join(format!("hds-agent-secrets-rm2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(&path, "{ not json: sk-or-secret-123456").unwrap();
+        let err = remove_project_at(&path, "P0001").expect_err("битый JSON — ошибка");
+        let message = err.to_string();
+        assert!(message.contains("secrets.json"), "{message}");
+        assert!(!message.contains("sk-or-secret-123456"), "{message}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{ not json: sk-or-secret-123456",
+            "файл не тронут"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

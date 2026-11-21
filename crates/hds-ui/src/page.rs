@@ -297,7 +297,7 @@ pub const PAGE: &str = r#"<!doctype html>
   <section><h2>Проекты</h2>
    <div class="row"><button onclick="loadAgentProjects()">Обновить</button>
     <span id="agmsg" class="muted"></span></div>
-   <table class="tr"><thead><tr><th>Проект</th><th>Папка</th><th>Файлов</th><th>Ждут решения</th></tr></thead>
+   <table class="tr"><thead><tr><th>Проект</th><th>Папка</th><th>Файлов</th><th>Ждут решения</th><th></th></tr></thead>
     <tbody id="agrows"></tbody></table>
    <div class="muted" id="aghint">Выберите проект — ниже состояние зеркала и файлы.</div></section>
 
@@ -660,8 +660,9 @@ async function loadAgentProjects(){
     document.getElementById('agrows').innerHTML=list.map(p=>
       '<tr data-id="'+esc(p.id)+'" onclick="selectAgentProject(this)">'+
       '<td><b>'+esc(p.id)+'</b> '+esc(p.name)+'</td><td class="muted">'+esc(p.path)+'</td>'+
-      '<td>'+p.files+'</td><td>'+(p.pending? '<b>'+p.pending+'</b>':'0')+'</td></tr>').join('')||
-      '<tr><td colspan="4" class="muted">проектов пока нет — создайте ниже</td></tr>';
+      '<td>'+p.files+'</td><td>'+(p.pending? '<b>'+p.pending+'</b>':'0')+'</td>'+
+      '<td><button onclick="agentRemoveProject(event,\''+esc(p.id)+'\')">Удалить…</button></td></tr>').join('')||
+      '<tr><td colspan="5" class="muted">проектов пока нет — создайте ниже</td></tr>';
     if(!AG_ID && list.length) selectAgentProject(null, list[0].id);
   }catch(e){ m.textContent='ошибка: '+e; }
 }
@@ -1472,6 +1473,29 @@ async function agentAdd(){
     await loadAgentProjects();
   }catch(e){ m.textContent='ошибка: '+e; }
 }
+// --- Удаление проекта (A6.5) ---
+// Папка проекта не удаляется ни при каких флагах; живой демон зеркала —
+// отказ: сервер вернёт 409 с подсказкой «hds stop», процессов UI не запускает.
+async function agentRemoveProject(ev, id){
+  if(ev && ev.stopPropagation) ev.stopPropagation();
+  if(!id) return;
+  if(!confirm('Удалить проект '+id+'? Уйдут каталог зоны (workspace, agent-config, '+
+     'agent-state), реестр, запись в projects.json и токен с provider/model. '+
+     'Папка проекта останется на месте.')) return;
+  const m=document.getElementById('agmsg');
+  if(m) m.textContent='удаление '+id+'…';
+  try{
+    const j=await jpost('/api/agent/project/rm',{project:id});
+    if(j.error){
+      if(m) m.innerHTML='<span class="err">'+esc(j.error)+'</span>';
+      return;
+    }
+    AG_ID='';
+    agentStreamClose(); agentBackupsClose(); agReset();
+    if(m) m.textContent='проект '+id+' удалён';
+    await loadAgentProjects();
+  }catch(e){ if(m) m.innerHTML='<span class="err">ошибка: '+esc(String(e))+'</span>'; }
+}
 // --- Уведомления фильтра и «Очистить историю» (A5.6) ---
 let AG_REDACT={total:0, labels:{}, sources:{}, last:[]};
 function agRedactRender(){
@@ -2221,3 +2245,25 @@ loadMe(); loadClient(); loadTr();
 
 </script></body></html>
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A6.5: кнопка удаления не должна потеряться в панели проектов.
+    #[test]
+    fn page_has_project_remove_button() {
+        assert!(
+            PAGE.contains("agentRemoveProject"),
+            "в панели проектов нет кнопки «Удалить…»"
+        );
+        assert!(
+            PAGE.contains("/api/agent/project/rm"),
+            "кнопка не вызывает маршрут удаления"
+        );
+        assert!(
+            PAGE.contains("stopPropagation"),
+            "кнопка должна гасить клик по строке (selectAgentProject)"
+        );
+    }
+}

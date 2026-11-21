@@ -82,6 +82,11 @@ fn usage() -> String {
      \x20        openrouter, модель — из В-12; имя — имя папки, если не задано)\n\
      \x20 project list [--json]\n\
      \x20       (список проектов зоны)\n\
+     \x20 project rm <P> [--yes] [--force] [--purge-meta]\n\
+     \x20       (удаление проекта: каталог <P>\\ зоны, реестр <P>.db, токен и\n\
+     \x20        provider/model в secrets.json, запись projects.json; папка проекта\n\
+     \x20        НЕ трогается; живой демон — отказ, принудительно --force;\n\
+     \x20        --purge-meta — удалить и метки проекта; повтор — код 2; A6.5)\n\
      \x20 run --project <P> [--prompt TEXT] [--session ID] [--max-iterations N]\n\
      \x20     [--subagents] [--json] [--quiet] [--dry-run]\n\
      \x20       (сессия агента: снимок vault, env, MCP, правила, Gateway; без --prompt\n\

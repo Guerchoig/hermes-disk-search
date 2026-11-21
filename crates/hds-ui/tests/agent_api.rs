@@ -198,3 +198,197 @@ fn agent_gate_is_forbidden_in_server_profile() {
     assert_eq!(reply.0, 403);
     assert!(reply.2.contains("серверном профиле"), "{}", reply.2);
 }
+
+/// Следы A6.5 у проекта `P0001`: каталог зоны, реестр (`db`/`-wal`/`-shm`),
+/// общий `secrets.json` с соседним проектом, `providers` и `mcp`.
+fn seed_project_traces(stand: &Stand) {
+    let zone = stand.zone().join("P0001");
+    for rel in [
+        "workspace/a.md",
+        "agent-config/keys.json",
+        "agent-state/sync.log",
+    ] {
+        let path = zone.join(rel);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, "[PERSON_1]\n").unwrap();
+    }
+    let db = stand
+        .dir
+        .join("data")
+        .join("agent")
+        .join("registry")
+        .join("P0001.db");
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    fs::write(&db, "db").unwrap();
+    fs::write(PathBuf::from(format!("{}-wal", db.display())), "wal").unwrap();
+    fs::write(PathBuf::from(format!("{}-shm", db.display())), "shm").unwrap();
+    let secrets = stand.dir.join("data").join("agent").join("secrets.json");
+    fs::write(
+        &secrets,
+        r#"{
+          "projects": {
+            "P0001": { "token": "tok-P0001-abcdef", "token_sha256": "aaa", "provider": "openrouter", "model": "m1" },
+            "P0002": { "token": "tok-P0002-abcdef", "token_sha256": "bbb", "provider": "openrouter", "model": "m2" }
+          },
+          "providers": { "openrouter": { "api_key": "sk-or-abcdefgh" } },
+          "mcp": { "tavily": { "api_key": "tvly-abcdefgh" } }
+        }"#,
+    )
+    .unwrap();
+}
+
+/// Зарегистрировать проект `P0001` (папка проекта — `stand.project_dir`).
+fn register(stand: &Stand) -> PathBuf {
+    let project = stand.project_dir("Проект");
+    let (status, v) = post(
+        "/api/agent/projects",
+        &serde_json::json!({ "name": "Пилот", "path": slash(&project) }),
+    );
+    assert_eq!(status, 200, "{v}");
+    project
+}
+
+#[test]
+fn agent_project_rm_removes_zone_registry_secret_and_record() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("rm", None);
+    let project = register(&stand);
+    seed_project_traces(&stand);
+
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 200, "{v}");
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["project"], "P0001");
+    assert_eq!(v["removed"]["token"], true);
+    assert_eq!(v["removed"]["record"], true);
+    assert_eq!(v["removed"]["labels"], Value::Null, "метки не трогались");
+    assert!(
+        v["removed"]["zone"]
+            .as_str()
+            .unwrap_or("")
+            .ends_with("P0001"),
+        "{v}"
+    );
+    assert_eq!(v["removed"]["registry"].as_array().unwrap().len(), 3);
+    assert!(v["left"].as_array().unwrap().is_empty(), "{v}");
+
+    // Зона, реестр, запись и токен удалены; соседи и секреты-ключи целы.
+    assert!(!stand.zone().join("P0001").exists());
+    assert!(!stand
+        .dir
+        .join("data")
+        .join("agent")
+        .join("registry")
+        .join("P0001.db")
+        .exists());
+    let registry =
+        hds_agent::projects::load_at(&stand.dir.join("data").join("agent").join("projects.json"))
+            .unwrap();
+    assert!(registry.get("P0001").is_none());
+    let secrets = hds_agent::secrets::Secrets::load(
+        &stand.dir.join("data").join("agent").join("secrets.json"),
+    )
+    .unwrap();
+    assert!(!secrets.has_project("P0001"));
+    assert!(secrets.has_project("P0002"), "соседний проект цел");
+    assert_eq!(secrets.mcp_key("tavily").as_deref(), Some("tvly-abcdefgh"));
+
+    // Папка проекта неприкосновенна.
+    assert!(project.exists());
+    // Тело ответа — без токенов и ключей (I8).
+    let text = v.to_string();
+    assert!(!text.contains("tok-P0001"), "{text}");
+    assert!(!text.contains("sk-or-"), "{text}");
+}
+
+#[test]
+fn agent_project_rm_refuses_live_daemon_and_accepts_force() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("rmdaemon", None);
+    register(&stand);
+    seed_project_traces(&stand);
+    let lock = stand
+        .zone()
+        .join("P0001")
+        .join("agent-state")
+        .join("sync.lock");
+    fs::write(&lock, std::process::id().to_string()).unwrap();
+
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 409, "{v}");
+    assert!(v["error"].as_str().unwrap_or("").contains("демон зеркала"));
+    assert!(stand.zone().join("P0001").exists(), "ничего не удалено");
+    let registry =
+        hds_agent::projects::load_at(&stand.dir.join("data").join("agent").join("projects.json"))
+            .unwrap();
+    assert!(registry.get("P0001").is_some());
+
+    // force: true — удаляется, даже если lock ещё на месте.
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001", "force": true }),
+    );
+    assert_eq!(status, 200, "{v}");
+    assert!(!stand.zone().join("P0001").exists());
+}
+
+#[test]
+fn agent_project_rm_repeat_is_404_and_bad_body_is_400() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("rmrepeat", None);
+    register(&stand);
+    seed_project_traces(&stand);
+
+    let (status, _) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 200);
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 404, "повтор — 404, не 500: {v}");
+
+    // Без project и с id не по D21 — 400.
+    assert_eq!(post("/api/agent/project/rm", &serde_json::json!({})).0, 400);
+    assert_eq!(
+        post(
+            "/api/agent/project/rm",
+            &serde_json::json!({ "project": "../P0001" })
+        )
+        .0,
+        400
+    );
+}
+
+#[test]
+fn agent_project_rm_requires_csrf() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _stand = Stand::new("rmcsrf", None);
+    let (status, _, _) = route(
+        "POST",
+        "/api/agent/project/rm",
+        "",
+        &ReqHeaders::default(),
+        r#"{"project":"P0001"}"#,
+    );
+    assert_eq!(status, 403, "POST без X-HDS-UI/Origin отклонён");
+}
+
+#[test]
+fn agent_project_rm_is_forbidden_in_server_profile() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _stand = Stand::new("rmserver", Some("server"));
+    let (status, v) = post(
+        "/api/agent/project/rm",
+        &serde_json::json!({ "project": "P0001" }),
+    );
+    assert_eq!(status, 403, "серверный профиль — 403 (D20): {v}");
+}

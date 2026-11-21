@@ -14,7 +14,7 @@
 //! `--dry-run` печатает план (без ключей) и не запускает ни Python, ни Node —
 //! этим пользуются тесты и диагностика.
 
-use std::io::{Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,12 +22,17 @@ use std::time::Duration;
 use serde_json::{json, Value};
 
 use hds_agent::deanon::DeAnonymizer;
+use hds_agent::factory::anonymizer_factory;
 use hds_agent::filter::sys_values;
 use hds_agent::gateway::{Gateway, GatewayEvent, GatewayHost, NoAskUser, RefreshState};
 use hds_agent::history;
 use hds_agent::projects::{self, Project};
+use hds_agent::remove::{RemoveError, RemoveOptions, RemoveReport};
+use hds_agent::secrets::Secrets as AgentSecrets;
+use hds_agent::settings;
 use hds_anonymize::Client;
 use hds_core::config::{project_root, Config};
+use hds_core::roots::is_agent_project;
 
 // План хода живёт в `hds_agent::run` (A5.2): CLI и вкладка «Агент» собирают
 // сессию одинаково. Здесь реэкспорт, чтобы тесты и `cmd_*` не менялись.
@@ -354,18 +359,18 @@ fn flag_u32(args: &[String], name: &str) -> Option<u32> {
     crate::cmd::agent::flag_val(args, name).and_then(|v| v.trim().parse().ok())
 }
 
-/// `hds agent project add|list` — минимальный реестр для стенда (TR-8.1, A5 —
-/// полный CRUD и UI).
+/// `hds agent project add|list|rm` — реестр проектов (TR-8.1); `rm` — A6.5.
 pub fn cmd_project(cfg: &Config, args: &[String]) -> i32 {
     match args.split_first() {
         Some((sub, rest)) if sub == "add" => project_add(cfg, rest),
         Some((sub, rest)) if sub == "list" => project_list(cfg, rest),
+        Some((sub, rest)) if sub == "rm" => project_rm(cfg, rest),
         Some((sub, _)) => {
-            eprintln!("agent project: неизвестная подкоманда '{sub}' (add|list)");
+            eprintln!("agent project: неизвестная подкоманда '{sub}' (add|list|rm)");
             2
         }
         None => {
-            eprintln!("agent project: нужна подкоманда (add|list)");
+            eprintln!("agent project: нужна подкоманда (add|list|rm)");
             2
         }
     }
@@ -452,6 +457,226 @@ fn project_list(cfg: &Config, args: &[String]) -> i32 {
         );
     }
     0
+}
+
+/// `hds agent project rm <P> [--yes] [--force] [--purge-meta]` — удаление проекта
+/// из зоны (A6.5).
+///
+/// Удаляются каталог `<P>\` (`workspace`, `agent-config`, `agent-state`), реестр
+/// `<P>.db` (+`-wal`/`-shm`), запись `/projects/<P>` в `secrets.json` (токен,
+/// `provider`, `model`) и запись в `projects.json`; **папка проекта не
+/// трогается**. При живом демоне зеркала — отказ (код 1) с подсказкой
+/// `hds stop`; принудительно только `--force`. `--purge-meta` дополнительно
+/// удаляет метки проекта через `vault_drop_project`.
+///
+/// Коды: 0 — удалено; 1 — отказ/частичный отказ (живой демон, занятый файл,
+/// воркер); 2 — аргументы и повторный `rm`.
+fn project_rm(cfg: &Config, args: &[String]) -> i32 {
+    let Some(id) = args.iter().find(|a| !a.starts_with("--")).cloned() else {
+        eprintln!("agent project rm: нужен идентификатор проекта (P0001)");
+        return 2;
+    };
+    if !is_agent_project(&id) {
+        eprintln!("agent project rm: идентификатор проекта — P + 4 цифры (D21): '{id}'");
+        return 2;
+    }
+    let registry = match projects::load(cfg) {
+        Ok(registry) => registry,
+        Err(e) => {
+            eprintln!("agent project rm: {e}");
+            return 1;
+        }
+    };
+    let Some(rec) = registry.get(&id).cloned() else {
+        eprintln!("agent project rm: проект {id} не зарегистрирован — удалять нечего");
+        return 2;
+    };
+    let force = crate::cmd::agent::has(args, "--force");
+    let purge_labels = crate::cmd::agent::has(args, "--purge-meta");
+    let zone = settings::project_dir(cfg, &id);
+    let mut registry_paths: Vec<PathBuf> = Vec::new();
+    if let Some(db) = settings::registry_db(cfg, &id) {
+        registry_paths.push(db.clone());
+        for suffix in ["-wal", "-shm"] {
+            registry_paths.push(PathBuf::from(format!("{}{suffix}", db.display())));
+        }
+    }
+    let secrets = AgentSecrets::load_or_empty(&settings::secrets_file(cfg));
+    let has_entry = match &secrets {
+        Ok(secrets) => secrets.has_project(&id),
+        Err(_) => false,
+    };
+    let lock = settings::state_dir_for(cfg, &id).map(|d| d.join("sync.lock"));
+    let daemon_alive = lock
+        .as_ref()
+        .is_some_and(|lock| lock.is_file() && !hds_index::watch::lock_is_stale(lock));
+
+    // Что будет удалено — ДО удаления (TR-4.2: подтверждение).
+    println!("Проект: {id} ({})", rec.name);
+    println!("Папка проекта (не трогается): {}", rec.path);
+    println!("Будет удалено:");
+    match &zone {
+        Some(zone) => println!(
+            "  каталог зоны: {} ({})",
+            zone.display(),
+            if zone.exists() { "есть" } else { "нет" }
+        ),
+        None => println!("  каталог зоны: agent.root не задан"),
+    }
+    if registry_paths.is_empty() {
+        println!("  реестр: путь не строится (D21)");
+    }
+    for path in &registry_paths {
+        println!(
+            "  реестр: {} ({})",
+            path.display(),
+            if path.exists() { "есть" } else { "нет" }
+        );
+    }
+    println!(
+        "  токен и provider/model в secrets.json: {}",
+        if has_entry {
+            "есть — будут удалены"
+        } else {
+            "нет"
+        }
+    );
+    println!("  запись в projects.json: есть — будет удалена");
+    println!(
+        "  метки в anonymize.db: {}",
+        if purge_labels {
+            "будут удалены (--purge-meta)"
+        } else {
+            "останутся (--purge-meta — удалить)"
+        }
+    );
+    if daemon_alive {
+        println!(
+            "Демон зеркала: работает ({})",
+            lock.as_ref()
+                .map(|l| l.display().to_string())
+                .unwrap_or_default()
+        );
+    }
+
+    // В-A6-3: при живом демоне — отказ, пока владелец не остановит его сам.
+    if daemon_alive && !force {
+        eprintln!(
+            "Отказ: демон зеркала ещё работает и держит файлы проекта. Остановите его: \
+             `hds stop` (или снимите задачу `installers\\install_agent_sync_task.ps1 -Remove`) \
+             и повторите; принудительно — `hds agent project rm {id} --yes --force`."
+        );
+        return 1;
+    }
+
+    if !crate::cmd::agent::has(args, "--yes") {
+        if !std::io::stdin().is_terminal() {
+            eprintln!("нет терминала для подтверждения — повторите с --yes");
+            return 2;
+        }
+        print!("Продолжить? [y/N]: ");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line).is_err() {
+            eprintln!("не удалось прочитать ответ — отменено");
+            return 2;
+        }
+        let answer = line.trim().to_lowercase();
+        if !matches!(answer.as_str(), "y" | "yes" | "д" | "да") {
+            println!("Отменено, ничего не изменено.");
+            return 1;
+        }
+    }
+
+    // --purge-meta: ленивый воркер анонимизации (та же фабрика, что у зеркала).
+    let root = project_root();
+    let mut factory = anonymizer_factory(cfg, &root);
+    let mut client: Option<Client> = None;
+    let mut purge = |pid: &str| -> Result<(), String> {
+        if client.is_none() {
+            client = Some(factory().map_err(|e| format!("воркер анонимизации не запущен: {e}"))?);
+        }
+        client
+            .as_mut()
+            .expect("воркер только что создан")
+            .drop_project(pid)
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    };
+    let options = RemoveOptions {
+        force,
+        daemon_alive,
+        purge_labels,
+    };
+    let outcome = {
+        let hook: Option<&mut hds_agent::remove::PurgeHook<'_>> =
+            if purge_labels { Some(&mut purge) } else { None };
+        hds_agent::remove::remove_project(cfg, &id, options, hook)
+    };
+    drop(purge);
+    if let Some(client) = client.take() {
+        client.shutdown();
+    }
+    match outcome {
+        Ok(report) => {
+            print_remove_report(&report, &rec.path);
+            0
+        }
+        Err(e) => {
+            eprintln!("agent project rm: {e}");
+            if let Some(report) = e.report() {
+                print_remove_report(report, &rec.path);
+            }
+            match e {
+                RemoveError::NotRegistered(_) => 2,
+                _ => 1,
+            }
+        }
+    }
+}
+
+/// Что удалено и что осталось: пути и «да/нет», без секретов и значений (I8).
+fn print_remove_report(report: &RemoveReport, project_path: &str) {
+    println!("[ok] проект {} удалён", report.project);
+    match &report.zone {
+        Some(zone) => println!("  каталог зоны: {}", zone.display()),
+        None => println!("  каталога зоны не было"),
+    }
+    if report.registry.is_empty() {
+        println!("  реестр: файлов не было");
+    }
+    for path in &report.registry {
+        println!("  реестр: {}", path.display());
+    }
+    println!(
+        "  токен и provider/model: {}",
+        if report.token {
+            "удалены"
+        } else {
+            "не было"
+        }
+    );
+    println!(
+        "  запись projects.json: {}",
+        if report.record {
+            "удалена"
+        } else {
+            "не было"
+        }
+    );
+    println!(
+        "  метки: {}",
+        match report.labels {
+            Some(true) => "удалены (--purge-meta)",
+            Some(false) => "не удалены",
+            None => "не удалялись (--purge-meta — удалить)",
+        }
+    );
+    for path in &report.left {
+        println!("  [!] не удалено: {}", path.display());
+    }
+    println!("  папка проекта не тронута: {project_path}");
 }
 
 /// `hds agent run --project P [--prompt …]` — один ход в анонимной зоне.

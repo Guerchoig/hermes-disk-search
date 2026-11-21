@@ -2161,6 +2161,12 @@ pub fn route_full(
                         Ok(cfg) => agent::history_clear_json(&cfg, body),
                         Err(reply) => reply,
                     },
+                    // A6.5: удаление проекта — каталог зоны, реестр, токен и
+                    // запись `projects.json`; папка проекта не трогается.
+                    "/api/agent/project/rm" => match agent::gate() {
+                        Ok(cfg) => agent::project_rm_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
                     "/api/index/start" => {
                         let full = qp(query, "full")
                             .map(|v| v == "1" || v == "true")
