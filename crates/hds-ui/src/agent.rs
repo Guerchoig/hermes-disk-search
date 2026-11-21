@@ -243,6 +243,9 @@ pub fn state_json(cfg: &Config, project: &str) -> Reply {
     if id.is_empty() {
         return err(400, "нет параметра project");
     }
+    // AG-24: опрос состояния — заодно тик выгрузки простаивающих сессий
+    // (`agent.idle_unload_min`). Проект с идущим ходом не выгружается.
+    agent_session::global(cfg).reap_idle();
     let Some(p) = projects::get(cfg, id) else {
         return err(404, format!("проект {id} не зарегистрирован"));
     };

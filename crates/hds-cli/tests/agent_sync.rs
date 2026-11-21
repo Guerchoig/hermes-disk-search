@@ -429,8 +429,10 @@ fn sync_rejects_bad_interval_arguments() {
 
 /// A4.6: демон живёт по таймеру и останавливается сигналом `index.stop`.
 ///
-/// Снаружи видно: код 0, журнал со строками `start`/`pass`/`stop`, снятые
-/// `index.stop` и `sync.lock`. Проверка «не висит» — по времени теста.
+/// Снаружи видно: код 0, журнал со строками `start`/`pass`/`stop`, снятый
+/// `sync.lock` и **неснятый** `index.stop` (AG-27: файл общий с `hds watch`,
+/// второй адресат сигнала должен его увидеть). Проверка «не висит» — по времени
+/// теста.
 #[test]
 fn sync_daemon_stops_on_index_stop_and_writes_journal() {
     let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -453,7 +455,10 @@ fn sync_daemon_stops_on_index_stop_and_writes_journal() {
         started.elapsed()
     );
     let state = stand.state_dir();
-    assert!(!stop_file.exists(), "index.stop снят сигналом");
+    assert!(
+        stop_file.exists(),
+        "index.stop не снимается демоном зеркала: его ждёт hds watch (AG-27)"
+    );
     assert!(!state.join("sync.lock").exists(), "sync.lock снят");
     let log = fs::read_to_string(state.join("sync.log")).expect("журнал демона");
     assert!(

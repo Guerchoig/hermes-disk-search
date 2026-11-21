@@ -35,7 +35,7 @@
 //! проверок собираются из меток, а содержимое образа или варианта в отчёт не
 //! попадает ни в каком виде.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -270,9 +270,13 @@ pub(crate) fn read_text(path: &Path, extractor: &mut dyn TextExtractor) -> Resul
 
 /// Слова текста для сравнения «сколько пропало»: регистр, пунктуация и
 /// служебные комментарии (`<!-- страница n -->`, маркер образа) не влияют.
-pub(crate) fn word_set(text: &str) -> BTreeSet<String> {
+///
+/// Кратность важна (AG-28): повторение слова в основании значит, что вариант
+/// обязан содержать его столько же раз. На множествах документ с потерянной
+/// половиной текста проходил как «ок», потому что словарь сохранялся.
+pub(crate) fn word_counts(text: &str) -> BTreeMap<String, usize> {
     let body = strip_comments(text);
-    let mut words = BTreeSet::new();
+    let mut words: BTreeMap<String, usize> = BTreeMap::new();
     let mut current = String::new();
     for ch in body.chars() {
         if ch.is_alphanumeric() {
@@ -280,11 +284,11 @@ pub(crate) fn word_set(text: &str) -> BTreeSet<String> {
                 current.push(lower);
             }
         } else if !current.is_empty() {
-            words.insert(std::mem::take(&mut current));
+            *words.entry(std::mem::take(&mut current)).or_insert(0) += 1;
         }
     }
     if !current.is_empty() {
-        words.insert(current);
+        *words.entry(current).or_insert(0) += 1;
     }
     words
 }
@@ -507,13 +511,19 @@ fn check_text_lost(
             return Check::flagged(CHECK_TEXT_LOST, "вариант не прочитан".to_string());
         }
     };
-    let base_words = word_set(base);
+    let base_words = word_counts(base);
     if base_words.is_empty() {
         return Check::ok(CHECK_TEXT_LOST, "в основании нет слов".to_string());
     }
-    let variant_words = word_set(variant);
-    let lost = base_words.difference(&variant_words).count();
-    let share = lost as f64 / base_words.len() as f64;
+    let variant_words = word_counts(variant);
+    // Кратность (AG-28): если слово было в основании трижды, а осталось один
+    // раз, потеряны два вхождения. На множествах такая потеря не видна.
+    let lost: usize = base_words
+        .iter()
+        .map(|(word, count)| count.saturating_sub(*variant_words.get(word).unwrap_or(&0)))
+        .sum();
+    let total: usize = base_words.values().sum();
+    let share = lost as f64 / total as f64;
     let percent = (share * 100.0).round() as u32;
     if share > TEXT_LOST_LIMIT {
         Check::flagged(
@@ -627,16 +637,49 @@ mod tests {
     }
 
     #[test]
-    fn word_set_ignores_case_punctuation_and_service_lines() {
-        let words = word_set("<!-- страница 1 -->\nПривет, МИР! Привет — 1С:ERP\n");
+    fn word_counts_ignores_case_punctuation_and_service_lines() {
+        let words = word_counts("<!-- страница 1 -->\nПривет, МИР! Привет — 1С:ERP\n");
         assert_eq!(words.len(), 4, "{words:?}");
         for expected in ["привет", "мир", "1с", "erp"] {
-            assert!(words.contains(expected), "{expected} — {words:?}");
+            assert!(words.contains_key(expected), "{expected} — {words:?}");
         }
-        assert!(!words.contains("страница"), "служебная строка не слово");
+        assert_eq!(words["привет"], 2, "кратность сохраняется: {words:?}");
+        assert!(!words.contains_key("страница"), "служебная строка не слово");
         // Маркер образа — тоже служебная строка.
-        let words = word_set("<!-- hds-agent/P0001/7 -->\nтекст");
+        let words = word_counts("<!-- hds-agent/P0001/7 -->\nтекст");
         assert_eq!(words.len(), 1, "{words:?}");
+    }
+
+    #[test]
+    fn text_lost_counts_repeated_words_once_per_occurrence() {
+        // AG-28: словарь основания сохранён, но половина вхождений потеряна —
+        // на множествах это было «ок», на кратности — «проверить».
+        let fix = Fixture::new("v-repeats");
+        let base_text = "протокол ".repeat(10) + "решение";
+        let base = fix.write("base.md", &base_text);
+        let images = fix.write("base.md.images.json", "[]");
+        let variant_text = "протокол ".repeat(4) + "решение";
+        let variant = fix.write("variant.md", &variant_text);
+        let mut ext = FakeExtractor::default();
+        let outcome = validate(
+            &Inputs {
+                rel: "Документ.md",
+                anon_rel: "Документ [DOC_1].md",
+                kind: Kind::Image,
+                image: &base,
+                variant: &variant,
+                base: &base,
+                images: &images,
+            },
+            Ok(snap(&[], 3)),
+            &mut ext,
+        );
+        let lost = check(&outcome.report, CHECK_TEXT_LOST);
+        assert_eq!(
+            lost.verdict,
+            Verdict::Check,
+            "потеряно 6 из 11 вхождений: {lost:?}"
+        );
     }
 
     #[test]

@@ -36,6 +36,7 @@ use hds_agent::history;
 use hds_agent::projects::{self, Project};
 use hds_agent::registry::AgentRegistry;
 use hds_agent::registry_db::ArtifactRegistry;
+use hds_agent::results;
 use hds_agent::run::{self, RunOptions};
 use hds_agent::secrets::Secrets;
 use hds_agent::settings::{self, AgentSettings};
@@ -523,6 +524,47 @@ impl AgentApi {
         removed
     }
 
+    /// Выгрузить проекты, простаивавшие дольше `agent.idle_unload_min` (AG-24).
+    ///
+    /// Раньше `AgentRegistry::reap_idle` звался только при отправке реплики:
+    /// пользователь, открывший проект и ушедший, держал процесс Node
+    /// бесконечно, хотя `idle_unload_min` обещает 30 минут. Тик идёт по опросу
+    /// API (`GET /api/agent/state`, `/events`) — **не отдельным потоком**, а
+    /// значит не требует остановки при завершении UI.
+    ///
+    /// Проект с идущим ходом не выгружается: `last_used` обновляется только на
+    /// `send`, и долгий ход формально «простаивает».
+    pub fn reap_idle(&self) -> Vec<String> {
+        let now = Instant::now();
+        let candidates = {
+            let registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+            registry.idle_projects(now)
+        };
+        let mut reaped = Vec::new();
+        for project in candidates {
+            let busy = self
+                .existing_turn(&project)
+                .map(|turn| turn.is_busy())
+                .unwrap_or(false);
+            if busy {
+                continue;
+            }
+            let removed = {
+                let mut registry = self.registry.lock().unwrap_or_else(|e| e.into_inner());
+                registry.unload(&project)
+            };
+            if !removed {
+                continue;
+            }
+            if let Some(turn) = self.existing_turn(&project) {
+                turn.opened.store(false, Ordering::SeqCst);
+                turn.stop.store(true, Ordering::SeqCst);
+            }
+            reaped.push(project);
+        }
+        reaped
+    }
+
     /// Положить событие в кольцо проекта (номер выдаёт кольцо, оно же будит
     /// поток SSE).
     fn push(&self, turn: &Turn, kind: &str, text: Option<Value>, raw: Option<Value>) {
@@ -544,7 +586,11 @@ impl AgentApi {
 
     /// `GET /api/agent/events`: `busy`, `session`, последний номер и события
     /// после `after` (≤ `limit`, не больше кольца).
+    ///
+    /// Здесь же тик выгрузки простаивающих сессий (AG-24): страница опрашивает
+    /// поток постоянно, отдельный фоновой поток не нужен.
     pub fn events_json(&self, project: &str, after: u64, limit: usize) -> Value {
+        self.reap_idle();
         let Some(turn) = self.existing_turn(project) else {
             return json!({ "busy": false, "session": Value::Null, "seq": 0, "events": [] });
         };
@@ -1147,6 +1193,19 @@ fn open_session(
         }
         _ => (Vec::new(), None),
     };
+    // AG-20: очередь `.hds-agent\messages.jsonl` (решения по документам,
+    // склейки меток) доезжает до агента первым сообщением сессии. Текст уже
+    // без значений (I8), поэтому дополнительная анонимизация не нужна —
+    // фильтр всё равно прогонит его на `egress_check`.
+    let project_root = std::path::Path::new(&plan.project.path);
+    let queued = results::read_queue(project_root);
+    let mut messages = messages;
+    if let Some(prompt) = results::queue_prompt(&queued) {
+        messages.push(json!({
+            "role": "user",
+            "content": [{ "type": "text", "text": prompt }],
+        }));
+    }
     let resumed = session_id.is_some();
     gateway
         .open(
@@ -1159,6 +1218,12 @@ fn open_session(
             plan.settings.subagents,
         )
         .map_err(|e| ApiError::new(503, format!("старт сессии: {e}")))?;
+    // Очередь доставлена (AG-20): строки переезжают в `messages.delivered.jsonl`,
+    // чтобы сообщение не повторялось в следующем ходе. Сбой пометки не должен
+    // валить старт — сообщение просто придёт ещё раз.
+    if !queued.is_empty() {
+        let _ = results::mark_delivered(project_root);
+    }
     turn.opened.store(true, Ordering::SeqCst);
     if let Some(id) = gateway.session_id() {
         *turn.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(id.to_string());

@@ -201,6 +201,19 @@ impl AgentRegistry {
         stale
     }
 
+    /// Проекты, которые простаивают дольше `idle`, **без** выгрузки (AG-24).
+    ///
+    /// Нужно вызывающему, который сам решает, можно ли выгружать: UI не трогает
+    /// проект с идущим ходом, хотя формально он «простаивает» по `last_used`
+    /// (время обновляется только на `send`, а ход может идти минутами).
+    pub fn idle_projects(&self, now: Instant) -> Vec<String> {
+        self.live
+            .iter()
+            .filter(|entry| now.saturating_duration_since(entry.last_used) > self.idle)
+            .map(|entry| entry.project.clone())
+            .collect()
+    }
+
     /// Выгрузить LRU-проект (тот, что дольше всех не использовался).
     fn evict_lru(&mut self) -> Option<String> {
         let (i, project) = self

@@ -64,6 +64,32 @@ _INVALID_NAME_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 _PATH_SPLIT_RE = re.compile(r"[\\/]+")
 
 
+def _protect_labels(text: str) -> tuple[str, list[str]]:
+    """Спрятать уже стоящие метки под плейсхолдеры (AG-21).
+
+    Словарный проход заменяет значения по границам слова. Без защиты короткое
+    значение («1С», «ООО») могло бы попасть внутрь метки `[PERSON_1]` и
+    испортить её — метка перестала бы разбираться `hds_core::labels`.
+    """
+    slots: list[str] = []
+
+    def keep(match: "re.Match[str]") -> str:
+        slots.append(match.group(0))
+        return f"\x00{len(slots) - 1}\x00"
+
+    return LABEL_RE.sub(keep, text), slots
+
+
+def _restore_labels(text: str, slots: list[str]) -> str:
+    """Вернуть метки на место после словарного прохода."""
+
+    def back(match: "re.Match[str]") -> str:
+        index = int(match.group(1))
+        return slots[index] if index < len(slots) else match.group(0)
+
+    return re.sub(r"\x00(\d+)\x00", back, text)
+
+
 def sanitize_component(name: str) -> str:
     """Санитайзинг компонента пути после подстановки меток (TR-7.1).
 
@@ -168,6 +194,38 @@ class AnonymizeHandlers:
 
             self._ner = NERService()
         return self._ner
+
+    # ── словарный проход по известным формам (AG-21) ────────────────────
+
+    def _apply_known_forms(self, project_id: str, text: str) -> tuple[str, int]:
+        """Дополнить анонимизацию словарём уже известных форм проекта (AG-21).
+
+        NER на короткой строке (заголовок, ячейка, имя) не выделяет часть
+        значений — без этого прохода они оставались в образе открытыми (I1:
+        22–28 попаданий на стенде). Здесь прогоняется тот же словарь, что у
+        Rust-фильтра: значение → метка проекта, по границам слова, без
+        `keep_terms`, значения короче 3 символов не трогаются.
+
+        Возвращает `(текст, сколько меток добавлено)`.
+        """
+        project_id = (project_id or "").strip()
+        if not project_id or not text:
+            return text, 0
+        mappings = self.store.project_mappings(project_id)
+        value_to_label = {
+            value: label
+            for label, value in mappings.items()
+            if isinstance(value, str)
+            and len(value.strip()) >= 3
+            and not self.store.is_kept(value)
+        }
+        if not value_to_label:
+            return text, 0
+        protected, slots = _protect_labels(text)
+        before = len(LABEL_RE.findall(protected))
+        replaced = self.text_replacer.replace_by_value(protected, value_to_label)
+        after = len(LABEL_RE.findall(replaced))
+        return _restore_labels(replaced, slots), max(after - before, 0)
 
     # ── вспомогательное ─────────────────────────────────────────────────
 
@@ -350,6 +408,16 @@ class AnonymizeHandlers:
             anon_lines.append(anon_line)
             mappings.extend(line_maps)
         anon_text = "\n".join(anon_lines)
+
+        if agent:
+            # AG-21: NER на коротких строках не выделяет часть известных форм —
+            # дозакрываем их словарём проекта. В предупреждение попадает только
+            # число (I8), без значений.
+            anon_text, added = self._apply_known_forms(project_id or "", anon_text)
+            if added:
+                warnings.append(
+                    f"словарный проход: дополнительно закрыто форм: {added}"
+                )
 
         if progress:
             progress(path.name, "assemble", 3, 4)
@@ -853,11 +921,24 @@ class AnonymizeHandlers:
             mappings.extend(line_maps)
         anon_text = "\n".join(anon_lines)
 
+        # AG-21: словарный проход — NER мог не увидеть известные формы проекта
+        # (короткие строки, падежи). Метки уже стоят под защитой, значения
+        # берутся из базы проекта; добавляем их в отчёт по меткам.
+        anon_text, added = self._apply_known_forms(project_id, anon_text)
+
         token_types: dict[str, str] = {}
         token_counts: dict[str, int] = {}
         for entry in mappings:
             token_types[entry.token] = entry.entity_type
             token_counts[entry.token] = token_counts.get(entry.token, 0) + 1
+        if added:
+            # Итоговый текст — источник истины: словарный проход мог добавить
+            # метки, которых нет в `mappings`.
+            token_counts.clear()
+            for match in LABEL_RE.finditer(anon_text):
+                token = match.group(0)
+                token_counts[token] = token_counts.get(token, 0) + 1
+                token_types.setdefault(token, match.group(1))
         labels = [
             {"label": token, "type": token_types[token], "count": token_counts[token]}
             for token in sorted(token_counts, key=_token_sort_key)

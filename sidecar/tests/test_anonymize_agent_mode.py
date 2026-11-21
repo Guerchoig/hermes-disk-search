@@ -382,5 +382,53 @@ class XlsxAgentModeTest(unittest.TestCase):
         self.assertEqual(res["images"], 0)
 
 
+class KnownFormsPassTest(unittest.TestCase):
+    """AG-21: словарный проход дозакрывает известные формы, которые NER не увидел.
+
+    NER на короткой строке слабее — в образе оставались открытые имена
+    (I1: 22–28 попаданий на стенде). Проход берёт значения из базы проекта и
+    заменяет их метками, не задевая уже стоящие метки.
+    """
+
+    class _NoNer:
+        """NER «ничего не нашёл» — воспроизводит пропуск на короткой строке."""
+
+        async def extract_entities_detailed(self, text, use_llm=True):  # noqa: ANN001
+            return [], 0, False
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory(prefix="hds-known-forms-")
+        self.dir = self.tmp.name
+        self.vault = Vault(os.path.join(self.dir, "anonymize.db"))
+        self.handlers = AnonymizeHandlers(self.vault, ner=self._NoNer())
+
+    def tearDown(self) -> None:
+        self.vault.close()
+        self.tmp.cleanup()
+
+    def test_known_form_is_closed_without_ner(self):
+        label = self.vault.project_label("P0001", PERSON_NOMN, "PERSON")
+        self.assertIsNotNone(label)
+        res = asyncio.run(
+            self.handlers.anonymize_text("P0001", f"Передать {PERSON_NOMN} сегодня\n")
+        )
+        self.assertIn(label, res["text"])
+        self.assertNotIn(PERSON_NOMN, res["text"], "значение осталось открытым")
+        self.assertTrue(
+            any(item["label"].startswith("[PERSON_") for item in res["labels"]),
+            res["labels"],
+        )
+
+    def test_existing_labels_are_not_corrupted(self):
+        # Короткое значение из базы не должно попасть внутрь готовой метки:
+        # `[PERSON_1]` обязан остаться разбираемым.
+        self.vault.project_label("P0001", "Иван", "PERSON")
+        res = asyncio.run(
+            self.handlers.anonymize_text("P0001", "Метка [PERSON_1] и Иван\n")
+        )
+        self.assertIn("[PERSON_1]", res["text"])
+        self.assertNotIn("Иван", res["text"])
+
+
 if __name__ == "__main__":
     unittest.main()

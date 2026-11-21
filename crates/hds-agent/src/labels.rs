@@ -146,7 +146,7 @@ pub fn report(
             let Some((kind, n, _gram)) = hds_core::labels::label_parts(&token) else {
                 continue;
             };
-            *counts.entry((kind, n)).or_insert(0) += text.matches(token.as_str()).count();
+            *counts.entry((kind, n)).or_insert(0) += 1;
         }
         for (key, count) in counts {
             occurrences.entry(key).or_default().push(LabelOccurrence {

@@ -152,6 +152,17 @@ pub fn run(
             }
             None => (Vec::new(), None),
         };
+        // AG-20: очередь `.hds-agent\messages.jsonl` — решения по документам и
+        // склейки меток доезжают до агента первым сообщением (только метки, I8).
+        let project_root = std::path::Path::new(&plan.project.path);
+        let queued = hds_agent::results::read_queue(project_root);
+        let mut history = history;
+        if let Some(prompt) = hds_agent::results::queue_prompt(&queued) {
+            history.push(serde_json::json!({
+                "role": "user",
+                "content": [{ "type": "text", "text": prompt }],
+            }));
+        }
         let resumed = session.is_some();
         let declared = gateway
             .open(
@@ -162,6 +173,9 @@ pub fn run(
                 plan.settings.subagents,
             )
             .map_err(|e| format!("start: {e}"))?;
+        if !queued.is_empty() {
+            let _ = hds_agent::results::mark_delivered(project_root);
+        }
         let session_id = gateway.session_id().map(str::to_string);
         if !opts.quiet && !opts.json {
             writeln!(

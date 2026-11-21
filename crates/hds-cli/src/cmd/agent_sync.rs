@@ -24,7 +24,9 @@
 //! код 1 — совместимость A4.1…A4.5.
 //!
 //! Порядок остановки демона: цикл → `drop` воркеров (Python завершается сам) →
-//! `sync.lock` → снять `index.stop` → строка `stop` в журнале. Ctrl+C — смерть
+//! `sync.lock` → строка `stop` в журнале. Файл `index.stop` **не снимается**
+//! (AG-27): он общий с `hds watch`, и второй адресат сигнала должен его увидеть;
+//! устаревший файл (старше старта демона) сигналом не считается. Ctrl+C — смерть
 //! процесса: `sync.lock` остаётся и снимается следующим стартом как устаревший
 //! (`hds_index::watch::lock_is_stale`), строка `stop` не пишется — журнал
 //! сохраняет всё до последнего начатого прохода.
@@ -32,7 +34,7 @@
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror, SyncReport};
 use hds_agent::registry_db::ArtifactRegistry;
@@ -47,6 +49,41 @@ pub const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 pub const SLEEP_STEP: Duration = Duration::from_millis(500);
 /// Сколько проблем прохода попадает в журнал (остальные — только числом).
 pub const LOG_PROBLEMS: usize = 10;
+
+/// Сигнал остановки `<root>\index.stop` (общий файл с `hds watch`, AG-27).
+///
+/// `hds stop` пишет его для **всех** демонов сразу. Демон зеркала не должен:
+/// * удалять файл — иначе `hds watch` (второй адресат) сигнала уже не увидит;
+/// * считать сигналом файл, который лежал на диске до его старта — иначе
+///   демон, запущенный после неудачного `hds stop` (индексатор при этом не
+///   работал и файл не снял), останавливался бы сразу после старта.
+///
+/// Поэтому сигнал — это файл, изменённый **после** запуска демона.
+#[derive(Debug, Clone)]
+pub struct StopSignal {
+    path: PathBuf,
+    since: SystemTime,
+}
+
+impl StopSignal {
+    /// Запомнить момент старта: файл, появившийся раньше, — устаревший.
+    pub fn new(path: PathBuf, since: SystemTime) -> StopSignal {
+        StopSignal { path, since }
+    }
+
+    /// Путь сигнала (для тестов и сообщений).
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Пришёл ли сигнал после старта демона.
+    pub fn triggered(&self) -> bool {
+        std::fs::metadata(&self.path)
+            .and_then(|meta| meta.modified())
+            .map(|mtime| mtime >= self.since)
+            .unwrap_or(false)
+    }
+}
 
 /// Точка входа `hds agent sync ...`.
 pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
@@ -168,7 +205,11 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
 
     // Один экземпляр зеркала и воркеров на все проходы: поднимать Python и
     // перечитывать настройки каждые пять секунд незачем (A4.6).
-    let stop_file = root.join("index.stop");
+    //
+    // AG-27: `index.stop` — общий файл с `hds watch`/`hds stop`. Демон его
+    // **не снимает** (иначе второй демон никогда не увидит сигнал) и не
+    // считает сигналом файл, который лежал до старта.
+    let stop = StopSignal::new(root.join("index.stop"), SystemTime::now());
     let (passes, changes, reason, code) = if parsed.daemon() {
         let interval = Duration::from_secs(interval_sec);
         log.start("daemon", &id, &project_path, &workspace, Some(interval));
@@ -179,7 +220,7 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
         let summary = run_loop(
             interval,
             None,
-            || stop_file.exists(),
+            || stop.triggered(),
             || match mirror.sync_once() {
                 Ok(report) => PassResult::Report(report),
                 Err(e) => PassResult::Failed(e.to_string()),
@@ -213,16 +254,12 @@ pub fn cmd_sync(cfg: &Config, args: &[String]) -> i32 {
     };
 
     // Порядок остановки (A4.6): цикл → воркеры (shutdown Python) → lock →
-    // index.stop → строка stop. Воркеры бросаем явно, до снятия lock: иначе
-    // следующий демон поднимется, пока Python ещё пишет во временные файлы.
+    // строка stop. Воркеры бросаем явно, до снятия lock: иначе следующий демон
+    // поднимется, пока Python ещё пишет во временные файлы.
     drop(mirror);
     drop(anonymizer);
     drop(extractor);
     drop(lock);
-    if reason == StopReason::StopFile && stop_file.exists() {
-        // Сигнал отработан — иначе следующий старт принял бы его за новый.
-        let _ = std::fs::remove_file(&stop_file);
-    }
     log.stop(reason.as_str(), passes, changes);
     println!(
         "[ok] остановлено: проходов {passes}, изменений {changes}, причина {}; журнал {}",
@@ -616,6 +653,24 @@ fn usage() -> String {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    /// AG-27: устаревший `index.stop` (лежал до старта) демон не останавливает,
+    /// а новый сигнал — да; сам файл остаётся на месте (его снимает индексатор).
+    #[test]
+    fn stale_stop_signal_is_ignored_and_file_is_kept() {
+        let dir = temp_dir("stopsignal");
+        let path = dir.join("index.stop");
+        std::fs::write(&path, b"").unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        // Старт «после» файла — сигнал устарел.
+        let stale = StopSignal::new(path.clone(), SystemTime::now());
+        assert!(!stale.triggered(), "старый файл — не сигнал");
+        // Старт «до» файла — сигнал свежий.
+        let fresh = StopSignal::new(path.clone(), SystemTime::now() - Duration::from_secs(1));
+        assert!(fresh.triggered(), "новый файл — сигнал");
+        assert!(path.exists(), "файл не снимается: его ждёт hds watch");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Временный каталог (счётчик — §7 п.4 хендоффа: тесты идут параллельно
     /// в одном процессе). Уборка — `cleanup`, а не `Drop`: тестам нужен путь.

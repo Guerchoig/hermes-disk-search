@@ -44,7 +44,7 @@ use std::time::UNIX_EPOCH;
 use hds_core::config::replace_file;
 use hds_core::error::CoreError;
 use hds_core::timefmt::{now_epoch, stamp_local};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::mirror::{
     copy_file, kind_for, rel_to_path, sha256_file, split_name, split_path, Mirror, MirrorError,
@@ -176,7 +176,7 @@ impl Decision {
 }
 
 /// Вид сообщения агенту (очередь `.hds-agent\messages.jsonl`, В-6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MessageKind {
     /// Правки не приняты, образ восстановлен/пересоздан из оригинала.
@@ -213,7 +213,7 @@ impl MessageKind {
 }
 
 /// Запись очереди сообщений агенту (В-6): по строке JSON на событие.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     /// Unix-время (секунды с дробной частью).
     pub ts: f64,
@@ -439,6 +439,75 @@ pub fn normalize_rel(rel: &str) -> Result<String, ResultsError> {
         return Err(ResultsError::BadPath(rel.to_string()));
     }
     Ok(parts.join(std::path::MAIN_SEPARATOR_STR))
+}
+
+/// Файл «доставленные сообщения»: очередь не удаляется, а переезжает сюда
+/// (аудит решений, AG-20).
+pub const DELIVERED_FILE: &str = "messages.delivered.jsonl";
+
+/// Прочитать очередь сообщений агенту (`.hds-agent\messages.jsonl`).
+///
+/// **AG-20.** Очередь писалась (`decide`, склейки меток), но её никто не читал:
+/// агент не узнавал ни об отклонённых правках, ни о перенесённых метках.
+/// Битые строки пропускаются — очередь не должна ломать старт сессии.
+pub fn read_queue(project_root: &Path) -> Vec<Message> {
+    let path = project_root.join(SERVICE_DIR).join(MESSAGES_FILE);
+    std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<Message>(line).ok())
+        .collect()
+}
+
+/// Пометить очередь доставленной: строки переезжают в
+/// `.hds-agent\messages.delivered.jsonl`, очередь очищается.
+///
+/// Так сообщение не повторится в следующем ходе (`initialMessages` передаются
+/// только при открытии сессии), но останется в зоне пользователя для аудита.
+pub fn mark_delivered(project_root: &Path) -> Result<(), ResultsError> {
+    let dir = project_root.join(SERVICE_DIR);
+    let queue = dir.join(MESSAGES_FILE);
+    let delivered = dir.join(DELIVERED_FILE);
+    let text = match std::fs::read_to_string(&queue) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(ResultsError::Io(queue, e.to_string())),
+    };
+    if text.trim().is_empty() {
+        let _ = std::fs::remove_file(&queue);
+        return Ok(());
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&delivered)
+        .map_err(|e| ResultsError::Io(delivered.clone(), e.to_string()))?;
+    file.write_all(text.as_bytes())
+        .map_err(|e| ResultsError::Io(delivered, e.to_string()))?;
+    fs::remove_file(&queue).map_err(|e| ResultsError::Io(queue, e.to_string()))
+}
+
+/// Текст реплики для агента из очереди: заголовок + строки сообщений.
+///
+/// В сообщениях только метки и пути (I8), значения не добавляются. `None` —
+/// очередь пуста (передавать агенту нечего).
+pub fn queue_prompt(messages: &[Message]) -> Option<String> {
+    if messages.is_empty() {
+        return None;
+    }
+    let mut out =
+        String::from("Служебные сообщения от пользователя (после его последнего запроса):\n");
+    for message in messages {
+        out.push_str("- ");
+        out.push_str(&message.text);
+        out.push('\n');
+    }
+    out.push_str(
+        "Учти их в работе: если документ отклонён или заменён — не считай свой образ \
+         актуальным; если метки склеены — используй старшую.\n",
+    );
+    Some(out)
 }
 
 /// Дописать сообщение агенту в `.hds-agent\messages.jsonl` (В-6, A5.5).
@@ -1059,6 +1128,35 @@ mod tests {
     use super::*;
     use crate::mirror::tests::{fast, FakeAnon, FakeExtractor, Stand};
     use crate::registry_db::ArtifactRegistry;
+
+    /// AG-20: очередь сообщений читается и после доставки переезжает в
+    /// `messages.delivered.jsonl` (повторно агенту не придёт, но останется
+    /// для аудита — только метки и пути, I8).
+    #[test]
+    fn queue_is_read_and_moved_to_delivered() {
+        let stand = Stand::new("queue");
+        assert!(read_queue(&stand.project).is_empty(), "пустой очереди нет");
+        let message = append_message(
+            &stand.project,
+            MessageKind::DocumentRejected,
+            "Протоколы\\[DOC_1].docx",
+            "изменения документа [DOC_1] отклонены пользователем".to_string(),
+        )
+        .expect("очередь");
+        assert_eq!(read_queue(&stand.project), vec![message.clone()]);
+        let prompt = queue_prompt(&read_queue(&stand.project)).expect("текст для агента");
+        assert!(prompt.contains("[DOC_1]"), "{prompt}");
+        mark_delivered(&stand.project).expect("доставлено");
+        assert!(
+            read_queue(&stand.project).is_empty(),
+            "очередь очищена после доставки"
+        );
+        let delivered =
+            std::fs::read_to_string(stand.project.join(SERVICE_DIR).join(DELIVERED_FILE))
+                .expect("журнал доставки");
+        assert!(delivered.contains("[DOC_1]"), "{delivered}");
+        let _ = std::fs::remove_dir_all(&stand.root);
+    }
 
     /// Стенд с собранным вариантом: образ выпущен, агент его правит, второй
     /// проход кладёт вариант в `.hds-agent\pending` и снимок основания.

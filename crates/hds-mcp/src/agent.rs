@@ -78,17 +78,52 @@ pub fn load_at(path: &Path) -> Result<AgentSecrets, String> {
 }
 
 /// Атомарное сохранение (временный файл рядом + `replace_file`).
+///
+/// **AG-22.** Файл общий: в нём же лежат `providers` (A5.6), `mcp` и
+/// `mcp.servers`. Слепая сериализация `AgentSecrets` (только `projects`)
+/// стирала их — поэтому новое состояние **сливается** с тем, что уже на диске:
+/// чужие блоки сохраняются, наши ключи сильнее.
 pub fn save_at(path: &Path, secrets: &AgentSecrets) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
-    let text = serde_json::to_string_pretty(secrets).map_err(|e| e.to_string())?;
+    let mut merged = match std::fs::read_to_string(path) {
+        Ok(text) => {
+            match serde_json::from_str::<serde_json::Value>(text.trim_start_matches('\u{feff}')) {
+                Ok(value) if value.is_object() => value,
+                Ok(_) => serde_json::Value::Object(serde_json::Map::new()),
+                Err(e) => return Err(format!("{}: {e}", path.display())),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Value::Object(serde_json::Map::new())
+        }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let ours = serde_json::to_value(secrets).map_err(|e| e.to_string())?;
+    merge_json(&mut merged, &ours);
+    let text = serde_json::to_string_pretty(&merged).map_err(|e| e.to_string())?;
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, text).map_err(|e| format!("{}: {e}", tmp.display()))?;
     replace_file(&tmp, path).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         e.message()
     })
+}
+
+/// Слияние JSON: объекты сливаются рекурсивно, остальное перекрывается.
+fn merge_json(target: &mut serde_json::Value, source: &serde_json::Value) {
+    match (target, source) {
+        (serde_json::Value::Object(into), serde_json::Value::Object(from)) => {
+            for (key, value) in from {
+                merge_json(
+                    into.entry(key.clone()).or_insert(serde_json::Value::Null),
+                    value,
+                );
+            }
+        }
+        (slot, value) => *slot = value.clone(),
+    }
 }
 
 /// Проект маршрута из пути запроса: `<mp>/agent/P0001` → `Some("P0001")`.
@@ -189,6 +224,60 @@ mod tests {
         assert!(token_ok(&secrets, "P0003", &plain, i64::MAX / 2));
         // Подделка.
         assert!(!token_ok(&secrets, "P0001", "deadbeef", 1_700_000_000));
+    }
+
+    #[test]
+    fn save_at_keeps_foreign_blocks() {
+        // AG-22: файл общий с панелью настроек — `providers`/`mcp` не теряются
+        // при выдаче токена, а неизвестные ключи переживают запись.
+        let dir = std::env::temp_dir().join(format!(
+            "hds-agent-token-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("secrets.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":{"mock":{"api_key":"sk-test"}},"mcp":{"tavily":{"api_key":"tv"}},"future":1}"#,
+        )
+        .unwrap();
+        let mut secrets = AgentSecrets::default();
+        secrets.projects.insert(
+            "P0001".into(),
+            AgentToken {
+                token_sha256: "hash".into(),
+                expires: 0,
+                token: Some("plain-token".into()),
+            },
+        );
+        save_at(&path, &secrets).expect("запись");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            value
+                .pointer("/providers/mock/api_key")
+                .and_then(|v| v.as_str()),
+            Some("sk-test"),
+            "ключ провайдера потерян: {text}"
+        );
+        assert_eq!(
+            value
+                .pointer("/mcp/tavily/api_key")
+                .and_then(|v| v.as_str()),
+            Some("tv")
+        );
+        assert_eq!(value.get("future").and_then(|v| v.as_i64()), Some(1));
+        assert_eq!(
+            value
+                .pointer("/projects/P0001/token_sha256")
+                .and_then(|v| v.as_str()),
+            Some("hash")
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
