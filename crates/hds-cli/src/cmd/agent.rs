@@ -97,9 +97,14 @@ fn usage() -> String {
      \x20        <P>\\agent-state\\sync.log; A4.6; --all — все проекты projects.json\n\
      \x20        в одном процессе, без --once — демон; A6.2)\n\
      \x20 result accept|reject|conflict --project <P> --path <отн. путь>\n\
-     \x20       [--choice agent|new|delegate]\n\
+     \x20       [--choice agent|new|delegate] [--json]\n\
      \x20       (решения по варианту агента: backup и замена оригинала, отклонение\n\
-     \x20        с сообщением агенту, три исхода конфликта; TR-7.6, A4.4)"
+     \x20        с сообщением агенту, три исхода конфликта; TR-7.6, A4.4)\n\
+     \x20 result restore|rebuild|relink --project <P> --path <отн. путь>\n\
+     \x20       [--stamp <штамп>] [--json]\n\
+     \x20       («Вернуть» из .hds-agent\\backup с выбором штампа, «Пересоздать образ»\n\
+     \x20        для orphan, relink по маркеру образа — только по команде; журнал\n\
+     \x20        решений decisions.jsonl; A6.4)"
         .to_string()
 }
 

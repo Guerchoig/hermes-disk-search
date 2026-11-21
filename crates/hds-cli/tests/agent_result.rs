@@ -80,6 +80,7 @@ fn mock_env() -> Option<EnvGuard> {
 struct Stand {
     dir: common::TempDir,
     cfg: Config,
+    cfg_path: PathBuf,
     project_dir: PathBuf,
 }
 
@@ -106,6 +107,7 @@ impl Stand {
         Stand {
             dir,
             cfg,
+            cfg_path,
             project_dir,
         }
     }
@@ -135,6 +137,23 @@ impl Stand {
         let mut full: Vec<String> = vec!["result".to_string()];
         full.extend(args.iter().map(|a| a.to_string()));
         cmd_agent_cfg(&self.cfg, &full)
+    }
+
+    /// `hds agent result ... --json` через настоящий бинарь: stdout нужен
+    /// целиком (in-process печать перехватить нельзя).
+    fn result_json(&self, args: &[&str]) -> (i32, String) {
+        let mut full: Vec<String> = vec!["agent".to_string(), "result".to_string()];
+        full.extend(args.iter().map(|a| a.to_string()));
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_hds"))
+            .args(&full)
+            .env("HDS_CONFIG", &self.cfg_path)
+            .env("HDS_ROOT", &self.dir.path)
+            .output()
+            .expect("hds");
+        (
+            output.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&output.stdout).to_string(),
+        )
     }
 
     fn workspace(&self) -> PathBuf {
@@ -484,5 +503,198 @@ fn result_rejects_bad_arguments() {
     assert_eq!(
         fs::read_to_string(stand.project_dir.join("Письмо.md")).unwrap(),
         "текст\n"
+    );
+}
+
+/// A6.4: «Вернуть» снаружи — выбранный штамп, sha этой копии, образ пересобран;
+/// `--json` отдаёт копии для выбора, коды 0/1/2.
+#[test]
+fn restore_through_cli_returns_copy_and_json() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(_env) = mock_env() else {
+        eprintln!("skip: нет интерпретатора воркера анонимизации");
+        return;
+    };
+    let stand = Stand::new("restore");
+    let rel = "Письмо Иванов Иван.md";
+    let anon_rel = "Письмо [PERSON_1].md";
+    fs::write(stand.project_dir.join(rel), "Контакт: Иванов Иван\n").unwrap();
+    assert_eq!(stand.register(), 0);
+    assert_eq!(stand.sync(), 0);
+    make_variant(&stand, rel, anon_rel, "[PERSON_1] — правка агента");
+    assert_eq!(stand.result(&["accept", "--project", P, "--path", rel]), 0);
+    assert_eq!(
+        fs::read_to_string(stand.project_dir.join(rel)).unwrap(),
+        "Иванов Иван — правка агента\n"
+    );
+
+    let stamps: Vec<String> = fs::read_dir(stand.service("backup"))
+        .expect("каталог копий")
+        .filter_map(|entry| {
+            entry
+                .ok()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    assert_eq!(stamps.len(), 1, "{stamps:?}");
+    let stamp = stamps[0].clone();
+    let copy = stand.service("backup").join(&stamp).join(rel);
+    let copy_sha = hds_agent::mirror::sha256_file(&copy).unwrap();
+
+    // Неизвестный штамп — отказ (1) с подсказкой, состояние не меняется.
+    assert_eq!(
+        stand.result(&[
+            "restore",
+            "--project",
+            P,
+            "--path",
+            rel,
+            "--stamp",
+            "19990101-000000",
+        ]),
+        1
+    );
+
+    // --json: выбранный штамп, sha копии, список копий для панели.
+    let (code, out) = stand.result_json(&[
+        "restore",
+        "--project",
+        P,
+        "--path",
+        rel,
+        "--stamp",
+        &stamp,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "{out}");
+    let value: serde_json::Value = serde_json::from_str(out.trim()).expect("JSON-отчёт");
+    assert_eq!(value["ok"], true, "{value}");
+    assert_eq!(value["action"], "restore");
+    assert_eq!(value["stamp"], stamp.as_str());
+    assert_eq!(value["sha256"], copy_sha.as_str());
+    assert_eq!(value["status"], "synced");
+    assert_eq!(value["backups"][0]["stamp"], stamp.as_str());
+    assert!(!out.contains("Контакт:"), "содержимое не уходит: {out}");
+
+    // Оригинал — версия из копии, образ пересобран из неё, копия не тратится.
+    assert_eq!(
+        fs::read_to_string(stand.project_dir.join(rel)).unwrap(),
+        "Контакт: Иванов Иван\n"
+    );
+    let image = fs::read_to_string(stand.image(anon_rel)).unwrap();
+    assert!(image.contains("[PERSON_1]"), "{image}");
+    assert!(!image.contains("правка агента"), "{image}");
+    assert!(copy.is_file(), "копия осталась в backup");
+
+    // Журнал решений: пути/статусы, содержимого нет (I8).
+    let journal = fs::read_to_string(stand.service("decisions.jsonl")).expect("журнал решений");
+    assert!(journal.contains("\"action\":\"restore\""), "{journal}");
+    assert!(!journal.contains("Контакт:"), "{journal}");
+
+    // Аргументы: без --path — 2; --stamp у rebuild — 2; неизвестный флаг — 2.
+    assert_eq!(stand.result(&["restore", "--project", P]), 2);
+    assert_eq!(
+        stand.result(&["rebuild", "--project", P, "--path", rel, "--stamp", &stamp]),
+        2
+    );
+    assert_eq!(
+        stand.result(&[
+            "relink",
+            "--project",
+            P,
+            "--path",
+            rel,
+            "--json",
+            "--что-то"
+        ]),
+        2
+    );
+}
+
+/// A6.4: «Пересоздать образ» для `orphan` и relink по маркеру через CLI.
+#[test]
+fn rebuild_and_relink_through_cli() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(_env) = mock_env() else {
+        eprintln!("skip: нет интерпретатора воркера анонимизации");
+        return;
+    };
+    let stand = Stand::new("rebuild");
+    let rel = "Письмо Иванов Иван.md";
+    let anon_rel = "Письмо [PERSON_1].md";
+    fs::write(stand.project_dir.join(rel), "Контакт: Иванов Иван\n").unwrap();
+    assert_eq!(stand.register(), 0);
+    assert_eq!(stand.sync(), 0);
+    let image_path = stand.image(anon_rel);
+    let image_body = fs::read_to_string(&image_path).unwrap();
+    assert!(
+        image_body.starts_with("<!-- hds-agent/P0001/"),
+        "{image_body}"
+    );
+
+    // Образ удалён — проход ставит `orphan`, «Пересоздать образ» возвращает synced.
+    fs::remove_file(&image_path).unwrap();
+    assert_eq!(stand.sync(), 0);
+    assert_eq!(
+        stand.registry().by_orig(rel).unwrap().unwrap().status,
+        Status::Orphan
+    );
+    assert_eq!(stand.result(&["rebuild", "--project", P, "--path", rel]), 0);
+    assert!(image_path.is_file(), "образ появился");
+    let registry = stand.registry();
+    let row = registry.by_orig(rel).unwrap().unwrap();
+    assert_eq!(row.status, Status::Synced);
+    assert_eq!(row.anon_sha256_issued, row.anon_sha256_seen);
+    drop(registry);
+
+    // Повторный rebuild — отказ (1): запись уже synced.
+    assert_eq!(stand.result(&["rebuild", "--project", P, "--path", rel]), 1);
+
+    // relink: снова orphan, образ с нашим маркером возвращён на место —
+    // запись чинит только команда.
+    let body = fs::read_to_string(&image_path).unwrap();
+    assert!(body.starts_with("<!-- hds-agent/P0001/"), "{body}");
+    fs::remove_file(&image_path).unwrap();
+    assert_eq!(stand.sync(), 0);
+    assert_eq!(
+        stand.registry().by_orig(rel).unwrap().unwrap().status,
+        Status::Orphan
+    );
+    fs::write(&image_path, &body).unwrap();
+    let (code, out) = stand.result_json(&["relink", "--project", P, "--path", rel, "--json"]);
+    assert_eq!(code, 0, "{out}");
+    let value: serde_json::Value = serde_json::from_str(out.trim()).expect("JSON-отчёт");
+    assert_eq!(value["action"], "relink", "{value}");
+    assert_eq!(value["status"], "synced", "{value}");
+    let registry = stand.registry();
+    let row = registry.by_orig(rel).unwrap().unwrap();
+    assert_eq!(row.status, Status::Synced);
+    assert_eq!(row.anon_sha256_issued, row.anon_sha256_seen);
+    drop(registry);
+
+    // Чужой маркер — код 1, текст про маркер, статус не меняется.
+    stand
+        .registry()
+        .set_status_by_orig(rel, Status::Orphan)
+        .unwrap();
+    fs::write(
+        &image_path,
+        "<!-- hds-agent/P0002/1 -->\nКонтакт: [PERSON_1]\n",
+    )
+    .unwrap();
+    let (code, out) = stand.result_json(&["relink", "--project", P, "--path", rel, "--json"]);
+    assert_eq!(code, 1, "{out}");
+    let value: serde_json::Value = serde_json::from_str(out.trim()).expect("JSON-отказ");
+    assert_eq!(value["ok"], false, "{value}");
+    assert!(
+        value["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("маркер"),
+        "{value}"
+    );
+    assert_eq!(
+        stand.registry().by_orig(rel).unwrap().unwrap().status,
+        Status::Orphan
     );
 }

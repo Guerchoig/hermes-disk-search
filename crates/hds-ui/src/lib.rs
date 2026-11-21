@@ -1962,6 +1962,15 @@ pub fn route_full(
                 ),
                 Err(reply) => reply,
             },
+            // A6.4: копии прежних версий (`.hds-agent\backup\<штамп>\<rel>`).
+            ("GET", "/api/agent/backups") => match agent::gate() {
+                Ok(cfg) => agent::backups_json(
+                    &cfg,
+                    &qp(query, "project").unwrap_or_default(),
+                    &qp(query, "path").unwrap_or_default(),
+                ),
+                Err(reply) => reply,
+            },
             // A5.5: панель «Метки проекта» (формы — значения, зона пользователя).
             ("GET", "/api/agent/labels") => match agent::gate() {
                 Ok(cfg) => agent::labels_json(&cfg, &qp(query, "project").unwrap_or_default()),
@@ -2113,6 +2122,24 @@ pub fn route_full(
                     // A5.4: решения по вариантам — поверх `Mirror::decide`.
                     "/api/agent/decision" => match agent::gate() {
                         Ok(cfg) => agent::decision_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    // A6.4: «Вернуть», «Пересоздать образ», relink и «Показать
+                    // в Проводнике» — те же гейты, что у решений (D20/D21).
+                    "/api/agent/restore" => match agent::gate() {
+                        Ok(cfg) => agent::restore_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/rebuild" => match agent::gate() {
+                        Ok(cfg) => agent::rebuild_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/relink" => match agent::gate() {
+                        Ok(cfg) => agent::relink_json(&cfg, body),
+                        Err(reply) => reply,
+                    },
+                    "/api/agent/reveal" => match agent::gate() {
+                        Ok(cfg) => agent::reveal_json(&cfg, body),
                         Err(reply) => reply,
                     },
                     // A5.5: склейка и разъединение меток проекта (TR-2.6).

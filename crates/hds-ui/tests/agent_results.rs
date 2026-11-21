@@ -341,6 +341,14 @@ fn compare_url(project: &str, rel: &str) -> String {
     )
 }
 
+fn backups_url(project: &str, path: &str) -> String {
+    format!(
+        "/api/agent/backups?project={}&path={}",
+        urlencode(project),
+        urlencode(path)
+    )
+}
+
 /// Ситуации 1 и 3 (TR-7.6): pending с отчётом, сравнение, приём и повтор.
 #[test]
 fn pending_compare_accept_updates_original_backup_and_image() {
@@ -684,6 +692,226 @@ fn decision_requires_csrf_and_desktop_profile() {
     if let Some(server) = server {
         let reply = hds_ui::agent::gate().expect_err("server-профиль — 403 (D20)");
         assert_eq!(reply.0, 403);
+        drop(server);
+    }
+}
+
+/// A6.4: копии, «Вернуть», ошибки штампа и CSRF.
+#[test]
+fn backups_and_restore_routes() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stand) = Stand::new("backups") else {
+        return;
+    };
+    let variant = stand.seed(Status::Synced);
+    // Копия прежней версии: `.hds-agent\backup\<штамп>\<rel>`.
+    let stamp = "20260101-120000";
+    let copy_dir = stand.project.join(".hds-agent").join("backup").join(stamp);
+    let copy = copy_dir.join(rel());
+    fs::create_dir_all(copy.parent().unwrap()).unwrap();
+    fs::write(&copy, "Контакт: Иванов Иван — версия из копии\n").unwrap();
+    let copy_sha = sha256_file(&copy).unwrap();
+    let _api = install_global(&stand);
+    let addr = spawn_ui();
+
+    // Список копий: штамп, размер, время, sha.
+    let (status, body) = get(addr, &backups_url("P0001", REL));
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["count"], 1, "{body}");
+    assert_eq!(body["copies"][0]["stamp"], stamp, "{body}");
+    assert_eq!(body["copies"][0]["sha256"], copy_sha.as_str(), "{body}");
+
+    // POST без CSRF — 403, состояние прежнее.
+    let (status, body) = post(
+        addr,
+        "/api/agent/restore",
+        &json!({ "project": "P0001", "path": REL, "stamp": stamp }),
+        false,
+    );
+    assert_eq!(status, 403, "{body}");
+    assert_eq!(
+        fs::read_to_string(&variant.original).unwrap(),
+        "Контакт: Иванов Иван\n"
+    );
+
+    // Неизвестный штамп — 404 с подсказкой о доступных.
+    let (status, body) = post(
+        addr,
+        "/api/agent/restore",
+        &json!({ "project": "P0001", "path": REL, "stamp": "19990101-000000" }),
+        true,
+    );
+    assert_eq!(status, 404, "{body}");
+    assert!(
+        body["error"].as_str().unwrap_or_default().contains(stamp),
+        "{body}"
+    );
+
+    // «Вернуть»: оригинал = копия, sha копии в ответе, образ пересобран.
+    let (status, body) = post(
+        addr,
+        "/api/agent/restore",
+        &json!({ "project": "P0001", "path": REL, "stamp": stamp }),
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "synced", "{body}");
+    assert_eq!(body["stamp"], stamp, "{body}");
+    assert_eq!(body["sha256"], copy_sha.as_str(), "{body}");
+    assert_eq!(
+        fs::read_to_string(&variant.original).unwrap(),
+        "Контакт: Иванов Иван — версия из копии\n"
+    );
+    assert!(copy.is_file(), "копия не тратится");
+    let image = fs::read_to_string(stand.image(&anon_rel())).unwrap();
+    assert!(image.contains("[PERSON_1]"), "{image}");
+    assert!(!image.contains("правка агента"), "{image}");
+    let journal = fs::read_to_string(stand.project.join(".hds-agent").join("decisions.jsonl"))
+        .expect("журнал решений");
+    assert!(journal.contains("\"action\":\"restore\""), "{journal}");
+    assert!(!journal.contains("Контакт:"), "{journal}");
+
+    // Неизвестный проект — 404, пустой path — 400.
+    let (status, _) = get(addr, &backups_url("P9999", REL));
+    assert_eq!(status, 404);
+    let (status, body) = post(
+        addr,
+        "/api/agent/restore",
+        &json!({ "project": "P0001", "path": "" }),
+        true,
+    );
+    assert_eq!(status, 400, "{body}");
+}
+
+/// A6.4: «Пересоздать образ» (только orphan) и relink по маркеру через маршруты.
+#[test]
+fn rebuild_and_relink_routes() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stand) = Stand::new("rebuild-routes") else {
+        return;
+    };
+    stand.seed(Status::Orphan);
+    let _api = install_global(&stand);
+    let addr = spawn_ui();
+
+    // orphan → образ пересоздан, статус synced.
+    let (status, body) = post(
+        addr,
+        "/api/agent/rebuild",
+        &json!({ "project": "P0001", "path": REL }),
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "synced", "{body}");
+    let image = fs::read_to_string(stand.image(&anon_rel())).unwrap();
+    assert!(image.contains("[PERSON_1]"), "{image}");
+
+    // Повтор — 409: запись уже не orphan.
+    let (status, body) = post(
+        addr,
+        "/api/agent/rebuild",
+        &json!({ "project": "P0001", "path": REL }),
+        true,
+    );
+    assert_eq!(status, 409, "{body}");
+
+    // relink: статус error + образ с маркером нашего проекта.
+    let registry = ArtifactRegistry::open(&stand.db()).unwrap();
+    let id = registry.by_orig(&rel()).unwrap().unwrap().id;
+    registry.set_status_by_orig(&rel(), Status::Error).unwrap();
+    drop(registry);
+    fs::write(
+        stand.image(&anon_rel()),
+        format!("<!-- hds-agent/P0001/{id} -->\nКонтакт: [PERSON_1]\n"),
+    )
+    .unwrap();
+    let (status, body) = post(
+        addr,
+        "/api/agent/relink",
+        &json!({ "project": "P0001", "path": REL }),
+        true,
+    );
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["status"], "synced", "{body}");
+    let registry = ArtifactRegistry::open(&stand.db()).unwrap();
+    let row = registry.by_orig(&rel()).unwrap().unwrap();
+    assert_eq!(row.status, Status::Synced);
+    assert_eq!(row.anon_sha256_issued, row.anon_sha256_seen);
+    drop(registry);
+
+    // Чужой маркер — 409, статус не меняется.
+    let registry = ArtifactRegistry::open(&stand.db()).unwrap();
+    registry.set_status_by_orig(&rel(), Status::Orphan).unwrap();
+    drop(registry);
+    fs::write(
+        stand.image(&anon_rel()),
+        "<!-- hds-agent/P0002/1 -->\nКонтакт: [PERSON_1]\n",
+    )
+    .unwrap();
+    let (status, body) = post(
+        addr,
+        "/api/agent/relink",
+        &json!({ "project": "P0001", "path": REL }),
+        true,
+    );
+    assert_eq!(status, 409, "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("маркер"),
+        "{body}"
+    );
+    let registry = ArtifactRegistry::open(&stand.db()).unwrap();
+    assert_eq!(
+        registry.by_orig(&rel()).unwrap().unwrap().status,
+        Status::Orphan
+    );
+}
+
+/// A6.4: «Показать в Проводнике» — только внутри проекта/зоны и с CSRF;
+/// в серверном профиле маршруты вкладки — 403 (D20).
+#[test]
+fn reveal_requires_confirmation_and_desktop_profile() {
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(stand) = Stand::new("reveal") else {
+        return;
+    };
+    stand.seed(Status::Synced);
+    let _api = install_global(&stand);
+    let addr = spawn_ui();
+
+    // Без CSRF — 403.
+    let (status, _) = post(
+        addr,
+        "/api/agent/reveal",
+        &json!({ "project": "P0001", "path": REL }),
+        false,
+    );
+    assert_eq!(status, 403);
+    // Путь вне проекта и анонимной зоны — 400 (Проводник не запускается).
+    let (status, body) = post(
+        addr,
+        "/api/agent/reveal",
+        &json!({ "project": "P0001", "path": "C:\\Windows\\win.ini" }),
+        true,
+    );
+    assert_eq!(status, 400, "{body}");
+    // Неизвестный проект — 404.
+    let (status, _) = post(
+        addr,
+        "/api/agent/reveal",
+        &json!({ "project": "P9999", "path": REL }),
+        true,
+    );
+    assert_eq!(status, 404);
+
+    // Серверный профиль: GET backups — 403 на живом сокете (D20).
+    let server = Stand::with_profile("server-routes", Some("server"));
+    if let Some(server) = server {
+        let addr = spawn_ui();
+        let (status, body) = get(addr, &backups_url("P0001", REL));
+        assert_eq!(status, 403, "{body}");
         drop(server);
     }
 }

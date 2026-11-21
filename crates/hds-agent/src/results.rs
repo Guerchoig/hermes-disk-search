@@ -34,6 +34,14 @@
 //! образ → очистка): если замена не удалась, не удаляется ничего. Единственное
 //! отклонение от буквы плана — «Отклонить» пересоздаёт образ **до** удаления
 //! варианта: сбой воркера не должен стоить пользователю последнего варианта.
+//!
+//! A6.4 добавляет эксплуатационные операции: [`Mirror::backups`] (список копий
+//! `.hds-agent\backup\<stamp>\<rel>`), [`Mirror::restore`] («Вернуть» —
+//! выбранный штамп или свежая копия), [`Mirror::rebuild`] («Пересоздать образ»
+//! для `orphan`) и [`Mirror::relink`] (починка записи по маркеру образа —
+//! **только по команде**, в проходе зеркала не вызывается, В-A6-5). Журнал
+//! решений — `.hds-agent\decisions.jsonl` (JSONL, ротация при 1 МБ, В-A6-6):
+//! только пути, статусы и числа (I8), `hds agent history clear` его не трогает.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -47,8 +55,8 @@ use hds_core::timefmt::{now_epoch, stamp_local};
 use serde::{Deserialize, Serialize};
 
 use crate::mirror::{
-    copy_file, kind_for, rel_to_path, sha256_file, split_name, split_path, Mirror, MirrorError,
-    ScannedFile,
+    copy_file, kind_for, rel_to_path, sha256_file, split_name, split_path, walk_files, Mirror,
+    MirrorError, ScannedFile,
 };
 use crate::registry_db::{Artifact, Kind, RegistryError, Status};
 
@@ -58,6 +66,10 @@ pub const SERVICE_DIR: &str = ".hds-agent";
 pub const MESSAGES_FILE: &str = "messages.jsonl";
 /// Копии прежних версий оригиналов: подкаталог [`SERVICE_DIR`] (TR-7.6).
 pub const BACKUP_SUBDIR: &str = "backup";
+/// Журнал решений `.hds-agent\decisions.jsonl` (В-A6-6).
+pub const DECISIONS_FILE: &str = "decisions.jsonl";
+/// Ротация журнала решений: больше этого — в `decisions.jsonl.1` (В-A6-6).
+pub const DECISIONS_ROTATE_BYTES: u64 = 1024 * 1024;
 /// Каталог workspace для вариантов при конфликте (TR-7.1/7.6).
 pub const CONFLICTS_DIR: &str = "_conflicts";
 /// Суффикс анонимной копии варианта агента в [`CONFLICTS_DIR`].
@@ -236,6 +248,12 @@ pub struct DecisionReport {
     pub status: Status,
     /// Копия прежнего оригинала (нет у «Отклонить» и у «Взять новую версию»).
     pub backup: Option<PathBuf>,
+    /// Штамп каталога копии (`YYYYMMDD-HHMMSS`): по нему «Вернуть» выбирает
+    /// версию (A6.4, В-A6-4).
+    pub stamp: Option<String>,
+    /// sha256 того, что операция записала (восстановленный оригинал или новый
+    /// образ): пользователь видит, что вернулось именно выбранное (A6.4).
+    pub sha256: Option<String>,
     /// Анонимная копия варианта в `_conflicts` («Поручить агенту»).
     pub conflict_copy: Option<String>,
     /// Сообщение, положенное в очередь агенту.
@@ -251,6 +269,8 @@ impl DecisionReport {
             anon_rel: row.anon_rel.clone(),
             status: row.status,
             backup: None,
+            stamp: None,
+            sha256: None,
             conflict_copy: None,
             message: None,
             warnings: Vec::new(),
@@ -353,6 +373,23 @@ pub enum ResultsError {
     BadPath(String),
     /// Вид артефакта не допускает замены оригинала (текстовый образ).
     Kind(Kind),
+    /// Копии нет в `.hds-agent\backup` (в том числе неизвестный `--stamp`).
+    NoBackup {
+        rel: String,
+        stamp: Option<String>,
+        /// Какие штампы есть — чтобы пользователь выбрал существующий.
+        available: Vec<String>,
+    },
+    /// Операция неприменима к текущему статусу записи (`op`: `rebuild`/`relink`).
+    NotApplicable {
+        rel: String,
+        status: Status,
+        op: &'static str,
+    },
+    /// Образа нет в workspace — восстанавливать запись не из чего.
+    NoImage(String),
+    /// Маркер образа не наш: чужой проект, чужой `artifact_id` или его нет.
+    BadMarker(String),
     Io(PathBuf, String),
     Registry(RegistryError),
     Mirror(MirrorError),
@@ -410,6 +447,51 @@ impl std::fmt::Display for ResultsError {
                 "вариант вида {} принять нельзя: оригинал такого формата агент не меняет \
                  (TR-7.3a) — используйте reject",
                 kind.as_str()
+            ),
+            ResultsError::NoBackup {
+                rel,
+                stamp,
+                available,
+            } => {
+                match stamp {
+                    Some(stamp) => write!(
+                        f,
+                        "'{rel}': копии '{stamp}' нет в {SERVICE_DIR}\\{BACKUP_SUBDIR}"
+                    )?,
+                    None => write!(
+                        f,
+                        "'{rel}': копий в {SERVICE_DIR}\\{BACKUP_SUBDIR} нет — вернуть нечего \
+                         (копия делается при «Принять»)"
+                    )?,
+                }
+                if !available.is_empty() {
+                    write!(f, " — доступны: {}", available.join(", "))?;
+                }
+                Ok(())
+            }
+            ResultsError::NotApplicable { rel, status, op } => match *op {
+                "rebuild" => write!(
+                    f,
+                    "'{rel}': статус {} — «Пересоздать образ» можно только для orphan \
+                     (образ удалён или оригинал заменён агентом)",
+                    status.as_str()
+                ),
+                _ => write!(
+                    f,
+                    "'{rel}': статус {} — запись восстанавливают только из orphan/error \
+                     (остальные обновляет hds agent sync)",
+                    status.as_str()
+                ),
+            },
+            ResultsError::NoImage(rel) => write!(
+                f,
+                "'{rel}': образа нет в workspace — восстанавливать запись не из чего \
+                 (запустите hds agent sync)"
+            ),
+            ResultsError::BadMarker(rel) => write!(
+                f,
+                "'{rel}': маркер образа не наш (нужен hds-agent/<P>/<id> этого проекта) — \
+                 запись не восстановлена"
             ),
             ResultsError::Io(path, why) => write!(f, "{}: {why}", path.display()),
             ResultsError::Registry(err) => write!(f, "{err}"),
@@ -543,6 +625,134 @@ pub fn append_message(
     Ok(message)
 }
 
+/// Одна копия прежней версии оригинала (A6.4, В-A6-4).
+///
+/// `sha256` считается только при выборке по конкретному файлу: список всех
+/// копий проекта не должен читать гигабайты ради панели.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BackupCopy {
+    /// Штамп каталога копии: `YYYYMMDD-HHMMSS` (возможен суффикс `-2`).
+    pub stamp: String,
+    /// Относительный путь оригинала (как в реестре).
+    pub rel: String,
+    /// Абсолютный путь копии.
+    pub path: PathBuf,
+    pub size: u64,
+    /// Unix-время изменения копии (секунды с дробной частью).
+    pub mtime: f64,
+    /// sha256 копии (есть, когда копии выбирались по `rel`).
+    pub sha256: Option<String>,
+}
+
+/// Запись журнала решений `.hds-agent\decisions.jsonl` (В-A6-6).
+///
+/// Только пути, статусы и числа (I8): значений из базы меток тут быть не может
+/// по построению — все поля собираются из реестра и путей.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DecisionEntry {
+    /// Unix-время записи.
+    pub ts: f64,
+    /// `accept`, `reject`, `conflict:*`, `restore`, `rebuild`, `relink`.
+    pub action: String,
+    /// Относительный путь оригинала.
+    pub orig_rel: String,
+    /// Штамп использованной копии (restore / accept / conflict:agent).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stamp: Option<String>,
+    /// Итоговый статус записи реестра.
+    pub status: String,
+    /// Относительный путь образа после операции.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<String>,
+    /// Числовой довесок (`sha256=…`, `artifact_id=…`) — без значений (I8).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra: Option<String>,
+}
+
+/// Дописать строку в `.hds-agent\decisions.jsonl` с ротацией при 1 МБ.
+///
+/// Ротация — как у `sync.log` (`LOG_ROTATE_BYTES`): прежний файл уезжает в
+/// `decisions.jsonl.1` и заменяет его. Неудача записи не должна отменять само
+/// решение: вызывающий превращает её в предупреждение.
+pub fn append_decision(project_root: &Path, entry: &DecisionEntry) -> Result<(), ResultsError> {
+    let dir = project_root.join(SERVICE_DIR);
+    fs::create_dir_all(&dir).map_err(|e| ResultsError::Io(dir.clone(), e.to_string()))?;
+    let path = dir.join(DECISIONS_FILE);
+    let too_big = fs::metadata(&path)
+        .map(|meta| meta.len() > DECISIONS_ROTATE_BYTES)
+        .unwrap_or(false);
+    if too_big {
+        let rotated = PathBuf::from(format!("{}.1", path.display()));
+        let _ = fs::remove_file(&rotated);
+        let _ = fs::rename(&path, &rotated);
+    }
+    let mut line =
+        serde_json::to_string(entry).map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
+    line.push('\n');
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
+    file.write_all(line.as_bytes())
+        .map_err(|e| ResultsError::Io(path, e.to_string()))
+}
+
+/// Штамп копии по пути `.hds-agent\backup\<stamp>\<rel>`.
+///
+/// Идём вверх до каталога `backup`: `rel` бывает вложенным, поэтому
+/// «родитель файла» — не обязательно каталог штампа.
+pub fn backup_stamp(backup: &Path) -> Option<String> {
+    let mut current = Some(backup);
+    while let Some(path) = current {
+        let parent = path.parent()?;
+        let is_root = parent
+            .file_name()
+            .map(|name| name == BACKUP_SUBDIR)
+            .unwrap_or(false);
+        if is_root {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            return valid_stamp(&name).then_some(name);
+        }
+        current = Some(parent);
+    }
+    None
+}
+
+/// Имя штампа — только компонент каталога: ни `..`, ни разделителей, ни диска.
+fn valid_stamp(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains(['/', '\\', ':'])
+        && !name.contains("..")
+}
+
+/// Время изменения файла в секундах Unix (0 — если платформа не отдала).
+fn mtime_of(meta: &fs::Metadata) -> f64 {
+    meta.modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// Временный файл рядом с оригиналом: атомарная замена через
+/// [`hds_core::config::replace_file`]. Расширение `.tmp` — зеркало его пропускает.
+fn restore_tmp_path(original: &Path) -> PathBuf {
+    let name = original
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut candidate = original.with_file_name(format!(".{name}.hds-restore.tmp"));
+    let mut n = 2u32;
+    while candidate.exists() {
+        candidate = original.with_file_name(format!(".{name}.hds-restore-{n}.tmp"));
+        n += 1;
+    }
+    candidate
+}
+
 impl<'a> Mirror<'a> {
     /// Принять решение по варианту документа (TR-7.6).
     ///
@@ -558,10 +768,38 @@ impl<'a> Mirror<'a> {
             .registry
             .by_orig(&rel)?
             .ok_or_else(|| ResultsError::NotFound(rel.clone()))?;
-        match decision {
-            Decision::Accept => self.accept_variant(&row),
-            Decision::Reject => self.reject_variant(&row),
-            Decision::Conflict(choice) => self.resolve_conflict(&row, choice),
+        let mut report = match decision {
+            Decision::Accept => self.accept_variant(&row)?,
+            Decision::Reject => self.reject_variant(&row)?,
+            Decision::Conflict(choice) => self.resolve_conflict(&row, choice)?,
+        };
+        // В-A6-6: журнал решений — после успешного решения; сбой записи не
+        // отменяет сделанное, но виден пользователю предупреждением.
+        self.journal(&mut report, &decision.as_str(), None);
+        Ok(report)
+    }
+
+    /// Дописать операцию в `.hds-agent\decisions.jsonl` (В-A6-6).
+    ///
+    /// Ошибка журнала — предупреждение в отчёте, а не отказ: решение уже
+    /// выполнено, и откатывать его из-за журнала нельзя.
+    fn journal(&self, report: &mut DecisionReport, action: &str, extra: Option<String>) {
+        let entry = DecisionEntry {
+            ts: now_epoch(),
+            action: action.to_string(),
+            orig_rel: report.orig_rel.clone(),
+            stamp: report.stamp.clone(),
+            status: report.status.as_str().to_string(),
+            image: match report.anon_rel.is_empty() {
+                true => None,
+                false => Some(report.anon_rel.clone()),
+            },
+            extra,
+        };
+        if let Err(e) = append_decision(&self.project_root, &entry) {
+            report
+                .warnings
+                .push(format!("журнал решений не записан: {e}"));
         }
     }
 
@@ -696,6 +934,7 @@ impl<'a> Mirror<'a> {
                 return Err(ResultsError::Io(original, err.to_string()));
             }
         }
+        report.stamp = backup_stamp(&backup);
         report.backup = Some(backup);
         if !self
             .registry
@@ -965,6 +1204,253 @@ impl<'a> Mirror<'a> {
     }
 }
 
+/// Копии, откат, пересоздание образа и relink (A6.4: В-A6-4…В-A6-7).
+impl<'a> Mirror<'a> {
+    /// Копии прежних версий из `.hds-agent\backup\<stamp>\<rel>` (В-A6-4).
+    ///
+    /// Свежие штампы первыми. `rel = None` — все копии проекта (sha не
+    /// считается: список не должен читать содержимое), `Some` — копии одного
+    /// файла с sha256. Имя штампа — только компонент каталога: `..`, `\`, `/`
+    /// и `:` отбрасываются, поэтому обход не выходит из `backup`.
+    pub fn backups(&self, rel: Option<&str>) -> Result<Vec<BackupCopy>, ResultsError> {
+        let root = self.project_root.join(SERVICE_DIR).join(BACKUP_SUBDIR);
+        let filter = match rel {
+            Some(value) => Some(normalize_rel(value)?),
+            None => None,
+        };
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(ResultsError::Io(root, e.to_string())),
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let dir = entry.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let stamp = entry.file_name().to_string_lossy().into_owned();
+            if !valid_stamp(&stamp) {
+                continue;
+            }
+            match &filter {
+                Some(rel) => {
+                    let path = dir.join(rel_to_path(rel));
+                    let meta = match fs::metadata(&path) {
+                        Ok(meta) if meta.is_file() => meta,
+                        _ => continue,
+                    };
+                    let sha = sha256_file(&path)
+                        .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
+                    out.push(BackupCopy {
+                        stamp,
+                        rel: rel.clone(),
+                        path,
+                        size: meta.len(),
+                        mtime: mtime_of(&meta),
+                        sha256: Some(sha),
+                    });
+                }
+                None => {
+                    let files = match walk_files(&dir) {
+                        Ok(files) => files,
+                        // Каталог копии мог исчезнуть между чтением и обходом.
+                        Err(_) => continue,
+                    };
+                    for file in files {
+                        out.push(BackupCopy {
+                            stamp: stamp.clone(),
+                            rel: file.rel,
+                            path: file.abs,
+                            size: file.size,
+                            mtime: file
+                                .mtime
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0),
+                            sha256: None,
+                        });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| b.stamp.cmp(&a.stamp).then_with(|| a.rel.cmp(&b.rel)));
+        Ok(out)
+    }
+
+    /// «Вернуть» (TR-7.6, В-A6-4): заменить оригинал копией и пересобрать образ.
+    ///
+    /// `stamp = None` — самая свежая копия. Копия **копируется** во временный
+    /// файл и уже он атомарно заменяет оригинал: набор копий не тратится, а
+    /// занятый файл (`os error 32`) даёт [`ResultsError::Busy`] и не меняет
+    /// состояние (ни оригинал, ни реестр). В `messages.jsonl` не пишется:
+    /// результат виден в UI (AG-20).
+    pub fn restore(
+        &mut self,
+        rel: &str,
+        stamp: Option<&str>,
+    ) -> Result<DecisionReport, ResultsError> {
+        let rel = normalize_rel(rel)?;
+        let row = self
+            .registry
+            .by_orig(&rel)?
+            .ok_or_else(|| ResultsError::NotFound(rel.clone()))?;
+        // Образ пересобирается сразу после замены: формат проверяем до неё,
+        // иначе оригинал вернулся бы, а образ остался прежним.
+        match kind_for(&row.orig_rel) {
+            Some(Kind::Image | Kind::TextImage) => {}
+            other => return Err(ResultsError::Kind(other.unwrap_or(row.kind))),
+        }
+        let copies = self.backups(Some(&rel))?;
+        let copy = match stamp.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(want) => copies
+                .iter()
+                .find(|copy| copy.stamp == want)
+                .cloned()
+                .ok_or_else(|| ResultsError::NoBackup {
+                    rel: rel.clone(),
+                    stamp: Some(want.to_string()),
+                    available: copies.iter().map(|copy| copy.stamp.clone()).collect(),
+                })?,
+            None => copies
+                .into_iter()
+                .next()
+                .ok_or_else(|| ResultsError::NoBackup {
+                    rel: rel.clone(),
+                    stamp: None,
+                    available: Vec::new(),
+                })?,
+        };
+        let sha = match copy.sha256.clone() {
+            Some(sha) => sha,
+            None => sha256_file(&copy.path)
+                .map_err(|e| ResultsError::Io(copy.path.clone(), e.to_string()))?,
+        };
+        let original = self.project_root.join(rel_to_path(&rel));
+        if let Some(parent) = original.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| ResultsError::Io(parent.to_path_buf(), e.to_string()))?;
+        }
+        let tmp = restore_tmp_path(&original);
+        copy_file(&copy.path, &tmp)?;
+        match replace_file(&tmp, &original) {
+            Ok(()) => {}
+            Err(CoreError::Io(err)) if err.kind() == std::io::ErrorKind::PermissionDenied => {
+                let _ = fs::remove_file(&tmp);
+                return Err(ResultsError::Busy(original));
+            }
+            Err(err) => {
+                let _ = fs::remove_file(&tmp);
+                return Err(ResultsError::Io(original, err.to_string()));
+            }
+        }
+        let restored = sha256_file(&original)
+            .map_err(|e| ResultsError::Io(original.clone(), e.to_string()))?;
+        if restored != sha {
+            return Err(ResultsError::Io(
+                original,
+                "sha256 восстановленного файла не совпал с копией".to_string(),
+            ));
+        }
+        let mut report = DecisionReport::new(&row);
+        report.backup = Some(copy.path);
+        report.stamp = Some(copy.stamp);
+        report.sha256 = Some(sha);
+        report.anon_rel = self.rebuild_image(&row, Status::Synced)?;
+        report.status = Status::Synced;
+        let extra = report.sha256.as_ref().map(|sha| format!("sha256={sha}"));
+        self.journal(&mut report, "restore", extra);
+        Ok(report)
+    }
+
+    /// «Пересоздать образ» для записи `orphan` (A6.4).
+    ///
+    /// У остальных статусов образ либо актуален, либо ждёт решения в
+    /// `.hds-agent\pending` — тогда пересборка потеряла бы правки агента
+    /// (отказ с понятным текстом).
+    pub fn rebuild(&mut self, rel: &str) -> Result<DecisionReport, ResultsError> {
+        let rel = normalize_rel(rel)?;
+        let row = self
+            .registry
+            .by_orig(&rel)?
+            .ok_or_else(|| ResultsError::NotFound(rel.clone()))?;
+        if row.status != Status::Orphan {
+            return Err(ResultsError::NotApplicable {
+                rel: row.orig_rel.clone(),
+                status: row.status,
+                op: "rebuild",
+            });
+        }
+        let mut report = DecisionReport::new(&row);
+        let anon_rel = self.rebuild_image(&row, Status::Synced)?;
+        let image = self.workspace.join(rel_to_path(&anon_rel));
+        report.sha256 =
+            Some(sha256_file(&image).map_err(|e| ResultsError::Io(image.clone(), e.to_string()))?);
+        report.anon_rel = anon_rel;
+        report.status = Status::Synced;
+        let extra = report.sha256.as_ref().map(|sha| format!("sha256={sha}"));
+        self.journal(&mut report, "rebuild", extra);
+        Ok(report)
+    }
+
+    /// Relink: восстановить запись по маркеру образа (A6.4, В-A6-5).
+    ///
+    /// **Только по команде**: в проходе зеркала не вызывается. Маркер
+    /// `hds-agent/<P>/<id>` должен принадлежать этому проекту, а `artifact_id`
+    /// — этой же записи реестра; статус — `orphan`/`error`. Восстановление —
+    /// через [`ArtifactRegistry::set_baseline`] (контракт §4: не «руками»).
+    pub fn relink(&mut self, rel: &str) -> Result<DecisionReport, ResultsError> {
+        let rel = normalize_rel(rel)?;
+        let row = self
+            .registry
+            .by_orig(&rel)?
+            .ok_or_else(|| ResultsError::NotFound(rel.clone()))?;
+        if !matches!(row.status, Status::Orphan | Status::Error) {
+            return Err(ResultsError::NotApplicable {
+                rel: row.orig_rel.clone(),
+                status: row.status,
+                op: "relink",
+            });
+        }
+        if row.anon_rel.is_empty() {
+            return Err(ResultsError::NoImage(row.orig_rel.clone()));
+        }
+        let image = self.workspace.join(rel_to_path(&row.anon_rel));
+        if !image.is_file() {
+            return Err(ResultsError::NoImage(row.orig_rel.clone()));
+        }
+        let marker = self.anonymizer.read_marker(&image)?;
+        let own_id = match (marker.project_id.as_deref(), marker.artifact_id) {
+            (Some(project), Some(id)) if project == self.project_id => self
+                .registry
+                .by_id(id)?
+                .map(|found| found.orig_rel == row.orig_rel)
+                .unwrap_or(false),
+            _ => false,
+        };
+        if !own_id {
+            return Err(ResultsError::BadMarker(row.orig_rel.clone()));
+        }
+        let original = self.project_root.join(rel_to_path(&row.orig_rel));
+        if !original.is_file() {
+            return Err(ResultsError::NotFound(row.orig_rel.clone()));
+        }
+        let orig_sha = sha256_file(&original)
+            .map_err(|e| ResultsError::Io(original.clone(), e.to_string()))?;
+        let anon_sha =
+            sha256_file(&image).map_err(|e| ResultsError::Io(image.clone(), e.to_string()))?;
+        self.registry
+            .set_baseline(row.id, &orig_sha, &anon_sha, Status::Synced)?;
+        let mut report = DecisionReport::new(&row);
+        report.anon_rel = row.anon_rel.clone();
+        report.status = Status::Synced;
+        report.sha256 = Some(anon_sha);
+        let extra = Some(format!("artifact_id={}", row.id));
+        self.journal(&mut report, "relink", extra);
+        Ok(report)
+    }
+}
+
 /// Метаданные файла: путь, наличие, размер, sha256, время изменения.
 fn file_info(path: &Path) -> FileInfo {
     let meta = fs::metadata(path).ok();
@@ -1143,7 +1629,20 @@ mod tests {
             "изменения документа [DOC_1] отклонены пользователем".to_string(),
         )
         .expect("очередь");
-        assert_eq!(read_queue(&stand.project), vec![message.clone()]);
+        // `ts` — f64 из JSON: парсер serde_json может отличаться на 1 ulp от
+        // исходного значения, поэтому время сверяем с допуском, а остальные
+        // поля записи — точно (иначе тест «мигает» раз в сотню прогонов).
+        let queued = read_queue(&stand.project);
+        assert_eq!(queued.len(), 1, "одна запись в очереди");
+        assert_eq!(queued[0].kind, message.kind);
+        assert_eq!(queued[0].rel, message.rel);
+        assert_eq!(queued[0].text, message.text);
+        assert!(
+            (queued[0].ts - message.ts).abs() < 1e-3,
+            "время записи: {} vs {}",
+            queued[0].ts,
+            message.ts
+        );
         let prompt = queue_prompt(&read_queue(&stand.project)).expect("текст для агента");
         assert!(prompt.contains("[DOC_1]"), "{prompt}");
         mark_delivered(&stand.project).expect("доставлено");
@@ -1852,5 +2351,346 @@ mod tests {
         assert_eq!(Decision::parse("conflict", Some("как-нибудь")), None);
         assert_eq!(Decision::parse("принять", None), None);
         assert_eq!(Decision::parse("", None), None);
+    }
+
+    /// A6.4: операция на стенде — тот же `Mirror`, что у CLI и вкладки.
+    fn with_mirror<T>(
+        stand: &Stand,
+        anon: &mut FakeAnon,
+        ext: &mut FakeExtractor,
+        action: impl for<'m> FnOnce(&mut Mirror<'m>) -> T,
+    ) -> T {
+        let registry = ArtifactRegistry::open(&stand.db).unwrap();
+        let mut mirror = Mirror::new(
+            "P0001",
+            &stand.project,
+            &stand.workspace,
+            &registry,
+            anon,
+            ext,
+            fast(),
+            200,
+        );
+        action(&mut mirror)
+    }
+
+    /// В-A6-4: копии видны списком (свежие первыми), фильтр по `rel` даёт sha,
+    /// посторонние файлы в `backup` и пустой путь отбрасываются.
+    #[test]
+    fn backups_lists_copies_newest_first_and_filters_by_rel() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-backups");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let root = service(&stand, BACKUP_SUBDIR);
+        let old = root.join("20000101-000000").join(rel());
+        fs::create_dir_all(old.parent().unwrap()).unwrap();
+        fs::write(&old, "Контакт: Иванов Иван — старая версия\n").unwrap();
+        // Посторонний файл в корне backup — не копия и в список не попадает.
+        fs::write(root.join("not-a-stamp"), "x").unwrap();
+
+        let (all, filtered, none, bad_path) = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            (
+                mirror.backups(None).unwrap(),
+                mirror.backups(Some(&rel())).unwrap(),
+                mirror.backups(Some("Нет такого.md")).unwrap(),
+                mirror.backups(Some("")).is_err(),
+            )
+        });
+        assert_eq!(all.len(), 2, "{all:?}");
+        assert_eq!(filtered.len(), 2, "{filtered:?}");
+        assert_ne!(all[0].stamp, "20000101-000000", "свежие штампы первыми");
+        assert_eq!(all[0].stamp, filtered[0].stamp);
+        assert!(
+            all.iter().all(|copy| copy.sha256.is_none()),
+            "список всех копий не читает содержимое"
+        );
+        assert!(
+            filtered.iter().all(|copy| copy.sha256.is_some()),
+            "копии одного файла — с sha256"
+        );
+        assert!(none.is_empty());
+        assert!(bad_path, "пустой путь — ошибка пути");
+
+        let old_copy = filtered
+            .iter()
+            .find(|copy| copy.stamp == "20000101-000000")
+            .expect("старая копия");
+        assert_eq!(old_copy.size, fs::metadata(&old).unwrap().len());
+        assert_eq!(old_copy.path, old);
+    }
+
+    /// В-A6-4: «Вернуть» даёт sha выбранной копии, копия не тратится, образ
+    /// пересоздаётся из восстановленного оригинала, журнал решений пишется.
+    #[test]
+    fn restore_returns_chosen_copy_and_rebuilds_image() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-restore");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let accepted = fs::read_to_string(stand.project.join(rel())).unwrap();
+        assert!(accepted.contains("правка агента"), "{accepted}");
+        let copies = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.backups(Some(&rel())).unwrap()
+        });
+        let copy = copies[0].clone();
+        let copy_sha = copy.sha256.clone().expect("sha копии");
+
+        // Без --stamp — свежая копия.
+        let report = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), None)
+        })
+        .expect("вернуть");
+        assert_eq!(report.status, Status::Synced);
+        assert_eq!(report.stamp.as_deref(), Some(copy.stamp.as_str()));
+        assert_eq!(report.sha256.as_deref(), Some(copy_sha.as_str()));
+        assert_eq!(
+            sha256_file(&stand.project.join(rel())).unwrap(),
+            copy_sha,
+            "sha восстановленного оригинала = sha копии"
+        );
+        let restored = fs::read_to_string(stand.project.join(rel())).unwrap();
+        assert!(restored.contains("Иванов Иван"), "{restored}");
+        assert!(!restored.contains("правка агента"), "{restored}");
+        assert!(copy.path.is_file(), "копия остаётся в backup");
+
+        let image = stand.image(&anon_rel());
+        assert!(image.contains("[PERSON_1]"), "{image}");
+        assert!(
+            !image.contains("правка агента"),
+            "образ из восстановленного оригинала: {image}"
+        );
+        let image_sha = sha256_file(&stand.workspace.join(anon_rel())).unwrap();
+        let registry = stand.registry();
+        let row = registry.by_orig(&rel()).unwrap().unwrap();
+        assert_eq!(row.status, Status::Synced);
+        assert_eq!(row.anon_sha256_issued.as_deref(), Some(image_sha.as_str()));
+        assert_eq!(row.anon_sha256_seen.as_deref(), Some(image_sha.as_str()));
+        drop(registry);
+
+        // Неизвестный штамп — отказ со списком доступных.
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), Some("19990101-000000"))
+        })
+        .expect_err("неизвестный штамп");
+        match &err {
+            ResultsError::NoBackup { available, .. } => {
+                assert_eq!(available, &vec![copy.stamp.clone()], "{available:?}")
+            }
+            other => panic!("ожидался NoBackup: {other}"),
+        }
+        assert!(err.to_string().contains("доступны"), "{err}");
+
+        // По штампу — та же копия.
+        let report = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), Some(copy.stamp.as_str()))
+        })
+        .expect("по штампу");
+        assert_eq!(report.stamp.as_deref(), Some(copy.stamp.as_str()));
+
+        // Журнал решений: пути и статусы; текста документа и значений нет (I8).
+        let journal = fs::read_to_string(service(&stand, DECISIONS_FILE)).unwrap();
+        assert!(journal.contains("\"action\":\"accept\""), "{journal}");
+        assert!(journal.contains("\"action\":\"restore\""), "{journal}");
+        assert!(
+            journal.contains(&format!("\"stamp\":\"{}\"", copy.stamp)),
+            "штамп копии в записи accept: {journal}"
+        );
+        assert!(
+            !journal.contains("Контакт:") && !journal.contains("правка агента"),
+            "содержимое документа не пишется: {journal}"
+        );
+    }
+
+    /// TR-7.6, случай 3: занятый файл при «Вернуть» — `Busy`, состояние прежнее.
+    #[cfg(windows)]
+    #[test]
+    fn restore_on_busy_file_keeps_state() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-busy");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let original = stand.project.join(rel());
+        let before = sha256_file(&original).unwrap();
+        let status = stand.registry().by_orig(&rel()).unwrap().unwrap().status;
+        let held = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0x0000_0001)
+            .open(&original)
+            .expect("открыть как Word");
+
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), None)
+        })
+        .expect_err("занят");
+        assert!(matches!(err, ResultsError::Busy(_)), "{err}");
+        assert_eq!(
+            sha256_file(&original).unwrap(),
+            before,
+            "оригинал не изменён"
+        );
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            status
+        );
+        let copies = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.backups(Some(&rel())).unwrap()
+        });
+        assert_eq!(copies.len(), 1, "копия на месте");
+        let tmp = original.with_file_name(format!(
+            ".{}.hds-restore.tmp",
+            original.file_name().unwrap().to_string_lossy()
+        ));
+        assert!(!tmp.exists(), "временный файл убран");
+        drop(held);
+
+        let report = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), None)
+        })
+        .expect("после закрытия");
+        assert_eq!(report.status, Status::Synced);
+    }
+
+    /// A6.4: «Пересоздать образ» — только `orphan`; у `pending_accept` отказ.
+    #[test]
+    fn rebuild_only_for_orphan() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-rebuild");
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| mirror.rebuild(&rel()))
+            .expect_err("не orphan");
+        match &err {
+            ResultsError::NotApplicable { status, op, .. } => {
+                assert_eq!(*status, Status::PendingAccept);
+                assert_eq!(*op, "rebuild");
+            }
+            other => panic!("ожидался отказ по статусу: {other}"),
+        }
+
+        // orphan: образ удалён агентом, оригинал остался.
+        fs::remove_file(stand.workspace.join(anon_rel())).unwrap();
+        stand
+            .registry()
+            .set_status_by_orig(&rel(), Status::Orphan)
+            .unwrap();
+        let report = with_mirror(&stand, &mut anon, &mut ext, |mirror| mirror.rebuild(&rel()))
+            .expect("пересоздать");
+        assert_eq!(report.status, Status::Synced);
+        assert!(stand.workspace.join(anon_rel()).is_file(), "образ появился");
+        let image = stand.image(&anon_rel());
+        assert!(image.contains("[PERSON_1]"), "{image}");
+        let registry = stand.registry();
+        let row = registry.by_orig(&rel()).unwrap().unwrap();
+        assert_eq!(row.status, Status::Synced);
+        assert_eq!(row.anon_sha256_issued, row.anon_sha256_seen);
+        drop(registry);
+        assert!(report.sha256.is_some(), "в отчёте sha нового образа");
+
+        // Журнал: операция rebuild записана.
+        let journal = fs::read_to_string(service(&stand, DECISIONS_FILE)).unwrap();
+        assert!(journal.contains("\"action\":\"rebuild\""), "{journal}");
+    }
+
+    /// В-A6-5: relink — только по команде. Проход зеркала запись `error` не
+    /// восстанавливает, `relink` по своему маркеру — восстанавливает; чужой
+    /// маркер и отсутствующий образ — понятный отказ.
+    #[test]
+    fn relink_by_marker_only_on_command() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-relink");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let row = stand.registry().by_orig(&rel()).unwrap().unwrap();
+        let image_body = stand.image(&anon_rel());
+        let marker = image_body.lines().next().unwrap_or("").to_string();
+        assert!(
+            marker.starts_with(&format!("<!-- hds-agent/P0001/{}", row.id)),
+            "{marker}"
+        );
+
+        // Ошибка обработки: образ и оригинал сходятся, поэтому проход зеркала
+        // запись не трогает — значит relink сам не срабатывает.
+        stand
+            .registry()
+            .set_status_by_orig(&rel(), Status::Error)
+            .unwrap();
+        let report = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(
+            report.changes(),
+            0,
+            "в проходе relink не срабатывает: {report:?}"
+        );
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            Status::Error,
+            "проход оставил запись как есть"
+        );
+
+        let report = with_mirror(&stand, &mut anon, &mut ext, |mirror| mirror.relink(&rel()))
+            .expect("relink по команде");
+        assert_eq!(report.status, Status::Synced);
+        let row = stand.registry().by_orig(&rel()).unwrap().unwrap();
+        assert_eq!(row.status, Status::Synced);
+        assert_eq!(row.anon_sha256_issued, row.anon_sha256_seen);
+
+        // Чужой маркер — отказ, статус не меняется.
+        stand
+            .registry()
+            .set_status_by_orig(&rel(), Status::Orphan)
+            .unwrap();
+        stand.write_ws(
+            &anon_rel(),
+            "<!-- hds-agent/P0002/1 -->\nКонтакт: [PERSON_1]\n",
+        );
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| mirror.relink(&rel()))
+            .expect_err("чужой маркер");
+        assert!(matches!(err, ResultsError::BadMarker(_)), "{err}");
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            Status::Orphan
+        );
+
+        // Образа нет — восстанавливать нечего.
+        fs::remove_file(stand.workspace.join(anon_rel())).unwrap();
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| mirror.relink(&rel()))
+            .expect_err("нет образа");
+        assert!(matches!(err, ResultsError::NoImage(_)), "{err}");
+
+        // Не тот статус — отказ с текстом операции.
+        let (stand2, mut anon2, mut ext2) = stand_with_variant("a64-relink-status");
+        let err = with_mirror(&stand2, &mut anon2, &mut ext2, |mirror| {
+            mirror.relink(&rel())
+        })
+        .expect_err("нечего восстанавливать");
+        match &err {
+            ResultsError::NotApplicable { op, .. } => assert_eq!(*op, "relink"),
+            other => panic!("ожидался отказ по статусу: {other}"),
+        }
+    }
+
+    /// В-A6-6: журнал решений — JSONL, ротация при 1 МБ, только пути/статусы.
+    #[test]
+    fn decisions_journal_rotates_and_keeps_paths_only() {
+        let stand = Stand::new("a64-journal");
+        let entry = DecisionEntry {
+            ts: 1.0,
+            action: "restore".to_string(),
+            orig_rel: "Документы\\Письмо [PERSON_1].md".to_string(),
+            stamp: Some("20260101-120000".to_string()),
+            status: "synced".to_string(),
+            image: Some("Документы\\Письмо [PERSON_1].md".to_string()),
+            extra: Some("sha256=abc123".to_string()),
+        };
+        append_decision(&stand.project, &entry).expect("запись журнала");
+        let path = service(&stand, DECISIONS_FILE);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        let line: DecisionEntry = serde_json::from_str(text.trim()).expect("JSONL");
+        assert_eq!(line, entry);
+        assert!(
+            !text.contains("Иванов"),
+            "только пути/статусы/числа (I8): {text}"
+        );
+
+        // Ротация: прежний журнал уезжает в `.1`, новый начинается с нуля.
+        fs::write(&path, vec![b'x'; (DECISIONS_ROTATE_BYTES + 1) as usize]).unwrap();
+        append_decision(&stand.project, &entry).expect("после ротации");
+        assert!(
+            PathBuf::from(format!("{}.1", path.display())).is_file(),
+            "прежний журнал в .1"
+        );
+        let fresh = fs::read_to_string(&path).unwrap();
+        assert_eq!(fresh.lines().count(), 1, "новый журнал — одна строка");
     }
 }

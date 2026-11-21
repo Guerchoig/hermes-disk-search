@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use hds_agent::factory::{anonymizer_factory, extractor_factory};
 use hds_agent::labels::{self, LabelsError, LabelsReport};
-use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror};
+use hds_agent::mirror::{canonical_clean, LazyAnonymizer, LazyExtractor, Mirror};
 use hds_agent::registry_db::{ArtifactRegistry, Status};
 use hds_agent::results::{
     self, append_message, Decision, DecisionReport, MessageKind, ResultsError, BACKUP_SUBDIR,
@@ -450,10 +450,15 @@ pub fn answer_json(cfg: &Config, body: &str) -> Reply {
 fn results_err(e: ResultsError) -> Reply {
     match &e {
         ResultsError::BadPath(_) => err(400, e.to_string()),
-        ResultsError::NotFound(_) | ResultsError::NoVariant(_) => err(404, e.to_string()),
+        ResultsError::NotFound(_)
+        | ResultsError::NoVariant(_)
+        | ResultsError::NoBackup { .. }
+        | ResultsError::NoImage(_) => err(404, e.to_string()),
         ResultsError::WrongStatus { .. }
         | ResultsError::OriginalChanged(_)
         | ResultsError::NothingToDelegate(_)
+        | ResultsError::NotApplicable { .. }
+        | ResultsError::BadMarker(_)
         | ResultsError::Kind(_) => err(409, e.to_string()),
         // Текст A4: пользователь должен понять, что закрыть и что не потеряно.
         ResultsError::Busy(path) => err(
@@ -1172,6 +1177,249 @@ pub fn decision_json(cfg: &Config, body: &str) -> Reply {
         }
         Err(reply) => reply,
     }
+}
+
+/// `GET /api/agent/backups?project=<P>&path=<rel>` — копии прежних версий.
+///
+/// `path` пустой — все копии проекта (без sha: список не читает содержимое);
+/// путь файла — копии именно его, с sha256 (В-A6-4).
+pub fn backups_json(cfg: &Config, project: &str, path: &str) -> Reply {
+    let id = project.trim();
+    if id.is_empty() {
+        return err(400, "нет параметра project");
+    }
+    if projects::get(cfg, id).is_none() {
+        return err(404, format!("проект {id} не зарегистрирован"));
+    }
+    let filter = path.trim().to_string();
+    let result = if filter.is_empty() {
+        with_mirror(cfg, id, |mirror| mirror.backups(None))
+    } else {
+        with_mirror(cfg, id, |mirror| mirror.backups(Some(&filter)))
+    };
+    match result {
+        Ok(copies) => ok(json!({
+            "count": copies.len(),
+            "copies": copies,
+        })),
+        Err(reply) => reply,
+    }
+}
+
+/// Тело `{project, path, stamp?}` для restore/rebuild/relink/reveal.
+fn action_body(body: &str) -> Result<(String, String, Option<String>), Reply> {
+    let value: Value =
+        serde_json::from_str(body).map_err(|e| err(400, format!("тело запроса не JSON: {e}")))?;
+    let project = value
+        .get("project")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let path = value
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    let stamp = value
+        .get("stamp")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|stamp| !stamp.is_empty())
+        .map(str::to_string);
+    if project.is_empty() {
+        return Err(err(400, "нужно поле project"));
+    }
+    if path.is_empty() {
+        return Err(err(400, "нужно поле path — относительный путь оригинала"));
+    }
+    Ok((project, path, stamp))
+}
+
+/// Отчёт операции «Вернуть»/«Пересоздать образ»/relink для вкладки.
+fn result_body(action: &str, report: &DecisionReport) -> Value {
+    let mut body = json!({
+        "ok": true,
+        "action": action,
+        "rel": report.orig_rel,
+        "anon": report.anon_rel,
+        "status": report.status.as_str(),
+        "warnings": report.warnings,
+    });
+    if let Some(stamp) = &report.stamp {
+        body["stamp"] = json!(stamp);
+    }
+    if let Some(sha) = &report.sha256 {
+        body["sha256"] = json!(sha);
+    }
+    if let Some(backup) = &report.backup {
+        body["backup"] = json!(backup.display().to_string());
+    }
+    body
+}
+
+/// Общий хвост операций A6.4: `notice` в ленту (путь и статус, без значений).
+fn finish_operation(
+    cfg: &Config,
+    project: &str,
+    action: &str,
+    outcome: Result<DecisionReport, Reply>,
+) -> Reply {
+    match outcome {
+        Ok(report) => {
+            let text = match action {
+                "restore" => format!(
+                    "файл возвращён из копии: {} · статус {}",
+                    report.orig_rel,
+                    report.status.as_str()
+                ),
+                "rebuild" => format!(
+                    "образ пересоздан: {} · статус {}",
+                    report.orig_rel,
+                    report.status.as_str()
+                ),
+                _ => format!(
+                    "запись восстановлена по маркеру: {} · статус {}",
+                    report.orig_rel,
+                    report.status.as_str()
+                ),
+            };
+            agent_session::global(cfg).notice(project, &text);
+            ok(result_body(action, &report))
+        }
+        Err(reply) => reply,
+    }
+}
+
+/// `POST /api/agent/restore {project, path, stamp?}` — «Вернуть» (В-A6-4).
+pub fn restore_json(cfg: &Config, body: &str) -> Reply {
+    let (project, path, stamp) = match action_body(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — операции недоступны",
+        );
+    }
+    let outcome = with_mirror(cfg, &project, |mirror| {
+        mirror.restore(&path, stamp.as_deref())
+    });
+    finish_operation(cfg, &project, "restore", outcome)
+}
+
+/// `POST /api/agent/rebuild {project, path}` — «Пересоздать образ» (orphan).
+pub fn rebuild_json(cfg: &Config, body: &str) -> Reply {
+    let (project, path, _) = match action_body(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — операции недоступны",
+        );
+    }
+    let outcome = with_mirror(cfg, &project, |mirror| mirror.rebuild(&path));
+    finish_operation(cfg, &project, "rebuild", outcome)
+}
+
+/// `POST /api/agent/relink {project, path}` — починка записи по маркеру.
+///
+/// Только по кнопке/команде: в проходе зеркала relink не выполняется (В-A6-5).
+pub fn relink_json(cfg: &Config, body: &str) -> Reply {
+    let (project, path, _) = match action_body(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    if projects::get(cfg, &project).is_none() {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    }
+    if !settings::settings(cfg).enabled {
+        return err(
+            503,
+            "анонимная зона выключена (agent.enabled: false) — операции недоступны",
+        );
+    }
+    let outcome = with_mirror(cfg, &project, |mirror| mirror.relink(&path));
+    finish_operation(cfg, &project, "relink", outcome)
+}
+
+/// `POST /api/agent/reveal {project, path}` — «Показать в Проводнике» (В-A6-7).
+///
+/// Отдельное действие с явным согласием в интерфейсе: запускается **только**
+/// `explorer.exe /select,<файл>` (выделение в Проводнике), приложения не
+/// открываются. Путь обязан быть внутри папки проекта или анонимной зоны —
+/// иначе отказ 400.
+pub fn reveal_json(cfg: &Config, body: &str) -> Reply {
+    let (project, path, _) = match action_body(body) {
+        Ok(parts) => parts,
+        Err(reply) => return reply,
+    };
+    let Some(rec) = projects::get(cfg, &project) else {
+        return err(404, format!("проект {project} не зарегистрирован"));
+    };
+    let project_dir = PathBuf::from(&rec.path);
+    let workspace = settings::workspace_dir(cfg, &project);
+    let target = match reveal_target(&project_dir, workspace.as_deref(), &path) {
+        Ok(target) => target,
+        Err(reply) => return reply,
+    };
+    if !target.is_file() {
+        return err(404, format!("файл не найден: {}", target.display()));
+    }
+    #[cfg(windows)]
+    {
+        match std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", target.display()))
+            .spawn()
+        {
+            Ok(_) => ok(json!({ "ok": true, "path": target.display().to_string() })),
+            Err(e) => err(500, format!("Проводник не запустился: {e}")),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = target;
+        err(409, "«Показать в Проводнике» доступно только в Windows")
+    }
+}
+
+/// Файл для «Показать в Проводнике»: внутри папки проекта или workspace.
+fn reveal_target(
+    project_dir: &Path,
+    workspace: Option<&Path>,
+    path: &str,
+) -> Result<PathBuf, Reply> {
+    let raw = PathBuf::from(path.trim());
+    let target = if raw.is_absolute() {
+        raw
+    } else {
+        // `normalize_rel` отдаёт путь с разделителем платформы: его можно
+        // присоединять к папке проекта как относительный `Path`.
+        let rel = results::normalize_rel(path).map_err(results_err)?;
+        project_dir.join(rel)
+    };
+    let canonical = canonical_clean(&target);
+    let inside_project = canonical.starts_with(canonical_clean(project_dir));
+    let inside_workspace = workspace
+        .map(|dir| canonical.starts_with(canonical_clean(dir)))
+        .unwrap_or(false);
+    if !inside_project && !inside_workspace {
+        return Err(err(
+            400,
+            "путь вне папки проекта и анонимной зоны — не показываем",
+        ));
+    }
+    Ok(canonical)
 }
 
 /// `Accept: text/event-stream` — клиент ждёт поток, а не JSON.

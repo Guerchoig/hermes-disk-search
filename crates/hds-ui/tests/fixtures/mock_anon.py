@@ -6,6 +6,7 @@ NDJSON через `hds_sidecar`; NER-модели и venv не нужны. Фо�
 """
 
 import os
+import re
 import sys
 
 sys.path.insert(0, r"__SIDECAR__")
@@ -219,6 +220,26 @@ def handle(req):
             stdio.err(mid, -32001, "склейка не найдена", kind="internal")
             return False
         stdio.ok(mid, result)
+        return False
+    if method == "read_marker":
+        path = params.get("path") or ""
+        marker = None
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                first = handle.readline().strip()
+            found = re.match(r"<!--\s*(hds-agent/[^\s>]+)\s*-->", first)
+            if found:
+                marker = found.group(1)
+        except OSError:
+            marker = None
+        project_id = None
+        artifact_id = None
+        if marker and marker.startswith("hds-agent/"):
+            parts = marker.split("/")
+            project_id = parts[1] if len(parts) > 1 else None
+            artifact_id = parts[2] if len(parts) > 2 else None
+        stdio.ok(mid, {"marker": marker, "project_id": project_id,
+                       "artifact_id": artifact_id})
         return False
     if method == "anonymize":
         in_path = params.get("in_path")

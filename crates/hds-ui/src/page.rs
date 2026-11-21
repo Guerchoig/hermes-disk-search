@@ -350,6 +350,19 @@ pub const PAGE: &str = r#"<!doctype html>
     <span id="agresmsg" class="muted"></span></div>
    <table class="tr"><thead><tr><th>Вариант</th><th>Статус</th><th>Отчёт</th>
      <th>Действия</th></tr></thead><tbody id="agresults"></tbody></table>
+   <div id="agbackups" hidden style="margin-top:10px;border:1px solid #3a5a80;border-radius:10px;padding:10px">
+    <div class="row"><b id="agbkpTitle">Копии</b>
+     <button onclick="agentBackupsClose()">Закрыть</button>
+     <span id="agbkpmsg" class="muted"></span></div>
+    <div class="row" style="margin-top:6px">
+     <label class="muted">Версия: <select id="agbkpStamp"></select></label>
+     <button onclick="agentRestore()">Вернуть…</button>
+     <button onclick="agentRevealCopy()">Показать в Проводнике…</button>
+     <button onclick="agentCopySelectedCopy()">Копировать путь</button></div>
+    <div class="muted" style="margin-top:4px">«Вернуть» заменит оригинал выбранной копией и
+     пересоберёт образ; сами копии остаются в <code>.hds-agent\backup</code>. «Показать в
+     Проводнике» — отдельное действие с подтверждением: открывается Проводник с выделением
+     файла, документы и приложения не запускаются.</div></div>
    <div id="agcompare" hidden style="margin-top:10px;border:1px solid #3a5a80;border-radius:10px;padding:10px">
     <div class="row"><b id="agcmpTitle"></b>
      <button onclick="agentCompareClose()">Закрыть</button>
@@ -364,8 +377,13 @@ pub const PAGE: &str = r#"<!doctype html>
   <section><h2>Файлы проекта</h2>
    <div class="row"><button onclick="loadAgentFiles()">Обновить</button>
     <span id="agfilesmsg" class="muted"></span></div>
-   <table class="tr"><thead><tr><th>Оригинал</th><th>Образ</th><th>Вид</th><th>Статус</th></tr></thead>
-    <tbody id="agfiles"></tbody></table></section>
+   <table class="tr"><thead><tr><th>Оригинал</th><th>Образ</th><th>Вид</th><th>Статус</th>
+     <th>Действия</th></tr></thead>
+    <tbody id="agfiles"></tbody></table>
+   <div class="muted" style="margin-top:4px">«Копии…» — прежние версии оригинала;
+    «Пересоздать образ» доступно только для статуса <code>orphan</code> (образ удалён или
+    оригинал заменён агентом). «Показать в Проводнике» открывает Проводник с выделением
+    файла — с отдельным подтверждением.</div></section>
 
   <section><h2>Метки проекта</h2>
    <div class="row"><button onclick="loadAgentLabels()">Обновить</button>
@@ -652,6 +670,7 @@ function selectAgentProject(tr, id){
   Array.prototype.forEach.call(document.querySelectorAll('#agrows tr'), function(r){
     r.classList.toggle('sel', r.getAttribute('data-id')===AG_ID); });
   agentStreamClose();
+  agentBackupsClose();
   AG_PREVIEW=null; AG_SEQ=0;
   agReset();
   document.getElementById('agpreview').textContent='…';
@@ -881,7 +900,8 @@ function agAgentEvent(t){
     const li=agLi('#4a4a6a');
     li.innerHTML='<span class="muted">инструмент</span> <b>'+esc(t.tool||'?')+
       '</b> ← <span class="muted">'+esc(String(input||'').slice(0,AG_INPUT_CLIP))+'</span>';
-    // «Открыть» = показать путь и скопировать (В-A5-7: UI не запускает процессы).
+    // «Открыть» = показать путь и скопировать (В-A5-7; процессы UI не
+    // запускает, кроме отдельного «Показать в Проводнике», В-A6-7).
     const path=(t.input && typeof t.input==='object' && t.input.path)? String(t.input.path) : '';
     if(path){
       const a=document.createElement('a');
@@ -979,7 +999,8 @@ function agAskHide(){
   const panel=document.getElementById('agask');
   if(panel) panel.hidden=true;
 }
-// Путь — в буфер обмена; процессов UI не запускает и файлов не открывает (В-A5-7).
+// Путь — в буфер обмена. UI не открывает документы приложениями (В-A5-7);
+// отдельное действие «Показать в Проводнике» — A6.4 (В-A6-7).
 function agentCopyPath(path){
   if(navigator.clipboard && navigator.clipboard.writeText){
     navigator.clipboard.writeText(path).then(
@@ -1074,17 +1095,26 @@ async function loadAgentState(){
     pre.textContent=(j.journal||[]).join('\n')||'(журнал пуст)';
   }catch(e){ box.textContent='ошибка: '+e; }
 }
+let AG_FILES=[];
 async function loadAgentFiles(){
   const tb=document.getElementById('agfiles'), m=document.getElementById('agfilesmsg');
-  if(!AG_ID){ tb.innerHTML=''; m.textContent=''; return; }
+  if(!AG_ID){ tb.innerHTML=''; m.textContent=''; AG_FILES=[]; return; }
   m.textContent='…';
   try{
     const j=await jget('/api/agent/files?project='+encodeURIComponent(AG_ID));
-    if(j.error){ m.innerHTML='<span class="err">'+esc(j.error)+'</span>'; tb.innerHTML=''; return; }
+    if(j.error){ m.innerHTML='<span class="err">'+esc(j.error)+'</span>'; tb.innerHTML=''; AG_FILES=[]; return; }
+    AG_FILES=j.files||[];
     m.textContent='файлов: '+j.count+' · ждут решения: '+j.pending;
-    tb.innerHTML=(j.files||[]).map(f=>'<tr><td>'+esc(f.orig)+'</td><td class="muted">'+esc(f.anon)+
-      '</td><td>'+esc(f.kind)+'</td><td>'+esc(f.status)+'</td></tr>').join('')||
-      '<tr><td colspan="4" class="muted">файлов нет — запустите hds agent sync</td></tr>';
+    tb.innerHTML=AG_FILES.map(function(f,i){
+      // A6.4: «Пересоздать образ» — только у orphan (у остальных образ либо
+      // актуален, либо ждёт решения в pending).
+      let act='<button onclick="agentBackupsForFile('+i+')">Копии…</button> '+
+        '<button onclick="agentRevealRel(AG_FILES['+i+'] && AG_FILES['+i+'].orig)">Показать в Проводнике…</button>';
+      if(f.status==='orphan') act+=' <button onclick="agentRebuildFile('+i+')">Пересоздать образ</button>';
+      return '<tr><td>'+esc(f.orig)+'</td><td class="muted">'+esc(f.anon)+
+        '</td><td>'+esc(f.kind)+'</td><td>'+esc(f.status)+'</td><td>'+act+'</td></tr>';
+    }).join('')||
+      '<tr><td colspan="5" class="muted">файлов нет — запустите hds agent sync</td></tr>';
   }catch(e){ m.textContent='ошибка: '+e; }
 }
 // --- Метки проекта (A5.5): формы, «Не скрывать», «Объединить», «Разъединить» ---
@@ -1210,9 +1240,13 @@ function agReportLabel(r){
     ' <span class="muted">· проверок '+r.checks+'</span>';
 }
 // Действия по варианту; кнопки конфликта — только у статуса `conflict`.
+// A6.4: «Копии…» — прежние версии (выбор штампа и «Вернуть»), «Показать в
+// Проводнике…» — отдельное действие с подтверждением (В-A6-7).
 function agResultActions(i){
   let html='<button onclick="agentResultOpen('+i+')">Открыть</button> '+
     '<button onclick="agentCompare('+i+')">Сравнить…</button> '+
+    '<button onclick="agentBackupsForResult('+i+')">Копии…</button> '+
+    '<button onclick="agentRevealRel(AG_RESULTS['+i+'] && AG_RESULTS['+i+'].rel)">Показать в Проводнике…</button> '+
     '<button onclick="agentDecide('+i+',\'accept\')">Принять</button> '+
     '<button onclick="agentDecide('+i+',\'reject\')">Отклонить</button>';
   if(AG_RESULTS[i] && AG_RESULTS[i].conflict){
@@ -1313,6 +1347,117 @@ async function agentDecide(i, decision, choice){
     agResMsg(text);
   }catch(e){ agResMsg('ошибка: '+e, true); }
 }
+// --- Копии, «Вернуть», «Пересоздать образ», relink (A6.4) ---
+let AG_BACKUPS=[], AG_BKP_REL='';
+function agBkpMsg(text, isErr){
+  const m=document.getElementById('agbkpmsg');
+  if(!m) return;
+  if(isErr) m.innerHTML='<span class="err">'+esc(text)+'</span>'; else m.textContent=text||'';
+}
+function agBkpSize(n){
+  if(n>=1048576) return (n/1048576).toFixed(1)+' МиБ';
+  return Math.max(1, Math.round(n/1024))+' КиБ';
+}
+function agBkpTime(ts){
+  try{ return new Date(ts*1000).toLocaleString(); }catch(e){ return ''; }
+}
+function agBkpRender(list){
+  const sel=document.getElementById('agbkpStamp');
+  sel.innerHTML=(list||[]).map(function(c){
+    return '<option value="'+esc(c.stamp)+'">'+esc(c.stamp)+' · '+
+      agBkpSize(c.size||0)+' · '+esc(agBkpTime(c.mtime))+'</option>';
+  }).join('');
+}
+function agBkpSelected(){
+  const sel=document.getElementById('agbkpStamp');
+  const stamp=sel? sel.value : '';
+  return AG_BACKUPS.find(function(c){ return c.stamp===stamp; })||null;
+}
+async function agentBackupsFor(rel){
+  if(!AG_ID || !rel) return;
+  AG_BKP_REL=rel; AG_BACKUPS=[];
+  document.getElementById('agbackups').hidden=false;
+  document.getElementById('agbkpTitle').textContent='Копии: '+rel;
+  agBkpRender([]); agBkpMsg('…');
+  try{
+    const j=await jget('/api/agent/backups?project='+encodeURIComponent(AG_ID)+
+      '&path='+encodeURIComponent(rel));
+    if(j.error){ agBkpMsg(j.error, true); return; }
+    AG_BACKUPS=j.copies||[];
+    agBkpRender(AG_BACKUPS);
+    agBkpMsg(AG_BACKUPS.length
+      ? 'копий: '+AG_BACKUPS.length+' · выберите версию и нажмите «Вернуть»'
+      : 'копий нет — вернуть нечего (копия делается при «Принять»)');
+  }catch(e){ agBkpMsg('ошибка: '+e, true); }
+}
+function agentBackupsForResult(i){
+  const it=AG_RESULTS[i]; if(it) agentBackupsFor(it.rel);
+}
+function agentBackupsForFile(i){
+  const f=AG_FILES[i]; if(f) agentBackupsFor(f.orig);
+}
+function agentBackupsClose(){
+  const box=document.getElementById('agbackups');
+  if(box) box.hidden=true;
+  AG_BACKUPS=[]; AG_BKP_REL='';
+}
+function agentCopySelectedCopy(){
+  const copy=agBkpSelected();
+  if(copy) agentCopyPath(copy.path||'');
+  else agBkpMsg('выберите версию', true);
+}
+function agentRevealCopy(){
+  const copy=agBkpSelected();
+  if(!copy){ agBkpMsg('выберите версию', true); return; }
+  agentRevealPath(copy.path, 'копия '+copy.stamp);
+}
+async function agentRestore(){
+  if(!AG_BKP_REL){ return; }
+  const copy=agBkpSelected();
+  const stamp=copy? copy.stamp : '';
+  if(!confirm('Вернуть «'+AG_BKP_REL+'» из копии '+(stamp||'(последняя)')+
+     '? Текущая версия будет заменена, образ пересобран; копии останутся.')) return;
+  agBkpMsg('…');
+  try{
+    const body={project:AG_ID, path:AG_BKP_REL};
+    if(stamp) body.stamp=stamp;
+    const j=await jpost('/api/agent/restore', body);
+    if(j.error){ agBkpMsg(j.error, true); return; }
+    const rel=AG_BKP_REL;
+    await loadAgentPending(); await loadAgentFiles(); await loadAgentState();
+    await agentBackupsFor(rel);
+    agBkpMsg('вернули '+(j.stamp||'')+' · sha '+(j.sha256? j.sha256.slice(0,12):'?')+
+      ' · статус '+j.status);
+  }catch(e){ agBkpMsg('ошибка: '+e, true); }
+}
+async function agentRebuildRel(rel){
+  if(!rel) return;
+  if(!confirm('Пересоздать образ «'+rel+'» из текущего оригинала? Запись вернётся в статус synced.')) return;
+  agResMsg('…');
+  try{
+    const j=await jpost('/api/agent/rebuild', {project:AG_ID, path:rel});
+    if(j.error){ agResMsg(j.error, true); return; }
+    await loadAgentPending(); await loadAgentFiles(); await loadAgentState();
+    agResMsg('образ пересоздан · статус '+j.status+
+      (j.sha256? ' · sha '+j.sha256.slice(0,12):''));
+  }catch(e){ agResMsg('ошибка: '+e, true); }
+}
+function agentRebuildFile(i){
+  const f=AG_FILES[i]; if(f) agentRebuildRel(f.orig);
+}
+// «Показать в Проводнике» — отдельное действие с явным согласием (В-A6-7):
+// сервер запускает только explorer /select,<файл>, документы не открываются.
+async function agentRevealPath(path, what){
+  if(!path) return;
+  if(!confirm('Показать '+(what||'файл')+' в Проводнике? Откроется Проводник с выделением '+
+     'файла; приложения и документы не запускаются.')) return;
+  try{
+    const j=await jpost('/api/agent/reveal', {project:AG_ID, path:path});
+    if(j.error){ agResMsg(j.error, true); return; }
+    agResMsg('Проводник: '+j.path);
+  }catch(e){ agResMsg('ошибка: '+e, true); }
+}
+function agentRevealRel(rel){ agentRevealPath(rel, rel); }
 async function agentAdd(){
   const m=document.getElementById('agaddmsg'); m.textContent='…';
   const name=document.getElementById('agname').value.trim();

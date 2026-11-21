@@ -713,6 +713,15 @@ fn history_clear_cli() {
     };
     let stand = Stand::new("history");
     stand.add_project();
+    // A6.4 (В-A6-6): журнал решений живёт рядом с очередью сообщений и
+    // `hds agent history clear` его не трогает.
+    let decisions = stand.project_dir.join(".hds-agent").join("decisions.jsonl");
+    fs::create_dir_all(decisions.parent().unwrap()).unwrap();
+    fs::write(
+        &decisions,
+        "{\"ts\":1.0,\"action\":\"restore\",\"orig_rel\":\"note.txt\",\"status\":\"synced\"}\n",
+    )
+    .unwrap();
     let old = seed_session(&stand, "S-OLD", "Иванов Иван");
     let new = seed_session(&stand, "S-NEW", "Иванов Иван");
     // S-OLD явно старее: без `--session` берётся последняя сессия.
@@ -749,6 +758,12 @@ fn history_clear_cli() {
     assert!(
         fs::read_to_string(&old).unwrap().contains("Иванов Иван"),
         "не последняя сессия не тронута"
+    );
+    assert!(
+        fs::read_to_string(&decisions)
+            .unwrap()
+            .contains("\"action\":\"restore\""),
+        "журнал решений не чистится командой history clear (В-A6-6)"
     );
 
     // Явный `--session`.
