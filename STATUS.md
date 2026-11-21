@@ -1,5 +1,47 @@
 # Состояние проекта hermes-disk-search — контекст для нового чата
 
+## Зона агента A0–A6 (21.11.2026)
+
+**Ветка:** `agent-privacy-zone`, **HEAD:** `beff5521` (A6.6; поверх — docs `6d1ffbd0`,
+хендофф A6.7). `origin` — ahead, **push не делался**. Отчёты: `AGENT_A6_REPORT.md`
+(фаза A6), `AGENT_A5_REPORT.md`/`AGENT_A4_REPORT.md`; журналы —
+`AGENT_A6_STAGES.md`, `AGENT_A5_STAGES.md`, `AGENT_A4_STAGES.md`.
+
+| Под-этап | Коммит | Что «снаружи» (кратко) |
+|---|---|---|
+| A0–A3 | — | SDK-агент, анонимная зона, маршрут `/mcp/agent/<P>`, фильтр на границе модели |
+| A4 | — | зеркало папки проекта (прямой/обратный путь), решения, демон `hds agent sync`, `A46_E2E.md` |
+| A5 | — | вкладка «Агент», лента SSE, «Результаты», метки, настройки; живой сценарий `A57_E2E.md` (76/76) |
+| A6.1 | `018056d1` | 12 пунктов `agent-*` в `hds check`, `hds agent check [--project P] [--json]` |
+| A6.2 | `15b70e84` | `hds agent sync --all`, задача Планировщика `HermesDiskSearchAgentSync`, `installers/install_agent_sync_task.ps1`, fallback «Автозагрузка» |
+| A6.3 | `ac64a682` | горячее перечитывание `config.yaml` (mtime+размер), `config reload …`, `agent.root` — только предупреждение |
+| A6.4 | `6dc86b2f` | `restore`/`rebuild`/`relink` (CLI + API + панель), `.hds-agent\decisions.jsonl` с ротацией |
+| A6.5 | `4c19a999` | `hds agent project rm` и кнопка «Удалить…», отказ при живом `sync.lock`, `--force`/`--purge-meta` |
+| A6.6 | `beff5521` | AG-23 (откат `decide`), AG-25 (кэш реестра), AG-26 (пути образа в ленте), AG-32 (`history.uncleaned`) |
+
+**Тесты среза `beff5521`:** `fmt` — 0; `clippy -D warnings` — 0; `hds-agent` 180 lib +
+наборы, 0 failed; `hds-cli` все наборы 0 failed (`agent_project_rm` 5, `agent_run` 7,
+`agent_sync` 14); `hds-ui` 42 lib, `agent_api` 11, остальные наборы ok; python 335 OK
+(skip 1); npm 23/23. Единственное падение полного `hds-ui` — предсуществующий флейк
+`agent_chat::abort_cancels_pending_ask` (воспроизводится на `0611159f`).
+
+**Что осталось:**
+
+* **A6.7 — приёмка не пройдена:** сценарий `tools\parity\out\agent_a42\a6_e2e.ps1`
+  (UTF-8 с BOM) и каркас `A6_E2E.md` подготовлены; в них только `-Preflight`
+  (код 0) и проверка синтаксиса. Полный живой прогон — **отдельная задача**:
+  заполнить колонку «результат», подтвердить I1/I8 сканами новых журналов
+  (`decisions.jsonl`, `sync.log`, `messages.jsonl`, `egress\*`).
+* **A6.8 (K1)** — замер RAG (с `disk-search` и без), отчёт `tools/parity/AGENT_RAG_K1.md`.
+* **Фаза 2** — `PLAN_AGENT_PRIVACY_ZONE.md` §8: подписка на ФС, PDF/PPTX и OCR,
+  Word-compare, служба Windows, многопользовательская вкладка, словарный проход (I1).
+* `RELEASE_NOTES_0.27.0.md` — **черновик**, релиз не выпущен (ждёт A6.7).
+
+Документация: `README.md` §20 «ИИ-агент в анонимной зоне», §21 «Эксплуатация зоны
+агента».
+
+---
+
 > Рабочая папка: `C:\Users\Sasha\hermes-disk-search` · GitHub: Guerchoig/hermes-disk-search (публичный).
 >
 > **Чат больше не резидент (30.10.2026, ветка `anonymizer-sidecar`):** по запросу владельца
