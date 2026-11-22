@@ -204,7 +204,8 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 | Джоба | Раннер | Блокирует? | Что делает |
 |---|---|---|---|
 | `check-version` | ubuntu | да | версия тега/входа = `__version__` в `hds/__init__.py` |
-| `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, тесты воркспейса |
+| `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, `cargo check --workspace --all-targets` (проверка не-Windows веток без запуска тестов) |
+| `test-rust-windows` | windows | да | `cargo test --workspace` на поставляемой платформе (Windows-only тесты путей `C:\…` на Linux падают) |
 | `test-python` | ubuntu | да | `python -m unittest discover sidecar/tests` (`PYTHONPATH=sidecar`; numpy/PyYAML + python-docx/openpyxl/lxml для набора анонимизации) — извлечение, расшифровка, глоссарий, LLM-валидатор, анонимизация |
 | `build-sidecar-windows` | windows | да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds`, `uv`) |
 | `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`, наличие `sidecar\hds_transcribe|hds_sidecar`, каталог `sidecar` с `hds_anonymize` и `transcribe-check --json` → `engine=python`, `anon --help`) |
@@ -288,7 +289,8 @@ macOS-сборка вручную не выпускается; `build_rust_relea
 - **Не выпускать с красными тестами** и не «глушить» мигающие тесты: `test-rust`
   блокирует выпуск, а мигание почти всегда означает гонку/тайминг в продукте.
 - **Сборка релиза — только Windows, но код остаётся кросс-платформенным.** Блокирующая
-  `test-rust` идёт на ubuntu и компилирует не-Windows ветки; отдельной mac-джобы больше нет.
+  `test-rust` идёт на ubuntu (fmt/clippy/`cargo check --all-targets`) и компилирует
+  не-Windows ветки; тесты воркспейса гоняет `test-rust-windows` на Windows. Mac-джобы нет.
   Платформенно-зависимую ветку (`#[cfg(windows)]`, `#[cfg(not(windows))]`) нельзя
   «проверить только на Windows»: вызов windows-only функции из общего кода (`E0425`) и
   перемещение значения в unix-ветке (`E0382`) вылезают именно на ubuntu-джобе. Не уверены —

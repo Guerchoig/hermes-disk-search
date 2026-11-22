@@ -70,7 +70,23 @@ jobs:
       - name: clippy (blocking, -D warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      - name: Rust tests
+      - name: Compile all targets (cross-platform check, no run)
+        # Windows-only tests (paths C:\…) run in test-rust-windows; here we only
+        # prove that non-Windows code paths still compile.
+        run: cargo check --workspace --all-targets
+
+  # ---------- Rust tests on the shipped platform (Windows) -------------------
+  test-rust-windows:
+    needs: [check-version]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Rust tests (Windows)
         run: cargo test --workspace
 
   # ---------- Python sidecar: unittest suite (P1-P6, blocking) ----------------
@@ -117,7 +133,7 @@ jobs:
 
   # ---------- Rust: Windows binaries + package (zip + sha256) ----------
   build-windows:
-    needs: [test-rust, test-python, build-sidecar-windows]
+    needs: [test-rust, test-rust-windows, test-python, build-sidecar-windows]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
