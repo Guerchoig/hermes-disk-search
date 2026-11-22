@@ -1,11 +1,11 @@
 # Состояние проекта hermes-disk-search — контекст для нового чата
 
-## Зона агента A0–A6 (21.11.2026)
+## Зона агента A0–A6 (22.11.2026)
 
-**Ветка:** `agent-privacy-zone`, **HEAD:** `beff5521` (A6.6; поверх — docs `6d1ffbd0`,
-хендофф A6.7). `origin` — ahead, **push не делался**. Отчёты: `AGENT_A6_REPORT.md`
-(фаза A6), `AGENT_A5_REPORT.md`/`AGENT_A4_REPORT.md`; журналы —
-`AGENT_A6_STAGES.md`, `AGENT_A5_STAGES.md`, `AGENT_A4_STAGES.md`.
+**Ветка:** `agent-privacy-zone`, **HEAD:** коммит «A6.7 — приёмка A6 (E2E пройден)»
+поверх `7919040e`; код A6 — срез `beff5521`. `origin` — ahead, **push не делался**.
+Отчёты: `AGENT_A6_REPORT.md` (фаза A6), `AGENT_A5_REPORT.md`/`AGENT_A4_REPORT.md`;
+журналы — `AGENT_A6_STAGES.md`, `AGENT_A5_STAGES.md`, `AGENT_A4_STAGES.md`.
 
 | Под-этап | Коммит | Что «снаружи» (кратко) |
 |---|---|---|
@@ -18,6 +18,7 @@
 | A6.4 | `6dc86b2f` | `restore`/`rebuild`/`relink` (CLI + API + панель), `.hds-agent\decisions.jsonl` с ротацией |
 | A6.5 | `4c19a999` | `hds agent project rm` и кнопка «Удалить…», отказ при живом `sync.lock`, `--force`/`--purge-meta` |
 | A6.6 | `beff5521` | AG-23 (откат `decide`), AG-25 (кэш реестра), AG-26 (пути образа в ленте), AG-32 (`history.uncleaned`) |
+| A6.7 | этот коммит | приёмка: `a6_e2e.ps1` — 75/75, I1/I8/I6 подтверждены; `A6_E2E.md`, README §21, `RELEASE_NOTES_0.27.0.md` |
 
 **Тесты среза `beff5521`:** `fmt` — 0; `clippy -D warnings` — 0; `hds-agent` 180 lib +
 наборы, 0 failed; `hds-cli` все наборы 0 failed (`agent_project_rm` 5, `agent_run` 7,
@@ -27,11 +28,12 @@
 
 **Что осталось:**
 
-* **A6.7 — приёмка не пройдена:** сценарий `tools\parity\out\agent_a42\a6_e2e.ps1`
-  (UTF-8 с BOM) и каркас `A6_E2E.md` подготовлены; в них только `-Preflight`
-  (код 0) и проверка синтаксиса. Полный живой прогон — **отдельная задача**:
-  заполнить колонку «результат», подтвердить I1/I8 сканами новых журналов
-  (`decisions.jsonl`, `sync.log`, `messages.jsonl`, `egress\*`).
+* **A6.7 — приёмка пройдена** (22.11.2026): `a6_e2e.ps1` — `ИТОГ: 75/75 ok, 0 fail`;
+  I1 — новых попаданий нет (23 → 23), I8 — `hits=0` в `decisions.jsonl`,
+  `a6-sync-live.log` (497 строк), `sync.log`, `messages.jsonl`, `projects.json`,
+  `egress`; I6 — оригиналы не изменились. Протокол — `A6_E2E.md` (в каталоге стенда).
+  Находка: повторный `hds stop` не обновляет mtime пустого `index.stop` (AG-27) —
+  кандидат AG-34, фаза 2.
 * **A6.8 (K1)** — замер RAG (с `disk-search` и без), отчёт `tools/parity/AGENT_RAG_K1.md`.
 * **Фаза 2** — `PLAN_AGENT_PRIVACY_ZONE.md` §8: подписка на ФС, PDF/PPTX и OCR,
   Word-compare, служба Windows, многопользовательская вкладка, словарный проход (I1).
