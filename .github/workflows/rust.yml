@@ -2,9 +2,8 @@ name: Rust CI
 
 # Rust-first workspace: fmt/clippy/tests are blocking. Python core is gone
 # (only the `sidecar/` worker remains and it is built in Release). Windows is
-# the primary target; macOS compiles but is not verified yet
-# (MIGRATION_PLAN_RUST.md section 10.0) - the macOS job is best-effort
-# (continue-on-error) and does not block the run.
+# the ONLY shipped target (macOS is not released since 22.11.2026): there are
+# no macOS jobs. Cross-platform code paths are still compiled/tested on ubuntu.
 
 on:
   push:
@@ -12,7 +11,7 @@ on:
     # `anonymizer-sidecar` — текущая ветка анонимизации (P1-P6, релиз 0.23.0);
     # `server-multiuser` — боевая ветка серверной подсистемы; `main` и
     # `w2-llm-host` — история (main = Python-эпоха, w2-llm-host = ядро на Rust).
-    branches: [main, w2-llm-host, server-multiuser, python-sidecar-transcribe, anonymizer-sidecar]
+    branches: [main, w2-llm-host, server-multiuser, python-sidecar-transcribe, anonymizer-sidecar, agent-privacy-zone]
   pull_request:
   workflow_dispatch:
 
@@ -36,9 +35,9 @@ jobs:
 
       - name: Shell wrappers syntax (bash -n)
         run: |
-          # RELEASING.md section 7: the shipped .sh/.command wrappers are only
-          # exercised on macOS (a Windows dev machine has no bash) - a syntax
-          # error must fail this blocking job, not the user's machine.
+          # RELEASING.md section 7: macOS is not shipped anymore, but the legacy
+          # .sh/.command wrappers stay in the tree for developers - a syntax error
+          # must fail this blocking job, not a user's machine.
           for f in installers/*.sh installers/*.command; do
             [ -f "$f" ] || continue
             bash -n "$f" || { echo "syntax error: $f"; exit 1; }
@@ -73,19 +72,6 @@ jobs:
           PYTHONPATH: sidecar
         run: python -m unittest discover sidecar/tests -v
 
-  test-rust-macos:
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Rust tests (macOS, best-effort - not verified yet)
-        run: cargo test --workspace
-
   build-windows:
     needs: [test-rust, test-python]
     runs-on: windows-latest
@@ -107,28 +93,4 @@ jobs:
             target/release/hds.exe
             target/release/hds_mcp.exe
             target/release/llm_host.exe
-          if-no-files-found: error
-
-  build-macos:
-    needs: [test-rust]
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Release build (macOS arm64, best-effort)
-        run: cargo build --release -p hds-cli -p hds-mcp -p hds-llama
-
-      - name: Artifacts (macOS arm64)
-        uses: actions/upload-artifact@v5
-        with:
-          name: hds-rust-macos-arm64
-          path: |
-            target/release/hds
-            target/release/hds_mcp
-            target/release/llm_host
           if-no-files-found: error

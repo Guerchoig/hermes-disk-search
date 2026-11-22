@@ -38,27 +38,25 @@
 
 ## 2. Платформы и состав ассетов
 
-- **Windows 10/11 x64** — основная цель, **блокирующая**: и приложение, и **оба**
-  офлайн-рантайма движка (CUDA и Vulkan). Без её сборки релиз не выходит.
-- **macOS 14+ (Apple Silicon)** — **best-effort** (на 10.2026 на живой машине не
-  проверено, `MIGRATION_PLAN_RUST.md` §10.0): mac-джобы **не** блокируют выпуск, их
-  ассеты добавляются к релизу, только если сборка прошла; при падении релиз всё равно
-  публикуется с Windows-ассетами.
-- GPU не обязательна: без NVIDIA движок уходит на Vulkan/CPU. Поэтому под Windows
-  публикуются **два** рантайма движка (NVIDIA → CUDA, AMD/Intel → Vulkan), под macOS —
-  Metal.
+- **Windows 10/11 x64** — **единственная поставляемая платформа** и **блокирующая**:
+  и приложение, и **оба** офлайн-рантайма движка (CUDA и Vulkan). Без её сборки релиз
+  не выходит.
+- **macOS не поставляется** (решение 22.11.2026): mac-джоб нет, mac-ассетов и
+  mac-клиента нет, релиз под Mac не выпускается. Скрипты `installers/*_macos*`,
+  `install_macos.command`, `*.command` остаются в дереве **только для разработчиков**
+  и в релиз не входят; код под `#[cfg(not(windows))]` сохраняется, но официальной
+  поддержки macOS нет.
+- GPU не обязательна: без NVIDIA движок уходит на Vulkan/CPU. Поэтому публикуются
+  **два** рантайма движка (NVIDIA → CUDA, AMD/Intel → Vulkan).
 
 | Ассет | Блокирующий? | Что внутри |
 |---|---|---|
 | `hds-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\` (`hds.exe`, `hds_mcp.exe`, `llm_host.exe`), `installers\`, `runtime-manifests\`, `sidecar\` (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds\`; **venv профилей расшифровки и анонимизации не входят** — их собирает установщик), `assets\`, `cline-rules\`, `hermes-skill\`, `shortcuts\windows\`, скрипты установки (`setup.cmd/.ps1`, `install-server.cmd`, `update.cmd`, `install_*.ps1`, `run_*.ps1`), `config.example.yaml`, `server_config.example.yaml` (шаблон серверного конфига для `hds config init`), `README.md`, `README_SERVER_MULTIUSER.md`, `installers\client_readme.md` (памятка пользователя), `NOTICE.md`, `sha256.txt` |
 | `hds-engine-runtime-windows-x64-cuda.zip` | **да** | рантайм движка (LLM + ASR) под NVIDIA/CUDA — для **офлайн-установки**; обычный установщик качает его сам по манифесту |
 | `hds-engine-runtime-windows-x64-vulkan.zip` | **да** | тот же рантайм под Vulkan (AMD/Intel, машины без NVIDIA) — тоже для офлайн-установки |
-| `hds-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же приложение для Apple Silicon; лаунчеры стейджатся с `+x` |
-| `hds-engine-runtime-macos-arm64-metal.zip` | нет (best-effort) | рантайм движка под Metal |
 | `hds-client-<ver>-windows-x64.zip` (+ `.sha256.txt`) | **да** | тонкий клиент (M9): `bin\hds.exe`, мастер `setup-client.*`, правило/скилл, `version.txt`, `sha256.txt`; тот же файл вложен в серверную поставку (`client/`) |
-| `hds-client-<ver>-macos-arm64.zip` (+ `.sha256.txt`) | нет (best-effort) | то же для Apple Silicon (мастер `install_client.command`) |
-| `client-install.ps1` / `client-install.sh` | **да** | скрипт-установщик для клиента (токен — аргументом): скачивает пакет с сервера под платформу клиента, распаковывает и запускает мастер. Сервер отдаёт тот же файл **публично** по `<mcp-path>/client-install.ps1\|sh` |
-| `hermes-disk-search-<ver>-windows.zip` / `-macos.zip` | нет | `git archive HEAD` — исходники (для сборки из кода) |
+| `client-install.ps1` | **да** | скрипт-установщик Windows-клиента (токен — аргументом): скачивает пакет с сервера, распаковывает и запускает мастер. Сервер отдаёт тот же файл **публично** по `<mcp-path>/client-install.ps1`; `client-install.sh` остаётся legacy и в релиз не входит |
+| `hermes-disk-search-<ver>-windows.zip` | нет | `git archive HEAD` — исходники Windows-сборки (для сборки из кода) |
 
 Модели (LLM/whisper/диаризация/CLIP ONNX, суммарно ≈11 ГБ), модели расшифровки
 (GigaAM-v3 ~1 ГБ, wav2vec2-ru ~1,2 ГБ, pyannote community-1 + segmentation-3.0 ~1,2 ГБ)
@@ -68,9 +66,10 @@ CI и кладётся внутрь, а модели/venv установщик �
 **Документы пользователей обязательны в поставке.** `README_SERVER_MULTIUSER.md` — то, по чему
 администратор сервера ставит систему и ведёт её; `installers/client_readme.md` — **памятка
 пользователя** (подключение клиентского ПК, кабинет и повседневная работа): в клиентском архиве тот
-же файл лежит как `README.md`, в серверном — внутри `installers\`. Сборщики
-(`installers/build_rust_release.ps1`, `installers/build_rust_release_macos.sh`) **падают**, если
-любого из этих документов нет в стейдже: релиз без них не выходит.
+же файл лежит как `README.md`, в серверном — внутри `installers\`. Сборщик
+(`installers/build_rust_release.ps1`) **падает**, если любого из этих документов нет в стейдже:
+релиз без них не выходит. `installers/build_rust_release_macos.sh` — legacy для разработчиков,
+в релизе не используется.
 
 Отдельные теги (не часть версии продукта):
 
@@ -79,14 +78,14 @@ CI и кладётся внутрь, а модели/venv установщик �
 - `clip-onnx-v1` — ONNX-модели CLIP (~850 МБ; `installers/publish_clip_models.ps1`).
 
 **Тонкий клиент (M9) публикуется двумя каналами.** (1) Ассетами релиза —
-`hds-client-<ver>-windows-x64.zip` / `-macos-arm64.zip` (+ `.sha256.txt`) и скриптами
-`client-install.ps1` / `client-install.sh`. (2) Внутрь **серверной** поставки, в
-`<корень>/client/`, откуда сервер отдаёт их по `<mcp-path>/…`: пакет —
-`client-package.zip` (Bearer-гейт как у `/mcp`; платформа выбирается `?platform=` → `User-Agent`
-→ платформа сервера), скрипт-установщик — **публично** (токен пользователь передаёт
-аргументом). В поставке держим **оба** пакета (кросс-вложение на релизе), чтобы сервер мог
-выдать клиенту его платформу. Пакет содержит только `bin\hds(.exe)` + правило/скилл + мастер +
-`version.txt`; версия объявляется в `/health` и сверяется мастером (W7).
+`hds-client-<ver>-windows-x64.zip` (+ `.sha256.txt`) и скриптом `client-install.ps1`.
+(2) Внутрь **серверной** поставки, в `<корень>/client/`, откуда сервер отдаёт их по
+`<mcp-path>/…`: пакет — `client-package.zip` (Bearer-гейт как у `/mcp`; платформа выбирается
+`?platform=` → `User-Agent` → платформа сервера), скрипт-установщик — **публично** (токен
+пользователь передаёт аргументом). Поставляется только Windows-пакет; серверный код
+`pick_package` сохраняет выбор платформы на будущее, но mac-пакета в релизе нет. Пакет
+содержит только `bin\hds(.exe)` + правило/скилл + мастер + `version.txt`; версия объявляется
+в `/health` и сверяется мастером (W7).
 
 ### 2.1 Стек расшифровки (Python-движок, `transcribe.engine: python`)
 
@@ -181,21 +180,24 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
    (пример: `waited_ms` быстрого пути очереди — F11, 13.10.2026).
 3. **Заметки и версия.** Написать `RELEASE_NOTES_<версия>.md` (с таблицей «что качать» —
    формат в §7) и бампнуть `__version__` в `hds/__init__.py`.
-4. **Коммит и пуш ветки.** Убедиться, что `rust.yml` на этой ветке зелёный (для
-   `server-multiuser` он теперь запускается).
+4. **Коммит и пуш ветки.** Убедиться, что `rust.yml` на этой ветке зелёный (ветка
+   релиза должна быть в списке `on.push.branches`, сейчас там `agent-privacy-zone`,
+   `server-multiuser`, `anonymizer-sidecar` и исторические).
 5. **Тег и выпуск** — тег-пуш (канонический путь) или `workflow_dispatch`:
    ```powershell
-   git tag v0.18.0
-   git push origin v0.18.0            # release.yml сработает на push тега
+   git tag v0.27.0
+   git push origin v0.27.0            # release.yml сработает на push тега
    gh run watch                       # следить за прогоном
 
    # либо вручную с указанием ветки:
-   gh workflow run release.yml --ref server-multiuser -f version=v0.18.0
+   gh workflow run release.yml --ref agent-privacy-zone -f version=v0.27.0
    ```
    Ветку указывать обязательно, если релиз делается не из `main`.
-6. **Проверка релиза:** на странице релиза все ассеты на месте (Windows CUDA + Windows
-   Vulkan + macOS), `.sha256.txt` рядом, заметки корректны. Если чего-то не хватает —
-   прогон не «доделывать руками»: перезапустить workflow (см. §7 про идемпотентность).
+6. **Проверка релиза:** на странице релиза все ассеты на месте (Windows-приложение +
+   Windows CUDA + Windows Vulkan + клиентский пакет + скрипт + исходники Windows),
+   `.sha256.txt` рядом, заметки корректны. Mac-ассетов быть **не должно**. Если чего-то
+   не хватает — прогон не «доделывать руками»: перезапустить workflow (см. §7 про
+   идемпотентность).
 
 ## 5. Джобы `release.yml`
 
@@ -204,13 +206,11 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 | `check-version` | ubuntu | да | версия тега/входа = `__version__` в `hds/__init__.py` |
 | `test-rust` | ubuntu | да | `fmt --check`, `clippy -D warnings`, тесты воркспейса |
 | `test-python` | ubuntu | да | `python -m unittest discover sidecar/tests` (`PYTHONPATH=sidecar`; numpy/PyYAML + python-docx/openpyxl/lxml для набора анонимизации) — извлечение, расшифровка, глоссарий, LLM-валидатор, анонимизация |
-| `build-sidecar-windows` / `build-sidecar-macos` | win/mac | win — да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds`, `uv`) |
+| `build-sidecar-windows` | windows | да | самодостаточный sidecar (портативный CPython + `hds_extract` + `hds_transcribe` + `hds_anonymize` + `hds_sidecar` + копия `hds`, `uv`) |
 | `build-windows` | windows | да | релизные бинарники, стейджинг `dist\hds-<ver>-windows-x64`, вложенный клиентский пакет (`client/`) + `version.txt`, `zip` + `sha256`, smoke (`hds.exe --help`, наличие `client/`, наличие `sidecar\hds_transcribe|hds_sidecar`, каталог `sidecar` с `hds_anonymize` и `transcribe-check --json` → `engine=python`, `anon --help`) |
-| `build-macos` | macos | нет (best-effort) | то же для `macos-arm64` |
 | `fetch-engine-runtime-windows-cuda` | windows | да | рантайм движка по манифесту (sha256) под CUDA → `hds-engine-runtime-windows-x64-cuda.zip` |
 | `fetch-engine-runtime-windows-vulkan` | windows | да | то же под Vulkan → `hds-engine-runtime-windows-x64-vulkan.zip` |
-| `fetch-engine-runtime-macos` | macos | нет (best-effort) | то же под Metal |
-| `release` | windows | — | публикует релиз, если **Windows-джобы** успешны (`build-windows` + оба рантайма); mac-ассеты подключаются, если их джобы прошли; здесь же — кросс-вложение обоих клиентских пакетов в оба серверных архива и пересчёт их sha256 |
+| `release` | windows | — | публикует релиз, если **Windows-джобы** успешны (`build-windows` + оба рантайма); здесь же — вложение Windows-клиентского пакета в серверный архив и пересчёт его sha256. Mac-джоб и mac-ассетов нет |
 
 `release` идемпотентен: если релиз уже существует, ассеты перезаливаются
 (`gh release upload --clobber`), новый тег не создаётся. При `workflow_dispatch` тег
@@ -222,18 +222,18 @@ SemVer: тег `vMAJOR.MINOR.PATCH` — он же имя релиза.
 
 ```powershell
 # Windows: приложение (sidecar — собранный: -WithSidecar, либо готовый каталог -SidecarDir)
-powershell -File installers\build_rust_release.ps1 -Version 0.18.0 -WithSidecar
-# macOS (на mac):
-bash installers/build_rust_release_macos.sh 0.18.0 <sidecar-dir>
+powershell -File installers\build_rust_release.ps1 -Version 0.27.0 -WithSidecar
 
 # офлайн-рантаймы движка (оба варианта)
 powershell -File installers\fetch_engine_runtime.ps1 -EngineDir dist\engine-cuda   -Backend cuda
 powershell -File installers\fetch_engine_runtime.ps1 -EngineDir dist\engine-vulkan -Backend vulkan
 
-gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commit> `
-  --notes-file RELEASE_NOTES_v0.18.0.md dist\hds-0.18.0-windows-x64.zip `
-  dist\hds-0.18.0-windows-x64.zip.sha256.txt <…остальные ассеты…>
+gh release create v0.27.0 --title "v0.27.0 - hermes-disk-search" --target <commit> `
+  --notes-file RELEASE_NOTES_0.27.0.md dist\hds-0.27.0-windows-x64.zip `
+  dist\hds-0.27.0-windows-x64.zip.sha256.txt <…остальные Windows-ассеты…>
 ```
+
+macOS-сборка вручную не выпускается; `build_rust_release_macos.sh` — legacy.
 
 Резидент держит `target\release\llm_host.exe` — перед релизной сборкой локально:
 `llm_host stop` **и** `hds mcp-http stop` (или `-SkipBuild`, если бинарники уже свежие).
@@ -252,19 +252,19 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
 - **Клиентский пакет собирается вместе с серверной поставкой** (`build_rust_release*`
   зовёт `build_client_release*` с `-SkipBuild`): он и ассет релиза, и содержимое
   `<корень>/client/` (раздача сервером по `<mcp-path>/client-package.zip`), туда же кладутся
-  скрипты `client-install.ps1|sh` (публичная раздача). Версию задаёт `-Version`/тег —
+  скрипт `client-install.ps1` (публичная раздача; `.sh` — legacy, в релиз не входит). Версию задаёт `-Version`/тег —
   держите её равной `__version__` (джоба `check-version`).
 - **Обёртки серверной установки/обновления обязательны в архиве** (`install-server.cmd`,
-  `update.cmd` — корень репозитория рядом с `setup.cmd`; macOS — `installers/update.command`).
-  Они снимают MotW/карантин, находят корень установки через `bin\hds.exe service root`
-  (корень читается из `binPath` SCM-службы / плейста LaunchDaemon; чистая логика —
+  `update.cmd` — корень репозитория рядом с `setup.cmd`; macOS-обёртки `installers/*.command`
+  остаются legacy и в релиз не входят). Они снимают MotW/карантин, находят корень установки
+  через `bin\hds.exe service root` (корень читается из `binPath` SCM-службы; чистая логика —
   `hds_core::service::install_root_*` с тестами) и передают версию из `version.txt`, чтобы
   обновление было «распаковал → запустил один файл» (иначе `.ps1` из интернета блокируется
   политикой `RemoteSigned`). `build_rust_release.ps1` **падает**, если их нет в стейджинге.
 - **Установка обязана оставаться пригодной к обновлению и откату.** Точки запуска (SCM
   `binPath`, задания Планировщика, ярлык на рабочем столе) хранят **абсолютный** путь, а
   обновление подменяет только каталог версии за указателем `app\current`. Поэтому:
-  * `installers/install_server.ps1`/`.command` при установке в корень, отличный от распакованного
+  * `installers/install_server.ps1` при установке в корень, отличный от распакованного
     архива, укладывают поставку по версиям (`app\<ver>` + `app\current`) и регистрируют роли
     на `app\current\bin` (иначе первое обновление не сменило бы работающие файлы — инцидент
     16.10.2026, релиз 0.20.3);
@@ -276,23 +276,25 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
   `crates/hds-cli/tests/install_server_parity.rs` (`update_ps1_repoints_launch_points`,
   `installers_lay_out_the_version`) и юниты `hds_core::service` (`exe_path_parsers…`,
   `task_xml_command_is_parsed`), `hds_index::diag::layout_check…`.
-- **Локальная сборка кладёт клиентский пакет только своей платформы** (Windows-сборка —
-  `*-windows-x64.zip`). Оба пакета в серверном архиве появляются на релизе: шаг
-  «Cross-embed both client packages» в `release.yml` докладывает недостающий и пересчитывает
-  `sha256` архива. При ручной проверке раздачи указывайте платформу явно:
-  `…/mcp/client-package.zip?platform=macos-arm64` (иначе берётся платформа сервера/`User-Agent`).
+- **Клиентский пакет — только Windows** (`hds-client-<ver>-windows-x64.zip`): его собирает
+  `build_client_release.ps1 -SkipBuild` внутри серверной сборки, а шаг
+  «Embed the Windows client package into the server archive» в `release.yml` вкладывает его
+  в `client/` и пересчитывает `sha256` архива. Для ручной проверки раздачи платформу можно
+  указать явно (`…/mcp/client-package.zip?platform=windows-x64`), но другого пакета в релизе нет.
 - **Рантайм движка собирается только с явным `-Backend`**: на раннере без NVIDIA режим
   `auto` выбирает Vulkan — так в v0.17.0 в `hds-engine-runtime-windows-x64-cuda.zip` лежал
   Vulkan-рантайм (~86 МБ вместо ~570 МБ). Джоба `fetch-engine-runtime-windows` идёт
   матрицей `cuda`/`vulkan` именно поэтому.
 - **Не выпускать с красными тестами** и не «глушить» мигающие тесты: `test-rust`
   блокирует выпуск, а мигание почти всегда означает гонку/тайминг в продукте.
-- **Кросс-платформенность обязательна**: блокирующая джоба `test-rust` идёт на ubuntu,
-  mac-джоба собирает под macOS. Платформенно-зависимую ветку (`#[cfg(windows)]`,
-  `#[cfg(target_os = "macos")]`) нельзя «проверить только на Windows»: вызов
-  windows-only функции из общего кода (`E0425`) и перемещение значения в mac-ветке
-  (`E0382`) вылезают именно там. Не уверены — не гейтите вызов условной компиляцией,
-  а дайте явную реализацию под `#[cfg(not(windows))]`.
+- **Сборка релиза — только Windows, но код остаётся кросс-платформенным.** Блокирующая
+  `test-rust` идёт на ubuntu и компилирует не-Windows ветки; отдельной mac-джобы больше нет.
+  Платформенно-зависимую ветку (`#[cfg(windows)]`, `#[cfg(not(windows))]`) нельзя
+  «проверить только на Windows»: вызов windows-only функции из общего кода (`E0425`) и
+  перемещение значения в unix-ветке (`E0382`) вылезают именно на ubuntu-джобе. Не уверены —
+  не гейтите вызов условной компиляцией, а дайте явную реализацию под `#[cfg(not(windows))]`.
+  Официальной поддержки macOS нет: mac-код компилируется, но не поставляется и не тестируется
+  на живой машине.
 - **Тесты не должны опираться на блокировки внутри одного процесса**: SQLite в одном
   процессе отдаёт `SQLITE_BUSY` без вызова busy-handler (защита от deadlock) — тест,
   который «держит слот блокировкой БД», на Linux становится недетерминированным
@@ -302,20 +304,18 @@ gh release create v0.18.0 --title "v0.18.0 - hermes-disk-search" --target <commi
 - **Заметки на русском**, разделы: новые функции, исправления, требования к обновлению
   (например «после смены модели запустите `index --full`»). Рядом со списком ассетов —
   таблица **«Файл / Нужен? / Что это»**:
-  * обязателен только `hds-<ver>-windows-x64.zip` (macOS — `hds-<ver>-macos-arm64.zip`),
-    проверка sha256 — по желанию;
-  * `hds-engine-runtime-windows-x64-{cuda,vulkan}.zip` и `...-macos-arm64-metal.zip` —
-    только для **офлайн-установки** (обычный установщик качает рантайм движка сам по
+  * обязателен только `hds-<ver>-windows-x64.zip`; проверка sha256 — по желанию;
+  * `hds-engine-runtime-windows-x64-{cuda,vulkan}.zip` — только для **офлайн-установки**
+    (обычный установщик качает рантайм движка сам по
     `runtime-manifests/engine-manifest.json`, выбирая CUDA или Vulkan по машине);
   * модели (LLM/whisper/CLIP ONNX) и sidecar в архив не входят — ставятся при установке;
   * архивы исходников рядовому пользователю не нужны.
   README остаётся каноническим источником этой таблицы; в заметках — та же таблица, чтобы
   не искать её по документации.
 - **Workflow никогда не удаляет** прежние релизы и теги.
-- **macOS-подпись — ad-hoc на целевой машине**: `install_macos.command` снимает карантин
-  (`xattr -dr com.apple.quarantine` с архива и рантайма движка) и ставит ad-hoc подпись на
-  `.app`-обёртку `~/Applications/HermesDiskSearchIndex.app` (`codesign --force --deep -s -`).
-  Нотации/Developer ID нет; подписи не коммитятся (их нельзя положить в архив).
+- **macOS-подписи и нотаризации нет** — релиз под Mac не выпускается. Legacy-скрипты
+  (`install_macos.command`, `codesign`) остаются для разработчиков; в ассеты не попадают
+  и в `RELEASE_NOTES` не упоминаются.
 - **Откат**: `git revert` + повторный запуск workflow с новым PATCH.
 
 

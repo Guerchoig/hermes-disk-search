@@ -16,10 +16,9 @@
   входящих llama.cpp / whisper.cpp / ggml;
 * `NVIDIA-CUDA-EULA.txt`, `NVIDIA-CUDA-RUNTIME-NOTICE.txt` — для сборок `*-cuda`
   (`cudart64_*`, `cublas*64_*`, `ggml-cuda.dll`);
-* для macOS берётся сборка `*-metal` (Metal — системный фреймворк Apple; файлов CUDA в ней
-  нет, отдельного стороннего уведомления Metal не требует). Рантайм кладёт
-  `install_macos.command` (на Windows — `installers/fetch_engine_runtime.ps1`; вариант на
-  PowerShell требует `pwsh`).
+* macOS **не поставляется** с 0.27.0: сборка `*-metal` и `install_macos.command` остаются
+  только в истории/исходниках для разработчиков. Рантайм движка на Windows ставит
+  `installers/fetch_engine_runtime.ps1`.
 
 ### Патч движка (наш, временный — до апстрима)
 Мы поставляем **собственный патч** сборки v1.15 (каталог `engine-patch/`, файлы и sha256 —
@@ -29,8 +28,8 @@ V). База — тот же MIT-лицензированный движок; и
 `bridge/llama_server_cluster.{h,cpp}` и `bridge/llama_server_bridge.{h,cpp}`
 (`engine-patch/hds-engine-patch-v1.15.patch`). Установка/откат —
 `installers/fetch_engine_runtime.ps1 -PatchEngine` / `-RollbackEnginePatch` (штатные DLL
-сохраняются рядом как `*.orig`). Патч применяется на **Windows-пути**; macOS-установщик
-(`install_macos.command`) ставит **стоковый** движок `*-metal` без патча. До апстрим-фикса
+сохраняются рядом как `*.orig`). Патч применяется на **Windows-пути**; macOS не поставляется,
+исторический `install_macos.command` остаётся только для разработчиков. До апстрим-фикса
 ставим свой вариант, после — переходим на стоковый (`engine-patch/README.md`).
 
 ## Медиа и OCR
@@ -121,11 +120,10 @@ DirectML в **python-профиле** — это `onnxruntime-directml` внут
   прежний backend (`diarization.backend: sortformer`), остаётся рабочим fallback; лицензия —
   NVIDIA Open Model License.
 
-## macOS: карантин и подпись (эксплуатация, не лицензия)
-Сборка для macOS **не подписана**. `install_macos.command` при установке снимает карантин
-Gatekeeper (`xattr -dr com.apple.quarantine`) с архива и рантайма движка и ставит **ad-hoc**
-подпись на `.app`-обёртку (`codesign --force --deep -s -`). Нотаризации/Developer ID нет;
-скачанный артефакт открывайте через «ПКМ → Открыть» либо снимите карантин вручную `xattr -dr`.
+## macOS: не поставляется (историческая информация)
+С 0.27.0 релизов для macOS нет: сборка не выпускается, не подписывается и не нотаризуется.
+Исторические `install_macos.command`/`codesign`-шаги остаются только в исходниках для
+разработчиков и в ассеты не входят.
 
 ## Прочее
 Лицензии Rust-крейтов и прочих зависимостей — в их пакетах. При выпуске релиза приложите

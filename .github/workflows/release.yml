@@ -1,10 +1,10 @@
 name: Release
 
-# Rust-first release (see RELEASING.md). Windows is the primary target and is
-# BLOCKING: the product package plus BOTH Windows engine runtimes (CUDA + Vulkan)
-# must be produced, otherwise no release is published. macOS is best-effort (not
-# verified on real hardware yet - MIGRATION_PLAN_RUST.md section 10.0): the mac
-# jobs are non-blocking and their assets are attached only when they succeed.
+# Rust-first release (see RELEASING.md). Windows is the ONLY shipped platform and
+# is BLOCKING: the product package plus BOTH Windows engine runtimes (CUDA + Vulkan)
+# must be produced, otherwise no release is published. macOS is NOT released
+# (decision 22.11.2026): there are no mac jobs, no mac assets and no mac client
+# package. The macOS build scripts stay in the tree for developers only.
 # Python core is gone; the `sidecar/` tree ships TWO workers (extraction and
 # transcription) plus the shared `hds_sidecar` package, built by the
 # build-sidecar-* jobs. The transcription profile venv (1.5-7.4 GB, GPU-specific)
@@ -113,25 +113,6 @@ jobs:
           path: dist/sidecar/**
           if-no-files-found: error
 
-  # ---------- macOS sidecar (best-effort) ----------
-  build-sidecar-macos:
-    needs: [test-rust]
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: astral-sh/setup-uv@v5
-
-      - name: Build self-contained sidecar (macOS)
-        run: bash installers/build_sidecar_macos.sh dist/sidecar
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: hds-sidecar-macos
-          path: dist/sidecar/**
-          if-no-files-found: error
-
   # ---------- Rust: Windows binaries + package (zip + sha256) ----------
   build-windows:
     needs: [test-rust, test-python, build-sidecar-windows]
@@ -223,39 +204,6 @@ jobs:
             dist/hds-*-windows-x64.zip.sha256.txt
           if-no-files-found: error
 
-  # ---------- Rust: macOS binaries + package (best-effort) ----------
-  build-macos:
-    needs: [test-rust, build-sidecar-macos]
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Download sidecar (macOS)
-        uses: actions/download-artifact@v5
-        with:
-          name: hds-sidecar-macos
-          path: sidecar_runtime
-
-      - name: Build release and package (bin + sidecar + sha256 + zip)
-        env:
-          VERSION: ${{ inputs.version || github.ref_name }}
-        run: |
-          ver="${VERSION#v}"
-          bash installers/build_rust_release_macos.sh "$ver" sidecar_runtime
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: hds-rust-macos-arm64
-          path: |
-            dist/hds-*-macos-arm64.zip
-            dist/hds-*-macos-arm64.zip.sha256.txt
-          if-no-files-found: error
-
   # ---------- Engine runtime (llm-host + ASR) as release assets (offline installs) ----------
   # Windows is BLOCKING and ships BOTH backends from the pinned upstream manifest:
   # CUDA (NVIDIA) and Vulkan (AMD/Intel, machines without NVIDIA). A normal install
@@ -287,36 +235,11 @@ jobs:
           path: dist/hds-engine-runtime-windows-x64-${{ matrix.backend }}.zip
           if-no-files-found: error
 
-  # ---------- Engine runtime for macOS (best-effort) ----------
-  fetch-engine-runtime-macos:
-    needs: [test-rust]
-    runs-on: macos-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Download engine runtime by manifest (sha256)
-        shell: pwsh
-        run: |
-          pwsh -NoProfile -File installers/fetch_engine_runtime.ps1 -EngineDir dist/engine-runtime
-
-      - name: Package engine runtime
-        run: |
-          cd dist/engine-runtime
-          zip -r ../hds-engine-runtime-macos-arm64-metal.zip .
-
-      - uses: actions/upload-artifact@v5
-        with:
-          name: hds-engine-runtime-macos-arm64
-          path: dist/hds-engine-runtime-macos-arm64-metal.zip
-          if-no-files-found: error
-
-  # ---------- Release with binary assets (Windows blocking, macOS best-effort) ----------
+  # ---------- Release with binary assets (Windows only) ----------
   release:
-    needs: [build-windows, fetch-engine-runtime-windows, build-macos, fetch-engine-runtime-macos]
+    needs: [build-windows, fetch-engine-runtime-windows]
     # Runs once the BLOCKING Windows jobs succeeded: the product package and BOTH
-    # engine runtimes (CUDA + Vulkan). Missing/failed macOS jobs (best-effort)
-    # simply do not contribute assets.
+    # engine runtimes (CUDA + Vulkan). There are no macOS jobs/assets.
     if: ${{ always() && needs.build-windows.result == 'success' && needs.fetch-engine-runtime-windows.result == 'success' }}
     runs-on: windows-latest
     steps:
@@ -335,52 +258,36 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Download macOS package (best-effort)
-        continue-on-error: true
-        uses: actions/download-artifact@v5
-        with:
-          name: hds-rust-macos-arm64
-          path: dist
-
-      - name: Download macOS engine runtime (best-effort)
-        continue-on-error: true
-        uses: actions/download-artifact@v5
-        with:
-          name: hds-engine-runtime-macos-arm64
-          path: dist
-
-      - name: Source archives (Windows/macOS)
+      - name: Source archive (Windows build sources)
         shell: pwsh
         env:
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
           git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-windows.zip" HEAD
-          git archive --format=zip --prefix="hermes-disk-search/" -o "hermes-disk-search-$env:VERSION-macos.zip" HEAD
 
       - name: Client bootstrap scripts into dist (public installers)
         shell: pwsh
         run: |
           # Скрипты, которые сервер отдаёт ПУБЛИЧНО (без токена) — их публикуем и
           # ассетом, чтобы «общедоступное место» было и без сервера.
-          Copy-Item installers/client-install.ps1, installers/client-install.sh dist -Force
-          Get-ChildItem dist -Filter "client-install.*" | ForEach-Object { Write-Host ("  " + $_.Name) }
+          Copy-Item installers/client-install.ps1 dist -Force
+          Get-ChildItem dist -Filter "client-install.ps1" | ForEach-Object { Write-Host ("  " + $_.Name) }
 
-      - name: Cross-embed both client packages into server archives
+      - name: Embed the Windows client package into the server archive
         shell: pwsh
         env:
           VERSION: ${{ inputs.version || github.ref_name }}
         run: |
-          # В поставке должны лежать ОБА клиентских пакета (windows-x64 + macos-arm64):
-          # тогда сервер выдаёт клиенту его платформу (см. hds_core::client::pick_package).
-          # Каждый build-* собирает свой пакет сам, поэтому недостающий докладываем сюда
-          # и пересчитываем sha256 серверного архива (он изменился).
+          # Клиентский пакет публикуется только под Windows (macOS не поставляется).
+          # Он же вкладывается в серверную поставку (`client/`), чтобы сервер отдавал
+          # его по `<mcp-path>/client-package.zip`; после вложения sha256 архива
+          # пересчитывается (архив изменился).
           $ver = "$env:VERSION" -replace '^v', ''
           Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $pkgs = @(Get-ChildItem dist -Filter "hds-client-$ver-*.zip" -ErrorAction SilentlyContinue)
-          if ($pkgs.Count -eq 0) { throw "no client packages found in dist" }
+          $pkgs = @(Get-ChildItem dist -Filter "hds-client-$ver-windows-x64.zip" -ErrorAction SilentlyContinue)
+          if ($pkgs.Count -eq 0) { throw "no Windows client package found in dist" }
           Write-Host ("[..] client packages: " + (($pkgs | ForEach-Object { $_.Name }) -join ", "))
-          $servers = @(Get-ChildItem dist -Filter "hds-*-windows-x64.zip" -ErrorAction SilentlyContinue) +
-                     @(Get-ChildItem dist -Filter "hds-*-macos-arm64.zip" -ErrorAction SilentlyContinue) |
+          $servers = @(Get-ChildItem dist -Filter "hds-*-windows-x64.zip" -ErrorAction SilentlyContinue) |
                      Where-Object { $_.Name -notlike "hds-client-*" }
           if (@($servers).Count -eq 0) { throw "no server archives found in dist" }
           foreach ($zip in $servers) {
@@ -395,10 +302,10 @@ jobs:
                 $changed = $true
               }
             } finally { $archive.Dispose() }
-            if (-not $changed) { Write-Host "[i] $($zip.Name): оба пакета уже внутри"; continue }
+            if (-not $changed) { Write-Host "[i] $($zip.Name): клиентский пакет уже внутри"; continue }
             $h = (Get-FileHash $zip.FullName -Algorithm SHA256).Hash.ToLower()
             "$h  $($zip.Name)" | Set-Content -Encoding ascii "$($zip.FullName).sha256.txt"
-            # Проверка: оба пакета реально внутри архива.
+            # Проверка: клиентский пакет реально внутри архива.
             $check = [System.IO.Compression.ZipFile]::OpenRead($zip.FullName)
             try {
               foreach ($p in $pkgs) {
@@ -407,7 +314,7 @@ jobs:
                 }
               }
             } finally { $check.Dispose() }
-            Write-Host "[ok] $($zip.Name): вложены оба пакета, sha256 обновлён"
+            Write-Host "[ok] $($zip.Name): клиентский пакет вложен, sha256 обновлён"
           }
 
       - name: Publish release (idempotent)
@@ -432,7 +339,6 @@ jobs:
             "hds-client-$noV-windows-x64.zip",
             "hds-client-$noV-windows-x64.zip.sha256.txt",
             "client-install.ps1",
-            "client-install.sh",
             "hds-engine-runtime-windows-x64-cuda.zip",
             "hds-engine-runtime-windows-x64-vulkan.zip"
           )
@@ -443,11 +349,8 @@ jobs:
           $assets = @()
           $assets += Get-ChildItem dist -Filter "hds-*-windows-x64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += Get-ChildItem dist -Filter "hds-engine-runtime-windows-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem dist -Filter "hds-*-macos-arm64.zip*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem dist -Filter "client-install.*" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
-          $assets += Get-ChildItem dist -Filter "hds-engine-runtime-macos-*.zip" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+          $assets += Get-ChildItem dist -Filter "client-install.ps1" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
           $assets += "hermes-disk-search-$tag-windows.zip"
-          $assets += "hermes-disk-search-$tag-macos.zip"
           Write-Host "[..] assets:"; $assets | ForEach-Object { Write-Host "  $_" }
 
           $exists = $false
