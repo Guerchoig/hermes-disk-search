@@ -65,7 +65,9 @@ jobs:
       - name: Install test dependencies
         # python-docx/openpyxl/lxml: `hds_anonymize.file_parser` imports them at
         # module level, so the anonymize tests cannot be skipped here.
-        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml
+        # pymorphy2 + setuptools<81: morphology/suffix tests (agent mode) expect
+        # pymorphy2; it imports pkg_resources, removed in setuptools 81+.
+        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml "pymorphy2==0.9.1" "setuptools>=75.0,<81"
 
       - name: Python sidecar tests (unittest)
         env:

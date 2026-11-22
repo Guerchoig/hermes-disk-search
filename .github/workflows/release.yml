@@ -86,7 +86,9 @@ jobs:
 
       - name: Install test dependencies
         # python-docx/openpyxl/lxml: module-level imports of the anonymize worker.
-        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml
+        # pymorphy2 + setuptools<81: morphology/suffix tests expect pymorphy2
+        # (it imports pkg_resources, removed in setuptools 81+).
+        run: python -m pip install --disable-pip-version-check numpy PyYAML python-docx openpyxl lxml "pymorphy2==0.9.1" "setuptools>=75.0,<81"
 
       - name: Python sidecar tests (unittest)
         env:

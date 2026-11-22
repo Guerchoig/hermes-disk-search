@@ -256,10 +256,7 @@ impl PidFile {
     /// Проверка содержимого важна: если pid-файл уже переписал другой процесс,
     /// удалять его нельзя (иначе новый `llm-host` остался бы без охраны).
     pub fn release(&self) -> bool {
-        if read_pid(&self.path) == Some(self.pid) && std::fs::remove_file(&self.path).is_ok() {
-            return true;
-        }
-        false
+        read_pid(&self.path) == Some(self.pid) && std::fs::remove_file(&self.path).is_ok()
     }
 }
 
