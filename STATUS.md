@@ -2,8 +2,8 @@
 
 ## Зона агента A0–A6 (22.11.2026)
 
-**Ветка:** `agent-privacy-zone`, **HEAD:** коммит «A6.7 — приёмка A6 (E2E пройден)»
-поверх `7919040e`; код A6 — срез `beff5521`. `origin` — ahead, **push не делался**.
+**Ветка:** `agent-privacy-zone`, **HEAD:** коммит «A6.8 — K1, замер RAG» поверх
+`1e2feaf` (хендофф A6.8); код A6 — срез `beff5521`. `origin` — ahead, **push не делался**.
 Отчёты: `AGENT_A6_REPORT.md` (фаза A6), `AGENT_A5_REPORT.md`/`AGENT_A4_REPORT.md`;
 журналы — `AGENT_A6_STAGES.md`, `AGENT_A5_STAGES.md`, `AGENT_A4_STAGES.md`.
 
@@ -18,13 +18,22 @@
 | A6.4 | `6dc86b2f` | `restore`/`rebuild`/`relink` (CLI + API + панель), `.hds-agent\decisions.jsonl` с ротацией |
 | A6.5 | `4c19a999` | `hds agent project rm` и кнопка «Удалить…», отказ при живом `sync.lock`, `--force`/`--purge-meta` |
 | A6.6 | `beff5521` | AG-23 (откат `decide`), AG-25 (кэш реестра), AG-26 (пути образа в ленте), AG-32 (`history.uncleaned`) |
-| A6.7 | этот коммит | приёмка: `a6_e2e.ps1` — 75/75, I1/I8/I6 подтверждены; `A6_E2E.md`, README §21, `RELEASE_NOTES_0.27.0.md` |
+| A6.7 | `920a054d` | приёмка: `a6_e2e.ps1` — 75/75, I1/I8/I6 подтверждены; `A6_E2E.md`, README §21, `RELEASE_NOTES_0.27.0.md` |
+| A6.8 | этот коммит | K1: `tools/parity/agent_rag_eval.py`, golden (20 вопросов), отчёт `tools/parity/AGENT_RAG_K1.md`; `agent.mcp.disk_search.enabled` по умолчанию **`false`** (решение владельца), тесты default/enable, README §20/§21, `RELEASE_NOTES_0.27.0.md` |
 
 **Тесты среза `beff5521`:** `fmt` — 0; `clippy -D warnings` — 0; `hds-agent` 180 lib +
 наборы, 0 failed; `hds-cli` все наборы 0 failed (`agent_project_rm` 5, `agent_run` 7,
 `agent_sync` 14); `hds-ui` 42 lib, `agent_api` 11, остальные наборы ok; python 335 OK
 (skip 1); npm 23/23. Единственное падение полного `hds-ui` — предсуществующий флейк
 `agent_chat::abort_cancels_pending_ask` (воспроизводится на `0611159f`).
+
+**Тесты A6.8 (после смены default):** `fmt` — 0; `clippy --workspace --all-targets
+-j 2 -- -D warnings` — 0; `hds-agent` **181** lib + наборы, 0 failed; `hds-ui
+--no-fail-fast` 42 lib, `agent_api` 11, `agent_chat` 9, 0 failed; python 335 OK
+(skip 1); npm 23/23; `hds-cli` — все наборы 0 failed, кроме
+`agent_acceptance::acceptance_a3_end_to_end` (проверка «профиль `~/.cline` не
+изменился» ловит запись **этой же сессии Cline** в `data\sessions\**`; одиночный
+прогон — 1 passed; к A6.8 не относится).
 
 **Что осталось:**
 
@@ -34,10 +43,15 @@
   `egress`; I6 — оригиналы не изменились. Протокол — `A6_E2E.md` (в каталоге стенда).
   Находка: повторный `hds stop` не обновляет mtime пустого `index.stop` (AG-27) —
   кандидат AG-34, фаза 2.
-* **A6.8 (K1)** — замер RAG (с `disk-search` и без), отчёт `tools/parity/AGENT_RAG_K1.md`.
+* **A6.8 (K1) закрыт 22.11.2026.** Замер: с `disk-search` полнота 1,775 из 2
+  (`semantic` 2,0), без него — 0,325 (0,333), +43,7 % токенов у поиска; правило §6
+  даёт `keep`, **владелец решил выключить** — `agent.mcp.disk_search.enabled: false`
+  по умолчанию. Отчёт — `tools/parity/AGENT_RAG_K1.md`; повторить на проекте 100+
+  документов (рекомендация).
 * **Фаза 2** — `PLAN_AGENT_PRIVACY_ZONE.md` §8: подписка на ФС, PDF/PPTX и OCR,
   Word-compare, служба Windows, многопользовательская вкладка, словарный проход (I1).
-* `RELEASE_NOTES_0.27.0.md` — **черновик**, релиз не выпущен (ждёт A6.7).
+* `RELEASE_NOTES_0.27.0.md` — **черновик**, релиз не выпущен (A6.1–A6.8 закрыты,
+  решение о выпуске — за владельцем).
 
 Документация: `README.md` §20 «ИИ-агент в анонимной зоне», §21 «Эксплуатация зоны
 агента».

@@ -102,7 +102,8 @@ agent:
   #   path: ''              # интерпретатор Node; пусто — sidecar\node\node.exe → PATH
   # mcp:
   #   disk_search:
-  #     enabled: true       # маршрут /mcp/agent/<P> (токен — `hds agent token`)
+  #     enabled: false      # по умолчанию выключен (A6.8, K1: tools/parity/AGENT_RAG_K1.md);
+  #                         # true — поиск фрагментов через маршрут /mcp/agent/<P> (токен — `hds agent token`)
   #   tavily:
   #     enabled: true
   #     command: ''         # скрипт tavily-mcp; пусто — node_modules воркера

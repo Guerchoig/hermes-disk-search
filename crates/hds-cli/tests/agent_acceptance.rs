@@ -160,6 +160,7 @@ impl Stand {
         let real_anon = std::env::var("HDS_A36_REAL_ANON").is_ok_and(|v| v == "1");
         let cfg_text = format!(
             "agent:\n  enabled: true\n  root: '{}'\n  mcp:\n    tavily:\n      command: '{}'\n\
+             \x20   disk_search:\n      enabled: true\n\
              \x20   onec_buddy:\n      enabled: false\n\
              db_path: '{}'\n\
              embedding:\n  dim: 4\n  base_url: 'http://127.0.0.1:9/v1'\n  batch_size: 1\n\

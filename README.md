@@ -1740,6 +1740,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File installers\install_agent_syn
   процесс агента: следующий ход откроет сессию заново (в ответе `reopened: true`), поэтому
   панель спрашивает подтверждение. `max_live_projects` применится после перезапуска
   `hds ui` (о чём панель предупреждает).
+* **Поиск фрагментов (`search_local_files`) по умолчанию выключен** —
+  `agent.mcp.disk_search.enabled: false` (A6.8 / K1, 22.11.2026). Замер на стенде (20 вопросов
+  аналитика и РП × 2 прогона, одна модель) показал: с поиском полнота ответа **1,775 из 2**
+  (87,5 % прогонов — «найдены все источники»; вопросы «по смыслу» — **2,0 из 2**), без поиска —
+  **0,325** («по смыслу» — **0,333**), причём 23 хода из 40 упираются в `--max-iterations`.
+  Цена включённого поиска — **+43,7 % токенов** (130,9 тыс. против 91,1 тыс. на ход) при меньшем
+  времени хода (47,0 с против 60,7 с). Поэтому значение оставлено выключенным: включайте его
+  осознанно — `agent.mcp.disk_search.enabled: true`, `hds agent token <P>` и
+  `hds mcp-http start`; методика, числа и оговорки — `tools/parity/AGENT_RAG_K1.md`.
 * **Уведомления фильтра** — блок под лентой. Срабатывание значит, что значение уже лежало
   в истории агента открытым (NER пропустил его при анонимизации файла или реплики): каждый
   запрос фильтр чинит, но исправлять надо и сохранённую историю. Блок показывает число
@@ -2048,7 +2057,7 @@ v2 (`agent-vault`), `projects.json` и папки проектов (`agent-proje
 |---|---|---|
 | `agent-node`, `agent-worker` | `fail` | `npm --prefix sidecar/hds_agent ci && npm --prefix sidecar/hds_agent run build` (`installers\build_agent_sidecar.ps1`) |
 | `agent-python`, `agent-vault` | `fail`/`warn` | проверить `root\sidecar\venv-anonymize`, собрать венв установщиком; `anonymize.db` создаётся первым запуском воркера |
-| `agent-token` | `warn` | `hds agent token <P>` — plain-токен печатается один раз |
+| `agent-token` | `warn` | нужен только при `agent.mcp.disk_search.enabled: true`; `hds agent token <P>` — plain-токен печатается один раз |
 | `agent-route` | `warn` | поднять `hds mcp-http start`; `warn` при выключенном MCP — норма |
 | `agent-sync` | `warn` про залипший `sync.lock` | процесса нет — удалить `<P>\agent-state\sync.lock` и запустить демон |
 | `agent-index` | `warn` | `hds agent init` или дождаться зеркалирования и `hds index` |
@@ -2152,6 +2161,11 @@ hds stop                                      # остановить демон 
   гигиена ложных меток.
 * **Один демон на все проекты.** Второй экземпляр по тому же проекту не запускается
   (lock); служба Windows и отдельная учётная запись — фаза 2.
+* **`search_local_files` выключен по умолчанию (A6.8 / K1).** Без него агент ищет
+  `search_codebase` и читает файлы; на проекте из десятков документов это заметно хуже
+  по полноте и чаще упирается в `--max-iterations` (числа — §20 и
+  `tools/parity/AGENT_RAG_K1.md`). Включается `agent.mcp.disk_search.enabled: true`;
+  при выключенном поиске `warn` пункта `agent-token` ожидаем и лечения не требует.
 
 Приёмка фазы A6 и известные ограничения — `AGENT_A6_REPORT.md`.
 

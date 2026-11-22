@@ -56,6 +56,8 @@ pub struct AgentSettings {
     /// (fail-closed, TR-6.5). По умолчанию 300 с (В-14).
     pub filter_max_stale_secs: u64,
     pub node_path: Option<PathBuf>,
+    /// `agent.mcp.disk_search.enabled`: `search_local_files` у агента. По умолчанию
+    /// **false** (A6.8, K1 — см. `tools/parity/AGENT_RAG_K1.md`).
     pub disk_search_enabled: bool,
     pub onec_enabled: bool,
     pub tavily_enabled: bool,
@@ -80,7 +82,9 @@ impl Default for AgentSettings {
             ask_timeout_secs: 600,
             filter_max_stale_secs: 300,
             node_path: None,
-            disk_search_enabled: true,
+            // A6.8 (K1): по умолчанию поиск фрагментов у агента выключен — см.
+            // `tools/parity/AGENT_RAG_K1.md` (включается `agent.mcp.disk_search.enabled: true`).
+            disk_search_enabled: false,
             onec_enabled: true,
             tavily_enabled: true,
             onec_command: None,
@@ -190,7 +194,7 @@ pub fn settings(cfg: &Config) -> AgentSettings {
         ask_timeout_secs: u64_at(cfg, "agent.ask_timeout_sec", 600),
         filter_max_stale_secs: u64_at(cfg, "agent.filter.max_stale_sec", 300),
         node_path: str_at(cfg, "agent.node.path").map(PathBuf::from),
-        disk_search_enabled: bool_at(cfg, "agent.mcp.disk_search.enabled", true),
+        disk_search_enabled: bool_at(cfg, "agent.mcp.disk_search.enabled", false),
         onec_enabled: bool_at(cfg, "agent.mcp.onec_buddy.enabled", true),
         tavily_enabled: bool_at(cfg, "agent.mcp.tavily.enabled", true),
         onec_command: str_at(cfg, "agent.mcp.onec_buddy.command"),
@@ -301,6 +305,19 @@ mod tests {
         assert_eq!(s.unknown, UnknownPolicy::Label);
         assert_eq!(s.max_live_projects, 2);
         assert_eq!(s.idle_secs, 1800);
+        // A6.8 (K1): поиск фрагментов у агента по умолчанию выключен.
+        assert!(!s.disk_search_enabled);
+        assert_eq!(
+            AgentSettings::default().disk_search_enabled,
+            s.disk_search_enabled
+        );
+    }
+
+    #[test]
+    fn disk_search_is_enabled_by_config() {
+        let s = settings(&cfg(
+            "agent:\n  mcp:\n    disk_search:\n      enabled: true\n",
+        ));
         assert!(s.disk_search_enabled);
     }
 
