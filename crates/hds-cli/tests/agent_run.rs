@@ -80,7 +80,7 @@ impl Stand {
         fs::create_dir_all(&zone).unwrap();
         let cfg_path = dir.write_config(&format!(
             "agent:\n  enabled: true\n  root: '{}'\n\
-             mcp:\n    disk_search:\n      enabled: true\n\
+             \x20\x20mcp:\n    disk_search:\n      enabled: true\n\
              db_path: '{}'\n\
              embedding:\n  dim: 4\n  base_url: 'http://127.0.0.1:9/v1'\n\
              index:\n  clip: false\n\
@@ -267,6 +267,14 @@ fn project_registry_and_plan() {
     let parsed: Value = serde_json::from_slice(&json_out.stdout).expect("JSON реестра");
     assert_eq!(parsed["projects"][0]["id"], "P0001");
 
+    // План требует собранный Node-воркер: в CI без `npm run build` его нет.
+    if !repo_root()
+        .join("sidecar/hds_agent/dist/worker.mjs")
+        .is_file()
+    {
+        eprintln!("пропуск плана: нет dist/worker.mjs (npm run build)");
+        return;
+    }
     // План без процессов: провайдер из реестра, ключ — только в памяти.
     stand.write_secrets("https://example.invalid/v1", "sk-a33-secret-key");
     let opts = RunOptions::new(Some("привет".to_string()));
