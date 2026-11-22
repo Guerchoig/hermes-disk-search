@@ -812,9 +812,18 @@ mod tests {
 
     #[test]
     fn glossary_and_hotwords_json_reflect_settings() {
-        let cfg: hds_core::config::Config = serde_yaml::from_str(
-            "transcribe:\n  glossary:\n    path: sidecar/hds_transcribe/glossary.example.yaml\n  hotwords:\n    enabled: true\n    backend: gigastt\n",
-        )
+        // Путь к примеру глоссария не должен зависеть от cwd тестового процесса
+        // (в CI он другой): считаем от корня крейта.
+        let glossary_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("sidecar")
+            .join("hds_transcribe")
+            .join("glossary.example.yaml");
+        let glossary_path = glossary_path.to_string_lossy().replace('\\', "/");
+        let cfg: hds_core::config::Config = serde_yaml::from_str(&format!(
+            "transcribe:\n  glossary:\n    path: '{glossary_path}'\n  hotwords:\n    enabled: true\n    backend: gigastt\n"
+        ))
         .expect("конфиг");
         let settings = Settings::from_config(&cfg);
         let glossary = glossary_json(&settings);
