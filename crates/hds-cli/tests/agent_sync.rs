@@ -634,6 +634,25 @@ fn sync_all_daemon_holds_per_project_locks_and_stops_on_signal() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
+    // Дождаться первого прохода: на медленном CI сигнал остановки мог прийти
+    // раньше, чем демон успевал записать `pass`, и проверка ниже падала.
+    let pass_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    loop {
+        let passed = ["P0001", "P0002"].iter().all(|id| {
+            fs::read_to_string(stand.state_dir_of(id).join("sync.log"))
+                .map(|log| log.lines().any(|l| l.contains(" pass ")))
+                .unwrap_or(false)
+        });
+        if passed {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < pass_deadline,
+            "демон не сделал первый проход за 15 с"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
     // Второй запуск: все проекты уже под наблюдением — быстро и с кодом 0.
     let started = std::time::Instant::now();
     assert_eq!(
