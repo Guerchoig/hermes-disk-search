@@ -21,7 +21,7 @@
 | Файл | Нужен? | Что это |
 |---|---|---|
 | `hds-0.27.0-windows-x64.zip` (+ `.sha256.txt`) | **да** | приложение: `bin\`, `installers\`, `sidecar\`, `runtime-manifests\`, документы, скрипты установки |
-| `hds-engine-runtime-windows-x64-cuda.zip` / `...-vulkan.zip` | по желанию | офлайн-рантайм движка (NVIDIA / AMD-Intel); обычный установщик скачивает его сам |
+| `hds-engine-runtime-windows-x64-cuda.zip` / `...-vulkan.zip` | по желанию | офлайн-рантайм движка (NVIDIA / AMD-Intel); обычный установщик скачивает его сам. Архивы зеркалируются из `engine-runtime-v1.15`: upstream v1.15 отдаёт 404, sha256 закреплены в манифесте |
 | `hds-client-0.27.0-windows-x64.zip` (+ `.sha256.txt`) | по желанию | тонкий клиент для клиентского ПК (M9); тот же файл вложен в серверную поставку |
 | `client-install.ps1` | по желанию | установщик клиента с сервера (токен — аргументом) |
 | `hermes-disk-search-0.27.0-windows.zip` | нет | исходники (для сборки из кода) |

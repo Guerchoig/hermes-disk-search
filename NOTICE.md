@@ -11,7 +11,10 @@
 ## Рантайм движка (LLM-хост + ASR) — скачивается установщиком
 `installers/fetch_engine_runtime.ps1` по `runtime-manifests/engine-manifest.json` кладёт
 архив **Openresearchtools Engine** (`github.com/openresearchtools/engine`, сборки
-`Openresearchtools-Engine-v1.15-*`). Внутри архива — свои уведомления, сохраняйте их:
+`Openresearchtools-Engine-v1.15-*`). С 22.11.2026 ассеты upstream v1.15 отдают **404**,
+поэтому манифест указывает на зеркало `Guerchoig/hermes-disk-search`, тег
+`engine-runtime-v1.15` — те же сборки, sha256 закреплены в манифесте и проверяются
+установщиком. Внутри архива — свои уведомления, сохраняйте их:
 * `LICENSE-ENGINE.txt`, `LICENSES.md`, `Third-Party-Notices.md` — лицензии движка и
   входящих llama.cpp / whisper.cpp / ggml;
 * `NVIDIA-CUDA-EULA.txt`, `NVIDIA-CUDA-RUNTIME-NOTICE.txt` — для сборок `*-cuda`

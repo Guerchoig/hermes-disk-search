@@ -1,6 +1,8 @@
 {
   "sources": [
+    "https://github.com/Guerchoig/hermes-disk-search/releases/tag/engine-runtime-v1.15",
     "https://github.com/openresearchtools/engine/releases/download/v1.15/engine-manifest.json",
     "https://github.com/openresearchtools/engine/releases/latest/download/engine-manifest.json"
-  ]
+  ],
+  "notes": "Upstream v1.15 assets return 404 since 22.11.2026; the first source is our pinned Windows x64 mirror used by runtime-manifests/engine-manifest.json."
 }

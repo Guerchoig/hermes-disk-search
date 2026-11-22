@@ -1,37 +1,29 @@
 {
   "schema_version": 1,
-  "project": "Openresearchtools-Engine",
-  "repository": "openresearchtools/engine",
-  "tag": "v1.15",
-  "generated_at": "2026-03-21T00:44:29Z",
-  "release_url": "https://github.com/openresearchtools/engine/releases/tag/v1.15",
+  "project": "hermes-disk-search engine runtime mirror",
+  "repository": "Guerchoig/hermes-disk-search",
+  "tag": "engine-runtime-v1.15",
+  "generated_at": "2026-11-22T18:10:00Z",
+  "release_url": "https://github.com/Guerchoig/hermes-disk-search/releases/tag/engine-runtime-v1.15",
+  "notes": "Upstream openresearchtools/engine v1.15 assets return 404 since 22.11.2026; this mirror keeps the same Windows x64 archives (sha256 pinned). macOS is not shipped since 0.27.0.",
   "assets": [
-    {
-      "id": "windows-x64-vulkan",
-      "platform": "windows-x64",
-      "backend": "vulkan",
-      "archive": "zip",
-      "file_name": "Openresearchtools-Engine-v1.15-windows-x64-vulkan.zip",
-      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-windows-x64-vulkan.zip",
-      "sha256": "d00058e9e7ee626b0be199be2bcc6a98e0899b3ca6a2cb95a4658a8895e77579"
-    },
-    {
-      "id": "macos-arm64-metal",
-      "platform": "macos-arm64",
-      "backend": "metal",
-      "archive": "zip",
-      "file_name": "Openresearchtools-Engine-v1.15-macos-arm64-metal.zip",
-      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-macos-arm64-metal.zip",
-      "sha256": "0779197e2e852143dcccc81f68b4d25d474f08d0e92a57b90d531860c4eb689b"
-    },
     {
       "id": "windows-x64-cuda",
       "platform": "windows-x64",
       "backend": "cuda",
       "archive": "zip",
-      "file_name": "Openresearchtools-Engine-v1.15-windows-x64-cuda.zip",
-      "url": "https://github.com/openresearchtools/engine/releases/download/v1.15/Openresearchtools-Engine-v1.15-windows-x64-cuda.zip",
-      "sha256": "de717dc32f50210dd059ab3770ff50abc728c9a372cadc62414422f1b3901727"
+      "file_name": "hds-engine-runtime-windows-x64-cuda.zip",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-runtime-v1.15/hds-engine-runtime-windows-x64-cuda.zip",
+      "sha256": "cce5844d50735f4e4288f9e2d36b2eaf7ff3625377fe4769560e1479e70c6915"
+    },
+    {
+      "id": "windows-x64-vulkan",
+      "platform": "windows-x64",
+      "backend": "vulkan",
+      "archive": "zip",
+      "file_name": "hds-engine-runtime-windows-x64-vulkan.zip",
+      "url": "https://github.com/Guerchoig/hermes-disk-search/releases/download/engine-runtime-v1.15/hds-engine-runtime-windows-x64-vulkan.zip",
+      "sha256": "231ad0387897f57e3cd49773ff3ffb4901efe94211b1a9f5d9321b720221e303"
     }
   ]
 }
