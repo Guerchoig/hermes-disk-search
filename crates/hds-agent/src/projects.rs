@@ -212,6 +212,9 @@ mod tests {
         }
     }
 
+    /// Конфиг с `agent.root` — нужен только Windows-тестам ниже (абсолютные пути
+    /// `C:\…`); вне Windows helper не компилируется, иначе clippy видит dead code.
+    #[cfg(windows)]
     fn cfg_with_root(root: &str) -> Config {
         serde_yaml::from_str(&format!("agent:\n  root: '{}'\n", root.replace('\\', "/")))
             .expect("конфиг")
