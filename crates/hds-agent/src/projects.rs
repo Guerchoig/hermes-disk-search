@@ -108,7 +108,7 @@ pub fn get(cfg: &Config, id: &str) -> Option<Project> {
 }
 
 /// Проверить запись проекта до записи в реестр.
-fn validate(project: &Project) -> Result<(), String> {
+fn validate(cfg: &Config, project: &Project) -> Result<(), String> {
     if !is_agent_project(&project.id) {
         return Err(format!(
             "идентификатор проекта должен быть P + 4 цифры (D21), получено {:?}",
@@ -123,18 +123,44 @@ fn validate(project: &Project) -> Result<(), String> {
     }
     // `path` — папка проекта в зоне пользователя: по ней деанонимизатор
     // подставляет пути, поэтому относительный путь бессмысленен.
-    if !Path::new(&project.path).is_absolute() {
+    let path = Path::new(&project.path);
+    if !path.is_absolute() {
         return Err(format!(
             "путь папки проекта должен быть абсолютным, получено {:?}",
             project.path
         ));
     }
+    // A6.5/AG6-07: папка проекта — вне анонимной зоны. Иначе зеркало обходило бы
+    // саму зону, а `project rm` удалил бы «папку проекта» вместе с `<P>\`.
+    if let Some(root) = settings::zone_root(cfg) {
+        let root_abs = std::path::absolute(&root).unwrap_or(root);
+        let path_abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        if same_or_inside(&path_abs, &root_abs) {
+            return Err(format!(
+                "папка проекта не может лежать внутри agent.root ({}): {}",
+                root_abs.display(),
+                project.path
+            ));
+        }
+    }
     Ok(())
+}
+
+/// `child` совпадает с `root` или лежит внутри (покомпонентно, без регистра).
+fn same_or_inside(child: &Path, root: &Path) -> bool {
+    fn norm(p: &Path) -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    }
+    let c = norm(child);
+    let r = norm(root);
+    !r.is_empty() && c.len() >= r.len() && c[..r.len()] == r[..]
 }
 
 /// Добавить проект (с проверкой идентификатора D21 и уникальности пути).
 pub fn add(cfg: &Config, project: Project) -> Result<(), String> {
-    validate(&project)?;
+    validate(cfg, &project)?;
     let mut projects = load(cfg)?;
     if let Some(existing) = projects.get(&project.id) {
         if !existing.path.eq_ignore_ascii_case(&project.path) {
@@ -186,6 +212,11 @@ mod tests {
         }
     }
 
+    fn cfg_with_root(root: &str) -> Config {
+        serde_yaml::from_str(&format!("agent:\n  root: '{}'\n", root.replace('\\', "/")))
+            .expect("конфиг")
+    }
+
     #[test]
     fn roundtrip_and_upsert() {
         let dir = tmpdir("roundtrip");
@@ -222,18 +253,34 @@ mod tests {
         assert_eq!(projects.projects[0].id, "P0002");
     }
 
+    #[cfg(windows)]
     #[test]
     fn validate_requires_absolute_path_and_pnnnn() {
+        let cfg = cfg_with_root(r"C:\anon\zone");
         let good = project("P0001", r"C:\work\one");
-        assert!(validate(&good).is_ok());
+        assert!(validate(&cfg, &good).is_ok());
         let mut relative = good.clone();
         relative.path = "work\\one".to_string();
-        assert!(validate(&relative).unwrap_err().contains("абсолютн"));
+        assert!(validate(&cfg, &relative).unwrap_err().contains("абсолютн"));
         let mut bad_id = good.clone();
         bad_id.id = "P01".to_string();
-        assert!(validate(&bad_id).is_err());
+        assert!(validate(&cfg, &bad_id).is_err());
         let mut no_name = good.clone();
         no_name.name = "  ".to_string();
-        assert!(validate(&no_name).is_err());
+        assert!(validate(&cfg, &no_name).is_err());
+    }
+
+    /// AG6-07: папка проекта не может лежать внутри `agent.root` (или быть им).
+    #[cfg(windows)]
+    #[test]
+    fn validate_rejects_project_folder_inside_agent_root() {
+        let cfg = cfg_with_root(r"C:\anon\zone");
+        let inside = project("P0001", r"C:\anon\zone\P0001\workspace");
+        let err = validate(&cfg, &inside).expect_err("внутри зоны — отказ");
+        assert!(err.contains("agent.root"), "{err}");
+        let root_itself = project("P0001", r"C:\anon\zone");
+        assert!(validate(&cfg, &root_itself).is_err());
+        let similar = project("P0001", r"C:\anon\zone-other");
+        assert!(validate(&cfg, &similar).is_ok(), "не подкаталог");
     }
 }

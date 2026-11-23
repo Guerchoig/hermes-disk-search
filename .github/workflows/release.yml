@@ -86,6 +86,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # AG6-14: без собранного воркера тесты плана пропускаются, а они проверяют
+      # проводку `disk-search` в `cline_mcp_settings.json`.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: sidecar/hds_agent/package-lock.json
+
+      - name: Node worker (build for tests)
+        run: |
+          npm --prefix sidecar/hds_agent ci
+          npm --prefix sidecar/hds_agent run build
+
       - name: Rust tests (Windows)
         run: cargo test --workspace
 

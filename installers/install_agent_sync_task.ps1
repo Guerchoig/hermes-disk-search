@@ -76,9 +76,10 @@ if (-not $StartupFolder) {
     try {
         $action = New-ScheduledTaskAction -Execute $hdsExe -Argument $argList -WorkingDirectory $root
         $trigger = New-ScheduledTaskTrigger -AtLogOn
-        # the mirror daemon runs for the whole session: no time limit, restart on failure
+        # the mirror daemon runs for the whole session: no time limit, restart on failure;
+        # -Hidden: no console window at logon (the Startup-shortcut path hides it too)
         $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+            -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Hidden
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Force -ErrorAction Stop | Out-Null
         # mutual exclusion: with a scheduled task in place, drop a leftover Startup shortcut
         if (Test-Path -LiteralPath $startupLnk) { Remove-Item -LiteralPath $startupLnk -Force -ErrorAction SilentlyContinue }

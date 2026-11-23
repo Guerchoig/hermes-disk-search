@@ -44,11 +44,29 @@
 //! сна) и `index.max_file_mb` на лету. `agent.enabled: false` останавливает
 //! демон с причиной `disabled`, смена `agent.root` — предупреждение `[!]` и
 //! работа на прежнем корне. Каждое применение — строка `config` в журнале (I8).
+//!
+//! **AG6-02:** проход прерывается **между файлами**: `Mirror::sync_once_cancellable`
+//! получает `stop.triggered()`, текущий файл дорабатывается целиком (недописанный
+//! образ хуже задержки), `wait_stable` не прерывается — верхняя граница задержки
+//! остановки равна обработке одного файла. После сигнала `run_loop` пишет `pass`
+//! и выходит с `stop reason=index.stop`: `sync.lock` снимается, `index.stop`
+//! остаётся (AG-27).
+//!
+//! **AG6-15(а):** демон `--all` — супервизор (`Supervisor`): раз в
+//! [`SUPERVISOR_TICK`] перечитывает `projects.json`, добирает новые проекты,
+//! перезапускает поток при смене папки и останавливает исчезнувшие — своим
+//! флагом на проект, не трогая остальные. Занятый `sync.lock` и отказ запуска —
+//! кулдаун [`BUSY_RETRY`]. Остановка супервизором пишется как
+//! `stop reason=restart` (это не `hds stop`, общий файл не трогается).
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+use std::time::{Duration, Instant, SystemTime};
 
 use hds_agent::mirror::{LazyAnonymizer, LazyExtractor, Mirror, SyncReport};
 use hds_agent::registry_db::ArtifactRegistry;
@@ -63,6 +81,15 @@ pub const LOG_ROTATE_BYTES: u64 = 1024 * 1024;
 pub const SLEEP_STEP: Duration = Duration::from_millis(500);
 /// Сколько проблем прохода попадает в журнал (остальные — только числом).
 pub const LOG_PROBLEMS: usize = 10;
+/// Как часто супервизор `--all` перечитывает `projects.json` (AG6-15(а)).
+///
+/// Меньше интервала прохода смысла нет: новый проект подхватывается между
+/// тиками, а ручная правка файла — редкое событие.
+pub const SUPERVISOR_TICK: Duration = Duration::from_secs(5);
+/// Кулдаун проекта, который не удалось вести: занятый `sync.lock` (его держит
+/// другой демон) или отказ запуска (AG6-15(а)). Без него супервизор поднимал бы
+/// поток каждые [`SUPERVISOR_TICK`] и засорял журнал.
+pub const BUSY_RETRY: Duration = Duration::from_secs(60);
 
 /// Сигнал остановки `<root>\index.stop` (общий файл с `hds watch`, AG-27).
 ///
@@ -220,6 +247,7 @@ fn sync_one(cfg: &Config, parsed: &SyncArgs) -> i32 {
         parsed.daemon(),
         interval_sec,
         &stop,
+        None,
     )
     .code
 }
@@ -231,6 +259,9 @@ struct ProjectOutcome {
     code: i32,
     /// Проходы/цикл действительно шли (не «уже запущен» и не отказ).
     started: bool,
+    /// Почему кончился цикл демона (AG6-15(а): супервизор не перезапускает
+    /// проект, у которого `agent.enabled: false`).
+    reason: Option<StopReason>,
 }
 
 impl ProjectOutcome {
@@ -238,6 +269,7 @@ impl ProjectOutcome {
         ProjectOutcome {
             code,
             started: false,
+            reason: None,
         }
     }
 
@@ -246,13 +278,15 @@ impl ProjectOutcome {
         ProjectOutcome {
             code: 0,
             started: false,
+            reason: None,
         }
     }
 
-    fn done(code: i32) -> ProjectOutcome {
+    fn done(code: i32, reason: Option<StopReason>) -> ProjectOutcome {
         ProjectOutcome {
             code,
             started: true,
+            reason,
         }
     }
 }
@@ -261,6 +295,11 @@ impl ProjectOutcome {
 ///
 /// Одна реализация для `--project` и `--all`: иначе `sync.log` и коды двух
 /// режимов со временем разъедутся.
+///
+/// `local_stop` (AG6-15(а)) — свой флаг проекта в супервизоре `--all`:
+/// супервизор поднимает его, когда проект исчез из `projects.json` или у него
+/// сменился путь, и остальные проекты при этом продолжают работу. У `--project`
+/// и `--once` флага нет (`None`) — там достаточно общего `index.stop`.
 fn run_project(
     cfg: &Config,
     project: &projects::Project,
@@ -268,6 +307,7 @@ fn run_project(
     daemon: bool,
     interval_sec: u64,
     stop: &StopSignal,
+    local_stop: Option<&AtomicBool>,
 ) -> ProjectOutcome {
     let id = project.id.as_str();
     let Some(db_path) = settings::registry_db(cfg, id) else {
@@ -285,22 +325,20 @@ fn run_project(
         return ProjectOutcome::failed(1);
     }
     // Lock демона — свой файл: боевой `watch.lock` индексатора не мешает, а
-    // второй демон зеркала по тому же проекту не нужен. Занят — «уже запущен»
-    // и код 0, как у `hds watch` (A4.6).
-    let lock = if daemon {
-        match WatchLock::acquire_named(&state_dir, "sync.lock", 3) {
-            Ok(Some(lock)) => Some(lock),
-            Ok(None) => {
-                println!("[i] демон зеркала уже запущен (sync.lock) — выхожу");
-                return ProjectOutcome::busy();
-            }
-            Err(e) => {
-                eprintln!("agent sync: не занять sync.lock: {}", e.message());
-                return ProjectOutcome::failed(1);
-            }
+    // второй проход по тому же проекту не нужен. Занят — «уже запущен» и код 0,
+    // как у `hds watch` (A4.6). С A6.2 lock занимает и `--once` (AG6-06): иначе
+    // ручной `--all --once` шёл бы параллельно с автозапуском — два зеркала на
+    // один проект, гонка `pending` и образов.
+    let lock = match WatchLock::acquire_named(&state_dir, "sync.lock", 3) {
+        Ok(Some(lock)) => Some(lock),
+        Ok(None) => {
+            println!("[i] зеркало уже запущено для {id} (sync.lock) — выхожу");
+            return ProjectOutcome::busy();
         }
-    } else {
-        None
+        Err(e) => {
+            eprintln!("agent sync: не занять sync.lock: {}", e.message());
+            return ProjectOutcome::failed(1);
+        }
     };
     let log_path = state_dir.join("sync.log");
     let mut log = match SyncLog::open(&log_path) {
@@ -356,6 +394,14 @@ fn run_project(
     // **не снимает** (иначе второй демон никогда не увидит сигнал) и не
     // считает сигналом файл, который лежал до старта. Сигнал передаётся
     // снаружи: в `--all` он общий для всех проектов.
+    //
+    // AG6-15(а): кроме общего сигнала у проекта может быть свой флаг —
+    // супервизор `--all` снимает один проект, не трогая остальные.
+    let stopped_locally = || {
+        local_stop
+            .map(|flag| flag.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    };
     let (passes, changes, reason, code) = if daemon {
         let interval = Duration::from_secs(interval_sec);
         log.start("daemon", id, project_path, &workspace, Some(interval));
@@ -373,7 +419,7 @@ fn run_project(
         let summary = run_loop(
             || Duration::from_secs(interval_sec.get()),
             None,
-            || stop.triggered(),
+            || stop.triggered() || stopped_locally(),
             |log| {
                 // A6.3: правка `config.yaml` подхватывается без перезапуска.
                 // Ошибка разбора не валит демон — строка `error` в журнал.
@@ -428,17 +474,23 @@ fn run_project(
                         }
                     }
                 }
-                match mirror.sync_once() {
+                match mirror.sync_once_cancellable(&|| stop.triggered() || stopped_locally()) {
                     Ok(report) => PassResult::Report(report),
                     Err(e) => PassResult::Failed(e.to_string()),
                 }
             },
             &mut log,
         );
+        // AG6-15(а): остановка своим флагом — это не `hds stop`: `index.stop`
+        // тут ни при чём, и в журнале честнее `reason=restart`.
+        let mut reason = summary.reason;
+        if reason == StopReason::StopFile && !stop.triggered() && stopped_locally() {
+            reason = StopReason::Restart;
+        }
         (
             summary.passes,
             summary.changes,
-            summary.reason,
+            reason,
             // Демон не умирает от ошибок прохода: они уже в журнале.
             0,
         )
@@ -474,20 +526,24 @@ fn run_project(
         reason.as_str(),
         log.path().display()
     );
-    ProjectOutcome::done(code)
+    ProjectOutcome::done(code, Some(reason))
 }
 
 /// `--all` (A6.2, В-A6-2): все проекты `projects.json` в одном процессе.
 ///
-/// * демон — по потоку на проект: у каждого свой `sync.lock`, журнал, реестр и
-///   воркеры, сон интервала свой, а остановка общая (`index.stop`);
-/// * `--once` — по одному проходу на проект подряд, без потоков и без lock
-///   (как у `--project <P> --once`);
+/// * демон — супервизор (`Supervisor`, AG6-15(а)): по потоку на проект, у
+///   каждого свой `sync.lock`, журнал, реестр и воркеры, сон интервала свой, а
+///   остановка общая (`index.stop`); список проектов перечитывается раз в
+///   [`SUPERVISOR_TICK`] — новый проект подхватывается без перезапуска демона;
+/// * `--once` — по одному проходу на проект подряд (как у `--project <P> --once`):
+///   lock тот же, занятый — «уже запущен» и код 0, поэтому параллельный ручной
+///   проход не сталкивается с автозапуском (AG6-06);
 /// * папка проекта недоступна — `problem` в журнале проекта и пропуск:
 ///   остальные проекты обрабатываются (критерий A6.2). В демоне пропуск не
 ///   мешает проекту подняться позже — `sync.lock` не занимается;
 /// * проект уже под наблюдением другого демона (`sync.lock` занят) — это
-///   норма: задача автозапуска и ручной запуск не конфликтуют.
+///   норма: задача автозапуска и ручной запуск не конфликтуют. Если так у всех
+///   проектов на первом тике — «уже запущен» и код 0 (AG6-15(б)).
 fn sync_all(cfg: &Config, parsed: &SyncArgs) -> i32 {
     if !settings::settings(cfg).enabled {
         eprintln!("agent sync: анонимная зона выключена (agent.enabled: false)");
@@ -521,49 +577,11 @@ fn sync_all(cfg: &Config, parsed: &SyncArgs) -> i32 {
     );
 
     if parsed.daemon() {
-        // Один процесс, по потоку на проект: каждый проект живёт своим
-        // ритмом, но `hds stop` останавливает все сразу.
-        let mut handles = Vec::new();
-        let mut missing = 0usize;
-        for project in &registry.projects {
-            let path = PathBuf::from(&project.path);
-            if !path.is_dir() {
-                note_missing_project(cfg, project, &path);
-                missing += 1;
-                continue;
-            }
-            println!("[i] проект {} — папка {}", project.id, project.path);
-            let cfg = cfg.clone();
-            let project = project.clone();
-            let stop = stop.clone();
-            handles.push(std::thread::spawn(move || {
-                run_project(&cfg, &project, &path, true, interval_sec, &stop)
-            }));
-        }
-        let mut started = 0usize;
-        let mut busy = 0usize;
-        let mut failed = 0usize;
-        for handle in handles {
-            match handle.join() {
-                Ok(outcome) if outcome.started => started += 1,
-                Ok(outcome) if outcome.code == 0 => busy += 1,
-                _ => failed += 1,
-            }
-        }
-        println!(
-            "[ok] --all: запущено {started}, уже работали {busy}, пропущено (папка) {missing}, \
-             отказов {failed}"
-        );
-        if started > 0 {
-            return 0;
-        }
-        // Ни один проект не запустился: либо все уже под наблюдением (это
-        // норма — повторный запуск задачи автозапуска), либо делать нечего.
-        if failed == 0 && busy > 0 {
-            println!("[i] демон зеркала уже запущен для всех проектов (sync.lock) — выхожу");
-            return 0;
-        }
-        return 1;
+        // AG6-15(а): супервизор. Проекты живут своими потоками (свой
+        // `sync.lock`, журнал, реестр, воркеры), а супервизор раз в тик
+        // перечитывает `projects.json`: новые проекты добирает, при смене пути
+        // перезапускает поток, исчезнувшие — останавливает своим флагом.
+        return Supervisor::new(cfg, registry, interval_sec, &stop).run();
     }
 
     // `--once`: один проход по каждому проекту подряд.
@@ -576,7 +594,7 @@ fn sync_all(cfg: &Config, parsed: &SyncArgs) -> i32 {
             continue;
         }
         println!("[i] проект {} — папка {}", project.id, project.path);
-        let outcome = run_project(cfg, project, &path, false, interval_sec, &stop);
+        let outcome = run_project(cfg, project, &path, false, interval_sec, &stop, None);
         processed += 1;
         if outcome.code != 0 {
             ok = false;
@@ -590,6 +608,371 @@ fn sync_all(cfg: &Config, parsed: &SyncArgs) -> i32 {
         0
     } else {
         1
+    }
+}
+
+/// Проект под наблюдением супервизора `--all` (AG6-15(а)).
+struct Worker {
+    /// Свой флаг остановки: его поднимает супервизор, остальные проекты живут.
+    flag: Arc<AtomicBool>,
+    /// Поток проекта; `None` — поток завершился или ещё не запускался.
+    handle: Option<JoinHandle<ProjectOutcome>>,
+    /// Папка, с которой запущен поток: другая в `projects.json` — перезапуск.
+    path: String,
+    /// До какого момента проект не трогаем (занятый `sync.lock`, отказ запуска).
+    retry_at: Option<Instant>,
+}
+
+/// Живой `sync.lock` проекта: его держит другой демон (A4.6).
+///
+/// Проверяется до `spawn`: так повторный запуск `hds agent sync --all` видит
+/// «уже запущен» сразу, не создавая поток на каждый проект.
+fn project_daemon_alive(cfg: &Config, id: &str) -> bool {
+    let Some(state) = settings::state_dir_for(cfg, id) else {
+        return false;
+    };
+    let lock = state.join("sync.lock");
+    lock.is_file() && !hds_index::watch::lock_is_stale(&lock)
+}
+
+/// Супервизор `hds agent sync --all` (AG6-15(а), вариант B).
+///
+/// Раньше список проектов читался один раз, и новый проект подхватывался только
+/// перезапуском демона. Теперь раз в [`SUPERVISOR_TICK`]:
+///
+/// 1. `projects.json` перечитывается, если изменились `mtime`/размер файла
+///    (недописанный или битый файл — предупреждение и работа на прежнем списке,
+///    повтор на следующем тике);
+/// 2. новый проект — запуск потока (если не действует кулдаун и `sync.lock`
+///    не занят чужим демоном);
+/// 3. сменился `path` — флаг, ожидание потока, запуск заново с новой папкой;
+/// 4. проект исчез из файла — флаг и ожидание потока (удаление через
+///    `hds agent project rm` при живом демоне и так запрещено, это сценарий
+///    ручной правки файла);
+/// 5. поток завершился сам: занятый `sync.lock` или отказ запуска — кулдаун
+///    [`BUSY_RETRY`]; `agent.enabled: false` — до перезапуска демона проект не
+///    поднимаем (иначе был бы цикл «старт → disabled → старт»).
+///
+/// `hds stop` (`index.stop`) по-прежнему останавливает всё: супервизор поднимает
+/// все флаги, дожидается потоков и печатает сводку. Формат `sync.log` и коды
+/// возврата не меняются: остановка проекта — обычная строка `stop`, только у
+/// снятого супервизором проекта причина `restart`.
+struct Supervisor<'a> {
+    cfg: &'a Config,
+    interval_sec: u64,
+    stop: &'a StopSignal,
+    /// `projects.json` — перечитывается по отпечатку `mtime`+размер.
+    projects_file: PathBuf,
+    stamp: Option<(SystemTime, u64)>,
+    registry: projects::Projects,
+    workers: BTreeMap<String, Worker>,
+    /// Проекты, чьей папки нет: `problem` пишется один раз на переход.
+    missing: BTreeSet<String>,
+    /// Проекты с `agent.enabled: false` — до перезапуска демона не поднимаем.
+    disabled: BTreeSet<String>,
+    /// Проекты, чей `sync.lock` держал другой демон (для сводки).
+    busy: BTreeSet<String>,
+    /// Последняя ошибка разбора `projects.json` — чтобы не печатать каждые 5 с.
+    last_error: Option<String>,
+    /// Сколько раз запускали потоки (в сводке — «запущено»).
+    runs: usize,
+    /// Сколько потоков завершилось отказами.
+    failed: usize,
+    first_tick: bool,
+}
+
+impl<'a> Supervisor<'a> {
+    fn new(
+        cfg: &'a Config,
+        registry: projects::Projects,
+        interval_sec: u64,
+        stop: &'a StopSignal,
+    ) -> Supervisor<'a> {
+        Supervisor {
+            cfg,
+            interval_sec,
+            stop,
+            projects_file: settings::projects_file(cfg),
+            stamp: fingerprint(&settings::projects_file(cfg)),
+            registry,
+            workers: BTreeMap::new(),
+            missing: BTreeSet::new(),
+            disabled: BTreeSet::new(),
+            busy: BTreeSet::new(),
+            last_error: None,
+            runs: 0,
+            failed: 0,
+            first_tick: true,
+        }
+    }
+
+    /// Главный цикл: перечитать список → сверить проекты → сон шагами ≤ 500 мс.
+    fn run(mut self) -> i32 {
+        loop {
+            self.reload();
+            self.tick();
+            self.reap();
+            if self.stop.triggered() {
+                break;
+            }
+            if self.first_tick && self.runs == 0 && self.failed == 0 {
+                // Первый тик не поднял ни одного потока: все проекты уже под
+                // наблюдением (повторный запуск задачи автозапуска) или папок
+                // нет. Ждать сигнала незачем — сообщения и коды прежние
+                // (AG6-15(б): недоступные папки не уводят задачу в перезапуски).
+                println!("[ok] --all: {}", self.summary());
+                if !self.busy.is_empty() {
+                    println!(
+                        "[i] демон зеркала уже запущен для всех проектов (sync.lock) — выхожу"
+                    );
+                } else {
+                    println!("[i] все проекты пропущены: папок нет — выхожу без ошибки");
+                }
+                return 0;
+            }
+            self.first_tick = false;
+            if !sleep_interval(SUPERVISOR_TICK, &|| self.stop.triggered()) {
+                break;
+            }
+        }
+        // `hds stop`: поднимаем все флаги и ждём каждый поток (AG6-02: поток
+        // дорабатывает текущий файл и выходит сам).
+        self.stop_all();
+        println!("[ok] --all: {}", self.summary());
+        if self.runs > 0 || self.failed == 0 {
+            0
+        } else {
+            1
+        }
+    }
+
+    /// Перечитать `projects.json`, если файл изменился.
+    fn reload(&mut self) {
+        let now = fingerprint(&self.projects_file);
+        if now == self.stamp {
+            return;
+        }
+        match projects::load(self.cfg) {
+            Ok(fresh) => {
+                let before = self.registry.projects.len();
+                let after = fresh.projects.len();
+                self.registry = fresh;
+                self.stamp = now;
+                self.last_error = None;
+                if before != after {
+                    println!("[i] projects.json перечитан: проектов {after} (было {before})");
+                }
+            }
+            Err(e) => {
+                // Недописанный или битый файл: работаем на прежнем списке и
+                // повторяем попытку на следующем тике (отпечаток не сдвигаем).
+                if self.last_error.as_deref() != Some(e.as_str()) {
+                    eprintln!("[!] projects.json не перечитан: {e}");
+                    self.last_error = Some(e);
+                }
+            }
+        }
+    }
+
+    /// Сводка в прежнем формате (запущено / уже работали / пропущено / отказов).
+    fn summary(&self) -> String {
+        format!(
+            "запущено {}, уже работали {}, пропущено (папка) {}, отказов {}",
+            self.runs,
+            self.busy.len(),
+            self.missing.len(),
+            self.failed
+        )
+    }
+
+    /// Один тик супервизора: сверить список проектов с потоками.
+    fn tick(&mut self) {
+        let now = Instant::now();
+        let known: BTreeSet<String> = self
+            .registry
+            .projects
+            .iter()
+            .map(|p| p.id.clone())
+            .collect();
+
+        for project in self.registry.projects.clone() {
+            let id = project.id.clone();
+            let path = PathBuf::from(&project.path);
+            if !path.is_dir() {
+                // Поток по проекту без папки не держим: проход по
+                // несуществующей папке — только строки `error` в журнале.
+                self.stop_worker(&id);
+                if self.missing.insert(id.clone()) {
+                    note_missing_project(self.cfg, &project, &path);
+                }
+                continue;
+            }
+            if self.missing.remove(&id) {
+                println!("[i] проект {id}: папка снова доступна — запускаю");
+            }
+            if self.disabled.contains(&id) {
+                continue;
+            }
+
+            let (running, same_path, ready) = match self.workers.get(&id) {
+                Some(w) => (
+                    w.handle.is_some(),
+                    w.path == project.path,
+                    w.retry_at.map(|t| t <= now).unwrap_or(true),
+                ),
+                // Проекта в карте нет: запускать можно сразу.
+                None => (false, false, true),
+            };
+            if running {
+                if same_path {
+                    continue;
+                }
+                // Папка проекта сменилась: поднимаем флаг, ждём поток (он
+                // доработает текущий файл) и стартуем заново.
+                self.stop_worker(&id);
+            } else if same_path && !ready {
+                // Кулдаун после занятого `sync.lock` или отказа запуска.
+                continue;
+            }
+
+            if project_daemon_alive(self.cfg, &id) {
+                // Проект ведёт другой демон (обычно автозапуск): своих потоков
+                // не плодим, вернёмся к нему после кулдауна.
+                if self.busy.insert(id.clone()) {
+                    println!("[i] зеркало уже запущено для {id} (sync.lock) — слежу");
+                }
+                self.workers.insert(
+                    id,
+                    Worker {
+                        flag: Arc::new(AtomicBool::new(false)),
+                        handle: None,
+                        path: project.path.clone(),
+                        retry_at: Some(now + BUSY_RETRY),
+                    },
+                );
+                continue;
+            }
+            self.start_worker(&project);
+        }
+
+        // Проекты, которых больше нет в файле: останавливаем своим флагом.
+        let vanished: Vec<String> = self
+            .workers
+            .keys()
+            .filter(|id| !known.contains(*id))
+            .cloned()
+            .collect();
+        for id in vanished {
+            self.stop_worker(&id);
+            self.disabled.remove(&id);
+            println!("[i] проект {id} исчез из projects.json — поток остановлен");
+        }
+    }
+
+    /// Забрать завершившиеся потоки: учесть итог и поставить кулдаун, если надо.
+    fn reap(&mut self) {
+        let now = Instant::now();
+        let finished: Vec<String> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| w.handle.as_ref().map(|h| h.is_finished()).unwrap_or(false))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in finished {
+            let Some(handle) = self.workers.get_mut(&id).and_then(|w| w.handle.take()) else {
+                continue;
+            };
+            match handle.join() {
+                Ok(outcome) => {
+                    if outcome.code != 0 {
+                        self.failed += 1;
+                    }
+                    if !outcome.started && outcome.code == 0 {
+                        // Занятый `sync.lock`: проект ведёт другой демон.
+                        self.busy.insert(id.clone());
+                    }
+                    if outcome.reason == Some(StopReason::Disabled) {
+                        // Зону выключили в config.yaml: поднимать проект заново
+                        // каждые 5 с — значит крутить «старт → disabled → старт».
+                        self.disabled.insert(id.clone());
+                        println!(
+                            "[i] проект {id}: agent.enabled=false — до перезапуска демона не веду"
+                        );
+                    }
+                    if outcome.code != 0 || !outcome.started {
+                        if let Some(worker) = self.workers.get_mut(&id) {
+                            worker.retry_at = Some(now + BUSY_RETRY);
+                        }
+                    }
+                }
+                Err(_) => {
+                    self.failed += 1;
+                    if let Some(worker) = self.workers.get_mut(&id) {
+                        worker.retry_at = Some(now + BUSY_RETRY);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Поднять флаг проекта и дождаться его потока (AG6-02: поток дорабатывает
+    /// текущий файл и выходит сам).
+    fn stop_worker(&mut self, id: &str) -> Option<ProjectOutcome> {
+        let worker = self.workers.remove(id)?;
+        worker.flag.store(true, Ordering::Relaxed);
+        let outcome = worker.handle.and_then(|handle| handle.join().ok());
+        if let Some(outcome) = &outcome {
+            if outcome.code != 0 {
+                self.failed += 1;
+            }
+        }
+        outcome
+    }
+
+    /// Запустить поток проекта (флаг остановки — свой у каждого проекта).
+    fn start_worker(&mut self, project: &projects::Project) {
+        let id = project.id.clone();
+        let path = PathBuf::from(&project.path);
+        let flag = Arc::new(AtomicBool::new(false));
+        // Запись в карту — до `spawn`: иначе следующий тик увидит проект без
+        // потока и запустит второй (дубли потоков запрещены).
+        self.workers.insert(
+            id.clone(),
+            Worker {
+                flag: Arc::clone(&flag),
+                handle: None,
+                path: project.path.clone(),
+                retry_at: None,
+            },
+        );
+        println!("[i] проект {} — папка {}", project.id, project.path);
+        let cfg = self.cfg.clone();
+        let project = project.clone();
+        let stop = self.stop.clone();
+        let interval_sec = self.interval_sec;
+        let handle = std::thread::spawn(move || {
+            run_project(
+                &cfg,
+                &project,
+                &path,
+                true,
+                interval_sec,
+                &stop,
+                Some(&flag),
+            )
+        });
+        if let Some(worker) = self.workers.get_mut(&id) {
+            worker.handle = Some(handle);
+        }
+        self.runs += 1;
+    }
+
+    /// Остановить все проекты (`hds stop`, Ctrl+C, конец работы).
+    fn stop_all(&mut self) {
+        let ids: Vec<String> = self.workers.keys().cloned().collect();
+        for id in ids {
+            self.stop_worker(&id);
+        }
     }
 }
 
@@ -637,6 +1020,10 @@ pub enum StopReason {
     /// `agent.enabled: false` в перечитанном конфиге (A6.3): зону выключили,
     /// демон останавливается без `index.stop` — общий файл не трогаем (AG-27).
     Disabled,
+    /// Проект снят супервизором `--all` (AG6-15(а)): сменилась папка проекта
+    /// в `projects.json` (поток перезапускается) или проект из файла исчез.
+    /// `index.stop` при этом не создаётся и не трогается.
+    Restart,
 }
 
 impl StopReason {
@@ -648,6 +1035,7 @@ impl StopReason {
             StopReason::Once => "once",
             StopReason::Error => "error",
             StopReason::Disabled => "disabled",
+            StopReason::Restart => "restart",
         }
     }
 }
@@ -1045,7 +1433,9 @@ fn usage() -> String {
      \x20  у каждого свой sync.lock, журнал, реестр и воркеры; папка проекта\n\
      \x20  недоступна — пропуск со строкой problem в его журнале; без --once — демон\n\
      \x20  с интервалом agent.sync.interval_sec (автозапуск:\n\
-     \x20  installers\\install_agent_sync_task.ps1);\n\
+     \x20  installers\\install_agent_sync_task.ps1); projects.json перечитывается\n\
+     \x20  раз в 5 с: новый проект подхватывается, смена папки перезапускает поток,\n\
+     \x20  исчезнувший проект останавливается (stop reason=restart; AG6-15);\n\
      \x20 между проходами перечитывается config.yaml (A6.3): agent.sync.*,\n\
      \x20  index.max_file_mb, agent.enabled (false — остановка `stop reason=disabled`);\n\
      \x20  agent.root на лету не меняется (`[!]`, работа на прежнем);\n\

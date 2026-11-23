@@ -320,4 +320,3 @@ crates/hds-ui/src/{agent,agent_session,lib,page}.rs,
 и npm — зелёные. Коммит: feat(agent): A6.5 — удаление проекта (hds agent project rm,
 кнопка во вкладке). Push не делать.
 ```
-

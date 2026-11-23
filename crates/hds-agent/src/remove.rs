@@ -139,6 +139,19 @@ pub fn remove_project(
     options: RemoveOptions,
     purge: Option<&mut PurgeHook<'_>>,
 ) -> Result<RemoveReport, RemoveError> {
+    remove_project_checked(cfg, id, options, purge, None)
+}
+
+/// То же, но с повторной проверкой живости демона прямо перед удалением (AG6-08:
+/// `daemon_alive` — снимок, снятый вызывающим, и окно между проверкой и
+/// `remove_dir_all` демон мог бы использовать для старта).
+pub fn remove_project_checked(
+    cfg: &Config,
+    id: &str,
+    options: RemoveOptions,
+    purge: Option<&mut PurgeHook<'_>>,
+    alive_now: Option<&dyn Fn() -> bool>,
+) -> Result<RemoveReport, RemoveError> {
     // D21: идентификатор — только `P` + 4 цифры. Всё остальное не могло быть
     // зарегистрировано, и путь по нему строить нельзя.
     if !is_agent_project(id) {
@@ -152,6 +165,19 @@ pub fn remove_project(
             .map(|d| d.join("sync.lock"))
             .unwrap_or_else(|| PathBuf::from("sync.lock"));
         return Err(RemoveError::DaemonAlive(lock));
+    }
+    // AG6-08: `daemon_alive` — снимок, снятый вызывающим; перед удалением
+    // сверяемся ещё раз (окно между проверкой и `remove_dir_all`), иначе
+    // демон, стартовавший в нём, остался бы без зоны.
+    if !options.force {
+        if let Some(alive) = alive_now {
+            if alive() {
+                let lock = settings::state_dir_for(cfg, id)
+                    .map(|d| d.join("sync.lock"))
+                    .unwrap_or_else(|| PathBuf::from("sync.lock"));
+                return Err(RemoveError::DaemonAlive(lock));
+            }
+        }
     }
 
     let mut report = RemoveReport {
@@ -586,6 +612,22 @@ mod tests {
         .expect("--force удаляет");
         assert!(report.zone.is_some());
         assert!(!stand.zone().join(P).exists());
+    }
+
+    /// AG6-08: lock проверяется ещё раз перед удалением — демон, стартовавший
+    /// после снимка `daemon_alive`, не остаётся без зоны.
+    #[test]
+    fn recheck_refuses_removal_when_daemon_started_late() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let stand = Stand::new("recheck");
+        stand.prepare();
+        let alive = || true;
+        let err = remove_project_checked(&stand.cfg, P, options(), None, Some(&alive))
+            .expect_err("живой демон найден повторной проверкой");
+        assert!(matches!(err, RemoveError::DaemonAlive(_)), "{err:?}");
+        assert!(stand.zone().join(P).exists(), "зона цела");
+        assert!(stand.registry_db().exists(), "реестр цел");
+        assert!(projects::get(&stand.cfg, P).is_some(), "запись цела");
     }
 
     #[test]

@@ -41,6 +41,9 @@ import urllib.request
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 FILE_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё_\- .()\[\]]+\.(?:docx|xlsx|md|pdf|txt|pptx|mpp)", re.I)
+#: Время хода по прогонам (`A-qQ01-r1` → секунды): сырые JSONL его не хранят,
+#: поэтому `--score-only` берёт время отсюда (AG6-05).
+TIMES_FILE = "k1-times.json"
 #: «Заметный» выигрыш по полноте на вопросах «поиск по смыслу»: +0.5 из 2 (§6 плана).
 SEMANTIC_GAIN = 0.5
 #: Порог экономии токенов из правила решения §6.
@@ -303,6 +306,28 @@ def aggregate(rows: list[dict]) -> dict:
     }
 
 
+def load_times(out_dir: str) -> dict[str, float]:
+    """Времена прогонов из `k1-times.json` (его нет — пусто)."""
+    path = os.path.join(out_dir, TIMES_FILE)
+    try:
+        # utf-8-sig: файл могли поправить в PowerShell 5.1 (BOM).
+        with open(path, encoding="utf-8-sig") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        str(key): float(value)
+        for key, value in data.items()
+        if isinstance(value, (int, float))
+    }
+
+
+def save_times(out_dir: str, times: dict[str, float]) -> None:
+    path = os.path.join(out_dir, TIMES_FILE)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(times, fh, ensure_ascii=False, indent=2, sort_keys=True)
+
+
 def mcp_alive(url: str) -> bool:
     try:
         with urllib.request.urlopen(url, timeout=5) as resp:  # noqa: S310 — loopback
@@ -335,7 +360,8 @@ def main() -> int:
     parser.add_argument("--mcp-url", default="http://127.0.0.1:8788/health")
     parser.add_argument("--skip-mcp-check", action="store_true")
     parser.add_argument("--score-only", action="store_true",
-                        help="только пересчитать сохранённые k1-<cfg>-q*-r*.jsonl")
+                        help="только пересчитать сохранённые k1-<cfg>-q*-r*.jsonl "
+                             "(время — из k1-times.json, сводка — k1-summary-score.json)")
     args = parser.parse_args()
 
     # hds запускает воркер с `current_dir(<root>)`: относительный `--root` даёт
@@ -373,12 +399,14 @@ def main() -> int:
 
     run_indexes = ([int(x) for x in args.run_index.split(",")] if args.run_index
                    else list(range(1, args.runs + 1)))
+    times = load_times(out_dir)
     rows: list[dict] = []
     for label, config in configs:
         for question in questions:
             for run in run_indexes:
                 stem = os.path.join(out_dir, f"k1-{label}-q{question['id']}-r{run}")
                 raw_path, err_path = stem + ".jsonl", stem + ".err"
+                key = f"{label}-q{question['id']}-r{run}"
                 if args.score_only:
                     if not os.path.isfile(raw_path):
                         print(f"skip {stem}: нет файла прогона", file=sys.stderr)
@@ -387,7 +415,9 @@ def main() -> int:
                         events, noise = parse_lines(fh.read())
                     summary = summarize_events(events)
                     summary.update({
-                        "exit": None, "timedOut": False, "seconds": None,
+                        "exit": None, "timedOut": False,
+                        # AG6-05: время не в JSONL — берём из k1-times.json.
+                        "seconds": times.get(key),
                         "noiseLines": len(noise.splitlines()) if noise else 0,
                         "raw": os.path.relpath(raw_path, REPO),
                         "stderr": os.path.relpath(err_path, REPO),
@@ -397,6 +427,8 @@ def main() -> int:
                     summary = run_once(args.hds, config, args.root, args.project, prompt,
                                        args.timeout, args.max_iterations, raw_path,
                                        err_path, args.retries)
+                    if summary.get("seconds") is not None:
+                        times[key] = float(summary["seconds"])
                 row = {
                     "config": label,
                     "id": question["id"],
@@ -463,7 +495,13 @@ def main() -> int:
             "verdict": "keep" if (by_tokens or by_semantic) else "disable",
         }
 
-    summary_path = os.path.join(out_dir, "k1-summary.json")
+    if not args.score_only:
+        # AG6-05: времена прогонов — отдельным файлом, чтобы `--score-only`
+        # воспроизводил и их (в сырых JSONL времени нет).
+        save_times(out_dir, times)
+
+    summary_path = os.path.join(
+        out_dir, "k1-summary-score.json" if args.score_only else "k1-summary.json")
     with open(summary_path, "w", encoding="utf-8") as fh:
         json.dump(report, fh, ensure_ascii=False, indent=2)
 
@@ -480,4 +518,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
-

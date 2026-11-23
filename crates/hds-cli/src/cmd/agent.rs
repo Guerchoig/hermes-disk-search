@@ -1,10 +1,11 @@
 //! `hds agent` — служебные команды анонимной зоны (фаза A2).
 //!
 //! * `hds agent init [--yes] [--root DIR] [--no-index]` — сброс и первичное
-//!   построение индекса анонимной зоны (TR-4.2, D9): останавливает `hds watch`,
-//!   удаляет `index.db` (+`-wal`/`-shm`) и выход прежней карточки анонимизации
-//!   (`anonymize.output_dir`), создаёт пустую базу и запускает индексацию
-//!   `<agent.root>\P<NNNN>\workspace`. Команда идемпотентна;
+//!   построение индекса анонимной зоны (TR-4.2, D9): останавливает `hds watch`
+//!   и демон зеркала (`sync.lock`, AG6-16), удаляет `index.db` (+`-wal`/`-shm`) и
+//!   выход прежней карточки анонимизации (`anonymize.output_dir`), создаёт пустую
+//!   базу и запускает индексацию `<agent.root>\P<NNNN>\workspace`. Команда
+//!   идемпотентна;
 //! * `hds agent token <P> [--ttl-days N]` — выдать токен проекта для маршрута
 //!   `/mcp/agent/<P>` (в файл — только хэш, plain печатается один раз).
 //!
@@ -66,8 +67,9 @@ pub fn cmd_agent_cfg(cfg: &Config, args: &[String]) -> i32 {
 fn usage() -> String {
     "использование: hds agent <подкоманда>\n\
      \x20 init  [--yes] [--root DIR] [--no-index] [--force]\n\
-     \x20       (сброс индекса: стоп hds watch, удаление index.db и выхода\n\
-     \x20        анонимизации, пустая база, индексация <agent.root>\\P*\\workspace; TR-4.2;\n\
+     \x20       (сброс индекса: стоп hds watch и демона зеркала (sync.lock),\n\
+     \x20        удаление index.db и выхода анонимизации, пустая база, индексация\n\
+     \x20        <agent.root>\\P*\\workspace; TR-4.2, AG6-16;\n\
      \x20        выход анонимизации удаляется, только если он внутри <state_dir>\\data\n\
      \x20        или <agent.root> — иначе нужен --force)\n\
      \x20 token <P> [--ttl-days N]\n\
@@ -156,6 +158,65 @@ fn stop_watch(root: &Path, lock: &Path, wait_secs: u64) -> Result<(), String> {
     Err(format!(
         "демон индексации не остановился за {wait_secs} с: остановите `hds watch` \
          (или службу) вручную и повторите `hds agent init`"
+    ))
+}
+
+/// Живые `sync.lock` проектов — демон зеркала работает (`hds agent sync`).
+///
+/// Проверка та же, что у демона (`hds_index::watch::lock_is_stale`): устаревший
+/// lock (PID 0 или умерший процесс) живым не считается.
+fn mirror_daemons_alive(cfg: &Config, ids: &[String]) -> Vec<PathBuf> {
+    ids.iter()
+        .filter_map(|id| hds_agent::settings::state_dir_for(cfg, id))
+        .map(|state| state.join("sync.lock"))
+        .filter(|lock| lock.is_file() && !hds_index::watch::lock_is_stale(lock))
+        .collect()
+}
+
+/// Остановить демон зеркала и дождаться снятия `sync.lock` (AG6-16(б)).
+///
+/// `index.db` удалять под живым зеркалом нельзя: демон пишет реестр и образы, а
+/// сигнал замечает только на своей безопасной точке — между файлами (AG6-02) и
+/// во время сна. Поэтому `hds agent init` сначала останавливает демон тем же
+/// сигналом, что и `hds stop` (файл пишется с явным mtime, AG-34), и ждёт, пока
+/// все `sync.lock` исчезнут или устареют. Таймаут — честный отказ: база под
+/// живым демоном не сносится.
+///
+/// `Ok(n)` — сколько живых демонов было (и остановилось), `Ok(0)` — зеркало не
+/// запущено (сигнал при этом не создаётся). `wait_secs = 0` — проверить один раз
+/// и не ждать (unit-тесты).
+fn stop_mirror_daemons(
+    cfg: &Config,
+    root: &Path,
+    ids: &[String],
+    wait_secs: u64,
+) -> Result<usize, String> {
+    let locks = mirror_daemons_alive(cfg, ids);
+    if locks.is_empty() {
+        return Ok(0);
+    }
+    crate::cmd::stop::stop(root).map_err(|e| format!("не создать index.stop: {}", e.message()))?;
+    println!("[..] остановка демона зеркала (index.stop)…");
+    let alive = || {
+        locks
+            .iter()
+            .any(|lock| lock.is_file() && !hds_index::watch::lock_is_stale(lock))
+    };
+    let deadline = Instant::now() + Duration::from_secs(wait_secs);
+    loop {
+        if !alive() {
+            println!("[ok] демон зеркала остановлен");
+            return Ok(locks.len());
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    Err(format!(
+        "демон зеркала не остановился за {wait_secs} с (sync.lock ещё занят).\n\
+         Сначала `hds stop`, дождитесь выхода `hds agent sync` и повторите \
+         `hds agent init`: база под живым демоном не удаляется."
     ))
 }
 
@@ -356,6 +417,21 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
     let anonymized = hds_anonymize::Settings::from_config(&cfg).output_dir_abs(&root);
     let watch_lock = root.join("watch.lock");
     let watch_running = watch_lock.exists() && !hds_index::watch::lock_is_stale(&watch_lock);
+    // AG6-16(б): демон зеркала держит `index.db` и реестр — его тоже останавливаем.
+    // Берём и проекты зоны (`P*\\workspace`), и записи `projects.json`: у проекта
+    // без каталога `workspace` демон тоже может быть жив.
+    let mirror_ids: Vec<String> = {
+        let mut ids: Vec<String> = projects.iter().map(|r| r.project.clone()).collect();
+        if let Ok(registry) = hds_agent::projects::load(&cfg) {
+            for project in registry.projects {
+                if !ids.iter().any(|id| id.eq_ignore_ascii_case(&project.id)) {
+                    ids.push(project.id);
+                }
+            }
+        }
+        ids
+    };
+    let mirror_running = !mirror_daemons_alive(&cfg, &mirror_ids).is_empty();
 
     // Всё, что будет удалено, перечисляем ДО удаления (TR-4.2: подтверждение).
     let mut doomed: Vec<PathBuf> = vec![db.clone()];
@@ -409,6 +485,9 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
     if watch_running {
         println!("Демон индексации: запущен — будет остановлен");
     }
+    if mirror_running {
+        println!("Демон зеркала: запущен — будет остановлен");
+    }
 
     if !has(rest, "--yes") {
         if !std::io::stdin().is_terminal() {
@@ -435,7 +514,14 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
         eprintln!("{e}");
         return 1;
     }
-    // 2. Снести базу и выход прежней карточки анонимизации.
+    // 2. Остановить демон зеркала (AG6-16(б)): он держит реестр и пишет образы,
+    //    а `index.stop` замечает только между файлами (AG6-02). Не остановился —
+    //    честный отказ: базу под живым демоном не сносим.
+    if let Err(e) = stop_mirror_daemons(&cfg, &root, &mirror_ids, 60) {
+        eprintln!("{e}");
+        return 1;
+    }
+    // 3. Снести базу и выход прежней карточки анонимизации.
     if let Err(e) = remove_path(&db) {
         eprintln!("{e}");
         return 1;
@@ -450,7 +536,7 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
         }
         println!("[ok] удалён выход анонимизации: {}", anonymized.display());
     }
-    // 3. Пустая база со схемой (идемпотентно: open_rw создаёт схему сам).
+    // 4. Пустая база со схемой (идемпотентно: open_rw создаёт схему сам).
     match open_conn(&cfg) {
         Ok(conn) => drop(conn),
         Err(e) => {
@@ -467,7 +553,7 @@ fn cmd_init(cfg: &Config, rest: &[String]) -> i32 {
         println!("[ok] индексация пропущена (--no-index): запустите `hds index` или `hds watch`.");
         return 0;
     }
-    // 4. Первичное построение индекса.
+    // 5. Первичное построение индекса.
     let conn = match open_conn(&cfg) {
         Ok(c) => c,
         Err(e) => {
@@ -553,5 +639,96 @@ fn cmd_check(cfg: &Config, args: &[String]) -> i32 {
         0
     } else {
         1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::SystemTime;
+
+    /// Временная зона с одним проектом и конфиг с `agent.root` — без env
+    /// (`HDS_ROOT`/`HDS_CONFIG` процесса не трогаем: тесты идут параллельно).
+    fn stand(tag: &str) -> (PathBuf, Config) {
+        let dir =
+            std::env::temp_dir().join(format!("hds-agent-init-unit-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("zone").join("P0001").join("agent-state")).unwrap();
+        let cfg_path = dir.join("config.yaml");
+        let zone = dir.join("zone").to_string_lossy().replace('\\', "/");
+        std::fs::write(
+            &cfg_path,
+            format!("agent:\n  enabled: true\n  root: '{zone}'\n"),
+        )
+        .unwrap();
+        let cfg = hds_core::config::load_from(&cfg_path).expect("config.yaml");
+        (dir, cfg)
+    }
+
+    fn lock_path(dir: &Path) -> PathBuf {
+        dir.join("zone")
+            .join("P0001")
+            .join("agent-state")
+            .join("sync.lock")
+    }
+
+    fn ids() -> Vec<String> {
+        vec!["P0001".to_string()]
+    }
+
+    /// AG6-16(б): живой `sync.lock` — сигнал выставлен (с явным mtime), но
+    /// `wait_secs=0` значит «не ждём»: честный отказ с подсказкой `hds stop`,
+    /// зона при этом цела.
+    #[test]
+    fn stop_mirror_daemons_refuses_live_lock_and_sends_signal() {
+        let (dir, cfg) = stand("live");
+        let lock = lock_path(&dir);
+        std::fs::write(&lock, std::process::id().to_string()).unwrap();
+        assert_eq!(
+            mirror_daemons_alive(&cfg, &ids()).len(),
+            1,
+            "живой lock виден"
+        );
+
+        let err = stop_mirror_daemons(&cfg, &dir, &ids(), 0).expect_err("живой lock — отказ");
+        assert!(err.contains("hds stop"), "подсказка в тексте: {err}");
+
+        let signal = dir.join("index.stop");
+        let meta = std::fs::metadata(&signal).expect("index.stop создан");
+        assert_eq!(meta.len(), 0, "сигнал — пустой файл (как у hds stop)");
+        let age = SystemTime::now()
+            .duration_since(meta.modified().unwrap())
+            .unwrap_or_default();
+        assert!(
+            age < std::time::Duration::from_secs(5),
+            "mtime сигнала свежий: {age:?}"
+        );
+        assert!(lock.is_file(), "чужой lock не снимается");
+        assert!(
+            dir.join("zone").join("P0001").join("agent-state").is_dir(),
+            "зона не тронута"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AG6-16(б): без lock и с устаревшим (PID 0) — ждать нечего, сигнал не
+    /// создаётся: `Ok(0)`, как «зеркало не запущено».
+    #[test]
+    fn stop_mirror_daemons_ignores_stale_and_absent_lock() {
+        let (dir, cfg) = stand("stale");
+        assert_eq!(stop_mirror_daemons(&cfg, &dir, &ids(), 0), Ok(0));
+        assert!(
+            !dir.join("index.stop").exists(),
+            "без демона сигнал не нужен"
+        );
+
+        std::fs::write(lock_path(&dir), "0").unwrap();
+        assert!(
+            mirror_daemons_alive(&cfg, &ids()).is_empty(),
+            "устаревший lock (PID 0) живым не считается"
+        );
+        assert_eq!(stop_mirror_daemons(&cfg, &dir, &ids(), 0), Ok(0));
+        assert!(!dir.join("index.stop").exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

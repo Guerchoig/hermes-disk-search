@@ -621,10 +621,16 @@ fn project_rm(cfg: &Config, args: &[String]) -> i32 {
         daemon_alive,
         purge_labels,
     };
+    // AG6-08: ядро перед удалением сверится с живым lock ещё раз — по этому
+    // замыканию, а не по снимку `lock`.
+    let alive_now = || {
+        lock.as_ref()
+            .is_some_and(|lock| lock.is_file() && !hds_index::watch::lock_is_stale(lock))
+    };
     let outcome = {
         let hook: Option<&mut hds_agent::remove::PurgeHook<'_>> =
             if purge_labels { Some(&mut purge) } else { None };
-        hds_agent::remove::remove_project(cfg, &id, options, hook)
+        hds_agent::remove::remove_project_checked(cfg, &id, options, hook, Some(&alive_now))
     };
     drop(purge);
     if let Some(client) = client.take() {

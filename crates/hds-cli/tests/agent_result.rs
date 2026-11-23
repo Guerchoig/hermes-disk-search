@@ -573,7 +573,21 @@ fn restore_through_cli_returns_copy_and_json() {
     assert_eq!(value["stamp"], stamp.as_str());
     assert_eq!(value["sha256"], copy_sha.as_str());
     assert_eq!(value["status"], "synced");
-    assert_eq!(value["backups"][0]["stamp"], stamp.as_str());
+    // AG6-03: в списке копий есть и выбранная, и сохранённая прежняя версия.
+    let stamps_after: Vec<&str> = value["backups"]
+        .as_array()
+        .expect("список копий")
+        .iter()
+        .filter_map(|item| item["stamp"].as_str())
+        .collect();
+    assert!(
+        stamps_after.contains(&stamp.as_str()),
+        "выбранная копия в списке: {stamps_after:?}"
+    );
+    assert!(
+        stamps_after.len() >= 2,
+        "прежняя версия сохранена отдельной копией: {stamps_after:?}"
+    );
     assert!(!out.contains("Контакт:"), "содержимое не уходит: {out}");
 
     // Оригинал — версия из копии, образ пересобран из неё, копия не тратится.

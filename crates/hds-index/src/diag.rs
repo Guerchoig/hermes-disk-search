@@ -3026,14 +3026,14 @@ fn index_project_rows(conn: &rusqlite::Connection) -> Result<Vec<(String, i64)>>
     Ok(rows.filter_map(std::result::Result::ok).collect())
 }
 
-/// Первый путь файла проекта в индексе (для проверки, что индекс смотрит в зону).
-fn index_first_path(conn: &rusqlite::Connection, project: &str) -> Option<String> {
-    conn.query_row(
-        "SELECT path FROM files WHERE project = ?1 LIMIT 1",
-        [project],
-        |r| r.get::<_, String>(0),
-    )
-    .ok()
+/// Все пути файлов проекта в индексе (AG6-12: проверяем не только первый).
+fn index_paths(conn: &rusqlite::Connection, project: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare("SELECT path FROM files WHERE project = ?1") else {
+        return Vec::new();
+    };
+    stmt.query_map([project], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(std::result::Result::ok).collect())
+        .unwrap_or_default()
 }
 
 /// Пункт `agent-root`: задан, абсолютный, не общий каталог (TR-8.3).
@@ -3529,10 +3529,14 @@ fn agent_index_check(
             norm_path(&root.to_string_lossy()).trim_end_matches('/')
         );
         for p in selected {
-            if let Some(path) = index_first_path(&conn, &p.id) {
-                if !norm_path(&path).starts_with(&zone) {
-                    outside.push(format!("{}: {}", p.id, short(&path)));
-                }
+            // AG6-12: проверяем все пути проекта, а не первую строку — одна
+            // «залетевшая» запись не должна прятаться за соседней.
+            let paths = index_paths(&conn, &p.id);
+            if let Some(path) = paths
+                .iter()
+                .find(|path| !norm_path(path).starts_with(&zone))
+            {
+                outside.push(format!("{}: {}", p.id, short(path)));
             }
         }
     }
@@ -4637,6 +4641,29 @@ mod agent_diag_tests {
             ypath(&zone.join("index.db")),
             ypath(&zone.join("anonymize.db")),
         ))
+    }
+
+    #[test]
+    fn index_paths_returns_every_row_of_the_project() {
+        // AG6-12: проверка «индекс не указывает вне зоны» смотрит все строки.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE files (project TEXT, path TEXT);\
+             INSERT INTO files VALUES ('P0001','C:/zone/P0001/workspace/a.md');\
+             INSERT INTO files VALUES ('P0001','C:/Проект/оригинал.docx');\
+             INSERT INTO files VALUES ('P0002','C:/zone/P0002/workspace/b.md');",
+        )
+        .unwrap();
+        let paths = index_paths(&conn, "P0001");
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(
+            paths.iter().any(|p| p.contains("оригинал.docx")),
+            "строка вне зоны видна проверке: {paths:?}"
+        );
+        assert!(
+            index_paths(&conn, "P0009").is_empty(),
+            "чужой проект строк не даёт"
+        );
     }
 
     #[test]

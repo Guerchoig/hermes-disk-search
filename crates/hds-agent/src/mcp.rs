@@ -21,6 +21,13 @@ use serde_json::{json, Value};
 
 use crate::secrets::Secrets;
 
+/// Имена, которые пользовательская запись `mcp.servers` не может подменить:
+/// `disk-search` — единственный сервер, который настройка `disk_search.enabled`
+/// обязана выключать (A6.8); `tavily`/`1c-buddy` настраиваются и через
+/// `mcp.servers` (шаблон `sidecar/mcp/mcp.example.json`), поэтому их
+/// пользовательская запись допустима, пока встроенная не выпущена.
+pub const RESERVED_SERVERS: [&str; 1] = ["disk-search"];
+
 /// Параметры записи `cline_mcp_settings.json`.
 #[derive(Debug, Clone, Default)]
 pub struct McpSpec {
@@ -133,11 +140,14 @@ impl McpSpec {
                 }),
             );
         }
-        // A3.7: дополнительные серверы из `secrets.json` (`mcp.servers`).
-        // Встроенные имена не перетираются: `disk-search`, `tavily`, `1c-buddy`
-        // остаются продуктовыми, даже если в секретах есть запись с тем же именем.
+        // A3.7/AG6-13: встроенные серверы сильнее пользовательских; `disk-search`
+        // не подставляется из `mcp.servers` и тогда, когда настройка его выключила.
         for (name, value) in &self.extra_servers {
-            if servers.contains_key(name) {
+            if servers.contains_key(name)
+                || RESERVED_SERVERS
+                    .iter()
+                    .any(|reserved| reserved.eq_ignore_ascii_case(name))
+            {
                 continue;
             }
             servers.insert(name.clone(), value.clone());
@@ -239,6 +249,37 @@ mod tests {
         let json = s.to_json();
         let servers = json["mcpServers"].as_object().unwrap();
         assert!(servers.is_empty());
+    }
+
+    #[test]
+    fn extra_server_with_builtin_name_is_ignored_even_when_disabled() {
+        // AG6-13: `disk_search.enabled: false` снимает токен, но запись с тем же
+        // именем в `mcp.servers` не должна «включать» сервер обратно.
+        let mut s = spec();
+        s.token = None;
+        s.onec_command = None; // 1c-buddy придёт из `mcp.servers` (шаблон поставки)
+        s.extra_servers = vec![
+            (
+                "disk-search".to_string(),
+                json!({ "transport": { "type": "streamableHttp",
+                    "url": "http://127.0.0.1:8788/mcp/agent/P0001" } }),
+            ),
+            (
+                "мой-сервер".to_string(),
+                json!({ "transport": { "type": "stdio", "command": "x.exe" } }),
+            ),
+            // `1c-buddy` из шаблона поставки настраивается через `mcp.servers`
+            // и при отсутствии встроенной команды должен попасть в файл.
+            (
+                "1c-buddy".to_string(),
+                json!({ "transport": { "type": "stdio", "command": "1c-buddy.exe" } }),
+            ),
+        ];
+        let json = s.to_json();
+        let servers = json["mcpServers"].as_object().unwrap();
+        assert!(!servers.contains_key("disk-search"), "{json}");
+        assert!(servers.contains_key("мой-сервер"), "{json}");
+        assert!(servers.contains_key("1c-buddy"), "{json}");
     }
 
     #[test]

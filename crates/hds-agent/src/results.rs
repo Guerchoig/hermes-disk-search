@@ -47,7 +47,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use hds_core::config::replace_file;
 use hds_core::error::CoreError;
@@ -701,13 +701,20 @@ pub fn append_decision(project_root: &Path, entry: &DecisionEntry) -> Result<(),
     let dir = project_root.join(SERVICE_DIR);
     fs::create_dir_all(&dir).map_err(|e| ResultsError::Io(dir.clone(), e.to_string()))?;
     let path = dir.join(DECISIONS_FILE);
+    // AG6-04: ротация под коротким lock-файлом. Два процесса (вкладка + CLI)
+    // иначе могли одновременно увидеть размер > 1 МБ: один переименовывал
+    // журнал, второй успевал удалить свежий `.1` — до 1 МБ аудита терялось.
+    let lock = acquire_file_lock(&path.with_extension("lock"), Duration::from_millis(1500));
     let too_big = fs::metadata(&path)
         .map(|meta| meta.len() > DECISIONS_ROTATE_BYTES)
         .unwrap_or(false);
-    if too_big {
+    if too_big && lock.is_some() {
         let rotated = PathBuf::from(format!("{}.1", path.display()));
-        let _ = fs::remove_file(&rotated);
-        let _ = fs::rename(&path, &rotated);
+        // `.1` заменяется целиком; при занятом файле пробуем ещё раз после удаления.
+        if fs::rename(&path, &rotated).is_err() {
+            let _ = fs::remove_file(&rotated);
+            let _ = fs::rename(&path, &rotated);
+        }
     }
     let mut line =
         serde_json::to_string(entry).map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
@@ -719,6 +726,55 @@ pub fn append_decision(project_root: &Path, entry: &DecisionEntry) -> Result<(),
         .map_err(|e| ResultsError::Io(path.clone(), e.to_string()))?;
     file.write_all(line.as_bytes())
         .map_err(|e| ResultsError::Io(path, e.to_string()))
+}
+
+/// Короткий lock-файл (`create_new`) с ожиданием и снятием залипшего.
+///
+/// `None` — взять не удалось (чужой процесс держит дольше таймаута): запись
+/// журнала продолжается без ротации, терять строку из-за lock нельзя.
+fn acquire_file_lock(path: &Path, timeout: Duration) -> Option<FileLock> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        match fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+        {
+            Ok(_) => {
+                return Some(FileLock {
+                    path: path.to_path_buf(),
+                })
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let stale = fs::metadata(path)
+                    .and_then(|meta| meta.modified())
+                    .ok()
+                    .and_then(|time| time.elapsed().ok())
+                    .map(|age| age > Duration::from_secs(30))
+                    .unwrap_or(false);
+                if stale {
+                    let _ = fs::remove_file(path);
+                    continue;
+                }
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
+/// Lock-файл, снимаемый при выходе.
+struct FileLock {
+    path: PathBuf,
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
 }
 
 /// Штамп копии по пути `.hds-agent\backup\<stamp>\<rel>`.
@@ -1413,6 +1469,12 @@ impl<'a> Mirror<'a> {
     /// занятый файл (`os error 32`) даёт [`ResultsError::Busy`] и не меняет
     /// состояние (ни оригинал, ни реестр). В `messages.jsonl` не пишется:
     /// результат виден в UI (AG-20).
+    ///
+    /// **Текущая версия оригинала тоже сохраняется** в
+    /// `.hds-agent\backup\<штамп>` (как при «Принять»), иначе «Вернуть» было бы
+    /// единственной операцией, после которой прежнюю версию не достать
+    /// (AGENT_A6_CODE_REVIEW AG6-03). Сбой пересборки образа после замены
+    /// откатывает оригинал из этой копии и возвращает прежний статус (AG-23).
     pub fn restore(
         &mut self,
         rel: &str,
@@ -1461,31 +1523,111 @@ impl<'a> Mirror<'a> {
         }
         let tmp = restore_tmp_path(&original);
         copy_file(&copy.path, &tmp)?;
+        // AG6-03: прежняя версия — в `backup\<штамп>`, как при «Принять».
+        // Не смогли её сохранить — не заменяем оригинал вовсе.
+        let keep = if original.is_file() {
+            let backup = self.backup_path(&row.orig_rel);
+            match copy_file(&original, &backup) {
+                Ok(()) => Some(backup),
+                Err(e) => {
+                    let _ = fs::remove_file(&tmp);
+                    return Err(e.into());
+                }
+            }
+        } else {
+            None
+        };
+        let mut report = DecisionReport::new(&row);
+        report.backup = Some(copy.path.clone());
+        report.stamp = Some(copy.stamp.clone());
+        report.sha256 = Some(sha.clone());
         match replace_file(&tmp, &original) {
             Ok(()) => {}
             Err(CoreError::Io(err)) if err.kind() == std::io::ErrorKind::PermissionDenied => {
                 let _ = fs::remove_file(&tmp);
+                if let Some(keep) = &keep {
+                    rollback_backup(keep);
+                }
                 return Err(ResultsError::Busy(original));
             }
             Err(err) => {
                 let _ = fs::remove_file(&tmp);
+                if let Some(keep) = &keep {
+                    rollback_backup(keep);
+                }
                 return Err(ResultsError::Io(original, err.to_string()));
             }
         }
         let restored = sha256_file(&original)
             .map_err(|e| ResultsError::Io(original.clone(), e.to_string()))?;
         if restored != sha {
-            return Err(ResultsError::Io(
-                original,
-                "sha256 восстановленного файла не совпал с копией".to_string(),
-            ));
+            // Копия испорчена: возвращаем прежнюю версию, состояние не меняем.
+            let mut notes: Vec<String> = Vec::new();
+            if let Some(keep) = &keep {
+                if replace_file(keep, &original).is_ok() {
+                    rollback_backup(keep);
+                    notes.push("оригинал возвращён из копии".to_string());
+                } else {
+                    notes.push("оригинал вернуть не удалось".to_string());
+                }
+            }
+            return Err(ResultsError::RolledBack {
+                rel: row.orig_rel.clone(),
+                stamp: report.stamp.clone(),
+                message: format!(
+                    "sha256 восстановленного файла не совпал с копией; {}",
+                    notes.join("; ")
+                ),
+            });
         }
-        let mut report = DecisionReport::new(&row);
-        report.backup = Some(copy.path);
-        report.stamp = Some(copy.stamp);
-        report.sha256 = Some(sha);
-        report.anon_rel = self.rebuild_image(&row, Status::Synced)?;
+        let anon_rel = match self.rebuild_image(&row, Status::Synced) {
+            Ok(rel) => rel,
+            Err(cause) => {
+                // AG6-03: без образа «Вернуть» не выполнено — возвращаем прежнюю
+                // версию, статус прежний, агенту след без значений (I8).
+                let mut notes: Vec<String> = Vec::new();
+                if let Some(keep) = &keep {
+                    match replace_file(keep, &original) {
+                        Ok(()) => {
+                            rollback_backup(keep);
+                            notes.push("оригинал возвращён из копии".to_string());
+                        }
+                        Err(_) => notes.push("оригинал вернуть не удалось".to_string()),
+                    }
+                } else {
+                    notes.push("прежней версии не было".to_string());
+                }
+                match self.registry.set_status_by_orig(&row.orig_rel, row.status) {
+                    Ok(true) => notes.push(format!("статус снова {}", row.status.as_str())),
+                    Ok(false) => notes.push("записи реестра уже нет".to_string()),
+                    Err(_) => notes.push("статус не возвращён".to_string()),
+                }
+                let text = format!(
+                    "«Вернуть» не выполнено: образ не пересобран; {}",
+                    notes.join("; ")
+                );
+                let _ = append_message(
+                    &self.project_root,
+                    MessageKind::DecisionFailed,
+                    &row.anon_rel,
+                    text.clone(),
+                );
+                return Err(ResultsError::RolledBack {
+                    rel: row.orig_rel.clone(),
+                    stamp: report.stamp.clone(),
+                    message: format!("{cause}; {text}"),
+                });
+            }
+        };
+        report.anon_rel = anon_rel;
         report.status = Status::Synced;
+        if let Some(keep) = &keep {
+            if let Some(stamp) = backup_stamp(keep) {
+                report
+                    .warnings
+                    .push(format!("прежняя версия сохранена в копии {stamp}"));
+            }
+        }
         let extra = report.sha256.as_ref().map(|sha| format!("sha256={sha}"));
         self.journal(&mut report, "restore", extra);
         Ok(report)
@@ -2658,6 +2800,30 @@ mod tests {
         assert!(!restored.contains("правка агента"), "{restored}");
         assert!(copy.path.is_file(), "копия остаётся в backup");
 
+        // AG6-03: прежняя (принятая) версия тоже сохранена отдельной копией.
+        let after = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.backups(Some(&rel())).unwrap()
+        });
+        assert_eq!(
+            after.len(),
+            2,
+            "копия «Вернуть» + копия прежней версии: {after:?}"
+        );
+        assert!(
+            after.iter().any(|item| fs::read_to_string(&item.path)
+                .map(|text| text.contains("правка агента"))
+                .unwrap_or(false)),
+            "прежняя версия доступна в backup: {after:?}"
+        );
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("прежняя версия")),
+            "{:?}",
+            report.warnings
+        );
+
         let image = stand.image(&anon_rel());
         assert!(image.contains("[PERSON_1]"), "{image}");
         assert!(
@@ -2679,7 +2845,8 @@ mod tests {
         .expect_err("неизвестный штамп");
         match &err {
             ResultsError::NoBackup { available, .. } => {
-                assert_eq!(available, &vec![copy.stamp.clone()], "{available:?}")
+                assert_eq!(available.len(), 2, "{available:?}");
+                assert!(available.contains(&copy.stamp), "{available:?}");
             }
             other => panic!("ожидался NoBackup: {other}"),
         }
@@ -2752,6 +2919,41 @@ mod tests {
         })
         .expect("после закрытия");
         assert_eq!(report.status, Status::Synced);
+    }
+
+    /// AG6-03: сбой пересборки образа после замены при «Вернуть» — оригинал
+    /// возвращается из копии, статус прежний, агенту `decision_failed`.
+    #[test]
+    fn restore_rolls_back_when_rebuild_fails() {
+        let (stand, mut anon, mut ext) = stand_with_variant("a64-restore-fail");
+        decide(&stand, &mut anon, &mut ext, Decision::Accept).expect("принять");
+        let accepted = fs::read_to_string(stand.project.join(rel())).unwrap();
+        assert!(accepted.contains("правка агента"), "{accepted}");
+        // Воркер падает на пересборке образа из восстановленного оригинала.
+        anon.fail_on = Some("Письмо Иванов Иван.md".to_string());
+        let err = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.restore(&rel(), None)
+        })
+        .expect_err("образ не пересобран");
+        assert!(matches!(err, ResultsError::RolledBack { .. }), "{err}");
+
+        assert_eq!(
+            fs::read_to_string(stand.project.join(rel())).unwrap(),
+            accepted,
+            "оригинал — прежняя (принятая) версия"
+        );
+        assert_eq!(
+            stand.registry().by_orig(&rel()).unwrap().unwrap().status,
+            Status::Accepted
+        );
+        let messages = messages(&stand);
+        assert!(messages.contains("decision_failed"), "{messages}");
+        assert!(!messages.contains("Иванов Иван"), "I8: {messages}");
+        // Копия для откатa прибрана: остаётся только копия «Принять».
+        let copies = with_mirror(&stand, &mut anon, &mut ext, |mirror| {
+            mirror.backups(Some(&rel())).unwrap()
+        });
+        assert_eq!(copies.len(), 1, "{copies:?}");
     }
 
     /// A6.4: «Пересоздать образ» — только `orphan`; у `pending_accept` отказ.

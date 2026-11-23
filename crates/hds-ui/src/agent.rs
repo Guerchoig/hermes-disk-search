@@ -372,10 +372,17 @@ pub fn project_rm_json(cfg: &Config, body: &str) -> Reply {
         daemon_alive,
         purge_labels: purge_meta,
     };
+    // AG6-08: перед удалением ядро перепроверяет lock этим замыканием.
+    let state_lock = settings::state_dir_for(cfg, &rec.id).map(|state| state.join("sync.lock"));
+    let alive_now = || {
+        state_lock
+            .as_ref()
+            .is_some_and(|lock| lock.is_file() && !hds_index::watch::lock_is_stale(lock))
+    };
     let outcome = {
         let hook: Option<&mut hds_agent::remove::PurgeHook<'_>> =
             if purge_meta { Some(&mut purge) } else { None };
-        hds_agent::remove::remove_project(cfg, &project, options, hook)
+        hds_agent::remove::remove_project_checked(cfg, &project, options, hook, Some(&alive_now))
     };
     drop(client);
     match outcome {
@@ -1729,6 +1736,9 @@ pub fn stream_events(stream: &mut TcpStream, cfg: &Config, project: &str, after:
 /// `GET /api/agent/events?project=<P>&after=<seq>&limit=200` — события без SSE
 /// (JSON-фолбэк для тестов, `curl.exe` и страницы без `EventSource`).
 pub fn events_json(cfg: &Config, project: &str, after: Option<u64>, limit: Option<usize>) -> Reply {
+    // AG-24/AG6-16: поток событий — тоже обращение к вкладке, поэтому тик
+    // выгрузки простаивающих сессий делаем и здесь (не только в `/state`).
+    agent_session::global(cfg).reap_idle();
     // Проект проверяем мягко: событий могло не быть вовсе — пустой ответ, а не
     // 404. Зона выключена — 503/RU-текст (как у остальных маршрутов вкладки).
     if let Err(e) = projects::get(cfg, project.trim())

@@ -14,6 +14,7 @@ mod common;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use hds_agent::projects;
 use hds_agent::registry_db::{Artifact, ArtifactRegistry, Kind, Status};
 use hds_cli::cmd::agent::cmd_agent_cfg;
 use hds_core::config::{load_from, Config};
@@ -813,5 +814,169 @@ fn sync_daemon_reloads_config_and_stops_on_disabled() {
     assert!(
         text.contains("config disabled agent.enabled=false"),
         "выключение пишется строкой config: {text}"
+    );
+}
+
+/// AG6-15(а): проект, добавленный в `projects.json` при живом `--all`,
+/// подхватывается без перезапуска демона.
+///
+/// Супервизор перечитывает файл раз в 5 с: у нового проекта появляется свой
+/// `sync.lock` и строки `start`/`pass` в его журнале, а `hds stop` снимает оба
+/// потока (`stop reason=index.stop`, оба lock сняты).
+#[test]
+fn sync_all_daemon_picks_up_new_project() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-new", true);
+    let second = stand.dir.join("Проект-2");
+    fs::create_dir_all(&second).unwrap();
+    assert_eq!(stand.register("P0001"), 0);
+    let first_log = stand.state_dir_of("P0001").join("sync.log");
+
+    let cfg = stand.cfg.clone();
+    let args: Vec<String> = ["sync", "--all", "--interval", "1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let daemon = std::thread::spawn(move || cmd_agent_cfg(&cfg, &args));
+    wait_for("первый проход демона P0001", || {
+        fs::read_to_string(&first_log)
+            .map(|t| t.lines().any(|l| l.contains(" pass ")))
+            .unwrap_or(false)
+    });
+
+    // Второй проект появляется уже при живом демоне (запись в projects.json).
+    assert_eq!(stand.register_with_path("P0002", &second), 0);
+    let second_state = stand.state_dir_of("P0002");
+    let second_lock = second_state.join("sync.lock");
+    wait_for("P0002: sync.lock живого демона", || {
+        second_lock.is_file()
+    });
+    wait_for(
+        "P0002: строки start и pass в журнале",
+        || {
+            fs::read_to_string(second_state.join("sync.log"))
+                .map(|t| {
+                    t.contains("start mode=daemon project=P0002")
+                        && t.lines().any(|l| l.contains(" pass "))
+                })
+                .unwrap_or(false)
+        },
+    );
+
+    fs::write(stand.dir.path.join("index.stop"), b"").unwrap();
+    assert_eq!(daemon.join().unwrap(), 0, "остановка по сигналу — код 0");
+    for id in ["P0001", "P0002"] {
+        assert!(
+            !stand.state_dir_of(id).join("sync.lock").exists(),
+            "{id}: sync.lock снят"
+        );
+        let log = fs::read_to_string(stand.state_dir_of(id).join("sync.log")).expect("журнал");
+        assert!(log.contains("stop reason=index.stop"), "{id}: {log}");
+    }
+}
+
+/// AG6-15(а): смена `path` у проекта перезапускает его поток на новой папке.
+///
+/// Путь правится прямо в `projects.json` (`project add` для той же записи с
+/// другой папкой отказывает — это сценарий ручной правки файла). В журнале
+/// появляется второй `start` с новым `source=…`, у прежнего потока —
+/// `stop reason=restart` (это не `hds stop`: общий `index.stop` не создаётся).
+#[test]
+fn sync_all_daemon_restarts_project_on_path_change() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-path", true);
+    let first = stand.dir.join("Проект-1");
+    let moved = stand.dir.join("Проект-1-новый");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&moved).unwrap();
+    assert_eq!(stand.register_with_path("P0001", &first), 0);
+    let log_path = stand.state_dir_of("P0001").join("sync.log");
+    let first_source = format!("source={}", first.display());
+
+    let cfg = stand.cfg.clone();
+    let args: Vec<String> = ["sync", "--all", "--interval", "1"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    let daemon = std::thread::spawn(move || cmd_agent_cfg(&cfg, &args));
+    wait_for(
+        "первый проход демона на исходной папке",
+        || {
+            fs::read_to_string(&log_path)
+                .map(|t| t.lines().any(|l| l.contains(" pass ")) && t.contains(&first_source))
+                .unwrap_or(false)
+        },
+    );
+
+    // Ручная правка projects.json: у проекта новая папка.
+    let mut registry = projects::load(&stand.cfg).expect("реестр проектов");
+    let slot = registry
+        .projects
+        .iter_mut()
+        .find(|p| p.id == "P0001")
+        .expect("P0001 в реестре");
+    slot.path = moved.to_string_lossy().to_string();
+    projects::save(&stand.cfg, &registry).expect("projects.json сохранён");
+
+    let expected = format!("source={}", moved.display());
+    wait_for(
+        "поток перезапущен на новой папке",
+        || {
+            fs::read_to_string(&log_path)
+                .map(|t| t.contains(&expected))
+                .unwrap_or(false)
+        },
+    );
+    let text = fs::read_to_string(&log_path).unwrap();
+    assert_eq!(
+        text.lines()
+            .filter(|l| l.contains("start mode=daemon project=P0001"))
+            .count(),
+        2,
+        "прежний поток остановлен, новый запущен: {text}"
+    );
+    assert!(
+        text.contains("stop reason=restart"),
+        "снятие супервизором — причина restart, а не index.stop: {text}"
+    );
+    assert!(
+        !stand.dir.path.join("index.stop").exists(),
+        "супервизор не трогает общий index.stop (AG-27)"
+    );
+
+    fs::write(stand.dir.path.join("index.stop"), b"").unwrap();
+    assert_eq!(daemon.join().unwrap(), 0, "остановка по сигналу — код 0");
+    assert!(!stand.state_dir_of("P0001").join("sync.lock").exists());
+}
+
+/// AG6-15(б): папок всех проектов нет — демон выходит сразу и с кодом 0,
+/// не уходя в перезапуски по кругу (задача автозапуска не «моргает»).
+#[test]
+fn sync_all_daemon_exits_when_all_folders_missing() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let stand = Stand::new("all-missing", true);
+    let gone = stand.dir.join("Нет такой папки");
+    fs::create_dir_all(&gone).unwrap();
+    assert_eq!(stand.register_with_path("P0001", &gone), 0);
+    // Папку «потеряли» уже после регистрации (так бывает с отключённым диском).
+    fs::remove_dir_all(&gone).unwrap();
+
+    let started = std::time::Instant::now();
+    assert_eq!(
+        stand.sync(&["--all", "--interval", "1"]),
+        0,
+        "все папки недоступны — код 0"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "демон не ждёт сигнала: {:?}",
+        started.elapsed()
+    );
+    let log = fs::read_to_string(stand.state_dir_of("P0001").join("sync.log"))
+        .expect("журнал пропущенного проекта");
+    assert!(log.contains("problem project=P0001 missing"), "{log}");
+    assert!(
+        !stand.state_dir_of("P0001").join("sync.lock").exists(),
+        "проект без папки lock не занимает"
     );
 }

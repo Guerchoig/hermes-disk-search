@@ -234,9 +234,15 @@ target\debug\hds.exe mcp-http stop
 ```
 
 Артефакты (гитигнорятся): `k1-A-q*-r*.jsonl` / `.err`, `k1-summary.json`,
-`k1-analysis.json`, `k1-search-eval.json`, `k1-label-search.json`, `k1-plan-A/B.json`,
-`k1-run.log`, `k1-rerun.log`. Скрипт оценки — `tools/parity/agent_rag_eval.py`
-(в репозитории); golden — в каталоге стенда (данные вымышленные).
+`k1-times.json` (время хода по прогонам), `k1-analysis.json`, `k1-search-eval.json`,
+`k1-label-search.json`, `k1-plan-A/B.json`, `k1-run.log`, `k1-rerun.log`. Скрипт
+оценки — `tools/parity/agent_rag_eval.py` (в репозитории); golden — в каталоге
+стенда (данные вымышленные).
+
+**Пересчёт без новых прогонов:** `--score-only` читает сохранённые JSONL, берёт
+время из `k1-times.json` и пишет сводку в `k1-summary-score.json` (исходную
+`k1-summary.json` не затирает). Без `k1-times.json` время в сводке будет `null` —
+сырые JSONL его не содержат.
 
 ## 8. Что изменено по итогам
 
@@ -259,7 +265,9 @@ target\debug\hds.exe mcp-http stop
 -D warnings` — 0; `cargo test -p hds-agent` — **181** lib + наборы, 0 failed
 (добавлены тесты дефолта и явного включения); `cargo test -p hds-ui
 --no-fail-fast` — 42 lib, `agent_api` 11, `agent_chat` 9, 0 failed; python
-**335 OK** (skip 1); npm **23/23**; `git diff --check` — чисто.
+**335 OK** (skip 1); npm **23/23**; `git diff --check` по рабочему дереву — чисто
+(в самих коммитах A6.8 оставались концевые пустые строки в трёх файлах — убраны
+после ревью A6, см. `AGENT_A6_CODE_REVIEW.md` §8).
 
 `hds-cli`: все наборы 0 failed, кроме `agent_acceptance::acceptance_a3_end_to_end`.
 Причина — проверка «профиль `%USERPROFILE%\.cline` не изменился»: снимок включает

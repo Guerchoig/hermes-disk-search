@@ -768,14 +768,44 @@ impl<'a> Mirror<'a> {
     }
 
     /// Один проход (A4.2 + A4.3): прямой путь, затем обратный.
+    ///
+    /// AG6-02 (вариант B): обёртка над [`Mirror::sync_once_cancellable`] без
+    /// отмены — поведение `--once`, `--all --once` и вкладки «Агент» не
+    /// меняется (проход целиком, как в A4).
     pub fn sync_once(&mut self) -> Result<SyncReport, MirrorError> {
-        let mut report = self.sync_forward()?;
-        self.sync_reverse(&mut report)?;
+        self.sync_once_cancellable(&|| false)
+    }
+
+    /// Один проход с проверкой отмены **между файлами** (AG6-02, вариант B).
+    ///
+    /// `cancel` спрашивается перед каждым файлом: на прямом пути в обоих циклах
+    /// (статусы/хеши и публикация), на обратном — в обходе workspace. Текущий
+    /// файл всегда дорабатывается целиком: недописанный образ хуже задержки
+    /// остановки, поэтому анонимизацию нельзя прерывать на середине.
+    /// `wait_stable` (до `agent.sync.wait_max_sec` = 30 с на файл) тоже остаётся
+    /// непрерываемым — верхняя граница задержки остановки равна обработке
+    /// одного файла.
+    ///
+    /// После сигнала проход не делает разрушительных шагов: удаление
+    /// исчезнувших оригиналов и подсчёт `orphan` требуют полного обхода, иначе
+    /// «не увиденный» файл выглядел бы удалённым, а его образ — сиротой. Всё
+    /// это доделает следующий проход. Отчёт при отмене согласован: в нём только
+    /// то, что действительно сделано до сигнала.
+    pub fn sync_once_cancellable(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+    ) -> Result<SyncReport, MirrorError> {
+        let mut report = self.sync_forward(cancel)?;
+        self.sync_reverse(cancel, &mut report)?;
         Ok(report)
     }
 
     /// Прямой путь (A4.2): папка проекта → workspace.
-    fn sync_forward(&mut self) -> Result<SyncReport, MirrorError> {
+    ///
+    /// `cancel` (AG6-02) проверяется в начале каждой итерации обоих циклов по
+    /// файлам; отмена в первом цикле завершает проход без публикации и без
+    /// удаления исчезнувших оригиналов (`present` тогда неполный).
+    fn sync_forward(&mut self, cancel: &dyn Fn() -> bool) -> Result<SyncReport, MirrorError> {
         let mut report = SyncReport::default();
         let files = walk_files(&self.project_root)?;
         report.scanned = files.len();
@@ -788,6 +818,10 @@ impl<'a> Mirror<'a> {
         let mut present: BTreeSet<String> = BTreeSet::new();
         let mut shas: BTreeMap<String, String> = BTreeMap::new();
         for file in &files {
+            // AG6-02: отмена — только между файлами; текущий файл дорабатывается.
+            if cancel() {
+                return Ok(report);
+            }
             present.insert(file.rel.clone());
             let Some(kind) = kind_for(&file.rel) else {
                 self.mark_status(&by_orig, file, Kind::Unknown, Status::Unsupported)?;
@@ -852,6 +886,11 @@ impl<'a> Mirror<'a> {
             .collect();
 
         for file in &files {
+            // AG6-02: сигнал в этом цикле — публикацию не продолжаем и
+            // исчезнувшие оригиналы не удаляем (следующий проход доделает).
+            if cancel() {
+                return Ok(report);
+            }
             let Some(sha) = shas.get(&file.rel).cloned() else {
                 continue;
             };
@@ -1249,7 +1288,11 @@ impl<'a> Mirror<'a> {
     /// * образ исчез — оригинал остаётся, запись `orphan` (A5 предложит
     ///   удалить оригинал);
     /// * наш маркер `hds-agent/<P>/<id>` повторно не выпускается (TR-7.7).
-    fn sync_reverse(&mut self, report: &mut SyncReport) -> Result<(), MirrorError> {
+    fn sync_reverse(
+        &mut self,
+        cancel: &dyn Fn() -> bool,
+        report: &mut SyncReport,
+    ) -> Result<(), MirrorError> {
         if !self.workspace.is_dir() {
             // До первого образа анонимной зоны может не быть вовсе.
             return Ok(());
@@ -1266,6 +1309,12 @@ impl<'a> Mirror<'a> {
         }
         let mut present: BTreeSet<String> = BTreeSet::new();
         for file in &files {
+            // AG6-02: отмена между файлами. `present` при этом неполный,
+            // поэтому подсчёт `orphan` ниже пропускается — иначе живой образ
+            // выглядел бы исчезнувшим.
+            if cancel() {
+                return Ok(());
+            }
             present.insert(file.rel.clone());
             let Some(row) = by_anon.get(&file.rel).cloned() else {
                 self.consider_new_file(file, &by_id, report);
@@ -1756,7 +1805,7 @@ pub(crate) mod tests {
     //! `FakeExtractor`) переиспользуются тестами [`crate::results`] — второй
     //! такой же набор держать незачем (A4.4).
     use super::*;
-    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 
     /// Тесты одного файла идут параллельно в одном процессе — в имени
     /// временного каталога есть счётчик (A3 §4 п.16).
@@ -1843,6 +1892,31 @@ pub(crate) mod tests {
                 max_file_mb,
             );
             mirror.sync_once().expect("проход зеркала")
+        }
+
+        /// Проход с отменой (AG6-02): тот же стенд, но
+        /// [`Mirror::sync_once_cancellable`] — поведение проверяет тест.
+        pub(crate) fn run_cancellable(
+            &self,
+            anon: &mut dyn Anonymizer,
+            ext: &mut dyn TextExtractor,
+            max_file_mb: u64,
+            cancel: &dyn Fn() -> bool,
+        ) -> SyncReport {
+            let registry = ArtifactRegistry::open(&self.db).unwrap();
+            let mut mirror = Mirror::new(
+                "P0001",
+                &self.project,
+                &self.workspace,
+                &registry,
+                anon,
+                ext,
+                fast(),
+                max_file_mb,
+            );
+            mirror
+                .sync_once_cancellable(cancel)
+                .expect("проход зеркала")
         }
 
         pub(crate) fn registry(&self) -> ArtifactRegistry {
@@ -2282,6 +2356,57 @@ pub(crate) mod tests {
         assert_eq!(
             sha256_file(&stand.workspace.join("ТЗ.pdf.md")).unwrap(),
             image_sha
+        );
+    }
+
+    /// AG6-02 (вариант B): сигнал в середине прохода останавливает обработку
+    /// **между файлами** — уже сделанное остаётся, недоделанное доводит
+    /// следующий проход, отчёт согласован (нет ни ошибок, ни «удалённых»).
+    ///
+    /// Счётчик вызовов делает тест детерминированным: `walk_files` сортирует
+    /// пути, поэтому первый цикл прямого пути — ровно три вызова `cancel`
+    /// (a, b, c), четвёртый (публикация `a.txt`) пропускает файл, пятый
+    /// (перед `b.txt`) поднимает сигнал.
+    #[test]
+    fn sync_once_cancellable_stops_between_files() {
+        let stand = Stand::new("cancel-mid");
+        stand.write("a.txt", "Контакт: Иванов Иван");
+        stand.write("b.txt", "Контакт: Петров Пётр");
+        stand.write("c.txt", "третий файл");
+        let mut anon = FakeAnon::default();
+        let mut ext = FakeExtractor::default();
+
+        let calls = AtomicUsize::new(0);
+        let cancel = || calls.fetch_add(1, Ordering::SeqCst) >= 4;
+        let partial = stand.run_cancellable(&mut anon, &mut ext, 200, &cancel);
+
+        assert_eq!(partial.scanned, 3, "обход папки целиком");
+        assert_eq!(partial.created, 1, "опубликован только a.txt: {partial:?}");
+        assert_eq!(partial.errors, 0, "{partial:?}");
+        assert_eq!(partial.removed + partial.orphans, 0, "{partial:?}");
+        assert!(
+            stand.workspace.join("a.txt").is_file(),
+            "текущий файл доработан полностью"
+        );
+        assert!(
+            !stand.workspace.join("b.txt").exists() && !stand.workspace.join("c.txt").exists(),
+            "до остальных дело не дошло"
+        );
+
+        // Повторный проход без отмены доводит остальное; сделанное не трогает.
+        let rest = stand.run(&mut anon, &mut ext, 200);
+        assert_eq!(rest.created, 2, "{rest:?}");
+        assert_eq!(rest.unchanged, 1, "{rest:?}");
+        for rel in ["a.txt", "b.txt", "c.txt"] {
+            assert!(
+                stand.workspace.join(rel).is_file(),
+                "образ {rel} появился после второго прохода"
+            );
+        }
+        assert_eq!(
+            stand.registry().count().unwrap(),
+            3,
+            "в реестре ровно три записи"
         );
     }
 
